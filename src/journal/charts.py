@@ -179,7 +179,7 @@ def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame, excursion: dict | N
         ))
 
     fig.update_layout(
-        height=560, xaxis_rangeslider_visible=False, dragmode="pan",
+        height=720, xaxis_rangeslider_visible=False, dragmode="pan",
         title=f"{trade['instrument']} {trade['direction']} — "
               f"{trade['max_contracts']:.0f} lot — net {trade['net_pnl']:+,.0f}",
         margin=dict(t=50, b=30), legend=dict(orientation="h", y=1.02),
@@ -210,7 +210,7 @@ def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame, excursion: dict | N
             extra = [v for v in extra if pd.notna(v)]
             lo = min([lo, *extra])
             hi = max([hi, *extra])
-            pad = (hi - lo) * 0.12 or 1.0
+            pad = (hi - lo) * 0.025 or 1.0
             fig.update_yaxes(range=[lo - pad, hi + pad])
 
     # Collapse weekend gaps (CME is closed) so panning across days stays tight.
