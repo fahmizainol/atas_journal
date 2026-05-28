@@ -9,8 +9,31 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-GREEN = "#2e9e5b"
-RED = "#d6455d"
+GREEN = "#21c07a"
+RED = "#f5455f"
+ACCENT = "#6c5ce7"
+GOLD = "#e0a52a"
+TEXT = "#e6e8ee"
+MUTED = "#8a8f9c"
+GRID = "#2a2e38"
+
+
+def _apply_theme(fig: go.Figure) -> go.Figure:
+    """Transparent dark canvas + faint gridlines so charts blend into cards."""
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, sans-serif", color=TEXT, size=12),
+        title_font=dict(color=TEXT, size=15),
+        legend=dict(font=dict(color=MUTED)),
+        hoverlabel=dict(bgcolor="#1a1d27", bordercolor=GRID,
+                        font=dict(color=TEXT, family="Inter, sans-serif")),
+    )
+    fig.update_xaxes(gridcolor=GRID, zerolinecolor=GRID, linecolor=GRID,
+                     tickfont=dict(color=MUTED))
+    fig.update_yaxes(gridcolor=GRID, zerolinecolor=GRID, linecolor=GRID,
+                     tickfont=dict(color=MUTED))
+    return fig
 
 
 def equity_curve_fig(eq: pd.DataFrame) -> go.Figure:
@@ -20,35 +43,39 @@ def equity_curve_fig(eq: pd.DataFrame) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(x=eq["trade_no"], y=eq["equity"], mode="lines",
-                   line=dict(color="#3b7dd8", width=2), name="Equity"),
+                   line=dict(color=ACCENT, width=2.5), name="Equity",
+                   fill="tozeroy", fillcolor="rgba(108,92,231,0.16)"),
         row=1, col=1,
     )
     fig.add_trace(
         go.Scatter(x=eq["trade_no"], y=eq["drawdown"], mode="lines",
-                   fill="tozeroy", line=dict(color=RED, width=1), name="Drawdown"),
+                   fill="tozeroy", line=dict(color=RED, width=1),
+                   fillcolor="rgba(245,69,95,0.18)", name="Drawdown"),
         row=2, col=1,
     )
     fig.update_layout(height=460, showlegend=False, margin=dict(t=40, b=30))
     fig.update_xaxes(title_text="Trade #", row=2, col=1)
-    return fig
+    return _apply_theme(fig)
 
 
 def daily_pnl_fig(daily: pd.DataFrame) -> go.Figure:
     colors = [GREEN if v >= 0 else RED for v in daily["net_pnl"]]
-    fig = go.Figure(go.Bar(x=daily["date"], y=daily["net_pnl"], marker_color=colors))
+    fig = go.Figure(go.Bar(x=daily["date"], y=daily["net_pnl"], marker_color=colors,
+                           marker_line_width=0))
     fig.update_layout(height=320, title="Daily net PnL", margin=dict(t=40, b=30),
-                      yaxis_title="USD")
-    return fig
+                      yaxis_title="USD", bargap=0.25)
+    return _apply_theme(fig)
 
 
 def distribution_fig(trades: pd.DataFrame) -> go.Figure:
     pnl = trades["net_pnl"].astype(float)
-    fig = go.Figure(go.Histogram(x=pnl, nbinsx=30, marker_color="#3b7dd8"))
-    fig.add_vline(x=0, line_color="#888", line_dash="dash")
+    fig = go.Figure(go.Histogram(x=pnl, nbinsx=30, marker_color=ACCENT,
+                                 marker_line_width=0))
+    fig.add_vline(x=0, line_color=MUTED, line_dash="dash")
     fig.update_layout(height=320, title="Trade PnL distribution",
                       xaxis_title="Net PnL (USD)", yaxis_title="Trades",
-                      margin=dict(t=40, b=30))
-    return fig
+                      margin=dict(t=40, b=30), bargap=0.05)
+    return _apply_theme(fig)
 
 
 def calendar_fig(daily: pd.DataFrame, year: int, month: int) -> go.Figure:
@@ -87,18 +114,19 @@ def calendar_fig(daily: pd.DataFrame, year: int, month: int) -> go.Figure:
     fig = go.Figure(go.Heatmap(
         z=z, text=text, texttemplate="%{text}", textfont=dict(size=12),
         x=weekday_labels, y=[f"W{i+1}" for i in range(n_rows)],
-        colorscale=[[0, RED], [0.5, "#2b2b2b"], [1, GREEN]],
-        zmid=0, showscale=False, xgap=3, ygap=3,
+        colorscale=[[0, RED], [0.5, "#1a1d27"], [1, GREEN]],
+        zmid=0, showscale=False, xgap=4, ygap=4,
         hoverinfo="text",
     ))
-    fig.update_yaxes(autorange="reversed", showticklabels=False)
+    fig.update_yaxes(autorange="reversed", showticklabels=False, showgrid=False)
+    fig.update_xaxes(showgrid=False, side="top", tickfont=dict(color=MUTED))
     month_total = sum(v[0] for v in by_day.values())
     fig.update_layout(
         height=120 + 78 * n_rows,
         title=f"{calendar.month_name[month]} {year} — net {month_total:+,.0f}",
         margin=dict(t=50, b=20),
     )
-    return fig
+    return _apply_theme(fig)
 
 
 def resample_ohlc(bars: pd.DataFrame, rule: str | None) -> pd.DataFrame:
@@ -152,16 +180,16 @@ def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame, excursion: dict | N
 
     # avg entry / exit lines
     if pd.notna(trade["avg_entry"]):
-        fig.add_hline(y=trade["avg_entry"], line_dash="dash", line_color="#3b7dd8",
+        fig.add_hline(y=trade["avg_entry"], line_dash="dash", line_color=ACCENT,
                       annotation_text=f"avg entry {trade['avg_entry']:.2f}")
     if pd.notna(trade["avg_exit"]):
-        fig.add_hline(y=trade["avg_exit"], line_dash="dash", line_color="#e0a52a",
+        fig.add_hline(y=trade["avg_exit"], line_dash="dash", line_color=GOLD,
                       annotation_text=f"avg exit {trade['avg_exit']:.2f}")
 
     # holding band tinted by outcome
     entry_kl = pd.Timestamp(trade["entry_ts_local"]).tz_convert(kl_tz)
     exit_kl = pd.Timestamp(trade["exit_ts_local"]).tz_convert(kl_tz)
-    band = "rgba(46,158,91,0.12)" if trade["net_pnl"] >= 0 else "rgba(214,69,93,0.12)"
+    band = "rgba(33,192,122,0.12)" if trade["net_pnl"] >= 0 else "rgba(245,69,95,0.12)"
     fig.add_vrect(x0=entry_kl, x1=exit_kl, fillcolor=band, line_width=0)
 
     # MAE / MFE markers
@@ -185,6 +213,7 @@ def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame, excursion: dict | N
         margin=dict(t=50, b=30), legend=dict(orientation="h", y=1.02),
         xaxis_title="Time (KL)",
     )
+    _apply_theme(fig)
     # Both axes freely rescalable: drag the plot to pan, drag an axis to zoom
     # just that axis, mouse-wheel to zoom, double-click to autoscale.
     fig.update_xaxes(fixedrange=False)
