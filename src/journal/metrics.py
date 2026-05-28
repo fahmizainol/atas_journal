@@ -105,7 +105,7 @@ def equity_curve(trades: pd.DataFrame) -> pd.DataFrame:
 
 
 def daily_pnl(trades: pd.DataFrame) -> pd.DataFrame:
-    """Net PnL and trade count per KL trading day."""
+    """Net PnL and trade count per trading day (in the active display zone)."""
     if trades is None or trades.empty:
         return pd.DataFrame(columns=["date", "net_pnl", "trades"])
     t = trades.copy()

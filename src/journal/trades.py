@@ -164,6 +164,24 @@ def _finalize(cur: dict, out: list[dict], pv: float, open_position: bool = False
     })
 
 
+def localize(df: pd.DataFrame, tz) -> pd.DataFrame:
+    """Rebuild the entry/exit *local* columns from the UTC instant in `tz`.
+
+    The UTC timestamp is the canonical instant; switching display zones is just
+    a reprojection, so day boundaries and hour-of-day follow the chosen zone.
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for utc_col, local_col in (("entry_ts_utc", "entry_ts_local"),
+                               ("exit_ts_utc", "exit_ts_local")):
+        s = out[utc_col]
+        if s.dt.tz is None:
+            s = s.dt.tz_localize("UTC")
+        out[local_col] = s.dt.tz_convert(tz)
+    return out
+
+
 def atas_trades(journal: pd.DataFrame) -> pd.DataFrame:
     """Expose ATAS Journal rows in the same shape as logical trades."""
     if journal.empty:

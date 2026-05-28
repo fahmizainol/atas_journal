@@ -26,6 +26,14 @@ KL_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 UTC_TZ = ZoneInfo("UTC")
 ET_TZ = ZoneInfo("America/New_York")  # CME session reference
 
+# User-selectable display zones for the UI. New York is DST-aware
+# (EDT = UTC-4 in summer, EST = UTC-5 in winter), unlike a fixed offset.
+DISPLAY_TZS: dict[str, ZoneInfo] = {
+    "New York": ET_TZ,
+    "Kuala Lumpur": KL_TZ,
+}
+DEFAULT_DISPLAY_TZ = "New York"
+
 # --- Contract specifications --------------------------------------------
 # point_value = dollars per full index point; tick_size in points.
 CONTRACT_SPECS: dict[str, dict[str, float]] = {

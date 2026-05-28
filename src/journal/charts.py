@@ -129,6 +129,99 @@ def calendar_fig(daily: pd.DataFrame, year: int, month: int) -> go.Figure:
     return _apply_theme(fig)
 
 
+def day_trades_bar_fig(day_trades: pd.DataFrame) -> go.Figure:
+    """One bar per trade for a day, green/red by outcome, ordered by entry time."""
+    t = day_trades.sort_values("entry_ts_utc").reset_index(drop=True)
+    labels = [f"#{int(n)}" for n in t["trade_no"]] if "trade_no" in t else \
+        [f"#{i+1}" for i in range(len(t))]
+    pnl = t["net_pnl"].astype(float)
+    colors = [GREEN if v >= 0 else RED for v in pnl]
+    times = t["entry_ts_local"].dt.strftime("%H:%M:%S")
+    fig = go.Figure(go.Bar(
+        x=labels, y=pnl, marker_color=colors, marker_line_width=0,
+        customdata=times, hovertemplate="%{x} @ %{customdata}<br>%{y:+,.0f}<extra></extra>",
+    ))
+    fig.update_layout(height=300, title="Per-trade net PnL", margin=dict(t=40, b=30),
+                      yaxis_title="USD", xaxis_title="Trade", bargap=0.3)
+    return _apply_theme(fig)
+
+
+def day_session_fig(day_trades: pd.DataFrame, bars: pd.DataFrame, kl_tz,
+                    focus_utc: tuple | None = None) -> go.Figure:
+    """Full-day candlestick with every trade's fills (buy/sell) and holding bands.
+
+    `bars` is the day's OHLC (any timeframe). `focus_utc` is an optional (start,
+    end) UTC range to open zoomed into — used when a single trade row is picked.
+    """
+    b = bars.copy()
+    b["ts_kl"] = pd.to_datetime(b["ts_utc"], utc=True).dt.tz_convert(kl_tz)
+    tf_name = day_trades["entry_ts_local"].iloc[0].strftime("%Y-%m-%d") \
+        if not day_trades.empty else ""
+
+    fig = go.Figure(go.Candlestick(
+        x=b["ts_kl"], open=b["open"], high=b["high"], low=b["low"], close=b["close"],
+        increasing_line_color=GREEN, decreasing_line_color=RED, name="OHLC",
+    ))
+
+    # collect all fills across the day's trades
+    buy_x, buy_y, sell_x, sell_y = [], [], [], []
+    for _, trade in day_trades.iterrows():
+        fills = trade.get("fills")
+        if fills:
+            fdf = pd.DataFrame(fills)
+            ts = pd.to_datetime(fdf["ts_utc"], utc=True).dt.tz_convert(kl_tz)
+            for tk, px, d in zip(ts, fdf["price"], fdf["direction"]):
+                if d == "Buy":
+                    buy_x.append(tk); buy_y.append(px)
+                else:
+                    sell_x.append(tk); sell_y.append(px)
+        # holding band tinted by outcome
+        entry_kl = pd.Timestamp(trade["entry_ts_local"]).tz_convert(kl_tz)
+        exit_kl = pd.Timestamp(trade["exit_ts_local"]).tz_convert(kl_tz)
+        band = "rgba(33,192,122,0.12)" if trade["net_pnl"] >= 0 else "rgba(245,69,95,0.12)"
+        fig.add_vrect(x0=entry_kl, x1=exit_kl, fillcolor=band, line_width=0)
+
+    if buy_x:
+        fig.add_trace(go.Scatter(
+            x=buy_x, y=buy_y, mode="markers", name="Buy",
+            marker=dict(symbol="triangle-up", size=12, color=GREEN,
+                        line=dict(width=1, color="white")),
+        ))
+    if sell_x:
+        fig.add_trace(go.Scatter(
+            x=sell_x, y=sell_y, mode="markers", name="Sell",
+            marker=dict(symbol="triangle-down", size=12, color=RED,
+                        line=dict(width=1, color="white")),
+        ))
+
+    day_net = float(day_trades["net_pnl"].sum()) if not day_trades.empty else 0.0
+    fig.update_layout(
+        height=620, xaxis_rangeslider_visible=False, dragmode="pan",
+        title=f"{tf_name} session — {len(day_trades)} trades — net {day_net:+,.0f}",
+        margin=dict(t=50, b=30), legend=dict(orientation="h", y=1.02),
+        xaxis_title="Time",
+    )
+    _apply_theme(fig)
+    fig.update_xaxes(fixedrange=False)
+    fig.update_yaxes(fixedrange=False)
+
+    if focus_utc is not None:
+        fs = pd.Timestamp(focus_utc[0])
+        fe = pd.Timestamp(focus_utc[1])
+        fs = (fs.tz_localize("UTC") if fs.tzinfo is None else fs.tz_convert("UTC")).tz_convert(kl_tz)
+        fe = (fe.tz_localize("UTC") if fe.tzinfo is None else fe.tz_convert("UTC")).tz_convert(kl_tz)
+        fig.update_xaxes(range=[fs, fe])
+        visible = b[(b["ts_kl"] >= fs) & (b["ts_kl"] <= fe)]
+        if not visible.empty:
+            lo = float(visible["low"].min())
+            hi = float(visible["high"].max())
+            pad = (hi - lo) * 0.15 or 1.0
+            fig.update_yaxes(range=[lo - pad, hi + pad])
+
+    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    return fig
+
+
 def resample_ohlc(bars: pd.DataFrame, rule: str | None) -> pd.DataFrame:
     """Aggregate 1m bars to a coarser timeframe (e.g. '5min'). Free / local."""
     if bars is None or bars.empty or rule in (None, "1min"):
