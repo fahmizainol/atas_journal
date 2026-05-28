@@ -249,8 +249,8 @@ with tab_detail:
                                     horizontal=True, key=f"tf_{trade['trade_key']}")
                 rule = {"1m": "1min", "5m": "5min", "15m": "15min"}[tf_label]
                 pbars = charts.resample_ohlc(bars, rule)
-                focus = (pd.Timestamp(trade["entry_ts_utc"]) - pd.Timedelta(minutes=20),
-                         pd.Timestamp(trade["exit_ts_utc"]) + pd.Timedelta(minutes=20))
+                focus = (pd.Timestamp(trade["entry_ts_utc"]) - pd.Timedelta(minutes=45),
+                         pd.Timestamp(trade["exit_ts_utc"]) + pd.Timedelta(minutes=45))
                 st.plotly_chart(
                     charts.reconstruction_fig(trade, pbars, exc, KL_TZ, focus_utc=focus),
                     width="stretch",
