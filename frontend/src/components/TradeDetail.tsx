@@ -2,7 +2,7 @@ import { useTradeDetail } from "../hooks/useTrades";
 import type { FilterScope } from "../lib/queryKeys";
 import { KpiGrid } from "./KpiGrid";
 import { JournalForm } from "./JournalForm";
-import { TradeChartPanel } from "./charts/TradeChartPanel";
+import { ReconstructionChart } from "./charts/ReconstructionChart";
 import { fmt, fmtDateTime, fmtInt } from "../lib/format";
 import { toneOf } from "../theme";
 import type { Card } from "./KpiCard";
@@ -32,7 +32,7 @@ export function TradeDetail({ scope, tradeNo }: { scope: FilterScope; tradeNo: n
       </div>
       <KpiGrid cards={row1} template="repeat(5, 1fr)" />
       <KpiGrid cards={row2} template="repeat(3, 1fr)" />
-      <TradeChartPanel scope={scope} tradeNo={tradeNo} />
+      <ReconstructionChart scope={scope} tradeNo={tradeNo} />
       <JournalForm
         tradeKey={t.trade_key}
         initialNote={data.note}
