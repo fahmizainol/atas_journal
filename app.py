@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import sys
 from datetime import datetime
@@ -12,7 +13,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from journal import charts, db, edges, excursion, ingest, metrics, trades, ui  # noqa: E402
+from journal import ai, charts, db, edges, excursion, ingest, metrics, trades, ui  # noqa: E402
 from journal import databento_client as dbn  # noqa: E402
 from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS, IMPORTS_DIR  # noqa: E402
 
@@ -132,8 +133,98 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
 tf = apply_filters(base)
 
 
+# --- AI rendering helpers ------------------------------------------------
+GRADE_TONE = {"A": "pos", "B": "pos", "C": "neutral", "D": "neg", "F": "neg"}
+
+
+def _ai_bullets(title: str, items, tone: str = "neutral") -> None:
+    if not items:
+        return
+    if isinstance(items, str):
+        items = [items]
+    color = ui.GREEN if tone == "pos" else (ui.RED if tone == "neg" else ui.TEXT)
+    lis = "".join(f"<li>{html.escape(str(i))}</li>" for i in items)
+    st.markdown(
+        f'<div class="section-cap" style="margin-top:8px">{title}</div>'
+        f'<ul style="margin-top:2px;color:{color}">{lis}</ul>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_trade_analysis(data: dict) -> None:
+    if "error" in data:
+        st.error(f"AI error: {data['error']}")
+        return
+    grade = str(data.get("grade", "")).strip().upper()[:1]
+    cards = [{"label": "Verdict", "value": data.get("verdict", "—"), "hero": True}]
+    if grade:
+        cards.append({"label": "Grade", "value": grade,
+                      "tone": GRADE_TONE.get(grade, "neutral")})
+    ui.render_cards(cards, "3fr 1fr" if grade else "1fr")
+    _ai_bullets("What went well", data.get("went_well"), "pos")
+    _ai_bullets("What went wrong", data.get("went_wrong"), "neg")
+    if data.get("suggestion"):
+        _ai_bullets("Suggestion", data.get("suggestion"))
+
+
+def render_period_review(data: dict) -> None:
+    if "error" in data:
+        st.error(f"AI error: {data['error']}")
+        return
+    if data.get("summary"):
+        ui.render_cards([{"label": "Summary", "value": data["summary"], "hero": True}],
+                        "1fr")
+    _ai_bullets("Strengths", data.get("strengths"), "pos")
+    _ai_bullets("Leaks", data.get("leaks"), "neg")
+    _ai_bullets("Recommendations", data.get("recommendations"))
+
+
+def render_trade_ai(trade: pd.Series, exc: dict | None) -> None:
+    ui.section_title("AI analysis")
+    if not ai.is_available():
+        st.info("Set LLM_MODEL / LLM_MODELS (and the provider keys) in .env to enable "
+                "AI analysis.")
+        return
+    if exc is None:
+        st.caption("AI critique needs Databento excursion data (MAE/MFE). "
+                   "Unavailable for this trade.")
+        return
+
+    key = trade["trade_key"]
+    models = ai.config.llm_models()
+    saved = db.get_trade_analyses(conn, key)  # model -> {analysis_json, created_at}
+
+    cc = st.columns([3, 1])
+    gen_model = cc[0].selectbox("Model", models, key=f"aimodel_{key}",
+                                help="Pick a model to generate or refresh its critique.")
+    if cc[1].button("Analyze", key=f"aibtn_{key}", width="stretch"):
+        with st.spinner(f"Analyzing with {gen_model}…"):
+            note = db.get_note(conn, key)["note"]
+            comment = trade.get("comment", "") if hasattr(trade, "get") else ""
+            profile = db.get_setting(conn, "trading_profile")
+            data = ai.analyze_trade(trade, exc, note, comment or "", profile, gen_model)
+        if "error" in data:
+            st.error(f"AI error: {data['error']}")
+        else:
+            db.save_trade_analysis(conn, key, gen_model, json.dumps(data))
+            saved = db.get_trade_analyses(conn, key)
+            st.session_state[f"aiview_{key}"] = gen_model
+
+    if not saved:
+        st.caption("No analyses yet — pick a model and click Analyze.")
+        return
+
+    names = list(saved.keys())
+    chosen = names[0] if len(names) == 1 else st.radio(
+        "Compare models", names, horizontal=True, key=f"aiview_{key}")
+    rec = saved[chosen]
+    st.caption(f"{chosen} · saved {rec['created_at']}")
+    render_trade_analysis(json.loads(rec["analysis_json"]))
+
+
 # --- Inline trade detail (used in the Trades tab) -----------------------
 def render_trade_detail(trade: pd.Series) -> None:
+    exc = None
     ui.render_cards([
         {"label": "Direction", "value": trade["direction"]},
         {"label": "Contracts", "value": f"{trade['max_contracts']:.0f}"},
@@ -186,6 +277,8 @@ def render_trade_detail(trade: pd.Series) -> None:
         st.info("Set DATABENTO_API_KEY in .env to render the candlestick chart "
                 "with fills, MAE/MFE and exit efficiency.")
 
+    render_trade_ai(trade, exc)
+
     ui.section_title("Journal")
     existing = db.get_note(conn, trade["trade_key"])
     with st.form(f"note_{trade['trade_key']}"):
@@ -199,8 +292,8 @@ def render_trade_detail(trade: pd.Series) -> None:
 
 
 # --- Tabs ----------------------------------------------------------------
-tab_over, tab_cal, tab_edges, tab_trades, tab_xcheck = st.tabs(
-    ["Overview", "Calendar", "Edges", "Trades", "ATAS Cross-check"]
+tab_over, tab_cal, tab_edges, tab_trades, tab_ai, tab_xcheck = st.tabs(
+    ["Overview", "Calendar", "Edges", "Trades", "AI Review", "ATAS Cross-check"]
 )
 
 # ---- Overview ----
@@ -423,6 +516,85 @@ with tab_trades:
         ui.section_title(
             f"Trade #{chosen} — {trade['entry_ts_local'].strftime('%Y-%m-%d %H:%M:%S')}")
         render_trade_detail(trade)
+
+# ---- AI Review ----
+with tab_ai:
+    ui.section_title("AI period review",
+                     "Reviews the currently-filtered trades — adjust the filter bar "
+                     "above for a weekly / monthly / per-instrument review.")
+
+    profile = db.get_setting(conn, "trading_profile")
+    with st.expander("My trading rules / style (used to ground every AI analysis)",
+                     expanded=not profile):
+        with st.form("ai_profile"):
+            new_profile = st.text_area(
+                "Describe your style, rules, risk limits, setups…",
+                value=profile, height=140,
+                placeholder="e.g. NQ scalper, max 2 contracts, cut losers fast, "
+                            "no trading after 2 losing trades in a day.")
+            if st.form_submit_button("Save profile"):
+                db.save_setting(conn, "trading_profile", new_profile)
+                profile = new_profile
+                st.success("Profile saved.")
+
+    if not ai.is_available():
+        st.info("Set LLM_MODEL / LLM_MODELS (and the provider keys) in .env to enable "
+                "AI review.")
+    elif tf.empty:
+        st.info("No trades match the current filters.")
+    else:
+        scope_sig = ai.scope_signature(sel_instr, dr, sel_tags)
+        count, latest = ai.trade_fingerprint(tf)
+        saved = db.get_period_reviews(conn, scope_sig)  # model -> {...}
+        models = ai.config.llm_models()
+        filters_json = json.dumps({
+            "instruments": sel_instr,
+            "date_range": [str(dr[0]), str(dr[1])] if isinstance(dr, tuple)
+            and len(dr) == 2 else None,
+            "tags": sel_tags,
+        })
+
+        def _generate_review(model: str) -> dict:
+            with st.spinner(f"Reviewing with {model}…"):
+                m = metrics.compute_metrics(tf)
+                edge_tables = {
+                    "By weekday": edges.by_weekday(tf),
+                    f"By hour ({tz_label})": edges.by_hour_kl(tf),
+                    "By hour (US Eastern / session)": edges.by_hour_et(tf),
+                    "By hold time": edges.by_hold_time(tf),
+                    "Long vs Short": edges.by_direction(tf),
+                }
+                data = ai.analyze_period(m, edge_tables, metrics.daily_pnl(tf),
+                                         profile, model)
+            if "error" not in data:
+                db.save_period_review(conn, scope_sig, model, filters_json,
+                                      json.dumps(data), count, latest)
+            return data
+
+        cc = st.columns([3, 1])
+        gen_model = cc[0].selectbox("Model", models, key="ai_period_model",
+                                    help="Pick a model to generate or refresh its review.")
+        if cc[1].button("Generate", key="ai_period_btn", width="stretch"):
+            data = _generate_review(gen_model)
+            if "error" in data:
+                st.error(f"AI error: {data['error']}")
+            else:
+                saved = db.get_period_reviews(conn, scope_sig)
+                st.session_state["ai_period_view"] = gen_model
+
+        if not saved:
+            st.caption("No reviews yet — pick a model and click Generate.")
+        else:
+            names = list(saved.keys())
+            chosen = names[0] if len(names) == 1 else st.radio(
+                "Compare models", names, horizontal=True, key="ai_period_view")
+            rec = saved[chosen]
+            if rec["trade_count"] != count or rec["latest_trade_ts"] != latest:
+                st.warning("New trades were imported into this scope since this review "
+                           "— regenerate to refresh it.")
+            st.caption(f"{chosen} · saved {rec['created_at']} · {rec['trade_count']} trades")
+            render_period_review(json.loads(rec["review_json"]))
+
 
 # ---- ATAS cross-check ----
 with tab_xcheck:

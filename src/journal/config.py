@@ -47,6 +47,9 @@ DEFAULT_SPEC = {"point_value": 20.0, "tick_size": 0.25}
 # Databento dataset for CME Globex futures.
 DATABENTO_DATASET = "GLBX.MDP3"
 
+# AI analyzer defaults.
+LLM_MAX_TOKENS = 1200
+
 
 def load_env() -> None:
     load_dotenv(ROOT / ".env")
@@ -60,9 +63,55 @@ def databento_key() -> str | None:
     return key
 
 
+def _models_env() -> list[str]:
+    """Parse the comma-separated LLM_MODELS list (may be empty)."""
+    load_env()
+    raw = os.environ.get("LLM_MODELS", "").strip()
+    return [m.strip() for m in raw.split(",") if m.strip() and m.strip() != "YOUR_MODEL_HERE"]
+
+
+def llm_model() -> str | None:
+    """Default LiteLLM model: LLM_MODEL if set, else the first of LLM_MODELS."""
+    load_env()
+    model = os.environ.get("LLM_MODEL", "").strip()
+    if model and model != "YOUR_MODEL_HERE":
+        return model
+    env = _models_env()
+    return env[0] if env else None
+
+
+def llm_models() -> list[str]:
+    """All selectable models for multi-model reviews (default first, de-duped)."""
+    out: list[str] = []
+    default = llm_model()
+    if default:
+        out.append(default)
+    for m in _models_env():
+        if m not in out:
+            out.append(m)
+    return out
+
+
+def llm_available() -> bool:
+    return bool(llm_models())
+
+
+def normalize_instrument(instrument: str) -> str:
+    """`#NQM6@CME` -> `NQM6@CME` (strip the leading `#` ATAS adds inconsistently).
+
+    Keeps the `@VENUE` suffix; only collapses the prefix so the same contract
+    isn't split into two instruments across exports.
+    """
+    return instrument.strip().lstrip("#")
+
+
 def raw_symbol(instrument: str) -> str:
-    """`NQM6@CME` -> `NQM6` (strip the @VENUE suffix)."""
-    return instrument.split("@", 1)[0].strip()
+    """`NQM6@CME` -> `NQM6` (strip @VENUE suffix and any leading `#`).
+
+    ATAS prefixes some contract symbols with `#` (e.g. `#NQM6@CME`), which
+    Databento cannot resolve.
+    """
+    return instrument.split("@", 1)[0].strip().lstrip("#")
 
 
 def root_symbol(instrument: str) -> str:

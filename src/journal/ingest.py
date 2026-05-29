@@ -15,7 +15,7 @@ from pathlib import Path
 import openpyxl
 
 from . import db
-from .config import IMPORTS_DIR, KL_TZ, UTC_TZ
+from .config import IMPORTS_DIR, KL_TZ, UTC_TZ, normalize_instrument
 
 
 def _kl_to_utc_iso(dt: datetime | None) -> str | None:
@@ -58,7 +58,7 @@ def parse_file(path: Path) -> dict[str, list[dict]]:
         executions.append({
             "exchange_id": str(exch_id),
             "account": str(account),
-            "instrument": str(instrument),
+            "instrument": normalize_instrument(str(instrument)),
             "ts_local": _local_iso(ts),
             "ts_utc": _kl_to_utc_iso(ts),
             "direction": str(direction),
@@ -76,7 +76,7 @@ def parse_file(path: Path) -> dict[str, list[dict]]:
          close_v, price_pnl, profit_ticks, pnl, comment) = r[:12]
         rec = {
             "account": str(account),
-            "instrument": str(instrument),
+            "instrument": normalize_instrument(str(instrument)),
             "open_ts_local": _local_iso(open_t),
             "close_ts_local": _local_iso(close_t),
             "open_ts_utc": _kl_to_utc_iso(open_t),

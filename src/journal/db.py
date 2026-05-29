@@ -69,6 +69,30 @@ CREATE TABLE IF NOT EXISTS imported_files (
     source_file   TEXT PRIMARY KEY,
     imported_at   TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ai_trade_analysis (
+    trade_key     TEXT,
+    model         TEXT,
+    analysis_json TEXT,
+    created_at    TEXT,
+    PRIMARY KEY (trade_key, model)
+);
+
+CREATE TABLE IF NOT EXISTS ai_period_review (
+    scope_sig       TEXT,
+    model           TEXT,
+    filters_json    TEXT,
+    review_json     TEXT,
+    trade_count     INTEGER,
+    latest_trade_ts TEXT,
+    created_at      TEXT,
+    PRIMARY KEY (scope_sig, model)
+);
+
+CREATE TABLE IF NOT EXISTS ai_settings (
+    key           TEXT PRIMARY KEY,
+    value         TEXT
+);
 """
 
 
@@ -83,6 +107,52 @@ def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    conn.commit()
+    _migrate_ai_schema(conn)
+
+
+def _migrate_ai_schema(conn: sqlite3.Connection) -> None:
+    """Rebuild AI tables that predate the per-model composite primary keys.
+
+    Earlier installs keyed analyses by trade_key / scope_sig alone, so a new
+    model's review would overwrite another's. Rebuild those tables with the
+    composite PK, preserving existing rows (NULL model -> 'unknown').
+    """
+    def stale(table: str, marker: str) -> bool:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        return row is not None and marker not in (row[0] or "")
+
+    if stale("ai_trade_analysis", "PRIMARY KEY (trade_key, model)"):
+        conn.executescript("""
+            ALTER TABLE ai_trade_analysis RENAME TO ai_trade_analysis_old;
+            CREATE TABLE ai_trade_analysis (
+                trade_key TEXT, model TEXT, analysis_json TEXT, created_at TEXT,
+                PRIMARY KEY (trade_key, model)
+            );
+            INSERT OR IGNORE INTO ai_trade_analysis
+                (trade_key, model, analysis_json, created_at)
+                SELECT trade_key, COALESCE(NULLIF(model,''),'unknown'),
+                       analysis_json, created_at FROM ai_trade_analysis_old;
+            DROP TABLE ai_trade_analysis_old;
+        """)
+    if stale("ai_period_review", "PRIMARY KEY (scope_sig, model)"):
+        conn.executescript("""
+            ALTER TABLE ai_period_review RENAME TO ai_period_review_old;
+            CREATE TABLE ai_period_review (
+                scope_sig TEXT, model TEXT, filters_json TEXT, review_json TEXT,
+                trade_count INTEGER, latest_trade_ts TEXT, created_at TEXT,
+                PRIMARY KEY (scope_sig, model)
+            );
+            INSERT OR IGNORE INTO ai_period_review
+                (scope_sig, model, filters_json, review_json, trade_count,
+                 latest_trade_ts, created_at)
+                SELECT scope_sig, COALESCE(NULLIF(model,''),'unknown'), filters_json,
+                       review_json, trade_count, latest_trade_ts, created_at
+                FROM ai_period_review_old;
+            DROP TABLE ai_period_review_old;
+        """)
     conn.commit()
 
 
@@ -189,3 +259,77 @@ def save_note(conn: sqlite3.Connection, trade_key: str, note: str, tags_json: st
 
 def all_notes(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query("SELECT * FROM trade_notes", conn)
+
+
+# --- AI analyzer persistence (keyed per model) ---------------------------
+def get_trade_analyses(conn: sqlite3.Connection, trade_key: str) -> dict[str, dict]:
+    """All saved per-model analyses for a trade, keyed by model name."""
+    rows = conn.execute(
+        "SELECT model, analysis_json, created_at FROM ai_trade_analysis "
+        "WHERE trade_key = ? ORDER BY created_at",
+        (trade_key,),
+    ).fetchall()
+    return {r["model"]: {"analysis_json": r["analysis_json"],
+                         "created_at": r["created_at"]} for r in rows}
+
+
+def save_trade_analysis(
+    conn: sqlite3.Connection, trade_key: str, model: str, analysis_json: str
+) -> None:
+    conn.execute(
+        "INSERT INTO ai_trade_analysis (trade_key, model, analysis_json, created_at) "
+        "VALUES (?, ?, ?, datetime('now')) "
+        "ON CONFLICT(trade_key, model) DO UPDATE SET "
+        "analysis_json=excluded.analysis_json, created_at=excluded.created_at",
+        (trade_key, model, analysis_json),
+    )
+    conn.commit()
+
+
+def get_period_reviews(conn: sqlite3.Connection, scope_sig: str) -> dict[str, dict]:
+    """All saved per-model reviews for a scope, keyed by model name."""
+    rows = conn.execute(
+        "SELECT model, filters_json, review_json, trade_count, latest_trade_ts, "
+        "created_at FROM ai_period_review WHERE scope_sig = ? ORDER BY created_at",
+        (scope_sig,),
+    ).fetchall()
+    return {
+        r["model"]: {
+            "filters_json": r["filters_json"], "review_json": r["review_json"],
+            "trade_count": r["trade_count"], "latest_trade_ts": r["latest_trade_ts"],
+            "created_at": r["created_at"],
+        } for r in rows
+    }
+
+
+def save_period_review(
+    conn: sqlite3.Connection, scope_sig: str, model: str, filters_json: str,
+    review_json: str, trade_count: int, latest_trade_ts: str | None,
+) -> None:
+    conn.execute(
+        "INSERT INTO ai_period_review (scope_sig, model, filters_json, review_json, "
+        "trade_count, latest_trade_ts, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, datetime('now')) "
+        "ON CONFLICT(scope_sig, model) DO UPDATE SET "
+        "filters_json=excluded.filters_json, review_json=excluded.review_json, "
+        "trade_count=excluded.trade_count, latest_trade_ts=excluded.latest_trade_ts, "
+        "created_at=excluded.created_at",
+        (scope_sig, model, filters_json, review_json, trade_count, latest_trade_ts),
+    )
+    conn.commit()
+
+
+def get_setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM ai_settings WHERE key = ?", (key,)).fetchone()
+    if row is None or row["value"] is None:
+        return default
+    return row["value"]
+
+
+def save_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO ai_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+    conn.commit()

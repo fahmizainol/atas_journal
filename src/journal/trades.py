@@ -13,6 +13,12 @@ import pandas as pd
 
 from .config import point_value
 
+# A logical trade must not span a session break. Intraday fills are seconds to
+# a couple of minutes apart; the gap between trading sessions is hours. Any open
+# position at a gap this large is force-closed so position drift in incomplete
+# exports (e.g. ATAS Replay) can't merge unrelated sessions into one trade.
+SESSION_GAP = pd.Timedelta(hours=1)
+
 
 def _trade_key(first_exchange_id: str, instrument: str) -> str:
     return hashlib.sha1(f"{instrument}|{first_exchange_id}".encode()).hexdigest()[:16]
@@ -33,15 +39,26 @@ def build_logical_trades(executions: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     cols_out: list[dict] = []
-    for instrument, grp in executions.sort_values("ts_utc").groupby("instrument"):
+    grouped = executions.sort_values("ts_utc").groupby(["account", "instrument"])
+    for (_account, instrument), grp in grouped:
         pv = point_value(instrument)
         pos = 0.0          # signed open position
         avg_price = 0.0    # avg price of open position
         cur: dict | None = None  # accumulator for the in-progress trade
+        prev_ts = None     # ts_utc of the previous fill (for session-gap detection)
 
         for _, fill in grp.iterrows():
             q = _signed_qty(fill["direction"], fill["volume"])
             price = fill["price"]
+
+            # Session break with an open position: finalize it (unclosed) and
+            # start fresh so the gap can't blend two sessions into one trade.
+            if cur is not None and prev_ts is not None and fill["ts_utc"] - prev_ts > SESSION_GAP:
+                _finalize(cur, cols_out, pv, open_position=True)
+                cur = None
+                pos = 0.0
+                avg_price = 0.0
+            prev_ts = fill["ts_utc"]
 
             if cur is None:
                 cur = _new_trade(fill, instrument)
