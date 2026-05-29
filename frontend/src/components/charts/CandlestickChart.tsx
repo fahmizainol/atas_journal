@@ -8,6 +8,7 @@ import {
 } from "lightweight-charts";
 import { palette } from "../../theme";
 import { TradeRectanglePrimitive } from "./TradeRectanglePrimitive";
+import { MarkerPrimitive } from "./MarkerPrimitive";
 import type { Bar, ChartMarker, PriceLineSpec, TradeRect, VwapPoint } from "../../lib/chartTypes";
 
 interface Props {
@@ -149,17 +150,9 @@ export function CandlestickChart({
     }
 
     if (markers && markers.length > 0) {
-      candle.setMarkers(
-        markers
-          .map((m) => ({
-            time: nearestBar(m.time) as Time,
-            position: m.position,
-            shape: m.shape,
-            color: m.color,
-            text: m.text,
-          }))
-          .sort((a, b) => (a.time as number) - (b.time as number)),
-      );
+      const barMap = new Map(bars.map((b) => [b.time, b]));
+      const snappedMarkers = markers.map((m) => ({ ...m, time: nearestBar(m.time) }));
+      candle.attachPrimitive(new MarkerPrimitive(snappedMarkers, barMap) as any);
     }
 
     for (const pl of priceLines ?? []) {
