@@ -97,3 +97,17 @@ export interface Note {
   note: string;
   tags: string[];
 }
+
+export interface Reconcile {
+  logical_net_pnl: number;
+  atas_journal_pnl: number;
+  difference: number;
+  logical_trades: number;
+  atas_rows: number;
+}
+
+export interface StatisticsDetail {
+  pivot: { scopes: string[]; rows: Record<string, string>[] };
+  ours: Metrics;
+  reconcile: Reconcile;
+}
