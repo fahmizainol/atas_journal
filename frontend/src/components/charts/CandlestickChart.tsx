@@ -71,6 +71,56 @@ export function CandlestickChart({
       })),
     );
 
+    // Overlay times (fills, MAE/MFE, trade rect) carry second precision, but
+    // lightweight-charts only renders markers on an exact bar time and
+    // timeToCoordinate() returns null for any off-grid time — so snap every
+    // overlay time onto the actual (resampled) bar grid.
+    const barTimes = bars.map((b) => b.time);
+    const last = barTimes.length - 1;
+    const nearestBar = (t: number): number => {
+      if (t <= barTimes[0]) return barTimes[0];
+      if (t >= barTimes[last]) return barTimes[last];
+      let lo = 0;
+      let hi = last;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (barTimes[mid] === t) return t;
+        if (barTimes[mid] < t) lo = mid + 1;
+        else hi = mid - 1;
+      }
+      const after = barTimes[lo];
+      const before = barTimes[hi];
+      return t - before <= after - t ? before : after;
+    };
+    const floorBar = (t: number): number => {
+      if (t <= barTimes[0]) return barTimes[0];
+      let lo = 0;
+      let hi = last;
+      let res = barTimes[0];
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (barTimes[mid] <= t) {
+          res = barTimes[mid];
+          lo = mid + 1;
+        } else hi = mid - 1;
+      }
+      return res;
+    };
+    const ceilBar = (t: number): number => {
+      if (t >= barTimes[last]) return barTimes[last];
+      let lo = 0;
+      let hi = last;
+      let res = barTimes[last];
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (barTimes[mid] >= t) {
+          res = barTimes[mid];
+          hi = mid - 1;
+        } else lo = mid + 1;
+      }
+      return res;
+    };
+
     const volume = chart.addHistogramSeries({
       priceFormat: { type: "volume" },
       priceScaleId: "",
@@ -100,13 +150,15 @@ export function CandlestickChart({
 
     if (markers && markers.length > 0) {
       candle.setMarkers(
-        markers.map((m) => ({
-          time: m.time as Time,
-          position: m.position,
-          shape: m.shape,
-          color: m.color,
-          text: m.text,
-        })),
+        markers
+          .map((m) => ({
+            time: nearestBar(m.time) as Time,
+            position: m.position,
+            shape: m.shape,
+            color: m.color,
+            text: m.text,
+          }))
+          .sort((a, b) => (a.time as number) - (b.time as number)),
       );
     }
 
@@ -122,7 +174,18 @@ export function CandlestickChart({
     }
 
     if (tradeRects && tradeRects.length > 0) {
-      candle.attachPrimitive(new TradeRectanglePrimitive(tradeRects) as any);
+      // Snap entry down / exit up to bar boundaries so the rectangle spans the
+      // whole holding period and its corners resolve to real coordinates.
+      const snapped = tradeRects.map((r) => {
+        let entry = floorBar(r.entry_time);
+        let exit = ceilBar(r.exit_time);
+        if (exit <= entry) {
+          const idx = barTimes.indexOf(entry);
+          exit = idx >= 0 && idx < last ? barTimes[idx + 1] : exit;
+        }
+        return { ...r, entry_time: entry, exit_time: exit };
+      });
+      candle.attachPrimitive(new TradeRectanglePrimitive(snapped) as any);
     }
 
     chart.timeScale().fitContent();

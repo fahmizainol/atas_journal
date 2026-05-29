@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMeta } from "../../hooks/useMeta";
 import { useTradeChart } from "../../hooks/useCharts";
 import type { FilterScope } from "../../lib/queryKeys";
@@ -14,6 +14,11 @@ export function ReconstructionChart({ scope, tradeNo }: { scope: FilterScope; tr
   const { data: meta } = useMeta();
   const [tf, setTf] = useState("1m");
   const { data, isLoading } = useTradeChart(scope, tradeNo, tf);
+  // Stable array reference so CandlestickChart's effect doesn't rebuild every render.
+  const tradeRects = useMemo(
+    () => (data?.trade_rect ? [data.trade_rect] : []),
+    [data?.trade_rect],
+  );
 
   if (meta && !meta.databento_available)
     return (
@@ -48,7 +53,7 @@ export function ReconstructionChart({ scope, tradeNo }: { scope: FilterScope; tr
         vwap={data.vwap}
         markers={data.markers}
         priceLines={data.price_lines}
-        tradeRects={data.trade_rect ? [data.trade_rect] : []}
+        tradeRects={tradeRects}
         height={560}
       />
       <div className="section-cap" style={{ marginTop: 6 }}>
