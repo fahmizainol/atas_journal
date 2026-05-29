@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 
 from journal import ai, charts, db, edges, excursion, ingest, metrics, trades, ui  # noqa: E402
 from journal import databento_client as dbn  # noqa: E402
@@ -19,6 +20,19 @@ from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS, ET_TZ, IMPORTS_DIR  
 
 st.set_page_config(page_title="ATAS Journal", layout="wide")
 ui.inject_css()
+
+
+@st.cache_resource
+def _patch_lwc():
+    # The trade-rectangle tooltip in the vendored lightweight-charts bundle shows
+    # raw price points instead of the real dollar PnL; reinstalls wipe the fix, so
+    # re-apply it once per process. See scripts/patch_lwc.py.
+    import patch_lwc
+
+    return patch_lwc.ensure_patched()
+
+
+_patch_lwc()
 
 
 @st.cache_resource

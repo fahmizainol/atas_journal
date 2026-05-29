@@ -33,8 +33,27 @@ from lightweight_charts_pro.type_definitions.enums import TooltipPosition, Toolt
 
 from .config import ET_TZ
 
+
+# lightweight-charts-pro serializes the layout background as flat `color`/`style`
+# keys, but its frontend only honors `layout.background.{type,color}` — so the dark
+# canvas is silently dropped and the chart renders white. Re-inject the nested
+# `background` the frontend expects. Idempotent across reruns/re-imports.
+if getattr(LayoutOptions.asdict, "__name__", "") != "_layout_asdict_with_background":
+    _orig_layout_asdict = LayoutOptions.asdict
+
+    def _layout_asdict_with_background(self):
+        d = _orig_layout_asdict(self)
+        if "background" not in d and "color" in d:
+            d["background"] = {"type": d.get("style", "solid"), "color": d["color"]}
+        return d
+
+    LayoutOptions.asdict = _layout_asdict_with_background
+
+
 GREEN = "#21c07a"
 RED = "#f5455f"
+BLUE = "#3b82f6"   # buy fills / profitable trades
+ORANGE = "#f97316"  # sell fills / losing trades
 ACCENT = "#6c5ce7"
 GOLD = "#e0a52a"
 TEXT = "#e6e8ee"
@@ -208,15 +227,15 @@ def _chart_options(height: int) -> ChartOptions:
     return ChartOptions(
         height=height,
         layout=LayoutOptions(
-            background_options=BackgroundSolid(color=BG), text_color=MUTED,
+            background_options=BackgroundSolid(color=BG), text_color=TEXT,
             pane_heights={0: PaneHeightOptions(factor=3.0),
                           1: PaneHeightOptions(factor=1.0)},
         ),
         grid=GridOptions(vert_lines=GridLineOptions(color=GRID),
                          horz_lines=GridLineOptions(color=GRID)),
         trade_visualization=TradeVisualizationOptions(
-            style="rectangles", rectangle_color_profit=GREEN,
-            rectangle_color_loss=RED, rectangle_fill_opacity=0.12,
+            style="rectangles", rectangle_color_profit=BLUE,
+            rectangle_color_loss=ORANGE, rectangle_fill_opacity=0.12,
             show_pnl_in_markers=True, show_quantity=False),
     )
 
@@ -304,10 +323,10 @@ def _fill_marker_tuples(fdf: pd.DataFrame | None, tz) -> list:
     for tk, px, d in zip(t, fdf["price"], fdf["direction"]):
         if d == "Buy":
             mk = Marker(time=tk, price=float(px), position=MarkerPosition.BELOW_BAR,
-                        shape=MarkerShape.ARROW_UP, color=GREEN)
+                        shape=MarkerShape.ARROW_UP, color=BLUE)
         else:
             mk = Marker(time=tk, price=float(px), position=MarkerPosition.ABOVE_BAR,
-                        shape=MarkerShape.ARROW_DOWN, color=RED)
+                        shape=MarkerShape.ARROW_DOWN, color=ORANGE)
         res.append((tk, mk))
     return res
 
