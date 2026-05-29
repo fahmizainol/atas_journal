@@ -43,7 +43,7 @@ def fmt(x, money=True):
 def load_trades():
     ex = db.load_executions(conn)
     jr = db.load_journal(conn)
-    logical = trades.build_logical_trades(ex)
+    logical = trades.build_logical_trades(jr, ex)
     atas = trades.atas_trades(jr)
     return ex, jr, logical, atas
 

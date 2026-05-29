@@ -1,116 +1,58 @@
-"""Build logical trades (flat->flat) from executions, and expose ATAS rows.
+"""Build logical trades (flat->flat) from the ATAS Journal, and expose ATAS rows.
 
 A logical trade spans from a flat position through any number of scale-in /
-scale-out fills back to flat. PnL is computed from the executions using the
-contract point value, signed by the realized direction of each closed lot.
+scale-out lots back to flat. The ATAS Journal is the source of truth: each row
+is one matched lot (an open leg and a close leg) carrying ATAS's own realized
+PnL, so a logical trade's PnL is the sum of its lots' PnL and always reconciles
+to the ATAS total. We group lots by walking a running net position built from
+every lot's open/close events in time order; the position returning to flat
+marks a trade boundary.
+
+We deliberately do *not* reconstruct PnL from the Executions sheet: ATAS Replay
+exports frequently ship a truncated Executions sheet (e.g. 7 fills backing 19
+journal lots), which a flat-to-flat fill reconstruction silently mis-books.
+Executions are used only to attach fill markers to a trade where they fall
+inside its window; missing fills just mean fewer markers, never wrong PnL.
 """
 
 from __future__ import annotations
 
 import hashlib
+from itertools import groupby
 
 import pandas as pd
 
-from .config import point_value
-
-# A logical trade must not span a session break. Intraday fills are seconds to
-# a couple of minutes apart; the gap between trading sessions is hours. Any open
-# position at a gap this large is force-closed so position drift in incomplete
-# exports (e.g. ATAS Replay) can't merge unrelated sessions into one trade.
+# A logical trade must not span a session break. Intraday lots are seconds to a
+# couple of minutes apart; the gap between trading sessions is hours. Any open
+# position at a gap this large is force-closed so position drift can't merge
+# unrelated sessions into one trade.
 SESSION_GAP = pd.Timedelta(hours=1)
 
 
-def _trade_key(first_exchange_id: str, instrument: str) -> str:
-    return hashlib.sha1(f"{instrument}|{first_exchange_id}".encode()).hexdigest()[:16]
+def _trade_key(seed: str, instrument: str) -> str:
+    return hashlib.sha1(f"{instrument}|{seed}".encode()).hexdigest()[:16]
 
 
-def _signed_qty(direction: str, volume: float) -> float:
-    return volume if direction == "Buy" else -volume
+def build_logical_trades(
+    journal: pd.DataFrame, executions: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """Group ATAS Journal lots per (account, instrument) into flat->flat trades.
 
-
-def build_logical_trades(executions: pd.DataFrame) -> pd.DataFrame:
-    """Group fills per instrument (UTC time order) into flat->flat trades.
-
-    Realized PnL uses a running average-cost on the open side; whenever the
-    position reduces, the closed quantity books PnL against the average open
-    price. Equivalent to ATAS per-position bookkeeping for these exports.
+    Each journal row contributes a signed open event at ``open_ts_utc`` and a
+    signed close event at ``close_ts_utc``. Walking those events in time order,
+    a trade boundary falls wherever the running net position returns to flat.
+    PnL is the sum of the grouped lots' ATAS PnL, so it reconciles exactly.
     """
-    if executions.empty:
+    if journal is None or journal.empty:
         return pd.DataFrame()
 
     cols_out: list[dict] = []
-    grouped = executions.sort_values("ts_utc").groupby(["account", "instrument"])
-    for (_account, instrument), grp in grouped:
-        pv = point_value(instrument)
-        pos = 0.0          # signed open position
-        avg_price = 0.0    # avg price of open position
-        cur: dict | None = None  # accumulator for the in-progress trade
-        prev_ts = None     # ts_utc of the previous fill (for session-gap detection)
-
-        for _, fill in grp.iterrows():
-            q = _signed_qty(fill["direction"], fill["volume"])
-            price = fill["price"]
-
-            # Session break with an open position: finalize it (unclosed) and
-            # start fresh so the gap can't blend two sessions into one trade.
-            if cur is not None and prev_ts is not None and fill["ts_utc"] - prev_ts > SESSION_GAP:
-                _finalize(cur, cols_out, pv, open_position=True)
-                cur = None
-                pos = 0.0
-                avg_price = 0.0
-            prev_ts = fill["ts_utc"]
-
-            if cur is None:
-                cur = _new_trade(fill, instrument)
-
-            cur["fills"].append({
-                "exchange_id": fill["exchange_id"],
-                "ts_local": fill["ts_local"],
-                "ts_utc": fill["ts_utc"],
-                "direction": fill["direction"],
-                "price": price,
-                "volume": fill["volume"],
-            })
-            cur["commission"] += fill["commission"]
-
-            same_side = (pos == 0) or (pos > 0 and q > 0) or (pos < 0 and q < 0)
-            if same_side:
-                # opening or adding: blend average price
-                new_pos = pos + q
-                avg_price = (avg_price * abs(pos) + price * abs(q)) / abs(new_pos)
-                pos = new_pos
-            else:
-                # reducing / closing (possibly flipping through zero)
-                closing_qty = min(abs(q), abs(pos))
-                direction_sign = 1.0 if pos > 0 else -1.0
-                cur["realized_pnl"] += direction_sign * (price - avg_price) * closing_qty * pv
-                remainder = abs(q) - closing_qty
-                pos += q
-                if remainder > 1e-9:
-                    # flip: book the close, finalize this trade, open a fresh one
-                    # for the overshoot quantity at this fill's price.
-                    _finalize(cur, cols_out, pv)
-                    cur = _new_trade(fill, instrument)
-                    cur["fills"].append({
-                        "exchange_id": fill["exchange_id"],
-                        "ts_local": fill["ts_local"],
-                        "ts_utc": fill["ts_utc"],
-                        "direction": fill["direction"],
-                        "price": price,
-                        "volume": remainder,
-                    })
-                    cur["commission"] += 0.0
-                    avg_price = price
-                    # pos already equals the signed remainder after `pos += q`.
-
-            if abs(pos) < 1e-9:
-                pos = 0.0
-                _finalize(cur, cols_out, pv)
-                cur = None
-
-        if cur is not None:
-            # position left open at end of data; finalize what we have
-            _finalize(cur, cols_out, pv, open_position=True)
+    for (_account, instrument), grp in journal.groupby(["account", "instrument"]):
+        grp = grp.reset_index(drop=True)
+        span_of = _assign_spans(grp)
+        grp = grp.assign(_span=grp.index.map(span_of))
+        for _span, lots in grp.groupby("_span"):
+            _finalize(lots.sort_values("open_ts_utc"), instrument, cols_out, executions)
 
     df = pd.DataFrame(cols_out)
     if not df.empty:
@@ -119,65 +61,120 @@ def build_logical_trades(executions: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _new_trade(fill, instrument: str) -> dict:
-    return {
-        "instrument": instrument,
-        "account": fill["account"],
-        "fills": [],
-        "realized_pnl": 0.0,
-        "commission": 0.0,
-        "first_exchange_id": fill["exchange_id"],
-    }
+def _assign_spans(grp: pd.DataFrame) -> dict[int, int]:
+    """Map each lot's row index to a flat->flat span id via running position.
+
+    Events sharing a timestamp are applied as one batch (opens before closes)
+    and the flat check happens only after the batch, so a position that is
+    momentarily netted to zero mid-instant doesn't split a trade spuriously.
+    """
+    events: list[tuple] = []
+    for i, r in grp.iterrows():
+        events.append((r["open_ts_utc"], 0, r["open_volume"], i, True))
+        events.append((r["close_ts_utc"], 1, r["close_volume"], i, False))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    span_of: dict[int, int] = {}
+    span = 0
+    pos = 0.0
+    prev_ts = None
+    for ts, batch in groupby(events, key=lambda e: e[0]):
+        if pos != 0.0 and prev_ts is not None and ts - prev_ts > SESSION_GAP:
+            span += 1
+            pos = 0.0
+        for _ts, _kind, dv, row_idx, is_open in batch:
+            if is_open:
+                span_of[row_idx] = span
+            pos += dv
+        prev_ts = ts
+        if abs(pos) < 1e-9:
+            pos = 0.0
+            span += 1
+    return span_of
 
 
-def _finalize(cur: dict, out: list[dict], pv: float, open_position: bool = False) -> None:
-    fills = pd.DataFrame(cur["fills"])
-    # entry side = first fill's direction; entries are fills matching it
-    first_dir = fills.iloc[0]["direction"]
-    direction = "Long" if first_dir == "Buy" else "Short"
-    entry_side = "Buy" if direction == "Long" else "Sell"
-    exit_side = "Sell" if direction == "Long" else "Buy"
+def _window_fills(
+    executions: pd.DataFrame | None, account: str, instrument: str,
+    start, end,
+) -> list[dict] | None:
+    """Executions for this account/instrument inside [start, end], as marker dicts.
 
-    entries = fills[fills["direction"] == entry_side]
-    exits = fills[fills["direction"] == exit_side]
+    Returns None when no executions are available in the window (e.g. a
+    truncated Replay export), so the chart simply omits fill markers.
+    """
+    if executions is None or executions.empty:
+        return None
+    m = (
+        (executions["account"] == account)
+        & (executions["instrument"] == instrument)
+        & (executions["ts_utc"] >= start)
+        & (executions["ts_utc"] <= end)
+    )
+    sub = executions[m].sort_values("ts_utc")
+    if sub.empty:
+        return None
+    return [
+        {
+            "exchange_id": f["exchange_id"],
+            "ts_local": f["ts_local"],
+            "ts_utc": f["ts_utc"],
+            "direction": f["direction"],
+            "price": f["price"],
+            "volume": f["volume"],
+        }
+        for _, f in sub.iterrows()
+    ]
 
-    def wavg(d: pd.DataFrame) -> float:
-        if d.empty or d["volume"].sum() == 0:
-            return float("nan")
-        return float((d["price"] * d["volume"]).sum() / d["volume"].sum())
 
-    avg_entry = wavg(entries)
-    avg_exit = wavg(exits)
-    max_contracts = float(entries["volume"].sum())
+def _finalize(
+    lots: pd.DataFrame, instrument: str, out: list[dict],
+    executions: pd.DataFrame | None,
+) -> None:
+    account = lots.iloc[0]["account"]
+    open_vol = lots["open_volume"]
+    close_vol = lots["close_volume"]
+    direction = "Long" if open_vol.iloc[0] > 0 else "Short"
 
-    entry_ts_utc = fills["ts_utc"].min()
-    exit_ts_utc = fills["ts_utc"].max()
-    entry_ts_local = fills["ts_local"].min()
-    exit_ts_local = fills["ts_local"].max()
+    abs_open = open_vol.abs()
+    abs_close = close_vol.abs()
+
+    def wavg(price: pd.Series, weight: pd.Series) -> float:
+        total = weight.sum()
+        return float((price * weight).sum() / total) if total else float("nan")
+
+    avg_entry = wavg(lots["open_price"], abs_open)
+    avg_exit = wavg(lots["close_price"], abs_close)
+    max_contracts = float(abs_open.sum())
+
+    entry_ts_utc = lots["open_ts_utc"].min()
+    exit_ts_utc = lots["close_ts_utc"].max()
+    entry_ts_local = lots["open_ts_local"].min()
+    exit_ts_local = lots["close_ts_local"].max()
     duration_s = (exit_ts_utc - entry_ts_utc).total_seconds()
 
-    gross_pnl = cur["realized_pnl"]
-    net_pnl = gross_pnl - cur["commission"]
+    gross_pnl = float(lots["pnl"].sum())
+    comments = [c for c in lots["comment"].fillna("").tolist() if c]
 
     out.append({
-        "trade_key": _trade_key(cur["first_exchange_id"], cur["instrument"]),
-        "instrument": cur["instrument"],
-        "account": cur["account"],
+        "trade_key": _trade_key(lots.iloc[0]["dedupe_key"], instrument),
+        "instrument": instrument,
+        "account": account,
         "direction": direction,
         "avg_entry": avg_entry,
         "avg_exit": avg_exit,
         "max_contracts": max_contracts,
-        "leg_count": int(len(fills)),
+        "leg_count": int(len(lots)),
         "entry_ts_utc": entry_ts_utc,
         "exit_ts_utc": exit_ts_utc,
         "entry_ts_local": entry_ts_local,
         "exit_ts_local": exit_ts_local,
         "duration_s": duration_s,
         "gross_pnl": gross_pnl,
-        "commission": cur["commission"],
-        "net_pnl": net_pnl,
-        "open_position": open_position,
-        "fills": cur["fills"],
+        "commission": 0.0,
+        "net_pnl": gross_pnl,
+        "open_position": False,
+        "fills": _window_fills(executions, account, instrument, entry_ts_utc, exit_ts_utc),
+        "comment": "; ".join(dict.fromkeys(comments)),
     })
 
 
