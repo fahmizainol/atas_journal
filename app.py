@@ -250,18 +250,12 @@ def render_trade_detail(trade: pd.Series) -> None:
                                 horizontal=True, key=f"tf_{trade['trade_key']}")
             rule = {"1m": "1min", "5m": "5min", "15m": "15min"}[tf_label]
             pbars = charts.resample_ohlc(bars, rule)
-            focus = (pd.Timestamp(trade["entry_ts_utc"]) - pd.Timedelta(minutes=45),
-                     pd.Timestamp(trade["exit_ts_utc"]) + pd.Timedelta(minutes=45))
-            st.plotly_chart(
-                charts.reconstruction_fig(trade, pbars, exc, disp_tz, focus_utc=focus),
-                width="stretch",
-                config={"scrollZoom": True, "displayModeBar": True,
-                        "displaylogo": False},
-            )
+            charts.reconstruction_fig(trade, pbars, exc, disp_tz).render(
+                key=f"recon_{trade['trade_key']}")
             st.caption(
-                "Drag = pan · mouse-wheel = zoom · double-click = autoscale. "
-                "To **stretch/compress an axis**, click the **Zoom** tool in the "
-                "top-right toolbar, then drag along the price or time axis."
+                "Drag = pan · mouse-wheel = zoom. Buy/Sell arrows = fills, "
+                "dashed lines = avg entry/exit, circles = MAE/MFE, gold band = "
+                "VWAP ±1σ, lower pane = volume. Hover the trade for its PnL."
             )
             if exc:
                 eff = exc["exit_efficiency"]
@@ -353,15 +347,6 @@ def render_day_explorer(day_df: pd.DataFrame, day) -> None:
         {"label": "Worst trade", "value": fmt(dm["worst_trade"]), "tone": "neg"},
     ], "1.5fr 1fr 1fr 1fr")
 
-    # which trade (if any) is selected for zoom
-    day_nos = day_df["trade_no"].tolist()
-    sel_no = st.session_state.get("sel_day_trade")
-    focus = None
-    if sel_no in day_nos:
-        srow = day_df[day_df["trade_no"] == sel_no].iloc[0]
-        focus = (pd.Timestamp(srow["entry_ts_utc"]) - pd.Timedelta(minutes=45),
-                 pd.Timestamp(srow["exit_ts_utc"]) + pd.Timedelta(minutes=45))
-
     # --- full-session candlestick (Databento) ---
     if dbn.is_available():
         instrument = day_df["instrument"].value_counts().idxmax()
@@ -374,14 +359,9 @@ def render_day_explorer(day_df: pd.DataFrame, day) -> None:
                                 horizontal=True, key=f"daytf_{day}")
             rule = {"1m": "1min", "5m": "5min", "15m": "15min"}[tf_label]
             pbars = charts.resample_ohlc(bars, rule)
-            st.plotly_chart(
-                charts.day_session_fig(day_df, pbars, disp_tz, focus_utc=focus),
-                width="stretch",
-                config={"scrollZoom": True, "displayModeBar": True,
-                        "displaylogo": False},
-            )
-            st.caption("Select a trade row below to zoom the chart to it · "
-                       "double-click the chart to return to the full session.")
+            charts.day_session_fig(day_df, pbars, disp_tz).render(key=f"dayses_{day}")
+            st.caption("Full session — each trade shows a holding rectangle + "
+                       "Buy/Sell fills; gold band = VWAP ±1σ, lower pane = volume.")
         else:
             st.warning("No market data returned for this day.")
     else:
@@ -393,20 +373,15 @@ def render_day_explorer(day_df: pd.DataFrame, day) -> None:
                        width="stretch")
     cc[1].plotly_chart(charts.day_trades_bar_fig(day_df), width="stretch")
 
-    # --- day's trades table (row select drives the chart zoom) ---
-    ui.section_title("Trades this day", "Select a row to zoom the chart above.")
+    # --- day's trades table ---
+    ui.section_title("Trades this day")
     disp = day_df.copy()
     disp["entry"] = disp["entry_ts_local"].dt.strftime("%H:%M:%S")
     disp["exit"] = disp["exit_ts_local"].dt.strftime("%H:%M:%S")
     disp["hold"] = (disp["duration_s"] / 60).round(1).astype(str) + "m"
     show = disp[["trade_no", "instrument", "direction", "max_contracts",
                  "entry", "exit", "hold", "avg_entry", "avg_exit", "net_pnl"]]
-    ev = st.dataframe(show, width="stretch", hide_index=True,
-                      on_select="rerun", selection_mode="single-row",
-                      key=f"daytbl_{day}")
-    rows = ev.selection.rows if ev and ev.selection else []
-    if rows:
-        st.session_state["sel_day_trade"] = int(day_df.iloc[rows[0]]["trade_no"])
+    st.dataframe(show, width="stretch", hide_index=True, key=f"daytbl_{day}")
 
 
 with tab_cal:
@@ -455,7 +430,6 @@ with tab_cal:
                 picked = days_order[sel[0]]
                 if st.session_state.get("sel_day") != picked:
                     st.session_state["sel_day"] = picked
-                    st.session_state.pop("sel_day_trade", None)
 
             chosen_day = st.session_state.get("sel_day")
             if chosen_day not in days_order:

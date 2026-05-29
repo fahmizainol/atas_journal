@@ -1,4 +1,4 @@
-"""Plotly figures: equity, drawdown, distribution, PnL calendar, reconstruction."""
+"""Charts: Plotly for stats/calendar, lightweight-charts for candlestick views."""
 
 from __future__ import annotations
 
@@ -8,6 +8,28 @@ from datetime import timedelta
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from streamlit_lightweight_charts_pro import (
+    BandSeries,
+    CandlestickSeries,
+    Chart,
+    ChartOptions,
+    HistogramSeries,
+    Marker,
+    MarkerPosition,
+    MarkerShape,
+    TradeData,
+    TradeVisualizationOptions,
+)
+from lightweight_charts_pro.charts.options.layout_options import (
+    GridLineOptions,
+    GridOptions,
+    LayoutOptions,
+    PaneHeightOptions,
+)
+from lightweight_charts_pro.charts.options.price_line_options import PriceLineOptions
+from lightweight_charts_pro.data.tooltip import TooltipConfig, TooltipField
+from lightweight_charts_pro.type_definitions.colors import BackgroundSolid
+from lightweight_charts_pro.type_definitions.enums import TooltipPosition, TooltipType
 
 GREEN = "#21c07a"
 RED = "#f5455f"
@@ -146,80 +168,156 @@ def day_trades_bar_fig(day_trades: pd.DataFrame) -> go.Figure:
     return _apply_theme(fig)
 
 
-def day_session_fig(day_trades: pd.DataFrame, bars: pd.DataFrame, kl_tz,
-                    focus_utc: tuple | None = None) -> go.Figure:
-    """Full-day candlestick with every trade's fills (buy/sell) and holding bands.
+# --- Lightweight-charts (TradingView) candlestick views ------------------
+# These two return a `Chart`; the caller renders with `.render(key=...)`.
+# Weekend/overnight gaps collapse automatically (missing bars aren't drawn), so
+# no rangebreaks are needed. There is no absolute set-visible-range in the
+# wrapper, so charts open on the full loaded window (no auto-zoom to the trade);
+# the trade is located by its rectangle + fill markers.
 
-    `bars` is the day's OHLC (any timeframe). `focus_utc` is an optional (start,
-    end) UTC range to open zoomed into — used when a single trade row is picked.
-    """
-    b = bars.copy()
-    b["ts_kl"] = pd.to_datetime(b["ts_utc"], utc=True).dt.tz_convert(kl_tz)
-    tf_name = day_trades["entry_ts_local"].iloc[0].strftime("%Y-%m-%d") \
-        if not day_trades.empty else ""
+BG = "#0e1117"          # matches the app background (.streamlit/config.toml)
+VWAP_FILL = "rgba(108,92,231,0.06)"
+VOL_UP = "rgba(33,192,122,0.5)"
+VOL_DOWN = "rgba(245,69,95,0.5)"
 
-    fig = go.Figure(go.Candlestick(
-        x=b["ts_kl"], open=b["open"], high=b["high"], low=b["low"], close=b["close"],
-        increasing_line_color=GREEN, decreasing_line_color=RED, name="OHLC",
-    ))
+_OHLC_TOOLTIP = TooltipConfig(
+    type=TooltipType.OHLC, position=TooltipPosition.CURSOR,
+    fields=[TooltipField(label="O", value_key="open", precision=2),
+            TooltipField(label="H", value_key="high", precision=2),
+            TooltipField(label="L", value_key="low", precision=2),
+            TooltipField(label="C", value_key="close", precision=2, color=ACCENT)],
+)
+_TRADE_TOOLTIP = TooltipConfig(type=TooltipType.TRADE, position=TooltipPosition.CURSOR)
 
-    # collect all fills across the day's trades
-    buy_x, buy_y, sell_x, sell_y = [], [], [], []
-    for _, trade in day_trades.iterrows():
-        fills = trade.get("fills")
-        if fills:
-            fdf = pd.DataFrame(fills)
-            ts = pd.to_datetime(fdf["ts_utc"], utc=True).dt.tz_convert(kl_tz)
-            for tk, px, d in zip(ts, fdf["price"], fdf["direction"]):
-                if d == "Buy":
-                    buy_x.append(tk); buy_y.append(px)
-                else:
-                    sell_x.append(tk); sell_y.append(px)
-        # holding band tinted by outcome
-        entry_kl = pd.Timestamp(trade["entry_ts_local"]).tz_convert(kl_tz)
-        exit_kl = pd.Timestamp(trade["exit_ts_local"]).tz_convert(kl_tz)
-        band = "rgba(33,192,122,0.12)" if trade["net_pnl"] >= 0 else "rgba(245,69,95,0.12)"
-        fig.add_vrect(x0=entry_kl, x1=exit_kl, fillcolor=band, line_width=0)
 
-    if buy_x:
-        fig.add_trace(go.Scatter(
-            x=buy_x, y=buy_y, mode="markers", name="Buy",
-            marker=dict(symbol="triangle-up", size=12, color=GREEN,
-                        line=dict(width=1, color="white")),
-        ))
-    if sell_x:
-        fig.add_trace(go.Scatter(
-            x=sell_x, y=sell_y, mode="markers", name="Sell",
-            marker=dict(symbol="triangle-down", size=12, color=RED,
-                        line=dict(width=1, color="white")),
-        ))
+def _to_local(s, tz) -> pd.Series:
+    """UTC instants -> naive wall-clock in the display tz, so the time axis reads
+    in local time (lightweight-charts treats a naive stamp as its epoch)."""
+    return pd.to_datetime(s, utc=True).dt.tz_convert(tz).dt.tz_localize(None)
 
-    day_net = float(day_trades["net_pnl"].sum()) if not day_trades.empty else 0.0
-    fig.update_layout(
-        height=620, xaxis_rangeslider_visible=False, dragmode="pan",
-        title=f"{tf_name} session — {len(day_trades)} trades — net {day_net:+,.0f}",
-        margin=dict(t=50, b=30), legend=dict(orientation="h", y=1.02),
-        xaxis_title="Time",
+
+def _local_ts(ts, tz) -> pd.Timestamp:
+    t = pd.Timestamp(ts)
+    t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+    return t.tz_convert(tz).tz_localize(None)
+
+
+def _chart_options(height: int) -> ChartOptions:
+    return ChartOptions(
+        height=height,
+        layout=LayoutOptions(
+            background_options=BackgroundSolid(color=BG), text_color=MUTED,
+            pane_heights={0: PaneHeightOptions(factor=3.0),
+                          1: PaneHeightOptions(factor=1.0)},
+        ),
+        grid=GridOptions(vert_lines=GridLineOptions(color=GRID),
+                         horz_lines=GridLineOptions(color=GRID)),
+        trade_visualization=TradeVisualizationOptions(
+            style="rectangles", rectangle_color_profit=GREEN,
+            rectangle_color_loss=RED, rectangle_fill_opacity=0.12,
+            show_pnl_in_markers=True, show_quantity=False),
     )
-    _apply_theme(fig)
-    fig.update_xaxes(fixedrange=False)
-    fig.update_yaxes(fixedrange=False)
 
-    if focus_utc is not None:
-        fs = pd.Timestamp(focus_utc[0])
-        fe = pd.Timestamp(focus_utc[1])
-        fs = (fs.tz_localize("UTC") if fs.tzinfo is None else fs.tz_convert("UTC")).tz_convert(kl_tz)
-        fe = (fe.tz_localize("UTC") if fe.tzinfo is None else fe.tz_convert("UTC")).tz_convert(kl_tz)
-        fig.update_xaxes(range=[fs, fe])
-        visible = b[(b["ts_kl"] >= fs) & (b["ts_kl"] <= fe)]
-        if not visible.empty:
-            lo = float(visible["low"].min())
-            hi = float(visible["high"].max())
-            pad = (hi - lo) * 0.15 or 1.0
-            fig.update_yaxes(range=[lo - pad, hi + pad])
 
-    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
-    return fig
+def _candle_series(bars: pd.DataFrame, tz) -> CandlestickSeries:
+    df = pd.DataFrame({"time": _to_local(bars["ts_utc"], tz),
+                       "open": bars["open"], "high": bars["high"],
+                       "low": bars["low"], "close": bars["close"]})
+    s = CandlestickSeries(data=df, column_mapping={
+        "time": "time", "open": "open", "high": "high",
+        "low": "low", "close": "close"})
+    s.set_up_color(GREEN).set_down_color(RED)
+    s.set_wick_up_color(GREEN).set_wick_down_color(RED)
+    s.set_tooltip("candles")
+    return s
+
+
+def _vwap_series(bars: pd.DataFrame, tz) -> BandSeries:
+    """Session VWAP ±1 volume-weighted standard deviation as a 3-line band."""
+    typ = (bars["high"] + bars["low"] + bars["close"]) / 3
+    vol = bars["volume"].astype(float)
+    cum = vol.cumsum().where(lambda c: c != 0)
+    vwap = (typ * vol).cumsum() / cum
+    std = ((vol * (typ - vwap) ** 2).cumsum() / cum) ** 0.5
+    df = pd.DataFrame({
+        "time": _to_local(bars["ts_utc"], tz),
+        "upper": vwap + std, "middle": vwap, "lower": vwap - std,
+        "middle_line_color": GOLD, "upper_line_color": MUTED,
+        "lower_line_color": MUTED, "upper_fill_color": VWAP_FILL,
+        "lower_fill_color": VWAP_FILL,
+    }).dropna(subset=["middle"])
+    return BandSeries(data=df, price_scale_id="right", pane_id=0, column_mapping={
+        "time": "time", "upper": "upper", "middle": "middle", "lower": "lower",
+        "upper_line_color": "upper_line_color",
+        "middle_line_color": "middle_line_color",
+        "lower_line_color": "lower_line_color",
+        "upper_fill_color": "upper_fill_color",
+        "lower_fill_color": "lower_fill_color"})
+
+
+def _volume_series(bars: pd.DataFrame, tz) -> HistogramSeries:
+    up = bars["close"] >= bars["open"]
+    df = pd.DataFrame({"time": _to_local(bars["ts_utc"], tz),
+                       "value": bars["volume"].astype(float),
+                       "color": [VOL_UP if u else VOL_DOWN for u in up]})
+    return HistogramSeries(data=df, pane_id=1, column_mapping={
+        "time": "time", "value": "value", "color": "color"})
+
+
+def _fill_marker_tuples(fdf: pd.DataFrame | None, tz) -> list:
+    """(time, Marker) per execution: Buy = up arrow below bar, Sell = down arrow."""
+    if fdf is None or fdf.empty:
+        return []
+    t = _to_local(fdf["ts_utc"], tz)
+    res = []
+    for tk, px, d in zip(t, fdf["price"], fdf["direction"]):
+        if d == "Buy":
+            mk = Marker(time=tk, price=float(px), position=MarkerPosition.BELOW_BAR,
+                        shape=MarkerShape.ARROW_UP, color=GREEN)
+        else:
+            mk = Marker(time=tk, price=float(px), position=MarkerPosition.ABOVE_BAR,
+                        shape=MarkerShape.ARROW_DOWN, color=RED)
+        res.append((tk, mk))
+    return res
+
+
+def _trade_data(trade: pd.Series, tz) -> TradeData:
+    return TradeData(
+        entry_time=_local_ts(trade["entry_ts_utc"], tz),
+        entry_price=float(trade["avg_entry"]),
+        exit_time=_local_ts(trade["exit_ts_utc"], tz),
+        exit_price=float(trade["avg_exit"]),
+        is_profitable=bool(trade["net_pnl"] >= 0),
+        id=str(trade.get("trade_no", "T")),
+    )
+
+
+def _register_tooltips(chart: Chart) -> None:
+    chart.add_tooltip_config("candles", _OHLC_TOOLTIP)
+    chart.add_tooltip_config("trade", _TRADE_TOOLTIP)
+
+
+def day_session_fig(day_trades: pd.DataFrame, bars: pd.DataFrame, disp_tz) -> Chart:
+    """Full-day candlestick (+ VWAP band + volume) with every trade's fills and
+    an outcome-tinted holding rectangle per trade."""
+    candles = _candle_series(bars, disp_tz)
+
+    fills = [pd.DataFrame(tr["fills"]) for _, tr in day_trades.iterrows()
+             if tr.get("fills")]
+    fdf = pd.concat(fills, ignore_index=True) if fills else None
+    tuples = sorted(_fill_marker_tuples(fdf, disp_tz), key=lambda x: x[0])
+    if tuples:
+        candles.add_markers([mk for _, mk in tuples])
+
+    chart = Chart(series=[candles, _vwap_series(bars, disp_tz),
+                          _volume_series(bars, disp_tz)],
+                  options=_chart_options(620))
+    trade_list = [_trade_data(tr, disp_tz) for _, tr in day_trades.iterrows()
+                  if pd.notna(tr["avg_entry"]) and pd.notna(tr["avg_exit"])]
+    if trade_list:
+        chart.add_trades(trade_list)
+    _register_tooltips(chart)
+    return chart
 
 
 def resample_ohlc(bars: pd.DataFrame, rule: str | None) -> pd.DataFrame:
@@ -234,110 +332,47 @@ def resample_ohlc(bars: pd.DataFrame, rule: str | None) -> pd.DataFrame:
     return agg.dropna(subset=["open"]).reset_index()
 
 
-def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame, excursion: dict | None,
-                       kl_tz, focus_utc: tuple | None = None) -> go.Figure:
-    """Candlestick with fills, avg lines, band, MAE/MFE.
+def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame,
+                       excursion: dict | None, disp_tz) -> Chart:
+    """Single-trade candlestick (+ VWAP band + volume) with per-fill markers,
+    avg entry/exit price lines, an outcome-tinted holding rectangle (with a
+    cursor PnL tooltip) and MAE/MFE markers."""
+    candles = _candle_series(bars, disp_tz)
 
-    `bars` is the full cached session; `focus_utc` is the (start, end) UTC range
-    to open zoomed into. Drag pans and the mouse wheel zooms across the rest of
-    the loaded session.
-    """
-    b = bars.copy()
-    b["ts_kl"] = pd.to_datetime(b["ts_utc"], utc=True).dt.tz_convert(kl_tz)
-
-    fig = go.Figure(go.Candlestick(
-        x=b["ts_kl"], open=b["open"], high=b["high"], low=b["low"], close=b["close"],
-        increasing_line_color=GREEN, decreasing_line_color=RED, name="1m",
-    ))
-
-    # per-fill markers from executions
-    fills = trade.get("fills")
-    if fills:
-        fdf = pd.DataFrame(fills)
-        fdf["ts_kl"] = pd.to_datetime(fdf["ts_local"], utc=True).dt.tz_convert(kl_tz) \
-            if fdf["ts_local"].dt.tz is None else fdf["ts_local"].dt.tz_convert(kl_tz)
-        buys = fdf[fdf["direction"] == "Buy"]
-        sells = fdf[fdf["direction"] == "Sell"]
-        if not buys.empty:
-            fig.add_trace(go.Scatter(
-                x=buys["ts_kl"], y=buys["price"], mode="markers", name="Buy",
-                marker=dict(symbol="triangle-up", size=13, color=GREEN,
-                            line=dict(width=1, color="white")),
-            ))
-        if not sells.empty:
-            fig.add_trace(go.Scatter(
-                x=sells["ts_kl"], y=sells["price"], mode="markers", name="Sell",
-                marker=dict(symbol="triangle-down", size=13, color=RED,
-                            line=dict(width=1, color="white")),
-            ))
-
-    # avg entry / exit lines
-    if pd.notna(trade["avg_entry"]):
-        fig.add_hline(y=trade["avg_entry"], line_dash="dash", line_color=ACCENT,
-                      annotation_text=f"avg entry {trade['avg_entry']:.2f}")
-    if pd.notna(trade["avg_exit"]):
-        fig.add_hline(y=trade["avg_exit"], line_dash="dash", line_color=GOLD,
-                      annotation_text=f"avg exit {trade['avg_exit']:.2f}")
-
-    # holding band tinted by outcome
-    entry_kl = pd.Timestamp(trade["entry_ts_local"]).tz_convert(kl_tz)
-    exit_kl = pd.Timestamp(trade["exit_ts_local"]).tz_convert(kl_tz)
-    band = "rgba(33,192,122,0.12)" if trade["net_pnl"] >= 0 else "rgba(245,69,95,0.12)"
-    fig.add_vrect(x0=entry_kl, x1=exit_kl, fillcolor=band, line_width=0)
-
-    # MAE / MFE markers
+    fdf = pd.DataFrame(trade["fills"]) if trade.get("fills") else None
+    tuples = _fill_marker_tuples(fdf, disp_tz)
     if excursion:
-        mid = entry_kl + (exit_kl - entry_kl) / 2
-        fig.add_trace(go.Scatter(
-            x=[mid], y=[excursion["mfe_price"]], mode="markers+text",
-            text=["MFE"], textposition="top center", name="MFE",
-            marker=dict(symbol="star", size=12, color=GREEN),
-        ))
-        fig.add_trace(go.Scatter(
-            x=[mid], y=[excursion["mae_price"]], mode="markers+text",
-            text=["MAE"], textposition="bottom center", name="MAE",
-            marker=dict(symbol="star", size=12, color=RED),
-        ))
+        entry = pd.Timestamp(trade["entry_ts_utc"])
+        exit_ = pd.Timestamp(trade["exit_ts_utc"])
+        mid = _local_ts(entry + (exit_ - entry) / 2, disp_tz)
+        tuples.append((mid, Marker(
+            time=mid, price=float(excursion["mfe_price"]),
+            position=MarkerPosition.ABOVE_BAR, shape=MarkerShape.CIRCLE,
+            color=GREEN, text="MFE")))
+        tuples.append((mid, Marker(
+            time=mid, price=float(excursion["mae_price"]),
+            position=MarkerPosition.BELOW_BAR, shape=MarkerShape.CIRCLE,
+            color=RED, text="MAE")))
+    tuples.sort(key=lambda x: x[0])
+    if tuples:
+        candles.add_markers([mk for _, mk in tuples])
 
-    fig.update_layout(
-        height=720, xaxis_rangeslider_visible=False, dragmode="pan",
-        title=f"{trade['instrument']} {trade['direction']} — "
-              f"{trade['max_contracts']:.0f} lot — net {trade['net_pnl']:+,.0f}",
-        margin=dict(t=50, b=30), legend=dict(orientation="h", y=1.02),
-        xaxis_title="Time (KL)",
-    )
-    _apply_theme(fig)
-    # Both axes freely rescalable: drag the plot to pan, drag an axis to zoom
-    # just that axis, mouse-wheel to zoom, double-click to autoscale.
-    fig.update_xaxes(fixedrange=False)
-    fig.update_yaxes(fixedrange=False)
+    if pd.notna(trade["avg_entry"]):
+        candles.add_price_line(PriceLineOptions(
+            price=float(trade["avg_entry"]), color=ACCENT, line_width=1,
+            title=f"avg entry {trade['avg_entry']:.2f}", axis_label_visible=True))
+    if pd.notna(trade["avg_exit"]):
+        candles.add_price_line(PriceLineOptions(
+            price=float(trade["avg_exit"]), color=GOLD, line_width=1,
+            title=f"avg exit {trade['avg_exit']:.2f}", axis_label_visible=True))
 
-    # Open zoomed to the trade; the rest of the session is loaded for pan/zoom.
-    if focus_utc is not None:
-        fs = pd.Timestamp(focus_utc[0])
-        fe = pd.Timestamp(focus_utc[1])
-        fs = (fs.tz_localize("UTC") if fs.tzinfo is None else fs.tz_convert("UTC")).tz_convert(kl_tz)
-        fe = (fe.tz_localize("UTC") if fe.tzinfo is None else fe.tz_convert("UTC")).tz_convert(kl_tz)
-        fig.update_xaxes(range=[fs, fe])
-
-        # Fit y to the focus window (Plotly won't auto-fit y on pan), including
-        # the avg lines and MAE/MFE so every overlay stays in view.
-        visible = b[(b["ts_kl"] >= fs) & (b["ts_kl"] <= fe)]
-        if not visible.empty:
-            lo = float(visible["low"].min())
-            hi = float(visible["high"].max())
-            extra = [trade["avg_entry"], trade["avg_exit"]]
-            if excursion:
-                extra += [excursion["mfe_price"], excursion["mae_price"]]
-            extra = [v for v in extra if pd.notna(v)]
-            lo = min([lo, *extra])
-            hi = max([hi, *extra])
-            pad = (hi - lo) * 0.15 or 1.0
-            fig.update_yaxes(range=[lo - pad, hi + pad])
-
-    # Collapse weekend gaps (CME is closed) so panning across days stays tight.
-    fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
-    return fig
+    chart = Chart(series=[candles, _vwap_series(bars, disp_tz),
+                          _volume_series(bars, disp_tz)],
+                  options=_chart_options(720))
+    if pd.notna(trade["avg_entry"]) and pd.notna(trade["avg_exit"]):
+        chart.add_trades([_trade_data(trade, disp_tz)])
+    _register_tooltips(chart)
+    return chart
 
 
 def adaptive_window(entry_utc, exit_utc) -> tuple:
