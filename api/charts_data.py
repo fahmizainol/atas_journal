@@ -12,7 +12,7 @@ from datetime import datetime, time, timedelta
 
 import pandas as pd
 
-from journal import charts, excursion
+from journal import excursion
 from journal import databento_client as dbn
 from journal.config import ET_TZ
 
@@ -25,6 +25,35 @@ BLUE = "#3b82f6"
 ORANGE = "#f97316"
 ACCENT = "#6c5ce7"
 GOLD = "#e0a52a"
+
+
+# --- Pure session/resample helpers (ported from the deleted journal.charts) ---
+def resample_ohlc(bars: pd.DataFrame, rule: str | None) -> pd.DataFrame:
+    """Aggregate 1m bars to a coarser timeframe (e.g. '5min')."""
+    if bars is None or bars.empty or rule in (None, "1min"):
+        return bars
+    df = bars.set_index("ts_utc")
+    agg = df.resample(rule, label="left", closed="left").agg(
+        open=("open", "first"), high=("high", "max"),
+        low=("low", "min"), close=("close", "last"), volume=("volume", "sum"),
+    )
+    return agg.dropna(subset=["open"]).reset_index()
+
+
+def session_open_utc(ts_utc) -> pd.Timestamp:
+    """UTC timestamp of the Globex session open (18:00 ET) containing `ts_utc`."""
+    et = pd.Timestamp(ts_utc)
+    et = et.tz_localize("UTC") if et.tzinfo is None else et.tz_convert("UTC")
+    et = et.tz_convert(ET_TZ)
+    sess_date = (et - pd.Timedelta(hours=18)).date()
+    open_et = pd.Timestamp(datetime.combine(sess_date, time(18, 0)), tz=ET_TZ)
+    return open_et.tz_convert("UTC")
+
+
+def adaptive_window(entry_utc, exit_utc) -> tuple:
+    """Pad each side by 2 hours so the trade has surrounding session context."""
+    pad = timedelta(hours=2)
+    return pd.Timestamp(entry_utc) - pad, pd.Timestamp(exit_utc) + pad
 
 
 def _epoch_local(ts_utc, tz) -> pd.Series | int:
@@ -151,17 +180,17 @@ def trade_chart(trade: pd.Series, tf: str, tz) -> dict:
 
     instrument = trade["instrument"]
     entry_utc, exit_utc = trade["entry_ts_utc"], trade["exit_ts_utc"]
-    start_utc, end_utc = charts.adaptive_window(entry_utc, exit_utc)
+    start_utc, end_utc = adaptive_window(entry_utc, exit_utc)
     bars = dbn.get_bars(instrument, start_utc, end_utc, slice_to_window=True)
     if bars is None or bars.empty:
         return {"available": True, "bars": []}
 
-    sess_open = charts.session_open_utc(entry_utc)
+    sess_open = session_open_utc(entry_utc)
     sess_bars = dbn.get_bars(instrument, sess_open.to_pydatetime(), end_utc,
                              slice_to_window=True)
     rule = _RULE.get(tf, "1min")
-    pbars = charts.resample_ohlc(bars, rule)
-    psess = charts.resample_ohlc(sess_bars, rule) if sess_bars is not None else None
+    pbars = resample_ohlc(bars, rule)
+    psess = resample_ohlc(sess_bars, rule) if sess_bars is not None else None
 
     exc = excursion.trade_excursion(trade)
     markers = sorted(
@@ -196,7 +225,7 @@ def day_chart(day_df: pd.DataFrame, day, tf: str, tz) -> dict:
     if bars is None or bars.empty:
         return {"available": True, "instrument": instrument, "bars": []}
 
-    pbars = charts.resample_ohlc(bars, _RULE.get(tf, "1min"))
+    pbars = resample_ohlc(bars, _RULE.get(tf, "1min"))
     fills = [tr["fills"] for _, tr in day_df.iterrows() if tr.get("fills")]
     flat = [f for sub in fills for f in sub]
     markers = sorted(_fill_markers(flat, tz), key=lambda m: m["time"])
@@ -218,5 +247,5 @@ def bars_window(instrument: str, start_utc, end_utc, tf: str, tz) -> dict:
     bars = dbn.get_bars(instrument, start_utc, end_utc, slice_to_window=True)
     if bars is None or bars.empty:
         return {"available": True, "bars": []}
-    pbars = charts.resample_ohlc(bars, _RULE.get(tf, "1min"))
+    pbars = resample_ohlc(bars, _RULE.get(tf, "1min"))
     return {"available": True, "bars": _bars_rows(pbars, tz)}
