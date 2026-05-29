@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
-from .config import CACHE_DIR, DATABENTO_DATASET, UTC_TZ, databento_key, raw_symbol
+from .config import CACHE_DIR, DATABENTO_DATASET, UTC_TZ, continuous_symbol, databento_key
 
 
 class DatabentoUnavailable(Exception):
@@ -34,7 +34,7 @@ def _cache_path(symbol: str, day: date):
 
 
 def _fetch_day(symbol: str, day: date) -> pd.DataFrame:
-    """Fetch one full UTC day of ohlcv-1m bars for a raw symbol."""
+    """Fetch one full UTC day of ohlcv-1m bars for a continuous symbol."""
     import databento as dbn
 
     key = databento_key()
@@ -53,7 +53,7 @@ def _fetch_day(symbol: str, day: date) -> pd.DataFrame:
 
     def _query(e: datetime):
         return client.timeseries.get_range(
-            dataset=DATABENTO_DATASET, schema="ohlcv-1m", stype_in="raw_symbol",
+            dataset=DATABENTO_DATASET, schema="ohlcv-1m", stype_in="continuous",
             symbols=[symbol], start=start, end=e,
         )
 
@@ -108,7 +108,7 @@ def get_bars(
     window touches (no trimming) — used so the chart can pan/zoom across the
     whole session from already-cached data.
     """
-    symbol = raw_symbol(instrument)
+    symbol = continuous_symbol(instrument)
     start_utc = _as_utc(start_utc)
     end_utc = _as_utc(end_utc)
 

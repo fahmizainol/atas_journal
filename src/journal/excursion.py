@@ -22,17 +22,23 @@ def trade_excursion(trade: pd.Series) -> dict | None:
     pv = point_value(trade["instrument"])
     qty = float(trade["max_contracts"])
     entry = float(trade["avg_entry"])
-    hi = float(bars["high"].max())
-    lo = float(bars["low"].min())
+    hi_idx = bars["high"].idxmax()
+    lo_idx = bars["low"].idxmin()
+    hi = float(bars.loc[hi_idx, "high"])
+    lo = float(bars.loc[lo_idx, "low"])
+    hi_time = bars.loc[hi_idx, "ts_utc"]
+    lo_time = bars.loc[lo_idx, "ts_utc"]
 
     if trade["direction"] == "Long":
         mfe_pts = hi - entry
         mae_pts = lo - entry  # negative
         mfe_price, mae_price = hi, lo
+        mfe_time, mae_time = hi_time, lo_time
     else:
         mfe_pts = entry - lo
         mae_pts = entry - hi  # negative
         mfe_price, mae_price = lo, hi
+        mfe_time, mae_time = lo_time, hi_time
 
     mfe_usd = mfe_pts * pv * qty
     mae_usd = mae_pts * pv * qty
@@ -46,6 +52,8 @@ def trade_excursion(trade: pd.Series) -> dict | None:
         "mae_usd": mae_usd,
         "mfe_price": mfe_price,
         "mae_price": mae_price,
+        "mfe_time": mfe_time,
+        "mae_time": mae_time,
         "exit_efficiency": exit_eff,
         "bars": bars,
     }

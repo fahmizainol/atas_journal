@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import calendar
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -30,6 +30,8 @@ from lightweight_charts_pro.charts.options.price_line_options import PriceLineOp
 from lightweight_charts_pro.data.tooltip import TooltipConfig, TooltipField
 from lightweight_charts_pro.type_definitions.colors import BackgroundSolid
 from lightweight_charts_pro.type_definitions.enums import TooltipPosition, TooltipType
+
+from .config import ET_TZ
 
 GREEN = "#21c07a"
 RED = "#f5455f"
@@ -232,20 +234,49 @@ def _candle_series(bars: pd.DataFrame, tz) -> CandlestickSeries:
     return s
 
 
-def _vwap_series(bars: pd.DataFrame, tz) -> BandSeries:
-    """Session VWAP ±1 volume-weighted standard deviation as a 3-line band."""
-    typ = (bars["high"] + bars["low"] + bars["close"]) / 3
-    vol = bars["volume"].astype(float)
-    cum = vol.cumsum().where(lambda c: c != 0)
-    vwap = (typ * vol).cumsum() / cum
-    std = ((vol * (typ - vwap) ** 2).cumsum() / cum) ** 0.5
+def session_open_utc(ts_utc) -> pd.Timestamp:
+    """UTC timestamp of the Globex session open (18:00 ET) containing `ts_utc`."""
+    et = pd.Timestamp(ts_utc)
+    et = et.tz_localize("UTC") if et.tzinfo is None else et.tz_convert("UTC")
+    et = et.tz_convert(ET_TZ)
+    sess_date = (et - pd.Timedelta(hours=18)).date()
+    open_et = pd.Timestamp(datetime.combine(sess_date, time(18, 0)), tz=ET_TZ)
+    return open_et.tz_convert("UTC")
+
+
+def _vwap_series(bars: pd.DataFrame, tz, anchor_bars: pd.DataFrame | None = None) -> BandSeries:
+    """Session VWAP ±1 volume-weighted standard deviation as a 3-line band.
+
+    Anchored at the CME Globex session open (18:00 ET), resetting each session,
+    to match ATAS. The VWAP must accumulate from the session open, so when the
+    plotted window starts later (e.g. the single-trade reconstruction chart),
+    pass the fuller session bars as `anchor_bars`: VWAP is computed over those
+    and then restricted to the timestamps actually being plotted (`bars`).
+    """
+    src = anchor_bars if anchor_bars is not None else bars
+    typ = (src["high"] + src["low"] + src["close"]) / 3
+    vol = src["volume"].astype(float)
+    # Group bars into Globex sessions: each runs 18:00 ET -> next 18:00 ET, so
+    # shifting back 18h and taking the ET date labels every bar by its session.
+    et = pd.to_datetime(src["ts_utc"], utc=True).dt.tz_convert(ET_TZ)
+    session = (et - pd.Timedelta(hours=18)).dt.date
+    cum = vol.groupby(session).cumsum().where(lambda c: c != 0)
+    vwap = (typ * vol).groupby(session).cumsum() / cum
+    # Volume-weighted variance via E[x^2] - E[x]^2 (textbook), clipped to >= 0.
+    var = (typ * typ * vol).groupby(session).cumsum() / cum - vwap ** 2
+    std = var.clip(lower=0) ** 0.5
     df = pd.DataFrame({
-        "time": _to_local(bars["ts_utc"], tz),
+        "ts_utc": pd.to_datetime(src["ts_utc"], utc=True),
+        "time": _to_local(src["ts_utc"], tz),
         "upper": vwap + std, "middle": vwap, "lower": vwap - std,
         "middle_line_color": GOLD, "upper_line_color": MUTED,
         "lower_line_color": MUTED, "upper_fill_color": VWAP_FILL,
         "lower_fill_color": VWAP_FILL,
     }).dropna(subset=["middle"])
+    if anchor_bars is not None:
+        window = pd.to_datetime(bars["ts_utc"], utc=True)
+        df = df[df["ts_utc"].isin(window)]
+    df = df.drop(columns="ts_utc")
     return BandSeries(data=df, price_scale_id="right", pane_id=0, column_mapping={
         "time": "time", "upper": "upper", "middle": "middle", "lower": "lower",
         "upper_line_color": "upper_line_color",
@@ -282,13 +313,25 @@ def _fill_marker_tuples(fdf: pd.DataFrame | None, tz) -> list:
 
 
 def _trade_data(trade: pd.Series, tz) -> TradeData:
+    # The library's default PnL is raw (exit-entry) price points — wrong for
+    # futures. Pass the journal's realized net_pnl (in $) so markers/tooltips
+    # show the true dollar result. pnl_percentage is the directional price move.
+    entry = float(trade["avg_entry"])
+    exit_ = float(trade["avg_exit"])
+    move = (exit_ - entry) / entry * 100 if entry else 0.0
+    pct = move if trade["direction"] == "Long" else -move
     return TradeData(
         entry_time=_local_ts(trade["entry_ts_utc"], tz),
-        entry_price=float(trade["avg_entry"]),
+        entry_price=entry,
         exit_time=_local_ts(trade["exit_ts_utc"], tz),
-        exit_price=float(trade["avg_exit"]),
+        exit_price=exit_,
         is_profitable=bool(trade["net_pnl"] >= 0),
         id=str(trade.get("trade_no", "T")),
+        additional_data={
+            "pnl": float(trade["net_pnl"]),
+            "quantity": float(trade.get("max_contracts", 0) or 0),
+            "pnl_percentage": pct,
+        },
     )
 
 
@@ -333,7 +376,8 @@ def resample_ohlc(bars: pd.DataFrame, rule: str | None) -> pd.DataFrame:
 
 
 def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame,
-                       excursion: dict | None, disp_tz) -> Chart:
+                       excursion: dict | None, disp_tz,
+                       vwap_bars: pd.DataFrame | None = None) -> Chart:
     """Single-trade candlestick (+ VWAP band + volume) with per-fill markers,
     avg entry/exit price lines, an outcome-tinted holding rectangle (with a
     cursor PnL tooltip) and MAE/MFE markers."""
@@ -342,15 +386,14 @@ def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame,
     fdf = pd.DataFrame(trade["fills"]) if trade.get("fills") else None
     tuples = _fill_marker_tuples(fdf, disp_tz)
     if excursion:
-        entry = pd.Timestamp(trade["entry_ts_utc"])
-        exit_ = pd.Timestamp(trade["exit_ts_utc"])
-        mid = _local_ts(entry + (exit_ - entry) / 2, disp_tz)
-        tuples.append((mid, Marker(
-            time=mid, price=float(excursion["mfe_price"]),
+        mfe_t = _local_ts(excursion["mfe_time"], disp_tz)
+        mae_t = _local_ts(excursion["mae_time"], disp_tz)
+        tuples.append((mfe_t, Marker(
+            time=mfe_t, price=float(excursion["mfe_price"]),
             position=MarkerPosition.ABOVE_BAR, shape=MarkerShape.CIRCLE,
             color=GREEN, text="MFE")))
-        tuples.append((mid, Marker(
-            time=mid, price=float(excursion["mae_price"]),
+        tuples.append((mae_t, Marker(
+            time=mae_t, price=float(excursion["mae_price"]),
             position=MarkerPosition.BELOW_BAR, shape=MarkerShape.CIRCLE,
             color=RED, text="MAE")))
     tuples.sort(key=lambda x: x[0])
@@ -366,7 +409,7 @@ def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame,
             price=float(trade["avg_exit"]), color=GOLD, line_width=1,
             title=f"avg exit {trade['avg_exit']:.2f}", axis_label_visible=True))
 
-    chart = Chart(series=[candles, _vwap_series(bars, disp_tz),
+    chart = Chart(series=[candles, _vwap_series(bars, disp_tz, anchor_bars=vwap_bars),
                           _volume_series(bars, disp_tz)],
                   options=_chart_options(720))
     if pd.notna(trade["avg_entry"]) and pd.notna(trade["avg_exit"]):
@@ -376,7 +419,7 @@ def reconstruction_fig(trade: pd.Series, bars: pd.DataFrame,
 
 
 def adaptive_window(entry_utc, exit_utc) -> tuple:
-    """Pad each side by a fixed 2 hours."""
+    """Pad each side by 2 hours so the trade has surrounding session context."""
     entry = pd.Timestamp(entry_utc)
     exit_ = pd.Timestamp(exit_utc)
     pad = timedelta(hours=2)

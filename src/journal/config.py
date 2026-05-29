@@ -47,6 +47,10 @@ DEFAULT_SPEC = {"point_value": 20.0, "tick_size": 0.25}
 # Databento dataset for CME Globex futures.
 DATABENTO_DATASET = "GLBX.MDP3"
 
+# Continuous-contract roll rule for front-month resolution:
+# "v" volume, "c" calendar, "n" open interest.
+CONTINUOUS_ROLL_RULE = "v"
+
 # AI analyzer defaults.
 LLM_MAX_TOKENS = 1200
 
@@ -122,6 +126,11 @@ def root_symbol(instrument: str) -> str:
     if m:
         return m.group(1)
     return sym
+
+
+def continuous_symbol(instrument: str) -> str:
+    """Front-month continuous symbol for Databento, e.g. 'NQ' -> 'NQ.v.0'."""
+    return f"{root_symbol(instrument)}.{CONTINUOUS_ROLL_RULE}.0"
 
 
 def contract_spec(instrument: str) -> dict[str, float]:

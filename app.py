@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from journal import ai, charts, db, edges, excursion, ingest, metrics, trades, ui  # noqa: E402
 from journal import databento_client as dbn  # noqa: E402
-from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS, IMPORTS_DIR  # noqa: E402
+from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS, ET_TZ, IMPORTS_DIR  # noqa: E402
 
 st.set_page_config(page_title="ATAS Journal", layout="wide")
 ui.inject_css()
@@ -243,14 +243,20 @@ def render_trade_detail(trade: pd.Series) -> None:
         start_utc, end_utc = charts.adaptive_window(
             trade["entry_ts_utc"], trade["exit_ts_utc"])
         bars = dbn.get_bars(trade["instrument"], start_utc, end_utc,
-                            slice_to_window=False)
+                            slice_to_window=True)
+        # Bars from the Globex session open so the VWAP band anchors correctly
+        # even though only the trade's window is plotted.
+        sess_open = charts.session_open_utc(trade["entry_ts_utc"])
+        sess_bars = dbn.get_bars(trade["instrument"], sess_open.to_pydatetime(),
+                                 end_utc, slice_to_window=True)
         if bars is not None and not bars.empty:
             exc = excursion.trade_excursion(trade)
             tf_label = st.radio("Timeframe", ["1m", "5m", "15m"], index=0,
                                 horizontal=True, key=f"tf_{trade['trade_key']}")
             rule = {"1m": "1min", "5m": "5min", "15m": "15min"}[tf_label]
             pbars = charts.resample_ohlc(bars, rule)
-            charts.reconstruction_fig(trade, pbars, exc, disp_tz).render(
+            psess = charts.resample_ohlc(sess_bars, rule) if sess_bars is not None else None
+            charts.reconstruction_fig(trade, pbars, exc, disp_tz, vwap_bars=psess).render(
                 key=f"recon_{trade['trade_key']}")
             st.caption(
                 "Drag = pan · mouse-wheel = zoom. Buy/Sell arrows = fills, "
@@ -350,9 +356,12 @@ def render_day_explorer(day_df: pd.DataFrame, day) -> None:
     # --- full-session candlestick (Databento) ---
     if dbn.is_available():
         instrument = day_df["instrument"].value_counts().idxmax()
-        day_start = pd.Timestamp(datetime.combine(day, datetime.min.time()), tz=disp_tz)
-        day_end = day_start + pd.Timedelta(days=1)
-        bars = dbn.get_bars(instrument, day_start.tz_convert("UTC").to_pydatetime(),
+        # CME Globex session for this trading day opens 18:00 ET the previous
+        # evening; load bars from there so the VWAP band accumulates over the
+        # whole session (matching ATAS) rather than from local midnight.
+        sess_open = pd.Timestamp(datetime.combine(day - timedelta(days=1), time(18, 0)), tz=ET_TZ)
+        day_end = pd.Timestamp(datetime.combine(day, datetime.min.time()), tz=disp_tz) + pd.Timedelta(days=1)
+        bars = dbn.get_bars(instrument, sess_open.tz_convert("UTC").to_pydatetime(),
                             day_end.tz_convert("UTC").to_pydatetime())
         if bars is not None and not bars.empty:
             tf_label = st.radio("Timeframe", ["1m", "5m", "15m"], index=0,
