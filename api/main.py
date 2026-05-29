@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from . import deps  # noqa: E402
-from .routers import filters, meta  # noqa: E402
+from .routers import filters, meta, overview  # noqa: E402
 from .serialize import SanitizedJSONResponse  # noqa: E402
 
 app = FastAPI(title="ATAS Journal API", default_response_class=SanitizedJSONResponse)
@@ -41,6 +41,7 @@ def _startup() -> None:
 
 app.include_router(meta.router, prefix="/api")
 app.include_router(filters.router, prefix="/api")
+app.include_router(overview.router, prefix="/api")
 
 
 # --- Prod static frontend (mounted last; only if a build exists) ---------
