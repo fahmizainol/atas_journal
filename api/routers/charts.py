@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS
@@ -44,3 +46,16 @@ def trade_chart(
 ) -> dict:
     trade = _find(scope, trade_no)
     return charts_data.trade_chart(trade, tf, scope.tz)
+
+
+@router.get("/day-chart/{day}")
+def day_chart(
+    day: str, tf: str = Query("1m"), scope: Scope = Depends(resolve_scope)
+) -> dict:
+    d = date.fromisoformat(day)
+    tf_frame = scope.filtered
+    day_df = tf_frame[tf_frame["entry_ts_local"].dt.date == d] if not tf_frame.empty else tf_frame
+    if day_df.empty:
+        raise HTTPException(404, f"No trades on {day} in scope")
+    day_df = day_df.sort_values("entry_ts_utc").reset_index(drop=True)
+    return charts_data.day_chart(day_df, d, tf, scope.tz)

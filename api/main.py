@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from . import deps  # noqa: E402
 from .routers import (  # noqa: E402
+    calendar,
     charts,
     edges,
     filters,
@@ -56,6 +57,7 @@ app.include_router(statistics.router, prefix="/api")
 app.include_router(trades.router, prefix="/api")
 app.include_router(notes.router, prefix="/api")
 app.include_router(charts.router, prefix="/api")
+app.include_router(calendar.router, prefix="/api")
 
 
 # --- Prod static frontend (mounted last; only if a build exists) ---------

@@ -8,6 +8,8 @@ axis in the display tz and weekend/overnight gaps collapse.
 
 from __future__ import annotations
 
+from datetime import datetime, time, timedelta
+
 import pandas as pd
 
 from journal import charts, excursion
@@ -179,22 +181,31 @@ def trade_chart(trade: pd.Series, tf: str, tz) -> dict:
     return payload
 
 
-def day_chart(day_trades: pd.DataFrame, instrument: str, bars: pd.DataFrame, tz) -> dict:
+def day_chart(day_df: pd.DataFrame, day, tf: str, tz) -> dict:
     """Composite full-day session payload: candles + VWAP + volume + per-trade
-    fills and holding rectangles."""
-    fills = [tr["fills"] for _, tr in day_trades.iterrows() if tr.get("fills")]
+    fills and holding rectangles. Loads bars from the 18:00 ET Globex session
+    open so the VWAP band accumulates over the whole session (matching ATAS)."""
+    if not dbn.is_available():
+        return {"available": False}
+    instrument = day_df["instrument"].value_counts().idxmax()
+
+    sess_open = pd.Timestamp(datetime.combine(day - timedelta(days=1), time(18, 0)), tz=ET_TZ)
+    day_end = pd.Timestamp(datetime.combine(day, datetime.min.time()), tz=tz) + pd.Timedelta(days=1)
+    bars = dbn.get_bars(instrument, sess_open.tz_convert("UTC").to_pydatetime(),
+                        day_end.tz_convert("UTC").to_pydatetime())
+    if bars is None or bars.empty:
+        return {"available": True, "instrument": instrument, "bars": []}
+
+    pbars = charts.resample_ohlc(bars, _RULE.get(tf, "1min"))
+    fills = [tr["fills"] for _, tr in day_df.iterrows() if tr.get("fills")]
     flat = [f for sub in fills for f in sub]
     markers = sorted(_fill_markers(flat, tz), key=lambda m: m["time"])
-    rects = []
-    for _, tr in day_trades.iterrows():
-        rect = _trade_rect(tr, tz)
-        if rect is not None:
-            rects.append(rect)
+    rects = [r for _, tr in day_df.iterrows() if (r := _trade_rect(tr, tz)) is not None]
     return {
         "available": True,
         "instrument": instrument,
-        "bars": _bars_rows(bars, tz),
-        "vwap": _vwap_rows(bars, None, tz),
+        "bars": _bars_rows(pbars, tz),
+        "vwap": _vwap_rows(pbars, None, tz),
         "markers": markers,
         "trades": rects,
     }
