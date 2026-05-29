@@ -47,23 +47,28 @@ export function Trades() {
   if (!data || data.length === 0)
     return <div className="notice">No trades to display.</div>;
 
-  const selected = tradeNo ? Number(tradeNo) : data[0].trade_no;
+  const expanded = tradeNo ? Number(tradeNo) : null;
 
   return (
     <div>
       <div className="section-title">Trades</div>
-      <div className="section-cap">Select a row to inspect the trade below.</div>
+      <div className="section-cap">Click a row to expand its full detail.</div>
       <div className="panel">
         <DataTable
           data={data}
           columns={columns}
           rowKey={(r) => r.trade_no}
-          selectedKey={selected}
-          onRowClick={(r) => navigate({ pathname: `/trades/${r.trade_no}`, search })}
           initialSort={[{ id: "trade_no", desc: false }]}
+          expandedKey={expanded}
+          onExpandedChange={(key) =>
+            navigate({
+              pathname: key == null ? "/trades" : `/trades/${key}`,
+              search,
+            })
+          }
+          renderExpanded={(r) => <TradeDetail scope={scope} tradeNo={r.trade_no} />}
         />
       </div>
-      <TradeDetail scope={scope} tradeNo={selected} />
     </div>
   );
 }

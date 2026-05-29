@@ -298,6 +298,23 @@ button:disabled {
 .data-table tbody tr.selected {
   background: rgba(108, 92, 231, 0.16);
 }
+.data-table td.expand-chevron {
+  text-align: center;
+  color: var(--muted);
+  font-size: 10px;
+  width: 28px;
+  padding-right: 0;
+}
+.data-table tr.expanded-detail > td {
+  text-align: left;
+  white-space: normal;
+  padding: 4px 0 12px;
+  background: var(--bg);
+  cursor: default;
+}
+.data-table tr.expanded-detail .section-title:first-child {
+  margin-top: 0;
+}
 .pos {
   color: var(--green);
 }

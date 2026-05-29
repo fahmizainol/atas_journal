@@ -6,6 +6,7 @@ import { DataTable } from "./DataTable";
 import { DaySessionChart } from "./charts/DaySessionChart";
 import { EquityCurveChart } from "./charts/EquityCurveChart";
 import { PerTradeBarChart } from "./charts/PerTradeBarChart";
+import { TradeDetail } from "./TradeDetail";
 import { fmt, fmtInt, fmtPct, fmtTime } from "../lib/format";
 import { toneOf } from "../theme";
 import type { Card } from "./KpiCard";
@@ -65,13 +66,19 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
       <div className="section-cap">{data.trades.length} trades</div>
       <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
       <DaySessionChart scope={scope} date={date} />
+      <div className="section-title">Trades this day</div>
+      <div className="section-cap">Click a row to expand its full detail.</div>
+      <div className="panel">
+        <DataTable
+          data={data.trades}
+          columns={dayColumns}
+          rowKey={(r) => r.trade_no}
+          renderExpanded={(r) => <TradeDetail scope={scope} tradeNo={r.trade_no} />}
+        />
+      </div>
       <div className="grid-2">
         {data.equity.length > 0 && <EquityCurveChart data={data.equity} />}
         <PerTradeBarChart data={data.per_trade_bars} />
-      </div>
-      <div className="section-title">Trades this day</div>
-      <div className="panel">
-        <DataTable data={data.trades} columns={dayColumns} rowKey={(r) => r.trade_no} />
       </div>
     </div>
   );

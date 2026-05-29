@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 
 import pandas as pd
 
@@ -34,14 +35,41 @@ def _complete(system: str, user: str, model: str | None = None) -> str:
     """One LiteLLM completion. Raises on failure (caller turns it into an error dict)."""
     import litellm
 
+    max_tokens = config.llm_max_tokens()
+    resolved_model = model or config.llm_model()
+    if config.ai_debug_prompts():
+        print(
+            f"\n=== AI prompt (model={resolved_model}, max_tokens={max_tokens}) ===\n"
+            f"[system]\n{system}\n\n[user]\n{user}\n=== end prompt ===\n",
+            file=sys.stderr, flush=True,
+        )
     resp = litellm.completion(
-        model=model or config.llm_model(),
+        model=resolved_model,
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
-        max_tokens=config.LLM_MAX_TOKENS,
+        max_tokens=max_tokens,
         temperature=0.3,
     )
-    return resp["choices"][0]["message"]["content"] or ""
+    choice = resp["choices"][0]
+    content = (choice["message"]["content"] or "").strip()
+    if config.ai_debug_prompts():
+        print(
+            f"=== AI response (finish_reason={choice['finish_reason']}) ===\n"
+            f"{content!r}\n=== end response ===\n",
+            file=sys.stderr, flush=True,
+        )
+    if content:
+        return content
+    # Billed-but-empty: usually a reasoning model that spent the whole token
+    # budget thinking and was cut off before emitting the answer. Surface it as
+    # an error instead of silently storing a blank verdict.
+    finish = choice["finish_reason"]
+    if finish == "length":
+        raise RuntimeError(
+            f"model returned no answer — output was truncated at {max_tokens} "
+            "tokens (raise LLM_MAX_TOKENS; reasoning models need more headroom)"
+        )
+    raise RuntimeError(f"model returned empty content (finish_reason={finish})")
 
 
 def _parse_json(text: str) -> dict:

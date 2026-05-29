@@ -51,8 +51,10 @@ DATABENTO_DATASET = "GLBX.MDP3"
 # "v" volume, "c" calendar, "n" open interest.
 CONTINUOUS_ROLL_RULE = "v"
 
-# AI analyzer defaults.
-LLM_MAX_TOKENS = 1200
+# AI analyzer defaults. Reasoning models ("thinking" variants) spend part of this
+# budget on hidden reasoning tokens before emitting the answer, so the default is
+# generous; override with LLM_MAX_TOKENS when a model needs more or less headroom.
+LLM_MAX_TOKENS_DEFAULT = 4000
 
 
 def load_env() -> None:
@@ -98,6 +100,21 @@ def llm_models() -> list[str]:
 
 def llm_available() -> bool:
     return bool(llm_models())
+
+
+def llm_max_tokens() -> int:
+    """Completion token budget; override with LLM_MAX_TOKENS in the env."""
+    load_env()
+    raw = os.environ.get("LLM_MAX_TOKENS", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return LLM_MAX_TOKENS_DEFAULT
+
+
+def ai_debug_prompts() -> bool:
+    """When AI_DEBUG_PROMPTS is truthy, log the full prompt sent to the model."""
+    load_env()
+    return os.environ.get("AI_DEBUG_PROMPTS", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def normalize_instrument(instrument: str) -> str:
