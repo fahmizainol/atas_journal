@@ -11,7 +11,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from journal import ai, db, edges, metrics
+from journal import ai, db, edges, levels as levels_mod, metrics
 from journal import databento_client as dbn
 from journal import excursion as excursion_mod
 
@@ -61,7 +61,12 @@ def gen_trade_ai(
         note = db.get_note(conn, trade_key)["note"]
         profile = db.get_setting(conn, "trading_profile")
     comment = trade.get("comment", "") or ""
-    data = ai.analyze_trade(trade, exc, note, comment, profile, model)
+    lv = levels_mod.compute_levels(trade["instrument"], levels_mod.rth_date_for(trade["entry_ts_utc"]))
+    rel = levels_mod.level_relations(
+        lv, float(trade["avg_entry"]), float(trade["avg_exit"]),
+        exc.get("mfe_price"), exc.get("mae_price"),
+    )
+    data = ai.analyze_trade(trade, exc, note, comment, profile, model, levels=rel)
     if "error" in data:
         return {"error": data["error"]}
 

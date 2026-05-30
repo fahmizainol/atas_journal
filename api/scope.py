@@ -39,6 +39,7 @@ class Scope:
     tz_label: str
     tz: ZoneInfo
     instruments: list[str]
+    accounts: list[str]
     start: date | None
     end: date | None
     tags: list[str]
@@ -54,14 +55,16 @@ class Scope:
 
 
 def _apply_filters(
-    df: pd.DataFrame, instruments: list[str], start: date | None, end: date | None,
-    tags: list[str], notes_df: pd.DataFrame,
+    df: pd.DataFrame, instruments: list[str], accounts: list[str], start: date | None,
+    end: date | None, tags: list[str], notes_df: pd.DataFrame,
 ) -> pd.DataFrame:
     if df.empty:
         return df
     out = df
     if instruments:
         out = out[out["instrument"].isin(instruments)]
+    if accounts:
+        out = out[out["account"].isin(accounts)]
     if start and end:
         d = out["entry_ts_local"].dt.date
         out = out[(d >= start) & (d <= end)]
@@ -76,6 +79,7 @@ def _apply_filters(
 def resolve_scope(
     view: str = Query("logical"),
     instruments: str | None = Query(None),
+    accounts: str | None = Query(None),
     start: str | None = Query(None),
     end: str | None = Query(None),
     tags: str | None = Query(None),
@@ -84,6 +88,7 @@ def resolve_scope(
     tz_label = tz if tz in DISPLAY_TZS else DEFAULT_DISPLAY_TZ
     disp_tz = DISPLAY_TZS[tz_label]
     instr_list = _csv(instruments)
+    account_list = _csv(accounts)
     tag_list = _csv(tags)
     d0, d1 = _parse_date(start), _parse_date(end)
 
@@ -93,6 +98,12 @@ def resolve_scope(
         jr = db.load_journal(conn)
         notes_df = db.all_notes(conn)
 
+    # load_executions parses ts_local as UTC (rows can come from mixed source
+    # tzs). Reproject into the chosen display tz so per-fill timestamps shown
+    # to the AI and in chart markers read in the user's clock.
+    if not ex.empty:
+        ex["ts_local"] = ex["ts_utc"].dt.tz_convert(disp_tz)
+
     if view == "atas":
         base = trades.atas_trades(jr)
     else:
@@ -101,9 +112,9 @@ def resolve_scope(
     if base is None:
         base = pd.DataFrame()
 
-    filtered = _apply_filters(base, instr_list, d0, d1, tag_list, notes_df)
+    filtered = _apply_filters(base, instr_list, account_list, d0, d1, tag_list, notes_df)
     return Scope(
         view="atas" if view == "atas" else "logical",
-        tz_label=tz_label, tz=disp_tz, instruments=instr_list,
+        tz_label=tz_label, tz=disp_tz, instruments=instr_list, accounts=account_list,
         start=d0, end=d1, tags=tag_list, base=base, filtered=filtered, journal=jr,
     )

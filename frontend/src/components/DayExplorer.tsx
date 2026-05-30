@@ -1,5 +1,6 @@
 import { type ColumnDef } from "@tanstack/react-table";
-import { useDay } from "../hooks/useCalendar";
+import { useNavigate } from "react-router-dom";
+import { useDay, useDeleteDay } from "../hooks/useCalendar";
 import type { FilterScope } from "../lib/queryKeys";
 import { KpiGrid } from "./KpiGrid";
 import { DataTable } from "./DataTable";
@@ -38,9 +39,25 @@ const dayColumns: ColumnDef<TradeRow, any>[] = [
 
 export function DayExplorer({ scope, date }: { scope: FilterScope; date: string }) {
   const { data, isLoading } = useDay(scope, date);
+  const navigate = useNavigate();
+  const deleteDay = useDeleteDay();
+  const onDelete = () => {
+    if (!data) return;
+    const msg =
+      `Delete all executions and journal trades for ${date}?\n\n` +
+      `${data.trades.length} trades will be removed. ` +
+      `Notes and AI analyses are kept (they'll reattach if you re-import an identical replay). ` +
+      `Statistics rows persist per source file and will be overwritten on re-import.`;
+    if (!window.confirm(msg)) return;
+    deleteDay.mutate(
+      { date },
+      { onSuccess: () => navigate("/calendar", { replace: true }) },
+    );
+  };
   if (isLoading || !data) return <div className="notice">Loading day…</div>;
 
   const m = data.kpis;
+  const x = data.extras;
   const pretty = new Date(date + "T00:00:00").toLocaleDateString("en-US", {
     weekday: "long",
     day: "2-digit",
@@ -60,11 +77,75 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
     { label: "Worst trade", value: fmt(m.worst_trade), tone: "neg" },
   ];
 
+  const sideCards: Card[] = [
+    {
+      label: "Long",
+      value: fmt(x.long.net_pnl),
+      tone: toneOf(x.long.net_pnl),
+      sub: `${x.long.trades} trades · ${fmtPct(x.long.win_rate)} win`,
+    },
+    {
+      label: "Short",
+      value: fmt(x.short.net_pnl),
+      tone: toneOf(x.short.net_pnl),
+      sub: `${x.short.trades} trades · ${fmtPct(x.short.win_rate)} win`,
+    },
+    { label: "Profit factor", value: fmt(m.profit_factor, false) },
+    {
+      label: "Total contracts",
+      value: fmtInt(x.total_contracts),
+      sub: `${(x.total_contracts / Math.max(m.trades, 1)).toFixed(1)} / trade`,
+    },
+  ];
+
+  const flowCards: Card[] = [
+    {
+      label: "Avg MFE / MAE",
+      value: `${fmt(x.avg_mfe_usd)} / ${fmt(x.avg_mae_usd)}`,
+    },
+    {
+      label: "Avg exit efficiency",
+      value: x.avg_exit_efficiency == null ? "—" : fmtPct(x.avg_exit_efficiency),
+    },
+    {
+      label: "Avg hold",
+      value: typeof m.avg_trade_length_s === "number"
+        ? `${(m.avg_trade_length_s / 60).toFixed(1)}m`
+        : "—",
+    },
+    {
+      label: "Trading window",
+      value: `${fmtTime(x.window_start)}–${fmtTime(x.window_end)}`,
+    },
+  ];
+
   return (
     <div>
-      <div className="section-title">{pretty}</div>
-      <div className="section-cap">{data.trades.length} trades</div>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 12,
+        }}
+      >
+        <div>
+          <div className="section-title">{pretty}</div>
+          <div className="section-cap">{data.trades.length} trades</div>
+        </div>
+        <button
+          type="button"
+          className="btn-danger"
+          onClick={onDelete}
+          disabled={deleteDay.isPending}
+          title="Delete all executions and trades for this day. Use before re-importing a replayed ATAS export."
+        >
+          {deleteDay.isPending ? "Deleting…" : "Delete day's data"}
+        </button>
+      </div>
       <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
+      <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />
+      <KpiGrid cards={flowCards} template="1fr 1fr 1fr 1fr" />
       <DaySessionChart scope={scope} date={date} />
       <div className="section-title">Trades this day</div>
       <div className="section-cap">Click a row to expand its full detail.</div>

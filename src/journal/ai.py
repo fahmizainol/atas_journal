@@ -110,9 +110,32 @@ def _fmt_fills(fills) -> str:
     return "; ".join(parts)
 
 
+def _levels_block(rel: dict | None) -> str:
+    """Render pre-computed session levels as labeled facts (signed pts vs entry)."""
+    if not rel or not rel.get("rows"):
+        return ""
+    lines = [
+        "\nKey session levels (NY-session context; signed pts, + = level above):",
+    ]
+    for r in rel["rows"]:
+        lines.append(
+            f"  {r['label']} {r['price']:.2f}  "
+            f"(entry {r['from_entry']:+.2f}, exit {r['from_exit']:+.2f})"
+        )
+    ne = rel.get("nearest_entry")
+    if ne:
+        lines.append(f"Nearest level to entry: {ne['label']} ({ne['dist']:+.2f} pts).")
+    mfe, mae = rel.get("mfe"), rel.get("mae")
+    if mfe:
+        lines.append(f"MFE extreme {mfe['price']:.2f} — nearest {mfe['label']} ({mfe['gap']:+.2f} pts).")
+    if mae:
+        lines.append(f"MAE extreme {mae['price']:.2f} — nearest {mae['label']} ({mae['gap']:+.2f} pts).")
+    return "\n".join(lines) + "\n"
+
+
 def analyze_trade(
     trade: pd.Series, excursion: dict, note: str, comment: str, profile: str,
-    model: str | None = None,
+    model: str | None = None, levels: dict | None = None,
 ) -> dict:
     eff = excursion.get("exit_efficiency")
     eff_s = f"{eff * 100:.0f}%" if eff is not None else "n/a"
@@ -139,6 +162,7 @@ def analyze_trade(
         facts += f"Trader's note on this trade: {note}\n"
     if comment:
         facts += f"ATAS comment: {comment}\n"
+    facts += _levels_block(levels)
 
     user = (
         "Critique this single trade.\n\n"

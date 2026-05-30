@@ -9,6 +9,7 @@ export interface Meta {
 
 export interface Filters {
   instruments: string[];
+  accounts: string[];
   date_min: string | null;
   date_max: string | null;
   tags: string[];
@@ -44,6 +45,23 @@ export interface Metrics {
   avg_trade_length_s: Num;
   total_commission: Num;
   view: string;
+}
+
+export interface SideStats {
+  trades: number;
+  net_pnl: number;
+  win_rate: number;
+}
+
+export interface SummaryExtras {
+  total_contracts: number;
+  long: SideStats;
+  short: SideStats;
+  avg_mfe_usd: number | null;
+  avg_mae_usd: number | null;
+  avg_exit_efficiency: number | null;
+  window_start: string | null;
+  window_end: string | null;
 }
 
 export interface EquityPoint {

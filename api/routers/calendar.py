@@ -11,6 +11,7 @@ from journal import metrics
 
 from ..scope import Scope, resolve_scope
 from ..serialize import records, sanitize
+from ..summary import summary_extras
 
 router = APIRouter()
 
@@ -72,6 +73,7 @@ def day_detail(day: str, scope: Scope = Depends(resolve_scope)) -> dict:
             "avg_entry", "avg_exit", "net_pnl"]
     return {
         "kpis": sanitize(kpis),
+        "extras": sanitize(summary_extras(day_df)),
         "equity": records(equity, ["ts", "trade_no", "pnl", "equity", "drawdown"]),
         "per_trade_bars": per_trade_bars,
         "trades": records(day_df, cols),

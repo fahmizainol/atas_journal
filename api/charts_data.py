@@ -13,6 +13,7 @@ from datetime import datetime, time, timedelta
 import pandas as pd
 
 from journal import excursion
+from journal import levels as levels_mod
 from journal import databento_client as dbn
 from journal.config import ET_TZ
 
@@ -25,6 +26,16 @@ BLUE = "#3b82f6"
 ORANGE = "#f97316"
 ACCENT = "#6c5ce7"
 GOLD = "#e0a52a"
+
+# Session-level lines: distinct color per Tier-A level.
+LEVEL_STYLE = {
+    "onh": ("#8b5cf6", "ON high"),
+    "onl": ("#8b5cf6", "ON low"),
+    "prior_high": ("#ef4444", "PD high"),
+    "prior_low": ("#22c55e", "PD low"),
+    "prior_close": ("#94a3b8", "prior close ~16:15"),
+    "today_open": ("#38bdf8", "open"),
+}
 
 
 # --- Pure session/resample helpers (ported from the deleted journal.charts) ---
@@ -160,6 +171,33 @@ def _price_lines(trade: pd.Series) -> list[dict]:
     return lines
 
 
+def _levels_rows(lv: dict | None) -> list[dict]:
+    """Map computed Tier-A levels to PriceLineSpec rows (skip missing ones)."""
+    if not lv:
+        return []
+    rows = []
+    for key, (color, label) in LEVEL_STYLE.items():
+        price = lv.get(key)
+        if price is None:
+            continue
+        rows.append({"price": float(price), "color": color,
+                     "title": f"{label} {float(price):.2f}"})
+    return rows
+
+
+def _near_levels(rows: list[dict], plot_bars: pd.DataFrame, margin: float = 0.10) -> list[dict]:
+    """Keep only levels inside the visible candle range (+margin), so a far level
+    can't force the trade-chart price scale to zoom out and squish the candles."""
+    if not rows or plot_bars is None or plot_bars.empty:
+        return []
+    lo = float(plot_bars["low"].min())
+    hi = float(plot_bars["high"].max())
+    pad = (hi - lo) * margin
+    lo -= pad
+    hi += pad
+    return [r for r in rows if lo <= r["price"] <= hi]
+
+
 def excursion_summary(trade: pd.Series) -> dict:
     """trade_excursion minus the heavy ``bars`` frame, or {available:false}."""
     if not dbn.is_available():
@@ -197,12 +235,14 @@ def trade_chart(trade: pd.Series, tf: str, tz) -> dict:
         _fill_markers(trade.get("fills"), tz) + _excursion_markers(exc, tz),
         key=lambda m: m["time"],
     )
+    lv = levels_mod.compute_levels(instrument, levels_mod.rth_date_for(entry_utc))
     payload = {
         "available": True,
         "bars": _bars_rows(pbars, tz),
         "vwap": _vwap_rows(pbars, psess, tz),
         "markers": markers,
         "price_lines": _price_lines(trade),
+        "levels": _near_levels(_levels_rows(lv), pbars),
         "trade_rect": _trade_rect(trade, tz),
     }
     if exc:
@@ -218,7 +258,12 @@ def day_chart(day_df: pd.DataFrame, day, tf: str, tz) -> dict:
         return {"available": False}
     instrument = day_df["instrument"].value_counts().idxmax()
 
-    sess_open = pd.Timestamp(datetime.combine(day - timedelta(days=1), time(18, 0)), tz=ET_TZ)
+    # Load from the *prior trading day's* Globex open (18:00 ET the evening before
+    # it) so the prior cash session — where the PD high/low/close levels formed —
+    # is on screen too, not just floating lines. Walk-back handles weekends.
+    prior = levels_mod.prior_trading_date(instrument, day)
+    load_from = (prior if prior is not None else day) - timedelta(days=1)
+    sess_open = pd.Timestamp(datetime.combine(load_from, time(18, 0)), tz=ET_TZ)
     day_end = pd.Timestamp(datetime.combine(day, datetime.min.time()), tz=tz) + pd.Timedelta(days=1)
     bars = dbn.get_bars(instrument, sess_open.tz_convert("UTC").to_pydatetime(),
                         day_end.tz_convert("UTC").to_pydatetime())
@@ -230,12 +275,14 @@ def day_chart(day_df: pd.DataFrame, day, tf: str, tz) -> dict:
     flat = [f for sub in fills for f in sub]
     markers = sorted(_fill_markers(flat, tz), key=lambda m: m["time"])
     rects = [r for _, tr in day_df.iterrows() if (r := _trade_rect(tr, tz)) is not None]
+    lv = levels_mod.compute_levels(instrument, day)
     return {
         "available": True,
         "instrument": instrument,
         "bars": _bars_rows(pbars, tz),
         "vwap": _vwap_rows(pbars, None, tz),
         "markers": markers,
+        "levels": _levels_rows(lv),
         "trades": rects,
     }
 

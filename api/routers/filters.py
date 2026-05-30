@@ -18,6 +18,7 @@ router = APIRouter()
 def filters(scope: Scope = Depends(resolve_scope)) -> dict:
     base = scope.base
     instruments = sorted(base["instrument"].dropna().unique().tolist()) if not base.empty else []
+    accounts = sorted(base["account"].dropna().unique().tolist()) if not base.empty else []
     date_min = date_max = None
     if not base.empty:
         date_min = base["entry_ts_local"].min().date().isoformat()
@@ -33,6 +34,7 @@ def filters(scope: Scope = Depends(resolve_scope)) -> dict:
 
     return {
         "instruments": instruments,
+        "accounts": accounts,
         "date_min": date_min,
         "date_max": date_max,
         "tags": sorted(all_tags),

@@ -1,8 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
-import { apiGet } from "../lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiGet, apiSend, toQuery } from "../lib/api";
 import { qk, scopeParams } from "../lib/queryKeys";
 import type { FilterScope } from "../lib/queryKeys";
-import type { DailyPnlPoint, EquityPoint, Metrics, TradeRow } from "../lib/types";
+import type {
+  DailyPnlPoint,
+  EquityPoint,
+  Metrics,
+  SummaryExtras,
+  TradeRow,
+} from "../lib/types";
 
 export interface CalendarMonth {
   year: number;
@@ -22,6 +28,7 @@ export interface CalendarData {
 
 export interface DayDetail {
   kpis: Metrics;
+  extras: SummaryExtras;
   equity: EquityPoint[];
   per_trade_bars: { trade_no: number; net_pnl: number; time: string }[];
   trades: TradeRow[];
@@ -45,3 +52,20 @@ export function useDay(scope: FilterScope, date: string | null) {
 
 // daily-pnl reused indirectly; re-export type for convenience.
 export type { DailyPnlPoint };
+
+export interface DeleteDayResult {
+  journal: number;
+  executions: number;
+}
+
+export function useDeleteDay() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { date: string; account?: string; instrument?: string }) => {
+      const qs = toQuery({ account: vars.account, instrument: vars.instrument });
+      const suffix = qs ? `?${qs}` : "";
+      return apiSend<DeleteDayResult>("DELETE", `/day/${vars.date}${suffix}`);
+    },
+    onSuccess: () => qc.invalidateQueries(),
+  });
+}

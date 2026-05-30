@@ -9,7 +9,7 @@ export async function apiGet<T>(path: string, params?: Record<string, unknown>):
 }
 
 export async function apiSend<T>(
-  method: "PUT" | "POST",
+  method: "PUT" | "POST" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {

@@ -4,12 +4,14 @@ import { useDayChart } from "../../hooks/useCharts";
 import type { FilterScope } from "../../lib/queryKeys";
 import { CandlestickChart } from "./CandlestickChart";
 import { TimeframeRadio } from "./TimeframeRadio";
+import { LevelsToggle } from "./LevelsToggle";
 
 // Full-day session candlestick: every trade's fills + an outcome-tinted holding
 // rectangle (reuses the Phase-4 CandlestickChart + TradeRectanglePrimitive).
 export function DaySessionChart({ scope, date }: { scope: FilterScope; date: string }) {
   const { data: meta } = useMeta();
   const [tf, setTf] = useState("1m");
+  const [showLevels, setShowLevels] = useState(true);
   const { data, isLoading } = useDayChart(scope, date, tf);
 
   if (meta && !meta.databento_available)
@@ -21,17 +23,22 @@ export function DaySessionChart({ scope, date }: { scope: FilterScope; date: str
 
   return (
     <div className="panel">
-      <TimeframeRadio value={tf} onChange={setTf} />
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <TimeframeRadio value={tf} onChange={setTf} />
+        <LevelsToggle value={showLevels} onChange={setShowLevels} />
+      </div>
       <CandlestickChart
         bars={data.bars}
         vwap={data.vwap}
         markers={data.markers}
+        levels={data.levels}
+        showLevels={showLevels}
         tradeRects={data.trades}
         height={580}
       />
       <div className="section-cap" style={{ marginTop: 6 }}>
-        Full session — each trade shows a holding rectangle + Buy/Sell fills; gold band = VWAP ±1σ,
-        lower pane = volume.
+        Current + prior session — each trade shows a holding rectangle + Buy/Sell fills; gold band =
+        VWAP ±1σ, dotted lines = session levels (ON/PD high-low, prior close, open), lower pane = volume.
       </div>
     </div>
   );

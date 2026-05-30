@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS executions (
     exchange_id   TEXT PRIMARY KEY,
     account       TEXT,
     instrument    TEXT,
-    ts_local      TEXT,   -- KL (UTC+8) ISO string
+    ts_local      TEXT,   -- source-tz ISO string (tz captured at import)
     ts_utc        TEXT,   -- UTC ISO string
     direction     TEXT,   -- Buy / Sell
     price         REAL,
@@ -216,12 +216,70 @@ def imported_files(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in conn.execute("SELECT source_file FROM imported_files ORDER BY 1")]
 
 
+def delete_day(
+    conn: sqlite3.Connection,
+    day: str,
+    account: str | None = None,
+    instrument: str | None = None,
+) -> dict[str, int]:
+    """Delete executions and journal rows whose KL-local date equals ``day``.
+
+    ``atas_statistics`` is left alone — it's keyed by source_file, so a
+    replayed re-import overwrites cleanly via INSERT OR REPLACE. ``trade_notes``
+    and ``ai_trade_analysis`` are also kept: notes are user content, and a
+    bit-identical replay reattaches them via stable trade_key.
+    """
+    j_where = ["substr(open_ts_local, 1, 10) = ?"]
+    e_where = ["substr(ts_local, 1, 10) = ?"]
+    params: list[str] = [day]
+    if account:
+        j_where.append("account = ?")
+        e_where.append("account = ?")
+        params.append(account)
+    if instrument:
+        j_where.append("instrument = ?")
+        e_where.append("instrument = ?")
+        params.append(instrument)
+    j_cur = conn.execute(
+        f"DELETE FROM atas_journal WHERE {' AND '.join(j_where)}", params
+    )
+    e_cur = conn.execute(
+        f"DELETE FROM executions WHERE {' AND '.join(e_where)}", params
+    )
+    conn.commit()
+    return {"journal": j_cur.rowcount, "executions": e_cur.rowcount}
+
+
+def delete_all_trades(conn: sqlite3.Connection) -> dict[str, int]:
+    """Wipe every trade-derived row: executions, journal, per-file stats, and
+    the imported-files log so the same filenames can be re-imported fresh.
+
+    ``trade_notes`` and ``ai_*`` are intentionally kept — they're user/AI
+    content keyed by trade_key and reattach automatically if you re-import
+    the same data. Call ``delete_user_data`` if you want a total nuke.
+    """
+    counts: dict[str, int] = {}
+    for table in ("executions", "atas_journal", "atas_statistics", "imported_files"):
+        cur = conn.execute(f"DELETE FROM {table}")
+        counts[table] = cur.rowcount
+    conn.commit()
+    return counts
+
+
 # --- Read helpers --------------------------------------------------------
+# ts_* columns are stored as ISO strings tagged with the source tz at import
+# time. A DB can hold rows from multiple source tzs (e.g. older KL imports
+# alongside newer NY ones), which pandas' default ISO8601 parser rejects with
+# "Mixed timezones detected". Parsing with utc=True coerces all rows to a
+# single tz-aware UTC column; the *_ts_local columns lose their per-row offset
+# but that's fine — every downstream view rebuilds them from *_ts_utc via
+# ``trades.localize`` in the user's display tz. The one exception is execution
+# fills (read by AI), which ``api.scope`` re-projects into the display tz.
 def load_executions(conn: sqlite3.Connection) -> pd.DataFrame:
     df = pd.read_sql_query("SELECT * FROM executions", conn)
     if not df.empty:
-        df["ts_local"] = pd.to_datetime(df["ts_local"], format="ISO8601")
-        df["ts_utc"] = pd.to_datetime(df["ts_utc"], format="ISO8601")
+        df["ts_local"] = pd.to_datetime(df["ts_local"], format="ISO8601", utc=True)
+        df["ts_utc"] = pd.to_datetime(df["ts_utc"], format="ISO8601", utc=True)
     return df
 
 
@@ -229,7 +287,7 @@ def load_journal(conn: sqlite3.Connection) -> pd.DataFrame:
     df = pd.read_sql_query("SELECT * FROM atas_journal", conn)
     for c in ("open_ts_local", "close_ts_local", "open_ts_utc", "close_ts_utc"):
         if c in df and not df.empty:
-            df[c] = pd.to_datetime(df[c], format="ISO8601")
+            df[c] = pd.to_datetime(df[c], format="ISO8601", utc=True)
     return df
 
 

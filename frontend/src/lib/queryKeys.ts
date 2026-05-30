@@ -4,6 +4,7 @@
 export interface FilterScope {
   view: string;
   instruments: string[];
+  accounts: string[];
   start: string | null;
   end: string | null;
   tags: string[];
@@ -14,6 +15,7 @@ export function scopeParams(scope: FilterScope): Record<string, unknown> {
   return {
     view: scope.view,
     instruments: scope.instruments,
+    accounts: scope.accounts,
     start: scope.start,
     end: scope.end,
     tags: scope.tags,
@@ -25,6 +27,7 @@ export const qk = {
   meta: ["meta"] as const,
   filters: (scope: FilterScope) => ["filters", scope.view, scope.tz] as const,
   metrics: (scope: FilterScope) => ["metrics", scope] as const,
+  summaryExtras: (scope: FilterScope) => ["summary-extras", scope] as const,
   equityCurve: (scope: FilterScope) => ["equity-curve", scope] as const,
   dailyPnl: (scope: FilterScope) => ["daily-pnl", scope] as const,
   distribution: (scope: FilterScope) => ["distribution", scope] as const,

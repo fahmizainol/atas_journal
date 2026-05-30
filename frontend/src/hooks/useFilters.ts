@@ -13,6 +13,7 @@ export function useFilters() {
     () => ({
       view: params.get("view") || "logical",
       instruments: CSV(params.get("instruments")),
+      accounts: CSV(params.get("accounts")),
       start: params.get("start"),
       end: params.get("end"),
       tags: CSV(params.get("tags")),
@@ -43,6 +44,7 @@ export function useFilters() {
     scope,
     setView: (view: string) => patch({ view }),
     setInstruments: (instruments: string[]) => patch({ instruments }),
+    setAccounts: (accounts: string[]) => patch({ accounts }),
     setDates: (start: string | null, end: string | null) => patch({ start, end }),
     setTags: (tags: string[]) => patch({ tags }),
     setTz: (tz: string) => patch({ tz }),

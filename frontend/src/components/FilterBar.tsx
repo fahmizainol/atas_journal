@@ -4,10 +4,11 @@ import { useFiltersData } from "../hooks/useMeta";
 // Top filter bar — mirrors the bordered container in app.py: view radio,
 // instrument multiselect, date range, tag multiselect. All state is in the URL.
 export function FilterBar() {
-  const { scope, setView, setInstruments, setDates, setTags } = useFilters();
+  const { scope, setView, setInstruments, setAccounts, setDates, setTags } = useFilters();
   const { data } = useFiltersData(scope);
 
   const instruments = data?.instruments ?? [];
+  const accounts = data?.accounts ?? [];
   const tags = data?.tags ?? [];
 
   const multi = (e: React.ChangeEvent<HTMLSelectElement>): string[] =>
@@ -42,11 +43,30 @@ export function FilterBar() {
             const sel = multi(e);
             setInstruments(sel.length === instruments.length ? [] : sel);
           }}
-          size={Math.min(3, Math.max(1, instruments.length))}
+          size={1}
         >
           {instruments.map((i) => (
             <option key={i} value={i}>
               {i}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="field">
+        <label>Account</label>
+        <select
+          multiple
+          value={scope.accounts.length ? scope.accounts : accounts}
+          onChange={(e) => {
+            const sel = multi(e);
+            setAccounts(sel.length === accounts.length ? [] : sel);
+          }}
+          size={1}
+        >
+          {accounts.map((a) => (
+            <option key={a} value={a}>
+              {a}
             </option>
           ))}
         </select>
@@ -79,7 +99,7 @@ export function FilterBar() {
           multiple
           value={scope.tags}
           onChange={(e) => setTags(multi(e))}
-          size={Math.min(3, Math.max(1, tags.length || 1))}
+          size={1}
         >
           {tags.length === 0 && <option disabled>(none)</option>}
           {tags.map((t) => (

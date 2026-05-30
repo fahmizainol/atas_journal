@@ -51,6 +51,7 @@ export interface TradeChartData {
   vwap?: VwapPoint[];
   markers?: ChartMarker[];
   price_lines?: PriceLineSpec[];
+  levels?: PriceLineSpec[];
   trade_rect?: TradeRect | null;
   excursion?: Omit<Excursion, "available">;
 }
@@ -61,5 +62,6 @@ export interface DayChartData {
   bars?: Bar[];
   vwap?: VwapPoint[];
   markers?: ChartMarker[];
+  levels?: PriceLineSpec[];
   trades?: TradeRect[];
 }

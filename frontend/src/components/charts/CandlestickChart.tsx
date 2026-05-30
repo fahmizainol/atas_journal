@@ -16,6 +16,8 @@ interface Props {
   vwap?: VwapPoint[];
   markers?: ChartMarker[];
   priceLines?: PriceLineSpec[];
+  levels?: PriceLineSpec[];
+  showLevels?: boolean;
   tradeRects?: TradeRect[];
   height?: number;
 }
@@ -31,6 +33,8 @@ export function CandlestickChart({
   vwap,
   markers,
   priceLines,
+  levels,
+  showLevels = true,
   tradeRects,
   height = 520,
 }: Props) {
@@ -166,6 +170,19 @@ export function CandlestickChart({
       });
     }
 
+    if (showLevels) {
+      for (const lv of levels ?? []) {
+        candle.createPriceLine({
+          price: lv.price,
+          color: lv.color,
+          lineWidth: 1,
+          lineStyle: 3,
+          axisLabelVisible: true,
+          title: lv.title,
+        });
+      }
+    }
+
     if (tradeRects && tradeRects.length > 0) {
       // Snap entry down / exit up to bar boundaries so the rectangle spans the
       // whole holding period and its corners resolve to real coordinates.
@@ -192,7 +209,7 @@ export function CandlestickChart({
       ro.disconnect();
       chart.remove();
     };
-  }, [bars, vwap, markers, priceLines, tradeRects, height]);
+  }, [bars, vwap, markers, priceLines, levels, showLevels, tradeRects, height]);
 
   return <div ref={ref} style={{ width: "100%" }} />;
 }

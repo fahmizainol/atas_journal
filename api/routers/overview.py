@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends
 from journal import metrics
 
 from ..scope import Scope, resolve_scope
-from ..serialize import records
+from ..serialize import records, sanitize
+from ..summary import summary_extras
 
 router = APIRouter()
 
@@ -17,6 +18,11 @@ def get_metrics(scope: Scope = Depends(resolve_scope)) -> dict:
     m = metrics.compute_metrics(scope.filtered)
     m["view"] = scope.view
     return m
+
+
+@router.get("/summary-extras")
+def get_summary_extras(scope: Scope = Depends(resolve_scope)) -> dict:
+    return sanitize(summary_extras(scope.filtered))
 
 
 @router.get("/equity-curve")
