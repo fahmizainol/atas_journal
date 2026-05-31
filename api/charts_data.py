@@ -15,9 +15,14 @@ import pandas as pd
 from journal import excursion
 from journal import levels as levels_mod
 from journal import databento_client as dbn
+from journal.atr import atr_series
 from journal.config import ET_TZ
 
 _RULE = {"1m": "1min", "5m": "5min", "15m": "15min"}
+_ATR_PERIOD = 14
+# Extra resampled bars pulled *before* the plotted window so Wilder's ATR has
+# converged by the time the visible candles start (period + smoothing margin).
+_ATR_LOOKBACK_BARS = 30
 
 # Palette (mirrors charts.py / theme.ts) for marker + line colors.
 GREEN = "#21c07a"
@@ -116,6 +121,24 @@ def _vwap_rows(plot_bars: pd.DataFrame, anchor_bars: pd.DataFrame | None, tz) ->
         {"time": int(t), "upper": float(u), "middle": float(m), "lower": float(low)}
         for t, u, m, low in zip(times, df["upper"], df["middle"], df["lower"])
     ]
+
+
+def _atr_rows(plot_bars: pd.DataFrame, compute_bars: pd.DataFrame | None, tz) -> list[dict]:
+    """ATR(14) Wilder, computed over *compute_bars* (which can include a warmup
+    lookback before the plotted window) and restricted to *plot_bars* timestamps
+    so the sub-pane lines up under the visible candles."""
+    src = compute_bars if compute_bars is not None else plot_bars
+    if src is None or src.empty:
+        return []
+    atr = atr_series(src, _ATR_PERIOD)
+    df = pd.DataFrame({"ts_utc": pd.to_datetime(src["ts_utc"], utc=True), "atr": atr}).dropna()
+    if compute_bars is not None and not plot_bars.empty:
+        window = pd.to_datetime(plot_bars["ts_utc"], utc=True)
+        df = df[df["ts_utc"].isin(window)]
+    if df.empty:
+        return []
+    times = _epoch_local(df["ts_utc"], tz)
+    return [{"time": int(t), "atr": float(a)} for t, a in zip(times, df["atr"])]
 
 
 def _fill_markers(fills, tz) -> list[dict]:
@@ -240,6 +263,7 @@ def trade_chart(trade: pd.Series, tf: str, tz) -> dict:
         "available": True,
         "bars": _bars_rows(pbars, tz),
         "vwap": _vwap_rows(pbars, psess, tz),
+        "atr_points": _atr_rows(pbars, psess, tz),
         "markers": markers,
         "price_lines": _price_lines(trade),
         "levels": _near_levels(_levels_rows(lv), pbars),
@@ -281,6 +305,7 @@ def day_chart(day_df: pd.DataFrame, day, tf: str, tz) -> dict:
         "instrument": instrument,
         "bars": _bars_rows(pbars, tz),
         "vwap": _vwap_rows(pbars, None, tz),
+        "atr_points": _atr_rows(pbars, None, tz),
         "markers": markers,
         "levels": _levels_rows(lv),
         "trades": rects,
