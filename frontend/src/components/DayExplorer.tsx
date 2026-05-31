@@ -109,6 +109,13 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
       value: x.avg_exit_efficiency == null ? "—" : fmtPct(x.avg_exit_efficiency),
     },
     {
+      label: "Avg ATR (hold)",
+      value:
+        x.avg_atr_pts == null
+          ? "—"
+          : `${x.avg_atr_pts.toFixed(2)} pts · ${fmt(x.avg_atr_usd)}`,
+    },
+    {
       label: "Avg hold",
       value: typeof m.avg_trade_length_s === "number"
         ? `${(m.avg_trade_length_s / 60).toFixed(1)}m`
@@ -146,7 +153,7 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
       </div>
       <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
       <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />
-      <KpiGrid cards={flowCards} template="1fr 1fr 1fr 1fr" />
+      <KpiGrid cards={flowCards} template="repeat(5, 1fr)" />
       <DayJournalForm date={date} />
       <DaySessionChart scope={scope} date={date} />
       <div className="section-title">Trades this day</div>

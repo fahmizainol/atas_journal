@@ -44,6 +44,13 @@ export function ReconstructionChart({ scope, tradeNo }: { scope: FilterScope; tr
           label: "Exit efficiency",
           value: exc.exit_efficiency != null ? fmtPct(exc.exit_efficiency * 100, 0) : "—",
         },
+        {
+          label: "Avg ATR (hold)",
+          value:
+            exc.avg_atr_pts == null
+              ? "—"
+              : `${exc.avg_atr_pts.toFixed(2)} pts · ${fmt(exc.avg_atr_usd)}`,
+        },
       ]
     : [];
 
@@ -69,7 +76,7 @@ export function ReconstructionChart({ scope, tradeNo }: { scope: FilterScope; tr
         dotted lines = session levels (ON/PD high-low, prior close, open), circles = MAE/MFE,
         gold band = VWAP ±1σ, lower pane = volume. Hover the trade for its PnL.
       </div>
-      {excCards.length > 0 && <KpiGrid cards={excCards} template="repeat(3, 1fr)" />}
+      {excCards.length > 0 && <KpiGrid cards={excCards} template="repeat(4, 1fr)" />}
     </div>
   );
 }

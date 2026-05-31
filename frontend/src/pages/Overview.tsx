@@ -58,6 +58,13 @@ function extrasCards(x: SummaryExtras, avgHoldS: number | null): Card[] {
       value: x.avg_exit_efficiency == null ? "—" : fmtPct(x.avg_exit_efficiency),
     },
     {
+      label: "Avg ATR (hold)",
+      value:
+        x.avg_atr_pts == null
+          ? "—"
+          : `${x.avg_atr_pts.toFixed(2)} pts · ${fmt(x.avg_atr_usd)}`,
+    },
+    {
       label: "Trading window",
       value: fmtWindow(x.window_start, x.window_end),
     },
