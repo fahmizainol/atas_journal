@@ -7,10 +7,18 @@ Exit efficiency = realized PnL / MFE PnL (how much of the best move captured).
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 
 from . import databento_client as dbn
+from .atr import atr_series
 from .config import point_value
+
+_ATR_PERIOD = 14
+# Extra 1m bars pulled *before* entry so Wilder's ATR is warmed up by the time
+# the trade starts (period + a few for smoothing convergence).
+_ATR_WARMUP_BARS = 30
 
 
 def trade_excursion(trade: pd.Series) -> dict | None:
@@ -45,6 +53,8 @@ def trade_excursion(trade: pd.Series) -> dict | None:
     realized = float(trade["gross_pnl"])
     exit_eff = (realized / mfe_usd) if mfe_usd > 0 else None
 
+    avg_atr_pts, avg_atr_usd = _avg_atr_during_hold(trade, pv, qty)
+
     return {
         "mfe_points": mfe_pts,
         "mae_points": mae_pts,
@@ -55,8 +65,30 @@ def trade_excursion(trade: pd.Series) -> dict | None:
         "mfe_time": mfe_time,
         "mae_time": mae_time,
         "exit_efficiency": exit_eff,
+        "avg_atr_pts": avg_atr_pts,
+        "avg_atr_usd": avg_atr_usd,
         "bars": bars,
     }
+
+
+def _avg_atr_during_hold(
+    trade: pd.Series, pv: float, qty: float
+) -> tuple[float | None, float | None]:
+    """Mean ATR(14) over the bars between entry and exit. Pulls a warmup buffer
+    before entry so the first in-hold bar already has a converged ATR."""
+    entry_utc = pd.Timestamp(trade["entry_ts_utc"]).tz_convert("UTC")
+    exit_utc = pd.Timestamp(trade["exit_ts_utc"]).tz_convert("UTC")
+    warmup_start = entry_utc - timedelta(minutes=_ATR_WARMUP_BARS)
+    buffered = dbn.get_bars(trade["instrument"], warmup_start, exit_utc, slice_to_window=True)
+    if buffered is None or buffered.empty:
+        return None, None
+    atr = atr_series(buffered, _ATR_PERIOD)
+    in_hold = atr[(buffered["ts_utc"] >= entry_utc) & (buffered["ts_utc"] <= exit_utc)]
+    in_hold = in_hold.dropna()
+    if in_hold.empty:
+        return None, None
+    avg_pts = float(in_hold.mean())
+    return avg_pts, avg_pts * pv * qty
 
 
 def aggregate_excursion(trades: pd.DataFrame, limit: int | None = None) -> pd.DataFrame:
@@ -76,5 +108,7 @@ def aggregate_excursion(trades: pd.DataFrame, limit: int | None = None) -> pd.Da
             "mfe_usd": exc["mfe_usd"],
             "mae_usd": exc["mae_usd"],
             "exit_efficiency": exc["exit_efficiency"],
+            "avg_atr_pts": exc.get("avg_atr_pts"),
+            "avg_atr_usd": exc.get("avg_atr_usd"),
         })
     return pd.DataFrame(rows)

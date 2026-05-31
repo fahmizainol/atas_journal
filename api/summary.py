@@ -34,6 +34,8 @@ def summary_extras(df: pd.DataFrame) -> dict:
             "avg_mfe_usd": None,
             "avg_mae_usd": None,
             "avg_exit_efficiency": None,
+            "avg_atr_pts": None,
+            "avg_atr_usd": None,
             "window_start": None,
             "window_end": None,
         }
@@ -44,11 +46,16 @@ def summary_extras(df: pd.DataFrame) -> dict:
     exc = excursion.aggregate_excursion(df)
     if exc.empty:
         avg_mfe = avg_mae = avg_eff = None
+        avg_atr_pts = avg_atr_usd = None
     else:
         avg_mfe = float(exc["mfe_usd"].mean())
         avg_mae = float(exc["mae_usd"].mean())
         eff = exc["exit_efficiency"].dropna()
         avg_eff = float(eff.mean() * 100) if len(eff) else None
+        atr_pts = exc["avg_atr_pts"].dropna() if "avg_atr_pts" in exc else pd.Series(dtype=float)
+        atr_usd = exc["avg_atr_usd"].dropna() if "avg_atr_usd" in exc else pd.Series(dtype=float)
+        avg_atr_pts = float(atr_pts.mean()) if len(atr_pts) else None
+        avg_atr_usd = float(atr_usd.mean()) if len(atr_usd) else None
 
     return {
         "total_contracts": float(df["max_contracts"].sum()),
@@ -57,6 +64,8 @@ def summary_extras(df: pd.DataFrame) -> dict:
         "avg_mfe_usd": avg_mfe,
         "avg_mae_usd": avg_mae,
         "avg_exit_efficiency": avg_eff,
+        "avg_atr_pts": avg_atr_pts,
+        "avg_atr_usd": avg_atr_usd,
         "window_start": df["entry_ts_local"].min(),
         "window_end": df["exit_ts_local"].max(),
     }
