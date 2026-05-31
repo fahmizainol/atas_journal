@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS trade_notes (
     updated_at    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS day_notes (
+    day           TEXT PRIMARY KEY,   -- ISO date in the display tz it was tagged from
+    note          TEXT,
+    tags_json     TEXT,
+    updated_at    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS imported_files (
     source_file   TEXT PRIMARY KEY,
     imported_at   TEXT
@@ -317,6 +324,30 @@ def save_note(conn: sqlite3.Connection, trade_key: str, note: str, tags_json: st
 
 def all_notes(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query("SELECT * FROM trade_notes", conn)
+
+
+def get_day_note(conn: sqlite3.Connection, day: str) -> dict:
+    row = conn.execute(
+        "SELECT note, tags_json FROM day_notes WHERE day = ?", (day,)
+    ).fetchone()
+    if row is None:
+        return {"note": "", "tags_json": "[]"}
+    return {"note": row["note"] or "", "tags_json": row["tags_json"] or "[]"}
+
+
+def save_day_note(conn: sqlite3.Connection, day: str, note: str, tags_json: str) -> None:
+    conn.execute(
+        "INSERT INTO day_notes (day, note, tags_json, updated_at) "
+        "VALUES (?, ?, ?, datetime('now')) "
+        "ON CONFLICT(day) DO UPDATE SET "
+        "note=excluded.note, tags_json=excluded.tags_json, updated_at=excluded.updated_at",
+        (day, note, tags_json),
+    )
+    conn.commit()
+
+
+def all_day_notes(conn: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query("SELECT * FROM day_notes", conn)
 
 
 # --- AI analyzer persistence (keyed per model) ---------------------------

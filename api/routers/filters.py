@@ -27,9 +27,13 @@ def filters(scope: Scope = Depends(resolve_scope)) -> dict:
     conn = deps.get_conn()
     with deps.db_lock():
         notes_df = db.all_notes(conn)
+        day_notes_df = db.all_day_notes(conn)
     all_tags: set[str] = set()
     if not notes_df.empty:
         for tj in notes_df["tags_json"].dropna():
+            all_tags.update(json.loads(tj or "[]"))
+    if not day_notes_df.empty:
+        for tj in day_notes_df["tags_json"].dropna():
             all_tags.update(json.loads(tj or "[]"))
 
     return {

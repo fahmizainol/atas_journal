@@ -1,7 +1,10 @@
 import { useEffect, useRef } from "react";
 import {
+  CandlestickSeries,
   ColorType,
   CrosshairMode,
+  HistogramSeries,
+  LineSeries,
   createChart,
   type IChartApi,
   type Time,
@@ -59,7 +62,7 @@ export function CandlestickChart({
       crosshair: { mode: CrosshairMode.Normal },
     });
 
-    const candle = chart.addCandlestickSeries({
+    const candle = chart.addSeries(CandlestickSeries, {
       upColor: palette.green,
       downColor: palette.red,
       wickUpColor: palette.green,
@@ -126,7 +129,7 @@ export function CandlestickChart({
       return res;
     };
 
-    const volume = chart.addHistogramSeries({
+    const volume = chart.addSeries(HistogramSeries, {
       priceFormat: { type: "volume" },
       priceScaleId: "",
     });
@@ -140,10 +143,10 @@ export function CandlestickChart({
     );
 
     if (vwap && vwap.length > 0) {
-      const mid = chart.addLineSeries({ color: palette.gold, lineWidth: 1, priceLineVisible: false });
+      const mid = chart.addSeries(LineSeries, { color: palette.gold, lineWidth: 1, priceLineVisible: false });
       mid.setData(vwap.map((v) => ({ time: v.time as Time, value: v.middle })));
       for (const key of ["upper", "lower"] as const) {
-        const line = chart.addLineSeries({
+        const line = chart.addSeries(LineSeries, {
           color: palette.muted,
           lineWidth: 1,
           priceLineVisible: false,

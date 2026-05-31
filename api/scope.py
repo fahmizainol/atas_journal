@@ -57,6 +57,7 @@ class Scope:
 def _apply_filters(
     df: pd.DataFrame, instruments: list[str], accounts: list[str], start: date | None,
     end: date | None, tags: list[str], notes_df: pd.DataFrame,
+    day_notes_df: pd.DataFrame,
 ) -> pd.DataFrame:
     if df.empty:
         return df
@@ -68,11 +69,21 @@ def _apply_filters(
     if start and end:
         d = out["entry_ts_local"].dt.date
         out = out[(d >= start) & (d <= end)]
-    if tags and not notes_df.empty:
-        keymap = {r["trade_key"]: set(json.loads(r["tags_json"] or "[]"))
-                  for _, r in notes_df.iterrows()}
+    if tags:
         sel = set(tags)
-        out = out[out["trade_key"].apply(lambda k: bool(keymap.get(k, set()) & sel))]
+        trade_tag_map = {
+            r["trade_key"]: set(json.loads(r["tags_json"] or "[]"))
+            for _, r in notes_df.iterrows()
+        } if not notes_df.empty else {}
+        day_tag_map = {
+            r["day"]: set(json.loads(r["tags_json"] or "[]"))
+            for _, r in day_notes_df.iterrows()
+        } if not day_notes_df.empty else {}
+        day_iso = out["entry_ts_local"].dt.date.map(lambda d: d.isoformat())
+        mask = out["trade_key"].apply(
+            lambda k: bool(trade_tag_map.get(k, set()) & sel)
+        ) | day_iso.apply(lambda d: bool(day_tag_map.get(d, set()) & sel))
+        out = out[mask]
     return out.reset_index(drop=True)
 
 
@@ -97,6 +108,7 @@ def resolve_scope(
         ex = db.load_executions(conn)
         jr = db.load_journal(conn)
         notes_df = db.all_notes(conn)
+        day_notes_df = db.all_day_notes(conn)
 
     # load_executions parses ts_local as UTC (rows can come from mixed source
     # tzs). Reproject into the chosen display tz so per-fill timestamps shown
@@ -112,7 +124,9 @@ def resolve_scope(
     if base is None:
         base = pd.DataFrame()
 
-    filtered = _apply_filters(base, instr_list, account_list, d0, d1, tag_list, notes_df)
+    filtered = _apply_filters(
+        base, instr_list, account_list, d0, d1, tag_list, notes_df, day_notes_df,
+    )
     return Scope(
         view="atas" if view == "atas" else "logical",
         tz_label=tz_label, tz=disp_tz, instruments=instr_list, accounts=account_list,

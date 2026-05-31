@@ -24,6 +24,7 @@ from .routers import (  # noqa: E402
     ai,
     calendar,
     charts,
+    day_notes,
     edges,
     filters,
     imports,
@@ -58,6 +59,7 @@ app.include_router(edges.router, prefix="/api")
 app.include_router(statistics.router, prefix="/api")
 app.include_router(trades.router, prefix="/api")
 app.include_router(notes.router, prefix="/api")
+app.include_router(day_notes.router, prefix="/api")
 app.include_router(charts.router, prefix="/api")
 app.include_router(calendar.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")

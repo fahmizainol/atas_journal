@@ -5,6 +5,7 @@ import type { FilterScope } from "../lib/queryKeys";
 import { KpiGrid } from "./KpiGrid";
 import { DataTable } from "./DataTable";
 import { DaySessionChart } from "./charts/DaySessionChart";
+import { DayJournalForm } from "./DayJournalForm";
 import { EquityCurveChart } from "./charts/EquityCurveChart";
 import { PerTradeBarChart } from "./charts/PerTradeBarChart";
 import { TradeDetail } from "./TradeDetail";
@@ -146,6 +147,7 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
       <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
       <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />
       <KpiGrid cards={flowCards} template="1fr 1fr 1fr 1fr" />
+      <DayJournalForm date={date} />
       <DaySessionChart scope={scope} date={date} />
       <div className="section-title">Trades this day</div>
       <div className="section-cap">Click a row to expand its full detail.</div>

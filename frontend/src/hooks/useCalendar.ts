@@ -6,6 +6,7 @@ import type {
   DailyPnlPoint,
   EquityPoint,
   Metrics,
+  Note,
   SummaryExtras,
   TradeRow,
 } from "../lib/types";
@@ -56,6 +57,25 @@ export type { DailyPnlPoint };
 export interface DeleteDayResult {
   journal: number;
   executions: number;
+}
+
+export function useDayNote(date: string | null) {
+  return useQuery({
+    queryKey: qk.dayNote(date ?? ""),
+    queryFn: () => apiGet<Note>(`/day-notes/${date}`),
+    enabled: !!date,
+  });
+}
+
+export function useSaveDayNote(date: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Note) => apiSend<{ ok: boolean }>("PUT", `/day-notes/${date}`, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.dayNote(date) });
+      qc.invalidateQueries({ queryKey: ["filters"] });
+    },
+  });
 }
 
 export function useDeleteDay() {
