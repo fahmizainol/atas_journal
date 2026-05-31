@@ -12,11 +12,12 @@ import {
 import { palette } from "../../theme";
 import { TradeRectanglePrimitive } from "./TradeRectanglePrimitive";
 import { MarkerPrimitive } from "./MarkerPrimitive";
-import type { Bar, ChartMarker, PriceLineSpec, TradeRect, VwapPoint } from "../../lib/chartTypes";
+import type { ATRPoint, Bar, ChartMarker, PriceLineSpec, TradeRect, VwapPoint } from "../../lib/chartTypes";
 
 interface Props {
   bars: Bar[];
   vwap?: VwapPoint[];
+  atrPoints?: ATRPoint[];
   markers?: ChartMarker[];
   priceLines?: PriceLineSpec[];
   levels?: PriceLineSpec[];
@@ -34,6 +35,7 @@ const VOL_DOWN = "rgba(245,69,95,0.5)";
 export function CandlestickChart({
   bars,
   vwap,
+  atrPoints,
   markers,
   priceLines,
   levels,
@@ -142,6 +144,23 @@ export function CandlestickChart({
       })),
     );
 
+    if (atrPoints && atrPoints.length > 0) {
+      const atr = chart.addSeries(
+        LineSeries,
+        {
+          color: palette.gold,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: true,
+          priceFormat: { type: "price", precision: 2, minMove: 0.01 },
+        },
+        1,
+      );
+      atr.setData(atrPoints.map((p) => ({ time: p.time as Time, value: p.atr })));
+      const panes = chart.panes();
+      if (panes.length > 1) panes[1].setStretchFactor(250);
+    }
+
     if (vwap && vwap.length > 0) {
       const mid = chart.addSeries(LineSeries, { color: palette.gold, lineWidth: 1, priceLineVisible: false });
       mid.setData(vwap.map((v) => ({ time: v.time as Time, value: v.middle })));
@@ -212,7 +231,7 @@ export function CandlestickChart({
       ro.disconnect();
       chart.remove();
     };
-  }, [bars, vwap, markers, priceLines, levels, showLevels, tradeRects, height]);
+  }, [bars, vwap, atrPoints, markers, priceLines, levels, showLevels, tradeRects, height]);
 
   return <div ref={ref} style={{ width: "100%" }} />;
 }

@@ -60,6 +60,8 @@ export interface SummaryExtras {
   avg_mfe_usd: number | null;
   avg_mae_usd: number | null;
   avg_exit_efficiency: number | null;
+  avg_atr_pts: number | null;
+  avg_atr_usd: number | null;
   window_start: string | null;
   window_end: string | null;
 }

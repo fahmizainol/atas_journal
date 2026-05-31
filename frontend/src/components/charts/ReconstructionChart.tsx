@@ -56,6 +56,7 @@ export function ReconstructionChart({ scope, tradeNo }: { scope: FilterScope; tr
       <CandlestickChart
         bars={data.bars}
         vwap={data.vwap}
+        atrPoints={data.atr_points}
         markers={data.markers}
         priceLines={data.price_lines}
         levels={data.levels}

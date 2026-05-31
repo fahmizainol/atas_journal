@@ -30,6 +30,7 @@ export function DaySessionChart({ scope, date }: { scope: FilterScope; date: str
       <CandlestickChart
         bars={data.bars}
         vwap={data.vwap}
+        atrPoints={data.atr_points}
         markers={data.markers}
         levels={data.levels}
         showLevels={showLevels}

@@ -14,6 +14,11 @@ export interface VwapPoint {
   lower: number;
 }
 
+export interface ATRPoint {
+  time: number;
+  atr: number;
+}
+
 export interface ChartMarker {
   time: number;
   position: "aboveBar" | "belowBar" | "inBar";
@@ -43,12 +48,15 @@ export interface Excursion {
   mfe_usd?: number;
   mae_usd?: number;
   exit_efficiency?: number | null;
+  avg_atr_pts?: number | null;
+  avg_atr_usd?: number | null;
 }
 
 export interface TradeChartData {
   available: boolean;
   bars?: Bar[];
   vwap?: VwapPoint[];
+  atr_points?: ATRPoint[];
   markers?: ChartMarker[];
   price_lines?: PriceLineSpec[];
   levels?: PriceLineSpec[];
@@ -61,6 +69,7 @@ export interface DayChartData {
   instrument?: string;
   bars?: Bar[];
   vwap?: VwapPoint[];
+  atr_points?: ATRPoint[];
   markers?: ChartMarker[];
   levels?: PriceLineSpec[];
   trades?: TradeRect[];
