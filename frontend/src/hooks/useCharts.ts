@@ -21,11 +21,20 @@ export function useExcursion(scope: FilterScope, tradeNo: number | null) {
   });
 }
 
-export function useDayChart(scope: FilterScope, date: string | null, tf: string) {
+export function useDayChart(
+  scope: FilterScope,
+  date: string | null,
+  tf: string,
+  sourceFile: string | null = null,
+) {
   return useQuery({
-    queryKey: qk.dayChart(scope, date ?? "", tf),
+    queryKey: qk.dayChart(scope, date ?? "", tf, sourceFile),
     queryFn: () =>
-      apiGet<DayChartData>(`/day-chart/${date}`, { ...scopeParams(scope), tf }),
+      apiGet<DayChartData>(`/day-chart/${date}`, {
+        ...scopeParams(scope),
+        tf,
+        source_file: sourceFile,
+      }),
     enabled: !!date,
   });
 }

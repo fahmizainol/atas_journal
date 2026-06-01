@@ -21,10 +21,17 @@ export interface CalendarDay {
   net_pnl: number;
   trades: number;
   win_rate: number;
+  attempts: number; // distinct replay takes on this day; >1 means re-done
 }
 export interface CalendarData {
   months: CalendarMonth[];
   days: CalendarDay[];
+}
+
+export interface DayAttempt {
+  source_file: string;
+  label: string; // "Attempt 1", "Attempt 2", …
+  file_modified: string | null; // export's "Date modified", ISO in display tz
 }
 
 export interface DayDetail {
@@ -34,6 +41,9 @@ export interface DayDetail {
   per_trade_bars: { trade_no: number; net_pnl: number; time: string }[];
   trades: TradeRow[];
   instrument: string;
+  attempts: DayAttempt[]; // replay takes for this day, oldest-uploaded first
+  source_file: string; // the attempt currently shown
+  file_modified: string | null; // "Date modified" of the shown attempt's export
 }
 
 export function useCalendar(scope: FilterScope) {
@@ -43,10 +53,15 @@ export function useCalendar(scope: FilterScope) {
   });
 }
 
-export function useDay(scope: FilterScope, date: string | null) {
+export function useDay(
+  scope: FilterScope,
+  date: string | null,
+  sourceFile: string | null = null,
+) {
   return useQuery({
-    queryKey: qk.day(scope, date ?? ""),
-    queryFn: () => apiGet<DayDetail>(`/day/${date}`, scopeParams(scope)),
+    queryKey: qk.day(scope, date ?? "", sourceFile),
+    queryFn: () =>
+      apiGet<DayDetail>(`/day/${date}`, { ...scopeParams(scope), source_file: sourceFile }),
     enabled: !!date,
   });
 }
@@ -85,6 +100,26 @@ export function useDeleteDay() {
       const qs = toQuery({ account: vars.account, instrument: vars.instrument });
       const suffix = qs ? `?${qs}` : "";
       return apiSend<DeleteDayResult>("DELETE", `/day/${vars.date}${suffix}`);
+    },
+    onSuccess: () => qc.invalidateQueries(),
+  });
+}
+
+export interface DeleteAttemptResult {
+  executions: number;
+  atas_journal: number;
+  atas_statistics: number;
+  imported_files: number;
+}
+
+// Drop a single replay take (one source file) without touching the day's
+// other attempts.
+export function useDeleteAttempt() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { sourceFile: string }) => {
+      const qs = toQuery({ source_file: vars.sourceFile });
+      return apiSend<DeleteAttemptResult>("DELETE", `/attempt?${qs}`);
     },
     onSuccess: () => qc.invalidateQueries(),
   });

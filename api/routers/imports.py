@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -45,19 +45,38 @@ def import_dir(source_tz: str | None = None) -> dict:
     }
 
 
+def _mtime_iso(epoch_ms: str) -> str | None:
+    """Browser ``File.lastModified`` (epoch ms) -> UTC ISO.
+
+    This is the export's own "Date modified" as the OS sees it; saving the
+    upload would otherwise stamp it with the upload time, so we carry the
+    client's value instead.
+    """
+    try:
+        return datetime.fromtimestamp(int(epoch_ms) / 1000, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
 @router.post("/import/upload")
 async def import_upload(
     files: list[UploadFile] = File(...),
     source_tz: str | None = Form(None),
+    mtimes: str | None = Form(None),
 ) -> dict:
     tz = _resolve_tz(source_tz)
+    # mtimes: comma-separated File.lastModified (epoch ms), aligned with files.
+    mtime_list = mtimes.split(",") if mtimes else []
     conn = deps.get_conn()
     results: dict[str, dict] = {}
-    for uf in files:
+    for i, uf in enumerate(files):
         dest = IMPORTS_DIR / uf.filename
         dest.write_bytes(await uf.read())
+        mtime = _mtime_iso(mtime_list[i]) if i < len(mtime_list) else None
         with deps.db_lock():
-            results[uf.filename] = ingest.import_file(conn, dest, source_tz=tz)
+            results[uf.filename] = ingest.import_file(
+                conn, dest, source_tz=tz, file_mtime=mtime
+            )
     return {"results": results, "source_tz": str(tz)}
 
 
@@ -79,6 +98,19 @@ def delete_day(
     conn = deps.get_conn()
     with deps.db_lock():
         return db.delete_day(conn, day, account=account, instrument=instrument)
+
+
+@router.delete("/attempt")
+def delete_attempt(source_file: str) -> dict:
+    """Delete one replay attempt (one source file) across all tables.
+
+    For dropping a junk take from a re-done day without disturbing the other
+    attempts. Removes that file's executions, journal, statistics, and its
+    imported-files entry so it can be re-uploaded clean.
+    """
+    conn = deps.get_conn()
+    with deps.db_lock():
+        return db.delete_attempt(conn, source_file)
 
 
 @router.delete("/data")

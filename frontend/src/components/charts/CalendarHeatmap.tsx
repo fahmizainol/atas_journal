@@ -82,7 +82,30 @@ export function CalendarHeatmap({
                   cursor: info ? "pointer" : "default",
                 }}
               >
-                <div style={{ fontWeight: 700, fontSize: 12 }}>{day}</div>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <span style={{ fontWeight: 700, fontSize: 12 }}>{day}</span>
+                  {info && info.attempts > 1 && (
+                    <span
+                      className="muted"
+                      title={`${info.attempts} replay attempts — showing the latest`}
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        padding: "0 4px",
+                        borderRadius: 6,
+                        border: `1px solid ${palette.cardBorder}`,
+                      }}
+                    >
+                      ·{info.attempts}
+                    </span>
+                  )}
+                </div>
                 {info && (
                   <>
                     <div style={{ fontSize: 12 }}>{fmt(info.net_pnl)}</div>

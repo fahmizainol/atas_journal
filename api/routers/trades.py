@@ -28,7 +28,9 @@ def list_trades(scope: Scope = Depends(resolve_scope)) -> list[dict]:
 
 @router.get("/trades/{trade_no}")
 def trade_detail(trade_no: int, scope: Scope = Depends(resolve_scope)) -> dict:
-    tf = scope.filtered
+    # filtered_all so a trade from any replay attempt (not just the latest take)
+    # can be expanded from the day explorer's trade table.
+    tf = scope.filtered_all
     match = tf[tf["trade_no"] == trade_no] if not tf.empty else tf
     if match.empty:
         raise HTTPException(404, f"Trade #{trade_no} not in scope")

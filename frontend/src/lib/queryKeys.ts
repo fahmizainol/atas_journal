@@ -40,10 +40,11 @@ export const qk = {
   bars: (params: Record<string, unknown>) => ["bars", params] as const,
   tradeChart: (scope: FilterScope, no: number, tf: string) =>
     ["trade-chart", no, tf, scope] as const,
-  dayChart: (scope: FilterScope, date: string, tf: string) =>
-    ["day-chart", date, tf, scope] as const,
+  dayChart: (scope: FilterScope, date: string, tf: string, sourceFile: string | null) =>
+    ["day-chart", date, tf, sourceFile, scope] as const,
   calendar: (scope: FilterScope) => ["calendar", scope] as const,
-  day: (scope: FilterScope, date: string) => ["day", date, scope] as const,
+  day: (scope: FilterScope, date: string, sourceFile: string | null) =>
+    ["day", date, sourceFile, scope] as const,
   statisticsFiles: ["statistics-files"] as const,
   statistics: (file: string) => ["statistics", file] as const,
   aiTrade: (tradeKey: string) => ["ai-trade", tradeKey] as const,

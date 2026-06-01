@@ -47,7 +47,14 @@ def build_logical_trades(
         return pd.DataFrame()
 
     cols_out: list[dict] = []
-    for (_account, instrument), grp in journal.groupby(["account", "instrument"]):
+    # Group by source_file too: each ATAS export is one replay attempt, and two
+    # attempts at the same account/instrument/replayed-date must never share a
+    # flat->flat span — otherwise their lots interleave by timestamp and merge
+    # into bogus combined trades. Isolating attempts here is what lets the day
+    # view show take-1 and take-2 separately instead of blended.
+    for (_account, instrument, _source_file), grp in journal.groupby(
+        ["account", "instrument", "source_file"]
+    ):
         grp = grp.reset_index(drop=True)
         span_of = _assign_spans(grp)
         grp = grp.assign(_span=grp.index.map(span_of))
@@ -157,6 +164,7 @@ def _finalize(
 
     out.append({
         "trade_key": _trade_key(lots.iloc[0]["dedupe_key"], instrument),
+        "source_file": lots.iloc[0]["source_file"],
         "instrument": instrument,
         "account": account,
         "direction": direction,
@@ -220,10 +228,10 @@ def atas_trades(journal: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("entry_ts_utc").reset_index(drop=True)
     df.insert(0, "trade_no", range(1, len(df) + 1))
     keep = [
-        "trade_no", "trade_key", "instrument", "account", "direction", "avg_entry",
-        "avg_exit", "max_contracts", "leg_count", "entry_ts_utc", "exit_ts_utc",
-        "entry_ts_local", "exit_ts_local", "duration_s", "gross_pnl", "commission",
-        "net_pnl", "open_position", "fills", "comment",
+        "trade_no", "trade_key", "source_file", "instrument", "account", "direction",
+        "avg_entry", "avg_exit", "max_contracts", "leg_count", "entry_ts_utc",
+        "exit_ts_utc", "entry_ts_local", "exit_ts_local", "duration_s", "gross_pnl",
+        "commission", "net_pnl", "open_position", "fills", "comment",
     ]
     return df[[c for c in keep if c in df.columns]]
 

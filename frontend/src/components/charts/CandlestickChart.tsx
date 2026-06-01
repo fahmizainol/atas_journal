@@ -157,8 +157,13 @@ export function CandlestickChart({
         1,
       );
       atr.setData(atrPoints.map((p) => ({ time: p.time as Time, value: p.atr })));
+      // Force a price-dominant split — default is 1000:1000 (50/50) for two panes,
+      // so set both factors explicitly. Ratio 5:1 ≈ 83% price / 17% ATR.
       const panes = chart.panes();
-      if (panes.length > 1) panes[1].setStretchFactor(250);
+      if (panes.length > 1) {
+        panes[0].setStretchFactor(1000);
+        panes[1].setStretchFactor(200);
+      }
     }
 
     if (vwap && vwap.length > 0) {

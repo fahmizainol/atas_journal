@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS day_notes (
 
 CREATE TABLE IF NOT EXISTS imported_files (
     source_file   TEXT PRIMARY KEY,
-    imported_at   TEXT
+    imported_at   TEXT,   -- when we ingested it (UTC)
+    file_mtime    TEXT    -- the export's own modified time (Windows "Date modified", UTC)
 );
 
 CREATE TABLE IF NOT EXISTS ai_trade_analysis (
@@ -116,6 +117,19 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     conn.commit()
     _migrate_ai_schema(conn)
+    _migrate_imported_files(conn)
+
+
+def _migrate_imported_files(conn: sqlite3.Connection) -> None:
+    """Add ``file_mtime`` to installs that predate the export-modified-time card.
+
+    Existing rows get NULL (we never captured the original file date), so their
+    day shows "—" for Modified until re-uploaded.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(imported_files)")}
+    if "file_mtime" not in cols:
+        conn.execute("ALTER TABLE imported_files ADD COLUMN file_mtime TEXT")
+        conn.commit()
 
 
 def _migrate_ai_schema(conn: sqlite3.Connection) -> None:
@@ -210,17 +224,60 @@ def _insert_ignore(
     return cur.rowcount
 
 
-def mark_imported(conn: sqlite3.Connection, source_file: str) -> None:
+def mark_imported(
+    conn: sqlite3.Connection, source_file: str, file_mtime: str | None = None
+) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO imported_files (source_file, imported_at) "
-        "VALUES (?, datetime('now'))",
-        (source_file,),
+        "INSERT OR REPLACE INTO imported_files (source_file, imported_at, file_mtime) "
+        "VALUES (?, datetime('now'), ?)",
+        (source_file, file_mtime),
     )
     conn.commit()
 
 
 def imported_files(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in conn.execute("SELECT source_file FROM imported_files ORDER BY 1")]
+
+
+def imported_at_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """{source_file: imported_at} (UTC ISO from ``datetime('now')``).
+
+    Drives replay-attempt ordering: a calendar day can hold several source
+    files (re-done takes), and the most recently imported one is the day's
+    canonical "latest attempt".
+    """
+    return {
+        r[0]: r[1]
+        for r in conn.execute("SELECT source_file, imported_at FROM imported_files")
+    }
+
+
+def file_mtime_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """{source_file: file_mtime} (the export's own modified time, UTC ISO).
+
+    Shown on the day's "Modified" card. NULL for files imported before the
+    column existed, or imported without a captured mtime.
+    """
+    return {
+        r[0]: r[1]
+        for r in conn.execute("SELECT source_file, file_mtime FROM imported_files")
+        if r[1] is not None
+    }
+
+
+def delete_attempt(conn: sqlite3.Connection, source_file: str) -> dict[str, int]:
+    """Delete every row from one replay attempt (one source file).
+
+    Removes the file's executions, journal trades, per-file statistics, and its
+    imported-files entry so the same export can be re-uploaded fresh. Used to
+    drop a junk take without touching the other attempts of that day.
+    """
+    counts: dict[str, int] = {}
+    for table in ("executions", "atas_journal", "atas_statistics", "imported_files"):
+        cur = conn.execute(f"DELETE FROM {table} WHERE source_file = ?", (source_file,))
+        counts[table] = cur.rowcount
+    conn.commit()
+    return counts
 
 
 def delete_day(

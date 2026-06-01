@@ -44,7 +44,14 @@ class Scope:
     end: date | None
     tags: list[str]
     base: pd.DataFrame          # localized, unfiltered (for filter-option discovery)
-    filtered: pd.DataFrame      # localized + filtered (the working frame)
+    filtered: pd.DataFrame      # localized + filtered, latest attempt per day (aggregates)
+    # filtered_all keeps every replay attempt (take-1 and take-2 of a re-done
+    # day both survive). Aggregate/list endpoints read ``filtered`` so re-dos
+    # never double-count; the day explorer and single-trade lookups read
+    # ``filtered_all`` so any attempt's trades stay reachable.
+    filtered_all: pd.DataFrame = field(default_factory=pd.DataFrame)
+    imported_at: dict = field(repr=False, default_factory=dict)  # source_file -> UTC ISO
+    file_mtime: dict = field(repr=False, default_factory=dict)    # source_file -> export mtime
     journal: pd.DataFrame = field(repr=False, default_factory=pd.DataFrame)
 
     @property
@@ -87,6 +94,25 @@ def _apply_filters(
     return out.reset_index(drop=True)
 
 
+def _latest_attempt_per_day(df: pd.DataFrame, imported_at: dict[str, str]) -> pd.DataFrame:
+    """Keep only each calendar day's most recently uploaded replay attempt.
+
+    A re-done day holds several source files; summing them all is the blending
+    bug. For every entry-date we pick the ``source_file`` with the greatest
+    ``imported_at`` (filename breaks ties deterministically) and drop the rest,
+    so aggregates reflect just the latest take. Days with a single attempt pass
+    through untouched.
+    """
+    if df is None or df.empty or "source_file" not in df.columns:
+        return df
+    day = df["entry_ts_local"].dt.date
+    imp = df["source_file"].map(lambda s: imported_at.get(s, ""))
+    order = pd.DataFrame({"day": day, "sf": df["source_file"], "imp": imp})
+    winners = order.sort_values(["imp", "sf"]).groupby("day")["sf"].last()
+    keep = day.map(winners) == df["source_file"]
+    return df[keep.to_numpy()].reset_index(drop=True)
+
+
 def resolve_scope(
     view: str = Query("logical"),
     instruments: str | None = Query(None),
@@ -109,6 +135,8 @@ def resolve_scope(
         jr = db.load_journal(conn)
         notes_df = db.all_notes(conn)
         day_notes_df = db.all_day_notes(conn)
+        imported = db.imported_at_map(conn)
+        file_mtimes = db.file_mtime_map(conn)
 
     # load_executions parses ts_local as UTC (rows can come from mixed source
     # tzs). Reproject into the chosen display tz so per-fill timestamps shown
@@ -124,11 +152,14 @@ def resolve_scope(
     if base is None:
         base = pd.DataFrame()
 
-    filtered = _apply_filters(
+    filtered_all = _apply_filters(
         base, instr_list, account_list, d0, d1, tag_list, notes_df, day_notes_df,
     )
+    filtered = _latest_attempt_per_day(filtered_all, imported)
     return Scope(
         view="atas" if view == "atas" else "logical",
         tz_label=tz_label, tz=disp_tz, instruments=instr_list, accounts=account_list,
-        start=d0, end=d1, tags=tag_list, base=base, filtered=filtered, journal=jr,
+        start=d0, end=d1, tags=tag_list, base=base, filtered=filtered,
+        filtered_all=filtered_all, imported_at=imported, file_mtime=file_mtimes,
+        journal=jr,
     )

@@ -26,8 +26,11 @@ export function useUpload() {
   return useMutation({
     mutationFn: (vars: { files: FileList; sourceTz?: string }) => {
       const fd = new FormData();
-      Array.from(vars.files).forEach((f) => fd.append("files", f));
+      const picked = Array.from(vars.files);
+      picked.forEach((f) => fd.append("files", f));
       if (vars.sourceTz) fd.append("source_tz", vars.sourceTz);
+      // File.lastModified is the OS "Date modified" (epoch ms), aligned with files.
+      fd.append("mtimes", picked.map((f) => f.lastModified).join(","));
       return apiSend<{ results: Record<string, unknown>; source_tz: string }>(
         "POST",
         "/import/upload",

@@ -8,11 +8,19 @@ import { LevelsToggle } from "./LevelsToggle";
 
 // Full-day session candlestick: every trade's fills + an outcome-tinted holding
 // rectangle (reuses the Phase-4 CandlestickChart + TradeRectanglePrimitive).
-export function DaySessionChart({ scope, date }: { scope: FilterScope; date: string }) {
+export function DaySessionChart({
+  scope,
+  date,
+  sourceFile = null,
+}: {
+  scope: FilterScope;
+  date: string;
+  sourceFile?: string | null;
+}) {
   const { data: meta } = useMeta();
   const [tf, setTf] = useState("1m");
   const [showLevels, setShowLevels] = useState(true);
-  const { data, isLoading } = useDayChart(scope, date, tf);
+  const { data, isLoading } = useDayChart(scope, date, tf, sourceFile);
 
   if (meta && !meta.databento_available)
     return <div className="notice">Set DATABENTO_API_KEY in .env to render the day candlestick.</div>;

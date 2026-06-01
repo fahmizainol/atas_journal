@@ -15,7 +15,9 @@ router = APIRouter()
 
 
 def _find(scope: Scope, trade_no: int):
-    tf = scope.filtered
+    # filtered_all (every attempt) so a trade in a non-latest replay take still
+    # resolves when its chart/excursion is opened from the day explorer.
+    tf = scope.filtered_all
     match = tf[tf["trade_no"] == trade_no] if not tf.empty else tf
     if match.empty:
         raise HTTPException(404, f"Trade #{trade_no} not in scope")
@@ -50,11 +52,18 @@ def trade_chart(
 
 @router.get("/day-chart/{day}")
 def day_chart(
-    day: str, tf: str = Query("1m"), scope: Scope = Depends(resolve_scope)
+    day: str,
+    tf: str = Query("1m"),
+    source_file: str | None = Query(None),
+    scope: Scope = Depends(resolve_scope),
 ) -> dict:
     d = date.fromisoformat(day)
-    tf_frame = scope.filtered
+    # Mirror the day explorer: when an attempt is picked, chart that take from
+    # filtered_all; otherwise the latest-per-day frame.
+    tf_frame = scope.filtered_all if source_file else scope.filtered
     day_df = tf_frame[tf_frame["entry_ts_local"].dt.date == d] if not tf_frame.empty else tf_frame
+    if source_file and not day_df.empty:
+        day_df = day_df[day_df["source_file"] == source_file]
     if day_df.empty:
         raise HTTPException(404, f"No trades on {day} in scope")
     day_df = day_df.sort_values("entry_ts_utc").reset_index(drop=True)

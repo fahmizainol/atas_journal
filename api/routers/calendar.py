@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from journal import metrics
 
@@ -16,12 +16,40 @@ from ..summary import summary_extras
 router = APIRouter()
 
 
-def _day_frame(scope: Scope, day: date) -> pd.DataFrame:
-    tf = scope.filtered
-    if tf.empty:
-        return tf
-    sub = tf[tf["entry_ts_local"].dt.date == day]
-    return sub.sort_values("entry_ts_utc").reset_index(drop=True)
+def _to_display_iso(raw: str | None, tz) -> str | None:
+    """Reproject an ``imported_at`` (UTC ISO from ``datetime('now')``) to tz.
+
+    The upload time is stored in UTC; showing it raw could land a late-night
+    upload on the wrong day, so the "Uploaded" card always reads in the user's
+    display zone.
+    """
+    if not raw:
+        return None
+    ts = pd.Timestamp(raw)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert(tz).isoformat()
+
+
+def _attempts_for_day(
+    day_all: pd.DataFrame, imported_at: dict, file_mtime: dict, tz
+) -> list[dict]:
+    """Replay attempts that touched this day, oldest-uploaded first ("Attempt 1").
+
+    Each ATAS export is one attempt; we order by upload time so the highest
+    number is the latest take (the day's default view). ``file_modified`` is the
+    export's own "Date modified" (NULL for files imported before we captured it).
+    """
+    files = day_all["source_file"].dropna().unique().tolist()
+    files.sort(key=lambda s: (imported_at.get(s, ""), s))
+    return [
+        {
+            "source_file": sf,
+            "label": f"Attempt {i}",
+            "file_modified": _to_display_iso(file_mtime.get(sf), tz),
+        }
+        for i, sf in enumerate(files, start=1)
+    ]
 
 
 @router.get("/calendar")
@@ -29,6 +57,15 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
     tf = scope.filtered
     if tf.empty:
         return {"months": [], "days": []}
+
+    # tf is already latest-attempt-per-day, so the cell PnL never blends takes.
+    # Count distinct attempts from the unreduced frame to badge re-done days.
+    attempts_by_day: dict = {}
+    allf = scope.filtered_all
+    if not allf.empty:
+        ac = allf.copy()
+        ac["date"] = ac["entry_ts_local"].dt.date
+        attempts_by_day = ac.groupby("date")["source_file"].nunique().to_dict()
 
     t = tf.copy()
     t["date"] = t["entry_ts_local"].dt.date
@@ -41,6 +78,7 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
             "net_pnl": float(pnl.sum()),
             "trades": n,
             "win_rate": float((pnl > 0).sum() / n * 100) if n else 0.0,
+            "attempts": int(attempts_by_day.get(d, 1)),
         })
     months = sorted({(d.year, d.month) for d in t["date"]}, reverse=True)
     month_objs = [{"year": y, "month": m,
@@ -49,11 +87,27 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
 
 
 @router.get("/day/{day}")
-def day_detail(day: str, scope: Scope = Depends(resolve_scope)) -> dict:
+def day_detail(
+    day: str,
+    source_file: str | None = Query(None),
+    scope: Scope = Depends(resolve_scope),
+) -> dict:
     d = date.fromisoformat(day)
-    day_df = _day_frame(scope, d)
-    if day_df.empty:
+    allf = scope.filtered_all
+    day_all = allf[allf["entry_ts_local"].dt.date == d] if not allf.empty else allf
+    if day_all.empty:
         raise HTTPException(404, f"No trades on {day} in scope")
+
+    attempts = _attempts_for_day(day_all, scope.imported_at, scope.file_mtime, scope.tz)
+    # Default to the latest attempt (last in the oldest-first list); honour an
+    # explicit pick only if it actually touched this day.
+    valid = {a["source_file"] for a in attempts}
+    selected = source_file if source_file in valid else attempts[-1]["source_file"]
+    day_df = (
+        day_all[day_all["source_file"] == selected]
+        .sort_values("entry_ts_utc")
+        .reset_index(drop=True)
+    )
 
     kpis = metrics.compute_metrics(day_df)
     equity = metrics.equity_curve(day_df)
@@ -71,6 +125,9 @@ def day_detail(day: str, scope: Scope = Depends(resolve_scope)) -> dict:
     cols = ["trade_no", "instrument", "direction", "max_contracts",
             "entry_ts_local", "exit_ts_local", "duration_s",
             "avg_entry", "avg_exit", "net_pnl"]
+    file_modified = next(
+        (a["file_modified"] for a in attempts if a["source_file"] == selected), None
+    )
     return {
         "kpis": sanitize(kpis),
         "extras": sanitize(summary_extras(day_df)),
@@ -78,4 +135,7 @@ def day_detail(day: str, scope: Scope = Depends(resolve_scope)) -> dict:
         "per_trade_bars": per_trade_bars,
         "trades": records(day_df, cols),
         "instrument": instrument,
+        "attempts": attempts,
+        "source_file": selected,
+        "file_modified": file_modified,
     }

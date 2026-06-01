@@ -1,6 +1,7 @@
 import { type ColumnDef } from "@tanstack/react-table";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useDay, useDeleteDay } from "../hooks/useCalendar";
+import { useDay, useDeleteDay, useDeleteAttempt } from "../hooks/useCalendar";
 import type { FilterScope } from "../lib/queryKeys";
 import { KpiGrid } from "./KpiGrid";
 import { DataTable } from "./DataTable";
@@ -9,7 +10,7 @@ import { DayJournalForm } from "./DayJournalForm";
 import { EquityCurveChart } from "./charts/EquityCurveChart";
 import { PerTradeBarChart } from "./charts/PerTradeBarChart";
 import { TradeDetail } from "./TradeDetail";
-import { fmt, fmtInt, fmtPct, fmtTime } from "../lib/format";
+import { fmt, fmtDateTime, fmtInt, fmtPct, fmtTime } from "../lib/format";
 import { toneOf } from "../theme";
 import type { Card } from "./KpiCard";
 import type { TradeRow } from "../lib/types";
@@ -39,9 +40,13 @@ const dayColumns: ColumnDef<TradeRow, any>[] = [
 ];
 
 export function DayExplorer({ scope, date }: { scope: FilterScope; date: string }) {
-  const { data, isLoading } = useDay(scope, date);
+  // null = show the latest attempt (server default); switching pins a take.
+  const [attempt, setAttempt] = useState<string | null>(null);
+  useEffect(() => setAttempt(null), [date]); // back to latest when the day changes
+  const { data, isLoading } = useDay(scope, date, attempt);
   const navigate = useNavigate();
   const deleteDay = useDeleteDay();
+  const deleteAttempt = useDeleteAttempt();
   const onDelete = () => {
     if (!data) return;
     const msg =
@@ -53,6 +58,19 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
     deleteDay.mutate(
       { date },
       { onSuccess: () => navigate("/calendar", { replace: true }) },
+    );
+  };
+  const onDeleteAttempt = () => {
+    if (!data) return;
+    const cur = data.attempts.find((a) => a.source_file === data.source_file);
+    const msg =
+      `Delete ${cur?.label ?? "this attempt"} (${data.source_file}) for ${date}?\n\n` +
+      `Only this replay take is removed — the day's other attempts stay. ` +
+      `You can re-upload this export later.`;
+    if (!window.confirm(msg)) return;
+    deleteAttempt.mutate(
+      { sourceFile: data.source_file },
+      { onSuccess: () => setAttempt(null) }, // fall back to the latest remaining take
     );
   };
   if (isLoading || !data) return <div className="notice">Loading day…</div>;
@@ -125,6 +143,11 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
       label: "Trading window",
       value: `${fmtTime(x.window_start)}–${fmtTime(x.window_end)}`,
     },
+    {
+      label: "Modified",
+      value: fmtDateTime(data.file_modified),
+      sub: data.attempts.length > 1 ? `${data.attempts.length} attempts` : undefined,
+    },
   ];
 
   return (
@@ -139,23 +162,55 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
       >
         <div>
           <div className="section-title">{pretty}</div>
-          <div className="section-cap">{data.trades.length} trades</div>
+          <div className="section-cap">
+            {data.trades.length} trades
+            {data.attempts.length > 1 &&
+              ` · ${data.attempts.find((a) => a.source_file === data.source_file)?.label} of ${data.attempts.length}`}
+          </div>
         </div>
-        <button
-          type="button"
-          className="btn-danger"
-          onClick={onDelete}
-          disabled={deleteDay.isPending}
-          title="Delete all executions and trades for this day. Use before re-importing a replayed ATAS export."
-        >
-          {deleteDay.isPending ? "Deleting…" : "Delete day's data"}
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {data.attempts.length > 1 && (
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={onDeleteAttempt}
+              disabled={deleteAttempt.isPending}
+              title="Delete only the replay take currently shown; the day's other attempts stay."
+            >
+              {deleteAttempt.isPending ? "Deleting…" : "Delete this attempt"}
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn-danger"
+            onClick={onDelete}
+            disabled={deleteDay.isPending}
+            title="Delete all executions and trades for this day (every attempt). Use before re-importing a replayed ATAS export."
+          >
+            {deleteDay.isPending ? "Deleting…" : "Delete day's data"}
+          </button>
+        </div>
       </div>
+      {data.attempts.length > 1 && (
+        <div className="radio-group" style={{ margin: "10px 0" }}>
+          {data.attempts.map((a) => (
+            <button
+              key={a.source_file}
+              type="button"
+              className={a.source_file === data.source_file ? "active" : ""}
+              onClick={() => setAttempt(a.source_file)}
+              title={`${a.source_file}${a.file_modified ? ` · modified ${fmtDateTime(a.file_modified)}` : ""}`}
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      )}
       <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
       <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />
-      <KpiGrid cards={flowCards} template="repeat(5, 1fr)" />
+      <KpiGrid cards={flowCards} template="repeat(6, 1fr)" />
       <DayJournalForm date={date} />
-      <DaySessionChart scope={scope} date={date} />
+      <DaySessionChart scope={scope} date={date} sourceFile={data.source_file} />
       <div className="section-title">Trades this day</div>
       <div className="section-cap">Click a row to expand its full detail.</div>
       <div className="panel">

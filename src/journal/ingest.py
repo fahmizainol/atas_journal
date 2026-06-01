@@ -124,10 +124,16 @@ def parse_file(
     return {"executions": executions, "journal": journal, "statistics": statistics}
 
 
+def _disk_mtime_iso(path: Path) -> str:
+    """The file's on-disk modified time as UTC ISO (Windows "Date modified")."""
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC_TZ).isoformat()
+
+
 def import_file(
     conn: sqlite3.Connection,
     path: Path,
     source_tz: ZoneInfo = DEFAULT_SOURCE_TZ,
+    file_mtime: str | None = None,
 ) -> dict[str, int]:
     parsed = parse_file(path, source_tz=source_tz)
     counts = {
@@ -135,7 +141,7 @@ def import_file(
         "journal": db.insert_journal(conn, parsed["journal"]),
         "statistics": db.insert_statistics(conn, parsed["statistics"]),
     }
-    db.mark_imported(conn, path.name)
+    db.mark_imported(conn, path.name, file_mtime=file_mtime)
     return counts
 
 
@@ -148,5 +154,8 @@ def import_dir(
     for path in sorted(Path(directory).glob("*.xlsx")):
         if path.name.startswith("~$"):
             continue
-        results[path.name] = import_file(conn, path, source_tz=source_tz)
+        # Watched-dir files keep their real mtime, so read it straight off disk.
+        results[path.name] = import_file(
+            conn, path, source_tz=source_tz, file_mtime=_disk_mtime_iso(path)
+        )
     return results
