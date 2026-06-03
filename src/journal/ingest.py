@@ -12,14 +12,22 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import openpyxl
 
 from . import db
-from .config import ET_TZ, IMPORTS_DIR, UTC_TZ, normalize_instrument
+from .config import (
+    ET_TZ,
+    IMPORTS_DIR,
+    SOURCE_TZ_AFTER_SWITCH,
+    SOURCE_TZ_BEFORE_SWITCH,
+    SOURCE_TZ_SWITCH_DATE,
+    UTC_TZ,
+    normalize_instrument,
+)
 
 DEFAULT_SOURCE_TZ = ET_TZ
 
@@ -129,6 +137,24 @@ def _disk_mtime_iso(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC_TZ).isoformat()
 
 
+def auto_source_tz_for_date(mdate: date) -> ZoneInfo:
+    """Pick the source tz for an export modified on ``mdate``.
+
+    Exports modified before ``SOURCE_TZ_SWITCH_DATE`` were taken while ATAS was
+    set to Kuala Lumpur; from that date on, New York. See config for the switch.
+    """
+    return (
+        SOURCE_TZ_AFTER_SWITCH
+        if mdate >= SOURCE_TZ_SWITCH_DATE
+        else SOURCE_TZ_BEFORE_SWITCH
+    )
+
+
+def _auto_source_tz(path: Path) -> ZoneInfo:
+    """Auto-pick the source tz from a file's local "Date modified"."""
+    return auto_source_tz_for_date(datetime.fromtimestamp(path.stat().st_mtime).date())
+
+
 def import_file(
     conn: sqlite3.Connection,
     path: Path,
@@ -148,14 +174,21 @@ def import_file(
 def import_dir(
     conn: sqlite3.Connection,
     directory: Path = IMPORTS_DIR,
-    source_tz: ZoneInfo = DEFAULT_SOURCE_TZ,
+    source_tz: ZoneInfo | None = None,
 ) -> dict[str, dict]:
+    """Import every .xlsx in ``directory``.
+
+    ``source_tz`` forces a single tz for every file. When ``None`` (the
+    default), each file's tz is chosen from its modified date via
+    :func:`_auto_source_tz` — KL before the switch, NY from it on.
+    """
     results: dict[str, dict] = {}
     for path in sorted(Path(directory).glob("*.xlsx")):
         if path.name.startswith("~$"):
             continue
         # Watched-dir files keep their real mtime, so read it straight off disk.
+        tz = source_tz or _auto_source_tz(path)
         results[path.name] = import_file(
-            conn, path, source_tz=source_tz, file_mtime=_disk_mtime_iso(path)
+            conn, path, source_tz=tz, file_mtime=_disk_mtime_iso(path)
         )
     return results

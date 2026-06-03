@@ -30,9 +30,11 @@ def import_dir(source_tz: str | None = None) -> dict:
     """Import every .xlsx in ``data/imports/``.
 
     ``source_tz`` is the timezone ATAS was set to when the file was exported
-    (e.g. ``America/New_York``, ``Asia/Kuala_Lumpur``). Defaults to NY.
+    (e.g. ``America/New_York``, ``Asia/Kuala_Lumpur``). When omitted, each
+    file's tz is chosen automatically from its "Date modified" — KL before the
+    configured switch date, NY from it on.
     """
-    tz = _resolve_tz(source_tz)
+    tz = _resolve_tz(source_tz) if source_tz else None
     conn = deps.get_conn()
     with deps.db_lock():
         res = ingest.import_dir(conn, source_tz=tz)
@@ -40,7 +42,7 @@ def import_dir(source_tz: str | None = None) -> dict:
     return {
         "files": len(res),
         "total_fills": total_fills,
-        "source_tz": str(tz),
+        "source_tz": str(tz) if tz else "auto (by file date)",
         "detail": res,
     }
 
@@ -64,7 +66,9 @@ async def import_upload(
     source_tz: str | None = Form(None),
     mtimes: str | None = Form(None),
 ) -> dict:
-    tz = _resolve_tz(source_tz)
+    # When no tz is forced, pick per file from its mtime — same switch as the
+    # directory import (KL before the switch date, NY from it on).
+    forced_tz = _resolve_tz(source_tz) if source_tz else None
     # mtimes: comma-separated File.lastModified (epoch ms), aligned with files.
     mtime_list = mtimes.split(",") if mtimes else []
     conn = deps.get_conn()
@@ -73,6 +77,11 @@ async def import_upload(
         dest = IMPORTS_DIR / uf.filename
         dest.write_bytes(await uf.read())
         mtime = _mtime_iso(mtime_list[i]) if i < len(mtime_list) else None
+        tz = forced_tz or (
+            ingest.auto_source_tz_for_date(datetime.fromisoformat(mtime).astimezone().date())
+            if mtime
+            else ingest.DEFAULT_SOURCE_TZ
+        )
         with deps.db_lock():
             results[uf.filename] = ingest.import_file(
                 conn, dest, source_tz=tz, file_mtime=mtime

@@ -4,6 +4,7 @@ import { useMeta } from "../hooks/useMeta";
 import { useDeleteAll, useImportDir, useUpload } from "../hooks/useImport";
 
 const SOURCE_TZ_OPTIONS: { label: string; value: string }[] = [
+  { label: "Auto (KL ≤ May 30, NY ≥ May 31)", value: "" },
   { label: "New York", value: "America/New_York" },
   { label: "Kuala Lumpur", value: "Asia/Kuala_Lumpur" },
 ];

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -33,6 +34,16 @@ DISPLAY_TZS: dict[str, ZoneInfo] = {
     "Kuala Lumpur": KL_TZ,
 }
 DEFAULT_DISPLAY_TZ = "New York"
+
+# --- Source-tz switch ----------------------------------------------------
+# ATAS was set to Kuala Lumpur until 2026-05-31, when it was switched to New
+# York. So an export's naive timestamps carry KL clocks if the file was
+# modified before this date, and NY clocks from this date onward. When a
+# directory import isn't given an explicit source_tz, it picks per file from
+# the on-disk "Date modified" against this switch.
+SOURCE_TZ_SWITCH_DATE = date(2026, 5, 31)
+SOURCE_TZ_BEFORE_SWITCH = KL_TZ
+SOURCE_TZ_AFTER_SWITCH = ET_TZ
 
 # --- Contract specifications --------------------------------------------
 # point_value = dollars per full index point; tick_size in points.

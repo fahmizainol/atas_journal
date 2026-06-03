@@ -94,21 +94,26 @@ def _apply_filters(
     return out.reset_index(drop=True)
 
 
-def _latest_attempt_per_day(df: pd.DataFrame, imported_at: dict[str, str]) -> pd.DataFrame:
-    """Keep only each calendar day's most recently uploaded replay attempt.
+def _latest_attempt_per_day(
+    df: pd.DataFrame, file_mtime: dict[str, str], imported_at: dict[str, str]
+) -> pd.DataFrame:
+    """Keep only each calendar day's most recently *modified* replay attempt.
 
     A re-done day holds several source files; summing them all is the blending
     bug. For every entry-date we pick the ``source_file`` with the greatest
-    ``imported_at`` (filename breaks ties deterministically) and drop the rest,
-    so aggregates reflect just the latest take. Days with a single attempt pass
-    through untouched.
+    export "Date modified" (upload time, then filename, break ties) and drop the
+    rest, so aggregates reflect just the latest take. Days with a single attempt
+    pass through untouched.
     """
     if df is None or df.empty or "source_file" not in df.columns:
         return df
     day = df["entry_ts_local"].dt.date
+    mtime = df["source_file"].map(lambda s: file_mtime.get(s) or "")
     imp = df["source_file"].map(lambda s: imported_at.get(s, ""))
-    order = pd.DataFrame({"day": day, "sf": df["source_file"], "imp": imp})
-    winners = order.sort_values(["imp", "sf"]).groupby("day")["sf"].last()
+    order = pd.DataFrame(
+        {"day": day, "sf": df["source_file"], "mtime": mtime, "imp": imp}
+    )
+    winners = order.sort_values(["mtime", "imp", "sf"]).groupby("day")["sf"].last()
     keep = day.map(winners) == df["source_file"]
     return df[keep.to_numpy()].reset_index(drop=True)
 
@@ -155,7 +160,7 @@ def resolve_scope(
     filtered_all = _apply_filters(
         base, instr_list, account_list, d0, d1, tag_list, notes_df, day_notes_df,
     )
-    filtered = _latest_attempt_per_day(filtered_all, imported)
+    filtered = _latest_attempt_per_day(filtered_all, file_mtimes, imported)
     return Scope(
         view="atas" if view == "atas" else "logical",
         tz_label=tz_label, tz=disp_tz, instruments=instr_list, accounts=account_list,

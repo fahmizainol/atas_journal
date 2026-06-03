@@ -34,14 +34,15 @@ def _to_display_iso(raw: str | None, tz) -> str | None:
 def _attempts_for_day(
     day_all: pd.DataFrame, imported_at: dict, file_mtime: dict, tz
 ) -> list[dict]:
-    """Replay attempts that touched this day, oldest-uploaded first ("Attempt 1").
+    """Replay attempts that touched this day, oldest-modified first ("Attempt 1").
 
-    Each ATAS export is one attempt; we order by upload time so the highest
-    number is the latest take (the day's default view). ``file_modified`` is the
-    export's own "Date modified" (NULL for files imported before we captured it).
+    Each ATAS export is one attempt; we order by the export's "Date modified"
+    (upload time, then filename, break ties) so the highest number is the latest
+    take (the day's default view). ``file_modified`` is that same modified time
+    (NULL for files imported before we captured it).
     """
     files = day_all["source_file"].dropna().unique().tolist()
-    files.sort(key=lambda s: (imported_at.get(s, ""), s))
+    files.sort(key=lambda s: (file_mtime.get(s) or "", imported_at.get(s, ""), s))
     return [
         {
             "source_file": sf,
