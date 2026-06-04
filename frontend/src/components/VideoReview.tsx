@@ -114,6 +114,21 @@ function VideoPanel({
   const [collapsed, setCollapsed] = useState(false);
   const [duration, setDuration] = useState(0);
   const [speed, setSpeed] = useState(1);
+  // Auto-compact: a 1px sentinel sits where the panel would start. The moment
+  // it scrolls off the viewport, the panel is "stuck" — shrink the video so it
+  // doesn't dominate the screen while you're reviewing trades.
+  const [stuck, setStuck] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      ([entry]) => setStuck(!entry.isIntersecting),
+      { threshold: 0 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
 
   const video = data?.video ?? null;
   // Reset the playhead-derived UI when the attempt (and thus the video) changes.
@@ -148,9 +163,13 @@ function VideoPanel({
   };
 
   return (
+    <>
+      <div ref={sentinelRef} aria-hidden style={{ height: 1 }} />
     <div className="panel" style={panelStyle}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div className="section-title" style={{ margin: 0 }}>Recording</div>
+        <div className="section-title" style={{ margin: 0 }}>
+          Recording{stuck ? " · compact" : ""}
+        </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <button type="button" onClick={() => setCollapsed((c) => !c)} title="Collapse / expand the player">
             {collapsed ? "▸ Show" : "▾ Hide"}
@@ -191,7 +210,17 @@ function VideoPanel({
               controls
               preload="metadata"
               onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
-              style={{ width: "100%", maxHeight: "55vh", background: "#000", borderRadius: 6 }}
+              style={{
+                width: stuck ? "auto" : "100%",
+                // Full size at the top of the page; auto-shrink to a thumbnail
+                // once the panel is sticky so it doesn't eat the screen while
+                // you scroll the trades table. Click-to-seek still works on
+                // the thumbnail; "Show" expands manually if you prefer.
+                maxHeight: stuck ? 180 : "min(50vh, 420px)",
+                background: "#000",
+                borderRadius: 6,
+                display: "block",
+              }}
             />
             <ScrubBar bookmarks={bookmarks} duration={duration} onSeek={seek} />
             <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "8px 0", flexWrap: "wrap" }}>
@@ -215,6 +244,7 @@ function VideoPanel({
         <BookmarkList sourceFile={sourceFile} bookmarks={bookmarks} onSeek={seek} />
       </div>
     </div>
+    </>
   );
 }
 
@@ -357,6 +387,10 @@ function LinkForm({ sourceFile }: { sourceFile: string }) {
 export function TradeVideoCell({ trade }: { trade: TradeRow }) {
   const ctx = useVideoReview();
   if (!ctx || !ctx.hasPlayableVideo) return <span className="section-cap">—</span>;
+  // Defensive: without a trade_key we can't bind a bookmark to this row.
+  // Should never happen now that the day endpoint returns trade_key, but
+  // guarding here keeps a single bad row from rendering a broken Mark button.
+  if (!trade.trade_key) return <span className="section-cap">—</span>;
   const bm = ctx.bookmarkForTrade(trade.trade_key);
   if (bm) {
     return (

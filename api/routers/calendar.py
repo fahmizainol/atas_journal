@@ -123,7 +123,7 @@ def day_detail(
         for _, r in day_df.iterrows()
     ]
 
-    cols = ["trade_no", "instrument", "direction", "max_contracts",
+    cols = ["trade_no", "trade_key", "instrument", "direction", "max_contracts",
             "entry_ts_local", "exit_ts_local", "duration_s",
             "avg_entry", "avg_exit", "net_pnl"]
     file_modified = next(
