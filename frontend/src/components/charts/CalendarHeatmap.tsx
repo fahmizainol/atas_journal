@@ -90,21 +90,31 @@ export function CalendarHeatmap({
                   }}
                 >
                   <span style={{ fontWeight: 700, fontSize: 12 }}>{day}</span>
-                  {info && info.attempts > 1 && (
-                    <span
-                      className="muted"
-                      title={`${info.attempts} replay attempts — showing the latest`}
-                      style={{
-                        fontSize: 10,
-                        fontWeight: 700,
-                        padding: "0 4px",
-                        borderRadius: 6,
-                        border: `1px solid ${palette.cardBorder}`,
-                      }}
-                    >
-                      ·{info.attempts}
-                    </span>
-                  )}
+                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    {info?.has_video && (
+                      <span
+                        title="A recording is linked to this day"
+                        style={{ fontSize: 11, lineHeight: 1 }}
+                      >
+                        🎥
+                      </span>
+                    )}
+                    {info && info.attempts > 1 && (
+                      <span
+                        className="muted"
+                        title={`${info.attempts} replay attempts — showing the latest`}
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          padding: "0 4px",
+                          borderRadius: 6,
+                          border: `1px solid ${palette.cardBorder}`,
+                        }}
+                      >
+                        ·{info.attempts}
+                      </span>
+                    )}
+                  </span>
                 </div>
                 {info && (
                   <>

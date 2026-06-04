@@ -127,6 +127,8 @@ export function VideoPanel({
   const [asideHidden, setAsideHidden] = useState(false);
   const [duration, setDuration] = useState(0);
   const [speed, setSpeed] = useState(1);
+  // Selected skip interval for the ⏪ / ⏩ step buttons.
+  const [skipStep, setSkipStep] = useState(10);
   // Auto-compact: a 1px sentinel sits where the panel would start. The moment
   // it scrolls off the viewport, the panel is "stuck" — shrink the video so it
   // doesn't dominate the screen while you're reviewing trades.
@@ -167,6 +169,14 @@ export function VideoPanel({
   const setRate = (r: number) => {
     setSpeed(r);
     if (videoRef.current) videoRef.current.playbackRate = r;
+  };
+
+  // Seek relative to the playhead, clamped to [0, duration].
+  const nudge = (deltaS: number) => {
+    const el = videoRef.current;
+    if (!el) return;
+    const dur = el.duration || duration || Number.POSITIVE_INFINITY;
+    el.currentTime = Math.min(Math.max(0, el.currentTime + deltaS), dur);
   };
 
   const addFreeForm = () => {
@@ -274,6 +284,17 @@ export function VideoPanel({
                 controls
                 preload="metadata"
                 onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+                // Override the browser's default 5s arrow-key seek with the
+                // selected skip interval (the video is focused on click/seek).
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowRight") {
+                    e.preventDefault();
+                    nudge(skipStep);
+                  } else if (e.key === "ArrowLeft") {
+                    e.preventDefault();
+                    nudge(-skipStep);
+                  }
+                }}
                 style={{
                   width: "100%",
                   // Full size at the top of the page; auto-shrink once the
@@ -308,6 +329,42 @@ export function VideoPanel({
                       </button>
                     ))}
                   </div>
+                  {/* Skip: the ⏪ / ⏩ buttons and the ←/→ arrow keys (when the
+                      video is focused) both jump by the selected interval. */}
+                  <span
+                    className="section-cap"
+                    style={{ marginLeft: 6, marginRight: 2 }}
+                    title="Also used by the ← / → arrow keys when the video is focused"
+                  >
+                    Skip (←/→)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => nudge(-skipStep)}
+                    title={`Back ${skipStep}s (← key)`}
+                  >
+                    ⏪ {skipStep}s
+                  </button>
+                  <div className="radio-group">
+                    {[5, 10, 15, 30].map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className={skipStep === s ? "active" : ""}
+                        onClick={() => setSkipStep(s)}
+                        title={`Set skip step to ${s}s (used by ⏪/⏩ and ←/→)`}
+                      >
+                        {s}s
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => nudge(skipStep)}
+                    title={`Forward ${skipStep}s (→ key)`}
+                  >
+                    {skipStep}s ⏩
+                  </button>
                   <button type="button" className="btn-accent" onClick={addFreeForm}>
                     + Bookmark here
                   </button>

@@ -212,6 +212,9 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
         </div>
       )}
       <VideoReviewProvider sourceFile={data.source_file}>
+        <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
+        <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />
+        <KpiGrid cards={flowCards} template="repeat(6, 1fr)" />
         {/* Experimental layout: the player sits in the same container as the
             trades table, side-by-side. The video column is sticky, so the
             table scrolls beside a pinned player. */}
@@ -238,9 +241,6 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
             </div>
           </div>
         </div>
-        <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
-        <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />
-        <KpiGrid cards={flowCards} template="repeat(6, 1fr)" />
         <DayJournalForm date={date} />
         <DaySessionChart scope={scope} date={date} sourceFile={data.source_file} />
         <div className="grid-2">

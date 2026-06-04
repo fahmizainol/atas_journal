@@ -479,6 +479,17 @@ def get_attempt_video(conn: sqlite3.Connection, source_file: str) -> dict | None
     return dict(row)
 
 
+def linked_video_source_files(conn: sqlite3.Connection) -> set[str]:
+    """Every ``source_file`` that has a recording linked.
+
+    Used by the calendar to badge days whose attempts carry a video, without a
+    per-day round-trip. "Linked" only — disk existence isn't checked here (that
+    would mean resolving every path on each calendar render)."""
+    return {
+        r[0] for r in conn.execute("SELECT source_file FROM attempt_videos")
+    }
+
+
 def save_attempt_video(
     conn: sqlite3.Connection, source_file: str, path: str, duration_s: float | None = None
 ) -> None:

@@ -22,6 +22,7 @@ export interface CalendarDay {
   trades: number;
   win_rate: number;
   attempts: number; // distinct replay takes on this day; >1 means re-done
+  has_video: boolean; // any attempt on this day has a recording linked
 }
 export interface CalendarData {
   months: CalendarMonth[];
