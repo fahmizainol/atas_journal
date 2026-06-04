@@ -113,6 +113,37 @@ export interface PlaybookStat {
   confluences: ConfluenceStat[];
 }
 
+// Confluences tab: the inverse pivot of PlaybookStat, plus lift vs baseline.
+export interface Lift {
+  win_rate_delta: number;
+  expectancy_delta: Num;
+  without_win_rate: number;
+  without_expectancy: Num;
+  without_trades: number;
+}
+
+export interface ConfluenceLeaderStat {
+  name: string;
+  metrics: Metrics;
+  lift: Lift;
+  playbooks: ConfluenceStat[]; // same {name, trades, win_rate, net_pnl} breakdown shape
+}
+
+export interface StackBucket {
+  count: number;
+  label: string;
+  trades: number;
+  win_rate: number;
+  expectancy: Num;
+  net_pnl: number;
+}
+
+export interface ConfluencesResponse {
+  baseline: Metrics;
+  confluences: ConfluenceLeaderStat[];
+  stacking: StackBucket[];
+}
+
 export interface EdgeRow {
   bucket: string;
   trades: number;
