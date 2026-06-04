@@ -12,8 +12,9 @@ pasted Windows path (``C:\\Users\\…``) is translated to its WSL mount
 HTTP Range support lets the browser ``<video>`` seek instantly.
 
 Bookmarks are pure metadata (offset in seconds + label); ``trade_key`` binds one
-to a trade (NULL = free-form). The folder/filename auto-link is a future
-feature — for now videos are linked manually per attempt.
+to a trade (NULL = free-form). Beyond the manual per-attempt link, the
+``/videos/scan`` endpoint batch-auto-links every attempt whose expected
+recording (``DD-MON-YYYY-NN.mp4``) is found in the configured recordings folder.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from journal import db
+from journal.recordings import expected_recording_name, parse_attempt_no
 
 from .. import deps
 from ..scope import Scope, resolve_scope
@@ -243,6 +245,61 @@ def sync_trades(
         "pruned_orphans": pruned,
         "anchor_trade_key": anchor["trade_key"],
     }
+
+
+@router.post("/videos/scan")
+def scan_recordings(scope: Scope = Depends(resolve_scope)) -> dict:
+    """Auto-link every attempt whose recording is in the configured folder.
+
+    For each replay attempt (``source_file``) not already linked, compute the
+    expected recording name from its replayed day (the trades' own entry date)
+    and its parsed attempt number, and link it if that ``.mp4`` exists in the
+    folder. Idempotent: already-linked attempts are skipped, so manual links
+    are never disturbed and a re-scan only fills new matches.
+    """
+    conn = deps.get_conn()
+    with deps.db_lock():
+        folder_raw = db.get_setting(conn, "recordings_folder")
+    if not folder_raw.strip():
+        raise HTTPException(400, "Set a recordings folder first.")
+    folder = _resolve_path(folder_raw)
+    if not folder.is_dir():
+        raise HTTPException(400, f"Not a folder: {folder} (from '{folder_raw}')")
+
+    df = scope.filtered_all
+    if df is None or df.empty:
+        return {"linked": [], "count": 0}
+
+    # One day per export (a replay session = one trading day); if an export's
+    # trades ever straddle midnight, the earliest entry date wins.
+    day_by_sf = (
+        df.assign(_d=df["entry_ts_local"].dt.date)
+        .groupby("source_file")["_d"]
+        .min()
+        .to_dict()
+    )
+
+    conn = deps.get_conn()
+    linked: list[dict] = []
+    with deps.db_lock():
+        already_linked = db.linked_video_source_files(conn)
+        for sf, day in day_by_sf.items():
+            if sf in already_linked:
+                continue  # skip-if-linked is the whole override rule
+            attempt_no = parse_attempt_no(sf)
+            name = expected_recording_name(day, attempt_no)
+            candidate = folder / name
+            if candidate.is_file():
+                db.save_attempt_video(conn, sf, str(candidate))
+                linked.append({
+                    "source_file": sf,
+                    "day": day.isoformat(),
+                    "attempt_no": attempt_no,
+                    "filename": name,
+                })
+
+    linked.sort(key=lambda r: (r["day"], r["attempt_no"]))
+    return {"linked": linked, "count": len(linked)}
 
 
 @router.delete("/videos/synced")
