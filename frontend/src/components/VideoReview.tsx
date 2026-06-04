@@ -354,6 +354,9 @@ function ScrubBar({
 }
 
 // Mixed list: trade-bound ("Trade #N") and free-form, sorted by offset.
+// Row is one click target — clicking anywhere seeks; double-click the label to
+// rename inline; the × on the right deletes (stops propagation). No standing
+// buttons means more rows fit and the panel stays scannable.
 function BookmarkList({
   sourceFile,
   bookmarks,
@@ -365,36 +368,126 @@ function BookmarkList({
 }) {
   const update = useUpdateBookmark(sourceFile);
   const del = useDeleteBookmark(sourceFile);
+  const [editingId, setEditingId] = useState<number | null>(null);
   if (!bookmarks.length) {
     return <div className="section-cap" style={{ marginTop: 6 }}>No bookmarks yet. Scrub to a moment and use “+ Bookmark here”, or mark a trade from its row.</div>;
   }
   return (
-    // fontSize: 0.75em shrinks every child (jump-time button, label, edit/
-    // delete glyphs) proportionally so the side panel fits more rows.
-    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 2, fontSize: "0.75em" }}>
+    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 1, fontSize: "0.75em" }}>
       {bookmarks.map((b) => (
-        <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <button type="button" onClick={() => onSeek(b.offset_s)} title="Jump to this moment" style={{ minWidth: 56, textAlign: "left" }}>
-            ▶ {fmtOffset(b.offset_s)}
-          </button>
-          <span style={{ color: b.trade_key ? "var(--accent)" : "var(--text)", flex: 1 }}>
-            {b.label || (b.trade_key ? "(trade)" : "(bookmark)")}
-          </span>
-          <button
-            type="button"
-            title="Rename"
-            onClick={() => {
-              const label = window.prompt("Bookmark label", b.label) ?? b.label;
-              if (label !== b.label) update.mutate({ id: b.id, label });
-            }}
-          >
-            ✎
-          </button>
-          <button type="button" className="btn-danger" title="Delete bookmark" onClick={() => del.mutate(b.id)}>
-            ✕
-          </button>
-        </div>
+        <BookmarkRow
+          key={b.id}
+          b={b}
+          editing={editingId === b.id}
+          onStartEdit={() => setEditingId(b.id)}
+          onCancelEdit={() => setEditingId(null)}
+          onSeek={() => onSeek(b.offset_s)}
+          onSave={(label) => {
+            if (label !== b.label) update.mutate({ id: b.id, label });
+            setEditingId(null);
+          }}
+          onDelete={() => del.mutate(b.id)}
+        />
       ))}
+    </div>
+  );
+}
+
+function BookmarkRow({
+  b,
+  editing,
+  onStartEdit,
+  onCancelEdit,
+  onSeek,
+  onSave,
+  onDelete,
+}: {
+  b: VideoBookmark;
+  editing: boolean;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSeek: () => void;
+  onSave: (label: string) => void;
+  onDelete: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const [draft, setDraft] = useState(b.label);
+  useEffect(() => setDraft(b.label), [b.label, editing]);
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={() => !editing && onSeek()}
+      title="Click to jump · double-click label to rename"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "2px 4px",
+        borderRadius: 4,
+        cursor: editing ? "text" : "pointer",
+        background: hover ? "var(--card-border)" : "transparent",
+      }}
+    >
+      <span
+        style={{
+          color: "var(--muted)",
+          fontVariantNumeric: "tabular-nums",
+          whiteSpace: "nowrap",
+        }}
+      >
+        ▶ {fmtOffset(b.offset_s)}
+      </span>
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          onBlur={() => onSave(draft)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onSave(draft);
+            else if (e.key === "Escape") onCancelEdit();
+          }}
+          style={{ flex: 1, minWidth: 0, padding: "0 4px" }}
+        />
+      ) : (
+        <span
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            onStartEdit();
+          }}
+          style={{
+            color: b.trade_key ? "var(--accent)" : "var(--text)",
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {b.label || (b.trade_key ? "(trade)" : "(bookmark)")}
+        </span>
+      )}
+      {/* Borderless glyph; only visible on hover so it doesn't clutter the
+          resting row. stopPropagation keeps the row's seek-on-click out. */}
+      <span
+        role="button"
+        title="Delete bookmark"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        style={{
+          color: "var(--red)",
+          opacity: hover ? 1 : 0,
+          cursor: "pointer",
+          padding: "0 2px",
+          userSelect: "none",
+        }}
+      >
+        ✕
+      </span>
     </div>
   );
 }
