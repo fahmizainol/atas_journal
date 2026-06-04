@@ -369,10 +369,12 @@ function BookmarkList({
     return <div className="section-cap" style={{ marginTop: 6 }}>No bookmarks yet. Scrub to a moment and use “+ Bookmark here”, or mark a trade from its row.</div>;
   }
   return (
-    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 2 }}>
+    // fontSize: 0.75em shrinks every child (jump-time button, label, edit/
+    // delete glyphs) proportionally so the side panel fits more rows.
+    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 2, fontSize: "0.75em" }}>
       {bookmarks.map((b) => (
-        <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <button type="button" onClick={() => onSeek(b.offset_s)} title="Jump to this moment" style={{ minWidth: 64, textAlign: "left" }}>
+        <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button type="button" onClick={() => onSeek(b.offset_s)} title="Jump to this moment" style={{ minWidth: 56, textAlign: "left" }}>
             ▶ {fmtOffset(b.offset_s)}
           </button>
           <span style={{ color: b.trade_key ? "var(--accent)" : "var(--text)", flex: 1 }}>
