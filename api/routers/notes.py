@@ -17,6 +17,8 @@ router = APIRouter()
 class NoteIn(BaseModel):
     note: str = ""
     tags: list[str] = []
+    playbooks: list[str] = []
+    confluences: list[str] = []
 
 
 @router.get("/notes/{trade_key}")
@@ -24,12 +26,24 @@ def get_note(trade_key: str) -> dict:
     conn = deps.get_conn()
     with deps.db_lock():
         n = db.get_note(conn, trade_key)
-    return {"note": n["note"], "tags": json.loads(n["tags_json"] or "[]")}
+    return {
+        "note": n["note"],
+        "tags": json.loads(n["tags_json"] or "[]"),
+        "playbooks": json.loads(n["playbooks_json"] or "[]"),
+        "confluences": json.loads(n["confluences_json"] or "[]"),
+    }
 
 
 @router.put("/notes/{trade_key}")
 def put_note(trade_key: str, body: NoteIn) -> dict:
     conn = deps.get_conn()
     with deps.db_lock():
-        db.save_note(conn, trade_key, body.note, json.dumps(body.tags))
+        db.save_note(
+            conn,
+            trade_key,
+            body.note,
+            json.dumps(body.tags),
+            json.dumps(body.playbooks),
+            json.dumps(body.confluences),
+        )
     return {"ok": True}

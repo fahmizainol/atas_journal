@@ -59,10 +59,12 @@ CREATE TABLE IF NOT EXISTS atas_statistics (
 );
 
 CREATE TABLE IF NOT EXISTS trade_notes (
-    trade_key     TEXT PRIMARY KEY,
-    note          TEXT,
-    tags_json     TEXT,
-    updated_at    TEXT
+    trade_key        TEXT PRIMARY KEY,
+    note             TEXT,
+    tags_json        TEXT,
+    playbooks_json   TEXT DEFAULT '[]',   -- setup/strategy badges (per-trade)
+    confluences_json TEXT DEFAULT '[]',   -- evidence/context badges (per-trade)
+    updated_at       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS day_notes (
@@ -139,6 +141,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _migrate_ai_schema(conn)
     _migrate_imported_files(conn)
     _migrate_bookmark_origin(conn)
+    _migrate_trade_note_tagging(conn)
 
 
 def _migrate_video_schema(conn: sqlite3.Connection) -> None:
@@ -185,6 +188,22 @@ def _migrate_bookmark_origin(conn: sqlite3.Connection) -> None:
             "ALTER TABLE video_bookmarks ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
         )
         conn.commit()
+
+
+def _migrate_trade_note_tagging(conn: sqlite3.Connection) -> None:
+    """Add ``playbooks_json`` / ``confluences_json`` to installs whose
+    ``trade_notes`` predate the playbook/confluence tagging dimensions.
+
+    Both are per-trade JSON arrays (like ``tags_json``); existing rows get the
+    column default of '[]' so they read as "untagged" until edited.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_notes)")}
+    for col in ("playbooks_json", "confluences_json"):
+        if col not in cols:
+            conn.execute(
+                f"ALTER TABLE trade_notes ADD COLUMN {col} TEXT DEFAULT '[]'"
+            )
+    conn.commit()
 
 
 def _migrate_ai_schema(conn: sqlite3.Connection) -> None:
@@ -416,20 +435,38 @@ def load_statistics(conn: sqlite3.Connection) -> pd.DataFrame:
 
 def get_note(conn: sqlite3.Connection, trade_key: str) -> dict:
     row = conn.execute(
-        "SELECT note, tags_json FROM trade_notes WHERE trade_key = ?", (trade_key,)
+        "SELECT note, tags_json, playbooks_json, confluences_json "
+        "FROM trade_notes WHERE trade_key = ?",
+        (trade_key,),
     ).fetchone()
     if row is None:
-        return {"note": "", "tags_json": "[]"}
-    return {"note": row["note"] or "", "tags_json": row["tags_json"] or "[]"}
+        return {"note": "", "tags_json": "[]", "playbooks_json": "[]", "confluences_json": "[]"}
+    return {
+        "note": row["note"] or "",
+        "tags_json": row["tags_json"] or "[]",
+        "playbooks_json": row["playbooks_json"] or "[]",
+        "confluences_json": row["confluences_json"] or "[]",
+    }
 
 
-def save_note(conn: sqlite3.Connection, trade_key: str, note: str, tags_json: str) -> None:
+def save_note(
+    conn: sqlite3.Connection,
+    trade_key: str,
+    note: str,
+    tags_json: str,
+    playbooks_json: str = "[]",
+    confluences_json: str = "[]",
+) -> None:
     conn.execute(
-        "INSERT INTO trade_notes (trade_key, note, tags_json, updated_at) "
-        "VALUES (?, ?, ?, datetime('now')) "
+        "INSERT INTO trade_notes "
+        "(trade_key, note, tags_json, playbooks_json, confluences_json, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, datetime('now')) "
         "ON CONFLICT(trade_key) DO UPDATE SET "
-        "note=excluded.note, tags_json=excluded.tags_json, updated_at=excluded.updated_at",
-        (trade_key, note, tags_json),
+        "note=excluded.note, tags_json=excluded.tags_json, "
+        "playbooks_json=excluded.playbooks_json, "
+        "confluences_json=excluded.confluences_json, "
+        "updated_at=excluded.updated_at",
+        (trade_key, note, tags_json, playbooks_json, confluences_json),
     )
     conn.commit()
 

@@ -23,7 +23,19 @@ TRADE_COLS = [
 
 @router.get("/trades")
 def list_trades(scope: Scope = Depends(resolve_scope)) -> list[dict]:
-    return records(scope.filtered, TRADE_COLS)
+    rows = records(scope.filtered, TRADE_COLS)
+    # Attach each trade's playbook badges so the day/trades tables can render
+    # them without a per-row fetch. One scan of trade_notes, mapped by key.
+    conn = deps.get_conn()
+    with deps.db_lock():
+        notes_df = db.all_notes(conn)
+    pb_map = {
+        r["trade_key"]: json.loads(r["playbooks_json"] or "[]")
+        for _, r in notes_df.iterrows()
+    } if not notes_df.empty else {}
+    for r in rows:
+        r["playbooks"] = pb_map.get(r["trade_key"], [])
+    return rows
 
 
 @router.get("/trades/{trade_no}")
@@ -44,4 +56,6 @@ def trade_detail(trade_no: int, scope: Scope = Depends(resolve_scope)) -> dict:
         "trade": trade,
         "note": note["note"],
         "tags": json.loads(note["tags_json"] or "[]"),
+        "playbooks": json.loads(note["playbooks_json"] or "[]"),
+        "confluences": json.loads(note["confluences_json"] or "[]"),
     }
