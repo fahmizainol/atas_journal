@@ -101,6 +101,24 @@ CREATE TABLE IF NOT EXISTS ai_settings (
     key           TEXT PRIMARY KEY,
     value         TEXT
 );
+
+CREATE TABLE IF NOT EXISTS attempt_videos (
+    source_file   TEXT PRIMARY KEY,   -- the replay take this video belongs to
+    path          TEXT NOT NULL,      -- as entered (Windows or POSIX); resolved on serve
+    duration_s    REAL,               -- known once the browser reads metadata; nullable
+    updated_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS video_bookmarks (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_file   TEXT NOT NULL,      -- the replay take this bookmark belongs to
+    offset_s      REAL NOT NULL,      -- seconds into that take's video
+    label         TEXT,
+    trade_key     TEXT,               -- bound trade (NULL = free-form bookmark)
+    created_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_video_bookmarks_sf ON video_bookmarks(source_file);
 """
 
 
@@ -405,6 +423,108 @@ def save_day_note(conn: sqlite3.Connection, day: str, note: str, tags_json: str)
 
 def all_day_notes(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query("SELECT * FROM day_notes", conn)
+
+
+# --- Per-attempt video link + bookmarks ----------------------------------
+# Each replay take (source_file) links to one recorded session video
+# (referenced by on-disk path, never copied). The attempt "number" shown in the
+# UI is positional and shifts when takes are deleted, so the stable key is the
+# source_file. Bookmarks are pure metadata — an offset in seconds plus a label —
+# independent of the file's location or format; trade_key binds one to a trade.
+def get_attempt_video(conn: sqlite3.Connection, source_file: str) -> dict | None:
+    row = conn.execute(
+        "SELECT source_file, path, duration_s, updated_at "
+        "FROM attempt_videos WHERE source_file = ?",
+        (source_file,),
+    ).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def save_attempt_video(
+    conn: sqlite3.Connection, source_file: str, path: str, duration_s: float | None = None
+) -> None:
+    conn.execute(
+        "INSERT INTO attempt_videos (source_file, path, duration_s, updated_at) "
+        "VALUES (?, ?, ?, datetime('now')) "
+        "ON CONFLICT(source_file) DO UPDATE SET "
+        "path=excluded.path, duration_s=excluded.duration_s, updated_at=excluded.updated_at",
+        (source_file, path, duration_s),
+    )
+    conn.commit()
+
+
+def delete_attempt_video(conn: sqlite3.Connection, source_file: str) -> None:
+    """Unlink the attempt's video and drop its bookmarks (offsets are
+    meaningless without the video they point into)."""
+    conn.execute("DELETE FROM video_bookmarks WHERE source_file = ?", (source_file,))
+    conn.execute("DELETE FROM attempt_videos WHERE source_file = ?", (source_file,))
+    conn.commit()
+
+
+def list_bookmarks(conn: sqlite3.Connection, source_file: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, source_file, offset_s, label, trade_key, created_at "
+        "FROM video_bookmarks WHERE source_file = ? ORDER BY offset_s",
+        (source_file,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_bookmark(
+    conn: sqlite3.Connection,
+    source_file: str,
+    offset_s: float,
+    label: str = "",
+    trade_key: str | None = None,
+) -> dict:
+    cur = conn.execute(
+        "INSERT INTO video_bookmarks (source_file, offset_s, label, trade_key, created_at) "
+        "VALUES (?, ?, ?, ?, datetime('now'))",
+        (source_file, offset_s, label, trade_key),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id, source_file, offset_s, label, trade_key, created_at "
+        "FROM video_bookmarks WHERE id = ?",
+        (cur.lastrowid,),
+    ).fetchone()
+    return dict(row)
+
+
+def update_bookmark(
+    conn: sqlite3.Connection,
+    bookmark_id: int,
+    offset_s: float | None = None,
+    label: str | None = None,
+) -> dict | None:
+    """Patch a bookmark's offset and/or label; unspecified fields are left as-is."""
+    sets: list[str] = []
+    params: list[object] = []
+    if offset_s is not None:
+        sets.append("offset_s = ?")
+        params.append(offset_s)
+    if label is not None:
+        sets.append("label = ?")
+        params.append(label)
+    if sets:
+        params.append(bookmark_id)
+        conn.execute(
+            f"UPDATE video_bookmarks SET {', '.join(sets)} WHERE id = ?", params
+        )
+        conn.commit()
+    row = conn.execute(
+        "SELECT id, source_file, offset_s, label, trade_key, created_at "
+        "FROM video_bookmarks WHERE id = ?",
+        (bookmark_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_bookmark(conn: sqlite3.Connection, bookmark_id: int) -> None:
+    conn.execute("DELETE FROM video_bookmarks WHERE id = ?", (bookmark_id,))
+    conn.commit()
 
 
 # --- AI analyzer persistence (keyed per model) ---------------------------

@@ -34,6 +34,7 @@ from .routers import (  # noqa: E402
     settings,
     statistics,
     trades,
+    videos,
 )
 from .serialize import SanitizedJSONResponse  # noqa: E402
 
@@ -65,6 +66,7 @@ app.include_router(calendar.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 app.include_router(ai.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
+app.include_router(videos.router, prefix="/api")
 
 
 # --- Prod static frontend (mounted last; only if a build exists) ---------
