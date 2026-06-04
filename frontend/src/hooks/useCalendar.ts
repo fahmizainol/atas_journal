@@ -23,6 +23,7 @@ export interface CalendarDay {
   win_rate: number;
   attempts: number; // distinct replay takes on this day; >1 means re-done
   has_video: boolean; // any attempt on this day has a recording linked
+  file_modified: string | null; // latest attempt's "Date modified", ISO in display tz
 }
 export interface CalendarData {
   months: CalendarMonth[];

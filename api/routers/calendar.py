@@ -89,6 +89,11 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
     for d, g in t.groupby("date"):
         pnl = g["net_pnl"].astype(float)
         n = len(pnl)
+        # Latest export "Date modified" across the day's attempts, so the table
+        # view can sort by when a day was last re-imported (NULL for days whose
+        # files predate mtime capture). UTC ISO strings sort lexicographically.
+        mtimes = [scope.file_mtime.get(sf) for sf in files_by_day.get(d, set())]
+        latest_mtime = max((m for m in mtimes if m), default=None)
         days.append({
             "date": d.isoformat(),
             "net_pnl": float(pnl.sum()),
@@ -96,6 +101,7 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
             "win_rate": float((pnl > 0).sum() / n * 100) if n else 0.0,
             "attempts": int(attempts_by_day.get(d, 1)),
             "has_video": bool(files_by_day.get(d, set()) & linked),
+            "file_modified": _to_display_iso(latest_mtime, scope.tz),
         })
     months = sorted({(d.year, d.month) for d in t["date"]}, reverse=True)
     month_objs = [{"year": y, "month": m,

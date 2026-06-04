@@ -3,14 +3,18 @@ import { useParams } from "react-router-dom";
 import { useFilters } from "../hooks/useFilters";
 import { useCalendar } from "../hooks/useCalendar";
 import { CalendarHeatmap } from "../components/charts/CalendarHeatmap";
+import { CalendarTable } from "../components/CalendarTable";
 import { DayExplorer } from "../components/DayExplorer";
 import { RecordingsCard } from "../components/RecordingsCard";
+
+type View = "calendar" | "table";
 
 export function Calendar() {
   const { scope } = useFilters();
   const { data, isLoading } = useCalendar(scope);
   const { date } = useParams();
   const [monthIdx, setMonthIdx] = useState(0);
+  const [view, setView] = useState<View>("calendar");
 
   // When a day is opened (via link or by clicking a cell), jump to its month.
   // After that, the dropdown/arrows drive the view freely.
@@ -33,42 +37,81 @@ export function Calendar() {
   return (
     <div>
       <RecordingsCard scope={scope} />
-      <div className="section-title">Monthly PnL calendar</div>
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 8, maxWidth: 360, marginBottom: 12 }}>
-        <button
-          type="button"
-          onClick={() => setMonthIdx(activeIdx + 1)}
-          disabled={activeIdx >= data.months.length - 1}
-          aria-label="Previous month"
-        >
-          ‹
-        </button>
-        <div className="field" style={{ flex: 1 }}>
-          <label>Month</label>
-          <select value={activeIdx} onChange={(e) => setMonthIdx(Number(e.target.value))}>
-            {data.months.map((m, i) => (
-              <option key={`${m.year}-${m.month}`} value={i}>
-                {m.label}
-              </option>
-            ))}
-          </select>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          marginBottom: 12,
+        }}
+      >
+        <div className="section-title" style={{ margin: 0 }}>
+          {view === "calendar" ? "Monthly PnL calendar" : "Trading days"}
         </div>
-        <button
-          type="button"
-          onClick={() => setMonthIdx(activeIdx - 1)}
-          disabled={activeIdx <= 0}
-          aria-label="Next month"
-        >
-          ›
-        </button>
+        <div className="radio-group">
+          <button
+            type="button"
+            onClick={() => setView("calendar")}
+            aria-pressed={view === "calendar"}
+            className={view === "calendar" ? "active" : ""}
+          >
+            Calendar
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("table")}
+            aria-pressed={view === "table"}
+            className={view === "table" ? "active" : ""}
+          >
+            Table
+          </button>
+        </div>
       </div>
 
-      <CalendarHeatmap
-        year={month.year}
-        month={month.month}
-        days={data.days}
-        selected={date ?? null}
-      />
+      {view === "calendar" ? (
+        <>
+          <div
+            style={{ display: "flex", alignItems: "flex-end", gap: 8, maxWidth: 360, marginBottom: 12 }}
+          >
+            <button
+              type="button"
+              onClick={() => setMonthIdx(activeIdx + 1)}
+              disabled={activeIdx >= data.months.length - 1}
+              aria-label="Previous month"
+            >
+              ‹
+            </button>
+            <div className="field" style={{ flex: 1 }}>
+              <label>Month</label>
+              <select value={activeIdx} onChange={(e) => setMonthIdx(Number(e.target.value))}>
+                {data.months.map((m, i) => (
+                  <option key={`${m.year}-${m.month}`} value={i}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMonthIdx(activeIdx - 1)}
+              disabled={activeIdx <= 0}
+              aria-label="Next month"
+            >
+              ›
+            </button>
+          </div>
+
+          <CalendarHeatmap
+            year={month.year}
+            month={month.month}
+            days={data.days}
+            selected={date ?? null}
+          />
+        </>
+      ) : (
+        <CalendarTable days={data.days} selected={date ?? null} />
+      )}
 
       {date && <DayExplorer scope={scope} date={date} />}
       {!date && <div className="notice">Click a day in the calendar to explore its trades.</div>}
