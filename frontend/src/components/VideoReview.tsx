@@ -678,6 +678,7 @@ export function TradeVideoCell({ trade }: { trade: TradeRow }) {
     return (
       <button
         type="button"
+        className="btn-xs"
         onClick={(e) => {
           e.stopPropagation();
           ctx.seek(bm.offset_s);
@@ -691,7 +692,7 @@ export function TradeVideoCell({ trade }: { trade: TradeRow }) {
   return (
     <button
       type="button"
-      className="btn-accent"
+      className="btn-accent btn-xs"
       disabled={ctx.isMarking}
       onClick={(e) => {
         e.stopPropagation();

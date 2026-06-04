@@ -391,6 +391,22 @@ button:disabled {
   flex-wrap: wrap;
   gap: 4px;
 }
+/* In tables, let long names wrap (~3 words wide) instead of stretching the
+   column. The 110px cap fits roughly three short words before breaking. */
+.badge-list .badge {
+  white-space: normal;
+  max-width: 110px;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+/* Compact button for dense cells (e.g. the table video column). */
+.btn-xs {
+  padding: 3px 7px;
+  font-size: 11px;
+  border-radius: 6px;
+}
 
 .radio-group {
   display: inline-flex;
