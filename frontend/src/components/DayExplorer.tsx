@@ -11,6 +11,7 @@ import { EquityCurveChart } from "./charts/EquityCurveChart";
 import { PerTradeBarChart } from "./charts/PerTradeBarChart";
 import { TradeDetail } from "./TradeDetail";
 import { VideoReviewProvider, VideoPanel, TradeVideoCell } from "./VideoReview";
+import { BadgeList } from "./BadgeInput";
 import { fmt, fmtDateTime, fmtInt, fmtPct, fmtTime } from "../lib/format";
 import { toneOf } from "../theme";
 import type { Card } from "./KpiCard";
@@ -35,6 +36,12 @@ const dayColumns: ColumnDef<TradeRow, any>[] = [
       const v = c.getValue() as number;
       return <span className={v >= 0 ? "pos" : "neg"}>{fmt(v)}</span>;
     },
+  },
+  {
+    id: "playbook",
+    header: "Playbook",
+    enableSorting: false,
+    cell: (c) => <BadgeList items={c.row.original.playbooks ?? []} />,
   },
   {
     id: "video",

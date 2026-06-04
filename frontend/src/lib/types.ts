@@ -95,6 +95,20 @@ export interface TradeRow {
   avg_exit: Num;
   net_pnl: number;
   comment: string;
+  playbooks?: string[]; // attached by GET /trades for table badges
+}
+
+export interface ConfluenceStat {
+  name: string;
+  trades: number;
+  win_rate: number;
+  net_pnl: number;
+}
+
+export interface PlaybookStat {
+  name: string;
+  metrics: Metrics;
+  confluences: ConfluenceStat[];
 }
 
 export interface EdgeRow {
@@ -116,6 +130,9 @@ export interface Edges {
 export interface Note {
   note: string;
   tags: string[];
+  // Per-trade only; day notes omit these (optional keeps DayJournalForm valid).
+  playbooks?: string[];
+  confluences?: string[];
 }
 
 export interface VideoBookmark {

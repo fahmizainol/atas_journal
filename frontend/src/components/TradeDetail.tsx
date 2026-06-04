@@ -68,6 +68,8 @@ export function TradeDetail({ scope, tradeNo }: { scope: FilterScope; tradeNo: n
         tradeKey={t.trade_key}
         initialNote={data.note}
         initialTags={data.tags}
+        initialPlaybooks={data.playbooks}
+        initialConfluences={data.confluences}
       />
     </div>
   );

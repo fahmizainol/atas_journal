@@ -1,23 +1,23 @@
 import { useEffect, useState } from "react";
 import { useDayNote, useSaveDayNote } from "../hooks/useCalendar";
+import { BadgeInput } from "./BadgeInput";
 
-// Per-day note + comma-separated tags. Mirrors JournalForm but keyed by date.
+// Per-day note + badge tags. Mirrors JournalForm but keyed by date.
 export function DayJournalForm({ date }: { date: string }) {
   const { data } = useDayNote(date);
   const save = useSaveDayNote(date);
   const [note, setNote] = useState("");
-  const [tags, setTags] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
 
   useEffect(() => {
     if (!data) return;
     setNote(data.note ?? "");
-    setTags((data.tags ?? []).join(", "));
+    setTags(data.tags ?? []);
   }, [date, data]);
 
   const onSave = (e: React.FormEvent) => {
     e.preventDefault();
-    const tagList = tags.split(",").map((t) => t.trim()).filter(Boolean);
-    save.mutate({ note, tags: tagList });
+    save.mutate({ note, tags });
   };
 
   return (
@@ -28,8 +28,8 @@ export function DayJournalForm({ date }: { date: string }) {
         <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={4} />
       </div>
       <div className="field" style={{ marginBottom: 10 }}>
-        <label>Tags (comma-separated)</label>
-        <input value={tags} onChange={(e) => setTags(e.target.value)} />
+        <label>Tags</label>
+        <BadgeInput value={tags} onChange={setTags} placeholder="add a tag…" />
       </div>
       <button type="submit" className="btn-accent" disabled={save.isPending}>
         {save.isPending ? "Saving…" : "Save"}

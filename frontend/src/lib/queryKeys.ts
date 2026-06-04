@@ -32,6 +32,7 @@ export const qk = {
   dailyPnl: (scope: FilterScope) => ["daily-pnl", scope] as const,
   distribution: (scope: FilterScope) => ["distribution", scope] as const,
   edges: (scope: FilterScope) => ["edges", scope] as const,
+  playbookStats: (scope: FilterScope) => ["playbook-stats", scope] as const,
   trades: (scope: FilterScope) => ["trades", scope] as const,
   trade: (scope: FilterScope, no: number) => ["trade", no, scope] as const,
   note: (tradeKey: string) => ["note", tradeKey] as const,

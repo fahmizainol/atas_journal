@@ -288,6 +288,79 @@ button:disabled {
   color: #fff;
 }
 
+/* ---- badge input (tags / playbooks / confluences) ---- */
+.badge-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 5px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+}
+.badge-input:focus-within {
+  border-color: var(--accent);
+}
+.badge-input-field {
+  flex: 1;
+  min-width: 120px;
+  border: none;
+  background: transparent;
+  padding: 2px 0;
+}
+.badge-input-field:focus {
+  outline: none;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.badge-sm {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+.badge-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.badge:hover .badge-x,
+.badge:focus-within .badge-x {
+  opacity: 1;
+}
+.badge-x:hover {
+  color: #fff;
+  background: var(--red);
+  border-color: var(--red);
+}
+.badge-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .radio-group {
   display: inline-flex;
   border: 1px solid var(--card-border);

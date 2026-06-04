@@ -8,6 +8,8 @@ export interface TradeDetail {
   trade: TradeRow;
   note: string;
   tags: string[];
+  playbooks: string[];
+  confluences: string[];
 }
 
 export function useTrades(scope: FilterScope) {

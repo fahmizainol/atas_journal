@@ -1,30 +1,38 @@
 import { useEffect, useState } from "react";
 import { useSaveNote } from "../hooks/useTrades";
+import { BadgeInput } from "./BadgeInput";
 
-// First WRITE path: save a trade's note + comma-separated tags.
+// First WRITE path: save a trade's note + badge-based tags / playbooks / confluences.
 export function JournalForm({
   tradeKey,
   initialNote,
   initialTags,
+  initialPlaybooks,
+  initialConfluences,
 }: {
   tradeKey: string;
   initialNote: string;
   initialTags: string[];
+  initialPlaybooks: string[];
+  initialConfluences: string[];
 }) {
   const [note, setNote] = useState(initialNote);
-  const [tags, setTags] = useState(initialTags.join(", "));
+  const [tags, setTags] = useState<string[]>(initialTags);
+  const [playbooks, setPlaybooks] = useState<string[]>(initialPlaybooks);
+  const [confluences, setConfluences] = useState<string[]>(initialConfluences);
   const save = useSaveNote(tradeKey);
 
   // Reset the form when switching to a different trade.
   useEffect(() => {
     setNote(initialNote);
-    setTags(initialTags.join(", "));
-  }, [tradeKey, initialNote, initialTags]);
+    setTags(initialTags);
+    setPlaybooks(initialPlaybooks);
+    setConfluences(initialConfluences);
+  }, [tradeKey, initialNote, initialTags, initialPlaybooks, initialConfluences]);
 
   const onSave = (e: React.FormEvent) => {
     e.preventDefault();
-    const tagList = tags.split(",").map((t) => t.trim()).filter(Boolean);
-    save.mutate({ note, tags: tagList });
+    save.mutate({ note, tags, playbooks, confluences });
   };
 
   return (
@@ -35,8 +43,16 @@ export function JournalForm({
         <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={5} />
       </div>
       <div className="field" style={{ marginBottom: 10 }}>
-        <label>Tags (comma-separated)</label>
-        <input value={tags} onChange={(e) => setTags(e.target.value)} />
+        <label>Playbooks</label>
+        <BadgeInput value={playbooks} onChange={setPlaybooks} placeholder="failed auction, trendlines…" />
+      </div>
+      <div className="field" style={{ marginBottom: 10 }}>
+        <label>Confluences</label>
+        <BadgeInput value={confluences} onChange={setConfluences} placeholder="vwap, cvd, vp ON…" />
+      </div>
+      <div className="field" style={{ marginBottom: 10 }}>
+        <label>Tags</label>
+        <BadgeInput value={tags} onChange={setTags} placeholder="add a tag…" />
       </div>
       <button type="submit" className="btn-accent" disabled={save.isPending}>
         {save.isPending ? "Saving…" : "Save"}

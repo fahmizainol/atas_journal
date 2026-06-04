@@ -4,6 +4,7 @@ import { useFilters } from "../hooks/useFilters";
 import { useTrades } from "../hooks/useTrades";
 import { DataTable } from "../components/DataTable";
 import { TradeDetail } from "../components/TradeDetail";
+import { BadgeList } from "../components/BadgeInput";
 import { fmt, fmtDateTime, fmtInt, fmtTime } from "../lib/format";
 import type { TradeRow } from "../lib/types";
 
@@ -33,6 +34,12 @@ const columns: ColumnDef<TradeRow, any>[] = [
       const v = c.getValue() as number;
       return <span className={v >= 0 ? "pos" : "neg"}>{fmt(v)}</span>;
     },
+  },
+  {
+    id: "playbook",
+    header: "Playbook",
+    enableSorting: false,
+    cell: (c) => <BadgeList items={c.row.original.playbooks ?? []} />,
   },
 ];
 
