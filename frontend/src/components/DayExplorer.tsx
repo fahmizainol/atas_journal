@@ -10,7 +10,7 @@ import { DayJournalForm } from "./DayJournalForm";
 import { EquityCurveChart } from "./charts/EquityCurveChart";
 import { PerTradeBarChart } from "./charts/PerTradeBarChart";
 import { TradeDetail } from "./TradeDetail";
-import { VideoReviewProvider, TradeVideoCell } from "./VideoReview";
+import { VideoReviewProvider, VideoPanel, TradeVideoCell } from "./VideoReview";
 import { fmt, fmtDateTime, fmtInt, fmtPct, fmtTime } from "../lib/format";
 import { toneOf } from "../theme";
 import type { Card } from "./KpiCard";
@@ -28,8 +28,6 @@ const dayColumns: ColumnDef<TradeRow, any>[] = [
     accessorFn: (r) => r.duration_s,
     cell: (c) => `${((c.getValue() as number) / 60).toFixed(1)}m`,
   },
-  { accessorKey: "avg_entry", header: "Avg entry", cell: (c) => fmt(c.getValue() as any, false) },
-  { accessorKey: "avg_exit", header: "Avg exit", cell: (c) => fmt(c.getValue() as any, false) },
   {
     accessorKey: "net_pnl",
     header: "Net PnL",
@@ -213,23 +211,38 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
           ))}
         </div>
       )}
-      <VideoReviewProvider sourceFile={data.source_file} scope={scope}>
+      <VideoReviewProvider sourceFile={data.source_file}>
+        {/* Experimental layout: the player sits in the same container as the
+            trades table, side-by-side. The video column is sticky, so the
+            table scrolls beside a pinned player. */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 1fr)",
+            gap: 12,
+            alignItems: "stretch",
+          }}
+        >
+          <VideoPanel sourceFile={data.source_file} scope={scope} />
+          <div>
+            <div className="section-title">Trades this day</div>
+            <div className="section-cap">Click a row to expand its full detail.</div>
+            <div className="panel" style={{ overflowX: "auto" }}>
+              <DataTable
+                data={data.trades}
+                columns={dayColumns}
+                rowKey={(r) => r.trade_no}
+                scrollOnExpand={false}
+                renderExpanded={(r) => <TradeDetail scope={scope} tradeNo={r.trade_no} />}
+              />
+            </div>
+          </div>
+        </div>
         <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
         <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />
         <KpiGrid cards={flowCards} template="repeat(6, 1fr)" />
         <DayJournalForm date={date} />
         <DaySessionChart scope={scope} date={date} sourceFile={data.source_file} />
-        <div className="section-title">Trades this day</div>
-        <div className="section-cap">Click a row to expand its full detail.</div>
-        <div className="panel">
-          <DataTable
-            data={data.trades}
-            columns={dayColumns}
-            rowKey={(r) => r.trade_no}
-            scrollOnExpand={false}
-            renderExpanded={(r) => <TradeDetail scope={scope} tradeNo={r.trade_no} />}
-          />
-        </div>
         <div className="grid-2">
           {data.equity.length > 0 && <EquityCurveChart data={data.equity} />}
           <PerTradeBarChart data={data.per_trade_bars} />

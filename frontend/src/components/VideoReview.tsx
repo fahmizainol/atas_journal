@@ -30,6 +30,10 @@ interface VideoReviewCtx {
   markTrade: (trade: TradeRow) => void;
   bookmarkForTrade: (tradeKey: string) => VideoBookmark | undefined;
   isMarking: boolean;
+  // The one shared <video>. Exposed so the player panel can be composed into
+  // the page layout (e.g. side-by-side with the trades table) rather than
+  // always auto-rendered at the top by the provider.
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
 }
 
 const Ctx = createContext<VideoReviewCtx | null>(null);
@@ -50,11 +54,9 @@ function fmtOffset(s: number): string {
 
 export function VideoReviewProvider({
   sourceFile,
-  scope,
   children,
 }: {
   sourceFile: string;
-  scope: FilterScope;
   children: ReactNode;
 }) {
   const { data } = useVideo(sourceFile);
@@ -94,9 +96,9 @@ export function VideoReviewProvider({
         markTrade,
         bookmarkForTrade,
         isMarking: addBookmark.isPending,
+        videoRef,
       }}
     >
-      <VideoPanel sourceFile={sourceFile} scope={scope} videoRef={videoRef} />
       {children}
     </Ctx.Provider>
   );
@@ -106,16 +108,14 @@ export function VideoReviewProvider({
 // The sticky player panel: link form when empty, else <video> + speed +
 // bookmark list + scrub-bar dots.
 // ---------------------------------------------------------------------------
-function VideoPanel({
+export function VideoPanel({
   sourceFile,
   scope,
-  videoRef,
 }: {
   sourceFile: string;
   scope: FilterScope;
-  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
 }) {
-  const { data, seek } = useContext(Ctx)!;
+  const { data, seek, videoRef } = useContext(Ctx)!;
   const addBookmark = useAddBookmark(sourceFile);
   const deleteVideo = useDeleteVideo(sourceFile);
   const syncTrades = useSyncTrades(sourceFile, scope);
@@ -208,7 +208,10 @@ function VideoPanel({
   };
 
   return (
-    <>
+    // Single wrapper so this whole player is ONE grid item when composed
+    // side-by-side with the trades table (a fragment would leak the sentinel
+    // and panel into separate grid cells).
+    <div>
       <div ref={sentinelRef} aria-hidden style={{ height: 1 }} />
     <div className="panel" style={panelStyle}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -221,9 +224,9 @@ function VideoPanel({
               type="button"
               className={asideHidden ? "" : "active"}
               onClick={() => setAsideHidden((h) => !h)}
-              title="Show / hide the speed + bookmarks side panel"
+              title="Show / hide the speed + bookmarks controls below the video"
             >
-              {asideHidden ? "☰ Panel" : "✕ Panel"}
+              {asideHidden ? "☰ Controls" : "✕ Controls"}
             </button>
           )}
           <button type="button" onClick={() => setCollapsed((c) => !c)} title="Collapse / expand the player">
@@ -259,57 +262,37 @@ function VideoPanel({
       <div style={{ display: collapsed ? "none" : "block" }}>
         {video.exists && video.playable ? (
           <>
-            {/* Two-column body: video on the left, controls + bookmarks on the
-                right. The right column holds speed (HTML5 native controls
-                don't expose a speed selector — only Chrome's right-click
-                menu — so we surface it here), the free-form add button, and
-                the mixed bookmark list. */}
-            {/* Shared height cap for video + side panel: many bookmarks would
-                otherwise stretch the aside (and the whole row) instead of
-                scrolling within it. */}
-            <div
-              style={{
-                display: "flex",
-                gap: 12,
-                alignItems: "flex-start",
-                marginTop: 6,
-              }}
-            >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <video
-                  ref={videoRef}
-                  src={streamUrl}
-                  controls
-                  preload="metadata"
-                  onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
-                  style={{
-                    width: "100%",
-                    // Full size at the top of the page; auto-shrink once the
-                    // panel is sticky so it doesn't eat the screen while you
-                    // scroll the trades table. Click-to-seek still works in
-                    // compact mode; "Hide" removes it entirely.
-                    maxHeight: stuck ? 450 : "min(82vh, 720px)",
-                    background: "#000",
-                    borderRadius: 6,
-                    display: "block",
-                    objectFit: "contain",
-                  }}
-                />
-              </div>
-              {!asideHidden && (
-              <aside
+            {/* Stacked body: video on top (full width), then the controls +
+                bookmarks below it. The control row holds speed (HTML5 native
+                controls don't expose a speed selector — only Chrome's
+                right-click menu — so we surface it here), the free-form add /
+                auto-sync buttons, and beneath them the mixed bookmark list. */}
+            <div style={{ marginTop: 6 }}>
+              <video
+                ref={videoRef}
+                src={streamUrl}
+                controls
+                preload="metadata"
+                onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
                 style={{
-                  width: stuck ? 240 : 280,
-                  // Cap matches the video's maxHeight so a long bookmark list
-                  // scrolls within the panel rather than stretching the row.
+                  width: "100%",
+                  // Full size at the top of the page; auto-shrink once the
+                  // panel is sticky so it doesn't eat the screen while you
+                  // scroll the trades table. Click-to-seek still works in
+                  // compact mode; "Hide" removes it entirely.
                   maxHeight: stuck ? 450 : "min(82vh, 720px)",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                  minHeight: 0,
+                  background: "#000",
+                  borderRadius: 6,
+                  display: "block",
+                  objectFit: "contain",
                 }}
-              >
-                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              />
+            </div>
+            <ScrubBar bookmarks={bookmarks} duration={duration} onSeek={seek} />
+            {!asideHidden && (
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                {/* Controls in one wrapping row across the full panel width. */}
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <span className="section-cap" style={{ marginRight: 2 }}>Speed</span>
                   {/* .radio-group is the styled selector for .active buttons
                       (matches the attempt-selector pattern in DayExplorer). */}
@@ -325,58 +308,49 @@ function VideoPanel({
                       </button>
                     ))}
                   </div>
-                </div>
-                <button type="button" className="btn-accent" onClick={addFreeForm}>
-                  + Bookmark here
-                </button>
-                {/* Auto-sync: replay runs at 1×, so one hand-marked trade
-                    anchors a bookmark for every other trade by timestamp.
-                    Disabled until an anchor exists and the player knows its
-                    duration. "Clear synced" only shows once synced rows exist. */}
-                <button
-                  type="button"
-                  onClick={runSync}
-                  disabled={!canSync}
-                  title={
-                    hasAnchor
-                      ? "Place a bookmark for every trade, inferred from the marked one"
-                      : "Mark a trade on the video first (that's the sync anchor)"
-                  }
-                >
-                  {syncTrades.isPending ? "Syncing…" : "⤓ Auto-sync trades"}
-                </button>
-                {syncedCount > 0 && (
+                  <button type="button" className="btn-accent" onClick={addFreeForm}>
+                    + Bookmark here
+                  </button>
+                  {/* Auto-sync: replay runs at 1×, so one hand-marked trade
+                      anchors a bookmark for every other trade by timestamp.
+                      Disabled until an anchor exists and the player knows its
+                      duration. "Clear synced" only shows once synced rows exist. */}
                   <button
                     type="button"
-                    className="btn-danger"
-                    onClick={runClearSynced}
-                    disabled={clearSynced.isPending}
-                    title="Remove auto-synced bookmarks (manual marks are kept)"
+                    onClick={runSync}
+                    disabled={!canSync}
+                    title={
+                      hasAnchor
+                        ? "Place a bookmark for every trade, inferred from the marked one"
+                        : "Mark a trade on the video first (that's the sync anchor)"
+                    }
                   >
-                    Clear synced ({syncedCount})
+                    {syncTrades.isPending ? "Syncing…" : "⤓ Auto-sync trades"}
                   </button>
-                )}
-                {syncMsg && (
-                  <div className="section-cap" style={{ margin: 0 }}>
-                    {syncMsg}
-                  </div>
-                )}
-                {/* Bookmark list scrolls within the side panel so a long list
-                    doesn't push the video off-screen. */}
-                <div
-                  style={{
-                    flex: 1,
-                    minHeight: 0,
-                    overflowY: "auto",
-                    paddingRight: 4,
-                  }}
-                >
+                  {syncedCount > 0 && (
+                    <button
+                      type="button"
+                      className="btn-danger"
+                      onClick={runClearSynced}
+                      disabled={clearSynced.isPending}
+                      title="Remove auto-synced bookmarks (manual marks are kept)"
+                    >
+                      Clear synced ({syncedCount})
+                    </button>
+                  )}
+                  {syncMsg && (
+                    <span className="section-cap" style={{ margin: 0 }}>
+                      {syncMsg}
+                    </span>
+                  )}
+                </div>
+                {/* Bookmark list scrolls within a capped height so a long list
+                    doesn't push the trades table / page content far down. */}
+                <div style={{ maxHeight: stuck ? 160 : 260, overflowY: "auto", paddingRight: 4 }}>
                   <BookmarkList sourceFile={sourceFile} bookmarks={bookmarks} onSeek={seek} />
                 </div>
-              </aside>
-              )}
-            </div>
-            <ScrubBar bookmarks={bookmarks} duration={duration} onSeek={seek} />
+              </div>
+            )}
           </>
         ) : (
           // No playable video yet — still surface bookmarks (e.g. after the
@@ -385,7 +359,7 @@ function VideoPanel({
         )}
       </div>
     </div>
-    </>
+    </div>
   );
 }
 
