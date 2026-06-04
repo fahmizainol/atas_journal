@@ -7,8 +7,10 @@ from datetime import date
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from journal import metrics
+from journal import db, metrics
+from journal.recordings import parse_attempt_no
 
+from .. import deps
 from ..scope import Scope, resolve_scope
 from ..serialize import records, sanitize
 from ..summary import summary_extras
@@ -34,22 +36,25 @@ def _to_display_iso(raw: str | None, tz) -> str | None:
 def _attempts_for_day(
     day_all: pd.DataFrame, imported_at: dict, file_mtime: dict, tz
 ) -> list[dict]:
-    """Replay attempts that touched this day, oldest-modified first ("Attempt 1").
+    """Replay attempts that touched this day, oldest-modified first.
 
     Each ATAS export is one attempt; we order by the export's "Date modified"
-    (upload time, then filename, break ties) so the highest number is the latest
-    take (the day's default view). ``file_modified`` is that same modified time
-    (NULL for files imported before we captured it).
+    (upload time, then filename, break ties) so the latest take sorts last (the
+    day's default view). The "Attempt N" label is the number **parsed from the
+    export filename** (first take → 1, ``…-02.xlsx`` → 2), not a positional
+    index — so it stays fixed when a take is deleted and lines up with the
+    ``-NN`` recording the auto-link scanner matches. ``file_modified`` is that
+    same modified time (NULL for files imported before we captured it).
     """
     files = day_all["source_file"].dropna().unique().tolist()
     files.sort(key=lambda s: (file_mtime.get(s) or "", imported_at.get(s, ""), s))
     return [
         {
             "source_file": sf,
-            "label": f"Attempt {i}",
+            "label": f"Attempt {parse_attempt_no(sf)}",
             "file_modified": _to_display_iso(file_mtime.get(sf), tz),
         }
-        for i, sf in enumerate(files, start=1)
+        for sf in files
     ]
 
 
@@ -60,13 +65,23 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
         return {"months": [], "days": []}
 
     # tf is already latest-attempt-per-day, so the cell PnL never blends takes.
-    # Count distinct attempts from the unreduced frame to badge re-done days.
+    # Count distinct attempts from the unreduced frame to badge re-done days,
+    # and collect each day's source files so a day can be badged when *any* of
+    # its attempts has a recording linked.
     attempts_by_day: dict = {}
+    files_by_day: dict = {}
     allf = scope.filtered_all
     if not allf.empty:
         ac = allf.copy()
         ac["date"] = ac["entry_ts_local"].dt.date
         attempts_by_day = ac.groupby("date")["source_file"].nunique().to_dict()
+        files_by_day = (
+            ac.groupby("date")["source_file"].apply(lambda s: set(s.dropna())).to_dict()
+        )
+
+    conn = deps.get_conn()
+    with deps.db_lock():
+        linked = db.linked_video_source_files(conn)
 
     t = tf.copy()
     t["date"] = t["entry_ts_local"].dt.date
@@ -80,6 +95,7 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
             "trades": n,
             "win_rate": float((pnl > 0).sum() / n * 100) if n else 0.0,
             "attempts": int(attempts_by_day.get(d, 1)),
+            "has_video": bool(files_by_day.get(d, set()) & linked),
         })
     months = sorted({(d.year, d.month) for d in t["date"]}, reverse=True)
     month_objs = [{"year": y, "month": m,
