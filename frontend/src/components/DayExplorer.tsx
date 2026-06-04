@@ -213,7 +213,7 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
           ))}
         </div>
       )}
-      <VideoReviewProvider sourceFile={data.source_file}>
+      <VideoReviewProvider sourceFile={data.source_file} scope={scope}>
         <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
         <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />
         <KpiGrid cards={flowCards} template="repeat(6, 1fr)" />
@@ -226,6 +226,7 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
             data={data.trades}
             columns={dayColumns}
             rowKey={(r) => r.trade_no}
+            scrollOnExpand={false}
             renderExpanded={(r) => <TradeDetail scope={scope} tradeNo={r.trade_no} />}
           />
         </div>

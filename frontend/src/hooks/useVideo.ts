@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend, toQuery } from "../lib/api";
-import { qk } from "../lib/queryKeys";
-import type { VideoBookmark, VideoData } from "../lib/types";
+import { qk, scopeParams, type FilterScope } from "../lib/queryKeys";
+import type { SyncResult, VideoBookmark, VideoData } from "../lib/types";
 
 // All video state is keyed by the attempt's source_file (the stable id; the
 // "Attempt N" label is positional and shifts when takes are deleted).
@@ -66,6 +66,34 @@ export function useDeleteBookmark(sourceFile: string) {
   return useMutation({
     mutationFn: (id: number) =>
       apiSend<{ ok: boolean }>("DELETE", `/videos/bookmarks/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+  });
+}
+
+// Auto-place a bookmark for every trade from the manual anchor. Scope params go
+// along so the backend builds the same trade set (view/tz/filters) the day view
+// shows; duration_s comes from the player (the DB value is usually NULL).
+export function useSyncTrades(sourceFile: string, scope: FilterScope) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { duration_s: number }) =>
+      apiSend<SyncResult>(
+        "POST",
+        `/videos/sync?${toQuery({ ...scopeParams(scope), source_file: sourceFile })}`,
+        { duration_s: vars.duration_s },
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+  });
+}
+
+export function useClearSynced(sourceFile: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiSend<{ ok: boolean; deleted: number }>(
+        "DELETE",
+        `/videos/synced?${toQuery({ source_file: sourceFile })}`,
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
   });
 }

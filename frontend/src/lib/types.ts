@@ -125,6 +125,15 @@ export interface VideoBookmark {
   label: string;
   trade_key: string | null; // bound trade; null = free-form bookmark
   created_at: string;
+  origin: "manual" | "synced"; // hand-placed/anchor vs auto-synced from trade ts
+}
+
+export interface SyncResult {
+  created: number;
+  skipped_existing: number;
+  skipped_out_of_range: number;
+  pruned_orphans: number;
+  anchor_trade_key: string;
 }
 
 export interface VideoInfo {

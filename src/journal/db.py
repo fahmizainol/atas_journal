@@ -115,7 +115,8 @@ CREATE TABLE IF NOT EXISTS video_bookmarks (
     offset_s      REAL NOT NULL,      -- seconds into that take's video
     label         TEXT,
     trade_key     TEXT,               -- bound trade (NULL = free-form bookmark)
-    created_at    TEXT
+    created_at    TEXT,
+    origin        TEXT NOT NULL DEFAULT 'manual'  -- 'manual' (hand-placed/anchor) | 'synced' (auto from trade ts)
 );
 
 CREATE INDEX IF NOT EXISTS idx_video_bookmarks_sf ON video_bookmarks(source_file);
@@ -137,6 +138,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
     _migrate_ai_schema(conn)
     _migrate_imported_files(conn)
+    _migrate_bookmark_origin(conn)
 
 
 def _migrate_video_schema(conn: sqlite3.Connection) -> None:
@@ -168,6 +170,20 @@ def _migrate_imported_files(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(imported_files)")}
     if "file_mtime" not in cols:
         conn.execute("ALTER TABLE imported_files ADD COLUMN file_mtime TEXT")
+        conn.commit()
+
+
+def _migrate_bookmark_origin(conn: sqlite3.Connection) -> None:
+    """Add ``origin`` to installs whose video_bookmarks predate auto-sync.
+
+    Existing rows were all hand-placed, so they default to 'manual' — exactly
+    right, since "Clear synced" and orphan-pruning must never touch them.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(video_bookmarks)")}
+    if "origin" not in cols:
+        conn.execute(
+            "ALTER TABLE video_bookmarks ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
+        )
         conn.commit()
 
 
@@ -486,7 +502,7 @@ def delete_attempt_video(conn: sqlite3.Connection, source_file: str) -> None:
 
 def list_bookmarks(conn: sqlite3.Connection, source_file: str) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, source_file, offset_s, label, trade_key, created_at "
+        "SELECT id, source_file, offset_s, label, trade_key, created_at, origin "
         "FROM video_bookmarks WHERE source_file = ? ORDER BY offset_s",
         (source_file,),
     ).fetchall()
@@ -499,15 +515,17 @@ def add_bookmark(
     offset_s: float,
     label: str = "",
     trade_key: str | None = None,
+    origin: str = "manual",
 ) -> dict:
     cur = conn.execute(
-        "INSERT INTO video_bookmarks (source_file, offset_s, label, trade_key, created_at) "
-        "VALUES (?, ?, ?, ?, datetime('now'))",
-        (source_file, offset_s, label, trade_key),
+        "INSERT INTO video_bookmarks "
+        "(source_file, offset_s, label, trade_key, created_at, origin) "
+        "VALUES (?, ?, ?, ?, datetime('now'), ?)",
+        (source_file, offset_s, label, trade_key, origin),
     )
     conn.commit()
     row = conn.execute(
-        "SELECT id, source_file, offset_s, label, trade_key, created_at "
+        "SELECT id, source_file, offset_s, label, trade_key, created_at, origin "
         "FROM video_bookmarks WHERE id = ?",
         (cur.lastrowid,),
     ).fetchone()
@@ -520,7 +538,11 @@ def update_bookmark(
     offset_s: float | None = None,
     label: str | None = None,
 ) -> dict | None:
-    """Patch a bookmark's offset and/or label; unspecified fields are left as-is."""
+    """Patch a bookmark's offset and/or label; unspecified fields are left as-is.
+
+    Any hand edit promotes the row to ``origin='manual'``: once you've nudged a
+    synced marker, it's yours, so "Clear synced" won't wipe your change.
+    """
     sets: list[str] = []
     params: list[object] = []
     if offset_s is not None:
@@ -530,13 +552,14 @@ def update_bookmark(
         sets.append("label = ?")
         params.append(label)
     if sets:
+        sets.append("origin = 'manual'")
         params.append(bookmark_id)
         conn.execute(
             f"UPDATE video_bookmarks SET {', '.join(sets)} WHERE id = ?", params
         )
         conn.commit()
     row = conn.execute(
-        "SELECT id, source_file, offset_s, label, trade_key, created_at "
+        "SELECT id, source_file, offset_s, label, trade_key, created_at, origin "
         "FROM video_bookmarks WHERE id = ?",
         (bookmark_id,),
     ).fetchone()
@@ -546,6 +569,39 @@ def update_bookmark(
 def delete_bookmark(conn: sqlite3.Connection, bookmark_id: int) -> None:
     conn.execute("DELETE FROM video_bookmarks WHERE id = ?", (bookmark_id,))
     conn.commit()
+
+
+def clear_synced_bookmarks(conn: sqlite3.Connection, source_file: str) -> int:
+    """Delete every auto-synced bookmark for an attempt; manual rows survive.
+    Returns the number removed."""
+    cur = conn.execute(
+        "DELETE FROM video_bookmarks WHERE source_file = ? AND origin = 'synced'",
+        (source_file,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def prune_orphan_synced_bookmarks(
+    conn: sqlite3.Connection, source_file: str, valid_trade_keys: list[str]
+) -> int:
+    """Drop synced bookmarks whose trade no longer exists (e.g. after a
+    re-import shifted trade_keys). Manual rows are never pruned. Returns count.
+
+    Synced markers are fully regenerable (just re-sync), so removing stale ones
+    keeps the scrub bar honest with no user action.
+    """
+    keys = list(valid_trade_keys)
+    placeholders = ",".join("?" for _ in keys)
+    # NOT IN () is invalid SQL; with no valid keys, every synced row is orphaned.
+    where_keys = f"AND trade_key NOT IN ({placeholders})" if keys else ""
+    cur = conn.execute(
+        f"DELETE FROM video_bookmarks "
+        f"WHERE source_file = ? AND origin = 'synced' {where_keys}",
+        (source_file, *keys),
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 # --- AI analyzer persistence (keyed per model) ---------------------------

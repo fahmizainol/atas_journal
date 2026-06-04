@@ -8,12 +8,15 @@ import {
 } from "react";
 import {
   useAddBookmark,
+  useClearSynced,
   useDeleteBookmark,
   useDeleteVideo,
   useSaveVideo,
+  useSyncTrades,
   useUpdateBookmark,
   useVideo,
 } from "../hooks/useVideo";
+import type { FilterScope } from "../lib/queryKeys";
 import type { TradeRow, VideoBookmark, VideoData } from "../lib/types";
 
 // ---------------------------------------------------------------------------
@@ -47,9 +50,11 @@ function fmtOffset(s: number): string {
 
 export function VideoReviewProvider({
   sourceFile,
+  scope,
   children,
 }: {
   sourceFile: string;
+  scope: FilterScope;
   children: ReactNode;
 }) {
   const { data } = useVideo(sourceFile);
@@ -91,7 +96,7 @@ export function VideoReviewProvider({
         isMarking: addBookmark.isPending,
       }}
     >
-      <VideoPanel sourceFile={sourceFile} videoRef={videoRef} />
+      <VideoPanel sourceFile={sourceFile} scope={scope} videoRef={videoRef} />
       {children}
     </Ctx.Provider>
   );
@@ -103,15 +108,23 @@ export function VideoReviewProvider({
 // ---------------------------------------------------------------------------
 function VideoPanel({
   sourceFile,
+  scope,
   videoRef,
 }: {
   sourceFile: string;
+  scope: FilterScope;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
 }) {
   const { data, seek } = useContext(Ctx)!;
   const addBookmark = useAddBookmark(sourceFile);
   const deleteVideo = useDeleteVideo(sourceFile);
+  const syncTrades = useSyncTrades(sourceFile, scope);
+  const clearSynced = useClearSynced(sourceFile);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
+  // The speed + bookmarks side panel shows by default; toggle it off to give the
+  // video the full panel width.
+  const [asideHidden, setAsideHidden] = useState(false);
   const [duration, setDuration] = useState(0);
   const [speed, setSpeed] = useState(1);
   // Auto-compact: a 1px sentinel sits where the panel would start. The moment
@@ -135,6 +148,7 @@ function VideoPanel({
   useEffect(() => {
     setDuration(0);
     setSpeed(1);
+    setSyncMsg(null);
   }, [sourceFile]);
 
   if (!data) return null;
@@ -162,6 +176,37 @@ function VideoPanel({
     addBookmark.mutate({ offset_s: el.currentTime, label });
   };
 
+  // Anchor = a hand-marked, trade-bound bookmark. Until one exists (and the
+  // player has reported its duration) there's nothing to sync from.
+  const hasAnchor = data.bookmarks.some((b) => b.trade_key && b.origin === "manual");
+  const syncedCount = data.bookmarks.filter((b) => b.origin === "synced").length;
+  const canSync = hasAnchor && duration > 0 && !syncTrades.isPending;
+
+  const runSync = () => {
+    if (!canSync) return;
+    syncTrades.mutate(
+      { duration_s: duration },
+      {
+        onSuccess: (r) => {
+          const bits = [`Synced ${r.created} trade${r.created === 1 ? "" : "s"}`];
+          if (r.skipped_out_of_range)
+            bits.push(`${r.skipped_out_of_range} outside the recording`);
+          if (r.skipped_existing) bits.push(`${r.skipped_existing} already marked`);
+          setSyncMsg(bits.join(" · "));
+        },
+        onError: () => setSyncMsg("Sync failed — mark a trade and play the video first."),
+      },
+    );
+  };
+
+  const runClearSynced = () => {
+    if (!window.confirm(`Remove ${syncedCount} auto-synced bookmark(s)? Manual marks stay.`))
+      return;
+    clearSynced.mutate(undefined, {
+      onSuccess: (r) => setSyncMsg(`Cleared ${r.deleted} synced bookmark(s).`),
+    });
+  };
+
   return (
     <>
       <div ref={sentinelRef} aria-hidden style={{ height: 1 }} />
@@ -171,6 +216,16 @@ function VideoPanel({
           Recording{stuck ? " · compact" : ""}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {video.exists && video.playable && !collapsed && (
+            <button
+              type="button"
+              className={asideHidden ? "" : "active"}
+              onClick={() => setAsideHidden((h) => !h)}
+              title="Show / hide the speed + bookmarks side panel"
+            >
+              {asideHidden ? "☰ Panel" : "✕ Panel"}
+            </button>
+          )}
           <button type="button" onClick={() => setCollapsed((c) => !c)} title="Collapse / expand the player">
             {collapsed ? "▸ Show" : "▾ Hide"}
           </button>
@@ -241,6 +296,7 @@ function VideoPanel({
                   }}
                 />
               </div>
+              {!asideHidden && (
               <aside
                 style={{
                   width: stuck ? 240 : 280,
@@ -273,6 +329,38 @@ function VideoPanel({
                 <button type="button" className="btn-accent" onClick={addFreeForm}>
                   + Bookmark here
                 </button>
+                {/* Auto-sync: replay runs at 1×, so one hand-marked trade
+                    anchors a bookmark for every other trade by timestamp.
+                    Disabled until an anchor exists and the player knows its
+                    duration. "Clear synced" only shows once synced rows exist. */}
+                <button
+                  type="button"
+                  onClick={runSync}
+                  disabled={!canSync}
+                  title={
+                    hasAnchor
+                      ? "Place a bookmark for every trade, inferred from the marked one"
+                      : "Mark a trade on the video first (that's the sync anchor)"
+                  }
+                >
+                  {syncTrades.isPending ? "Syncing…" : "⤓ Auto-sync trades"}
+                </button>
+                {syncedCount > 0 && (
+                  <button
+                    type="button"
+                    className="btn-danger"
+                    onClick={runClearSynced}
+                    disabled={clearSynced.isPending}
+                    title="Remove auto-synced bookmarks (manual marks are kept)"
+                  >
+                    Clear synced ({syncedCount})
+                  </button>
+                )}
+                {syncMsg && (
+                  <div className="section-cap" style={{ margin: 0 }}>
+                    {syncMsg}
+                  </div>
+                )}
                 {/* Bookmark list scrolls within the side panel so a long list
                     doesn't push the video off-screen. */}
                 <div
@@ -286,6 +374,7 @@ function VideoPanel({
                   <BookmarkList sourceFile={sourceFile} bookmarks={bookmarks} onSeek={seek} />
                 </div>
               </aside>
+              )}
             </div>
             <ScrubBar bookmarks={bookmarks} duration={duration} onSeek={seek} />
           </>
@@ -328,27 +417,37 @@ function ScrubBar({
         borderTop: "1px solid var(--grid)",
       }}
     >
-      {bookmarks.map((b) => (
-        <button
-          key={b.id}
-          type="button"
-          onClick={() => onSeek(b.offset_s)}
-          title={`${b.label || "bookmark"} · ${fmtOffset(b.offset_s)}`}
-          style={{
-            position: "absolute",
-            left: `${Math.min(100, (b.offset_s / duration) * 100)}%`,
-            top: 2,
-            transform: "translateX(-50%)",
-            width: 10,
-            height: 10,
-            padding: 0,
-            borderRadius: "50%",
-            border: "1px solid var(--bg)",
-            cursor: "pointer",
-            background: b.trade_key ? "var(--accent)" : "var(--muted)",
-          }}
-        />
-      ))}
+      {bookmarks.map((b) => {
+        // Three states: solid accent = hand-marked trade, hollow accent =
+        // auto-synced trade, muted = free-form bookmark.
+        const synced = b.origin === "synced";
+        const tradeBound = !!b.trade_key;
+        return (
+          <button
+            key={b.id}
+            type="button"
+            onClick={() => onSeek(b.offset_s)}
+            title={`${b.label || "bookmark"}${synced ? " (synced)" : ""} · ${fmtOffset(b.offset_s)}`}
+            style={{
+              position: "absolute",
+              left: `${Math.min(100, (b.offset_s / duration) * 100)}%`,
+              top: 2,
+              transform: "translateX(-50%)",
+              width: 10,
+              height: 10,
+              padding: 0,
+              borderRadius: "50%",
+              border: synced ? "1.5px solid var(--accent)" : "1px solid var(--bg)",
+              cursor: "pointer",
+              background: synced
+                ? "var(--card)"
+                : tradeBound
+                  ? "var(--accent)"
+                  : "var(--muted)",
+            }}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -466,6 +565,11 @@ function BookmarkRow({
             whiteSpace: "nowrap",
           }}
         >
+          {/* ↻ flags an auto-synced marker — distinguishes it from a
+              hand-placed trade mark, mirroring the hollow scrub-bar dot. */}
+          {b.origin === "synced" && (
+            <span title="auto-synced" style={{ opacity: 0.6, marginRight: 3 }}>↻</span>
+          )}
           {b.label || (b.trade_key ? "(trade)" : "(bookmark)")}
         </span>
       )}

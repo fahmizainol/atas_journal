@@ -21,13 +21,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from journal import db
 
 from .. import deps
+from ..scope import Scope, resolve_scope
 
 router = APIRouter()
 
@@ -67,6 +68,17 @@ class BookmarkIn(BaseModel):
 class BookmarkPatch(BaseModel):
     offset_s: float | None = None
     label: str | None = None
+
+
+class SyncIn(BaseModel):
+    # The player knows the real runtime from <video> metadata; the DB's
+    # duration_s is often NULL (the link form never persists it), so the
+    # frontend passes it here. Falls back to the stored value if omitted.
+    duration_s: float | None = None
+
+
+def _money(pnl: float) -> str:
+    return f"{'+' if pnl >= 0 else '-'}${abs(pnl):,.0f}"
 
 
 @router.get("/videos")
@@ -150,3 +162,93 @@ def remove_bookmark(bookmark_id: int) -> dict:
     with deps.db_lock():
         db.delete_bookmark(conn, bookmark_id)
     return {"ok": True}
+
+
+@router.post("/videos/sync")
+def sync_trades(
+    body: SyncIn,
+    source_file: str = Query(...),
+    scope: Scope = Depends(resolve_scope),
+) -> dict:
+    """Auto-place a bookmark for every trade of this attempt from one anchor.
+
+    Replay runs at a steady 1×, so video time maps linearly to trade
+    timestamps: ``offset = anchor_offset + (entry_ts - anchor_entry_ts)``. The
+    anchor is the earliest *manually* marked trade on the attempt. Trades that
+    already have any bookmark are skipped (idempotent — re-running fills only
+    gaps and never disturbs manual marks/nudges); trades whose computed offset
+    falls outside ``[0, duration]`` are skipped (no seekable marker for them).
+    """
+    df = scope.filtered_all
+    day_df = (
+        df[df["source_file"] == source_file] if not df.empty else df
+    )
+    if day_df is None or day_df.empty:
+        raise HTTPException(404, "No trades for this attempt in scope")
+
+    # entry_ts_utc by trade_key — the canonical instant for the offset math.
+    entry_by_key = dict(zip(day_df["trade_key"], day_df["entry_ts_utc"]))
+    valid_keys = list(entry_by_key.keys())
+
+    conn = deps.get_conn()
+    with deps.db_lock():
+        # Re-import can shift trade_keys, orphaning old synced rows; drop them
+        # before filling so a re-synced day ends clean.
+        pruned = db.prune_orphan_synced_bookmarks(conn, source_file, valid_keys)
+        existing = db.list_bookmarks(conn, source_file)
+
+        # Anchor = earliest (by entry time) manual, trade-bound bookmark whose
+        # trade still exists on this attempt.
+        anchors = [
+            b for b in existing
+            if b["origin"] == "manual"
+            and b["trade_key"] in entry_by_key
+        ]
+        if not anchors:
+            raise HTTPException(
+                400, "Mark a trade on the video first — that's the sync anchor."
+            )
+        anchor = min(anchors, key=lambda b: entry_by_key[b["trade_key"]])
+        anchor_entry = entry_by_key[anchor["trade_key"]]
+        anchor_offset = anchor["offset_s"]
+
+        duration = body.duration_s
+        if duration is None:
+            video = db.get_attempt_video(conn, source_file)
+            duration = video["duration_s"] if video else None
+        if not duration or duration <= 0:
+            raise HTTPException(
+                400, "Video duration unknown — play the recording, then sync."
+            )
+
+        already = {b["trade_key"] for b in existing if b["trade_key"]}
+        created = 0
+        out_of_range = 0
+        for _, t in day_df.iterrows():
+            key = t["trade_key"]
+            if key in already:
+                continue  # fill gaps only; never touch an existing bookmark
+            offset = anchor_offset + (t["entry_ts_utc"] - anchor_entry).total_seconds()
+            if offset < 0 or offset > duration:
+                out_of_range += 1
+                continue
+            label = f"#{int(t['trade_no'])} {t['direction']} {_money(float(t['net_pnl']))}"
+            db.add_bookmark(conn, source_file, offset, label, key, origin="synced")
+            created += 1
+
+    return {
+        "created": created,
+        "skipped_existing": len(already),
+        "skipped_out_of_range": out_of_range,
+        "pruned_orphans": pruned,
+        "anchor_trade_key": anchor["trade_key"],
+    }
+
+
+@router.delete("/videos/synced")
+def clear_synced(source_file: str = Query(...)) -> dict:
+    """Remove every auto-synced bookmark for the attempt (manual marks stay)."""
+    conn = deps.get_conn()
+    with deps.db_lock():
+        deleted = db.clear_synced_bookmarks(conn, source_file)
+    return {"ok": True, "deleted": deleted}
