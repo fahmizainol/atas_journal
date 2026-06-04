@@ -132,10 +132,31 @@ def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    _migrate_video_schema(conn)  # must run before SCHEMA recreates the tables
     conn.executescript(SCHEMA)
     conn.commit()
     _migrate_ai_schema(conn)
     _migrate_imported_files(conn)
+
+
+def _migrate_video_schema(conn: sqlite3.Connection) -> None:
+    """Drop pre-rekey video tables so SCHEMA can recreate them keyed by
+    ``source_file`` instead of ``day``.
+
+    An early build keyed videos/bookmarks by ``day``; we switched to the stable
+    ``source_file`` (the attempt id). ``CREATE TABLE IF NOT EXISTS`` would skip
+    the old tables, then the new ``source_file`` index would fail against the
+    old ``day`` columns. These tables only ever held throwaway pre-release data,
+    so dropping is safe — relink the recording to recreate.
+    """
+    conn.execute("DROP TABLE IF EXISTS day_videos")  # renamed to attempt_videos
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='video_bookmarks'"
+    ).fetchone()
+    if row is not None and "source_file" not in (row[0] or ""):
+        conn.execute("DROP INDEX IF EXISTS idx_video_bookmarks_day")
+        conn.execute("DROP TABLE IF EXISTS video_bookmarks")
+    conn.commit()
 
 
 def _migrate_imported_files(conn: sqlite3.Connection) -> None:
