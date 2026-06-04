@@ -221,7 +221,7 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 1fr)",
+            gridTemplateColumns: "minmax(0, 7fr) minmax(0, 3fr)",
             gap: 12,
             alignItems: "stretch",
           }}
@@ -230,7 +230,7 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
           <div>
             <div className="section-title">Trades this day</div>
             <div className="section-cap">Click a row to expand its full detail.</div>
-            <div className="panel" style={{ overflowX: "auto" }}>
+            <div className="panel compact-table" style={{ overflowX: "auto" }}>
               <DataTable
                 data={data.trades}
                 columns={dayColumns}

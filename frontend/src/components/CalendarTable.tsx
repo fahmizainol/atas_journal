@@ -67,14 +67,16 @@ export function CalendarTable({
   return (
     <div className="panel">
       <div className="section-cap">Click a row to explore the day's trades.</div>
-      <DataTable
-        data={days}
-        columns={columns}
-        rowKey={(r) => r.date}
-        selectedKey={selected}
-        onRowClick={(r) => navigate({ pathname: `/calendar/${r.date}`, search })}
-        initialSort={[{ id: "file_modified", desc: true }]}
-      />
+      <div className="table-scroll" style={{ height: 480, overflow: "auto" }}>
+        <DataTable
+          data={days}
+          columns={columns}
+          rowKey={(r) => r.date}
+          selectedKey={selected}
+          onRowClick={(r) => navigate({ pathname: `/calendar/${r.date}`, search })}
+          initialSort={[{ id: "file_modified", desc: true }]}
+        />
+      </div>
     </div>
   );
 }

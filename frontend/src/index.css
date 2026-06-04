@@ -318,6 +318,22 @@ button:disabled {
   border-bottom: 1px solid var(--card-border);
   white-space: nowrap;
 }
+/* Tight variant for narrow side-by-side layouts (e.g. day view next to video). */
+.compact-table .data-table {
+  font-size: 12px;
+}
+.compact-table .data-table th,
+.compact-table .data-table td {
+  padding: 5px 6px;
+}
+.compact-table .data-table th {
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+.compact-table .data-table td.expand-chevron {
+  width: 18px;
+  padding-left: 4px;
+}
 .data-table th:first-child,
 .data-table td:first-child {
   text-align: left;
@@ -330,6 +346,13 @@ button:disabled {
   letter-spacing: 0.05em;
   cursor: pointer;
   user-select: none;
+}
+/* Header stays pinned when the table lives in a fixed-height scroll area. */
+.table-scroll .data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card);
 }
 .data-table tbody tr {
   cursor: pointer;
