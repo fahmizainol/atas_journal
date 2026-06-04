@@ -35,6 +35,7 @@ export function useSaveNote(tradeKey: string) {
       qc.invalidateQueries({ queryKey: ["note"] });
       qc.invalidateQueries({ queryKey: ["trade"] });
       qc.invalidateQueries({ queryKey: ["trades"] });
+      qc.invalidateQueries({ queryKey: ["day"] });
       qc.invalidateQueries({ queryKey: ["filters"] });
     },
   });

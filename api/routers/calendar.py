@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pandas as pd
@@ -148,6 +149,18 @@ def day_detail(
     cols = ["trade_no", "trade_key", "instrument", "direction", "max_contracts",
             "entry_ts_local", "exit_ts_local", "duration_s",
             "avg_entry", "avg_exit", "net_pnl"]
+    trade_rows = records(day_df, cols)
+    # Attach each trade's playbook badges so the day-view table can render them
+    # (same one-scan-mapped-by-key approach as GET /trades).
+    conn = deps.get_conn()
+    with deps.db_lock():
+        notes_df = db.all_notes(conn)
+    pb_map = {
+        r["trade_key"]: json.loads(r["playbooks_json"] or "[]")
+        for _, r in notes_df.iterrows()
+    } if not notes_df.empty else {}
+    for r in trade_rows:
+        r["playbooks"] = pb_map.get(r["trade_key"], [])
     file_modified = next(
         (a["file_modified"] for a in attempts if a["source_file"] == selected), None
     )
@@ -156,7 +169,7 @@ def day_detail(
         "extras": sanitize(summary_extras(day_df)),
         "equity": records(equity, ["ts", "trade_no", "pnl", "equity", "drawdown"]),
         "per_trade_bars": per_trade_bars,
-        "trades": records(day_df, cols),
+        "trades": trade_rows,
         "instrument": instrument,
         "attempts": attempts,
         "source_file": selected,
