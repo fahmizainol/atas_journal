@@ -13,6 +13,8 @@ export interface Filters {
   date_min: string | null;
   date_max: string | null;
   tags: string[];
+  playbooks: string[];
+  confluences: string[];
 }
 
 import type { Num } from "./format";
