@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useTradeDetail } from "../hooks/useTrades";
 import { useExcursion } from "../hooks/useCharts";
 import type { FilterScope } from "../lib/queryKeys";
@@ -11,7 +12,11 @@ import type { Card } from "./KpiCard";
 
 export function TradeDetail({ scope, tradeNo }: { scope: FilterScope; tradeNo: number }) {
   const { data, isLoading } = useTradeDetail(scope, tradeNo);
-  const { data: exc } = useExcursion(scope, tradeNo);
+  // Heavy section (chart + excursion-backed AI) is hidden by default and only
+  // fetched when revealed — keeps expanding a trade row instant. Excursion
+  // loads Databento bars, which is the slow part on a cold cache.
+  const [showChart, setShowChart] = useState(false);
+  const { data: exc } = useExcursion(scope, tradeNo, showChart);
   if (isLoading || !data) return <div className="notice">Loading trade…</div>;
 
   const t = data.trade;
@@ -33,14 +38,32 @@ export function TradeDetail({ scope, tradeNo }: { scope: FilterScope; tradeNo: n
       <div className="section-title">
         Trade #{t.trade_no} — {fmtDateTime(t.entry_ts_local)}
       </div>
-      <KpiGrid cards={row1} template="repeat(5, 1fr)" />
-      <KpiGrid cards={row2} template="repeat(3, 1fr)" />
-      <ReconstructionChart scope={scope} tradeNo={tradeNo} />
-      <TradeAnalysis
-        tradeKey={t.trade_key}
-        scope={scope}
-        hasExcursion={!!exc?.available && !!exc?.has_data}
-      />
+      <KpiGrid cards={row1} template="repeat(5, 1fr)" className="kpi-compact" />
+      <KpiGrid cards={row2} template="repeat(3, 1fr)" className="kpi-compact" />
+      <div style={{ margin: "10px 0 4px" }}>
+        <button
+          type="button"
+          className={showChart ? "active" : ""}
+          onClick={() => setShowChart((s) => !s)}
+          title="Show / hide the reconstruction chart + AI analysis (hidden = not loaded, keeps expand instant)"
+        >
+          {showChart ? "▾ Hide chart & analysis" : "▸ Show chart & analysis"}
+        </button>
+      </div>
+      {showChart && (
+        <>
+          <ReconstructionChart scope={scope} tradeNo={tradeNo} />
+          {/* Render once excursion has resolved so the AI panel doesn't flash
+              its "needs excursion data" notice while bars are still loading. */}
+          {exc !== undefined && (
+            <TradeAnalysis
+              tradeKey={t.trade_key}
+              scope={scope}
+              hasExcursion={!!exc?.available && !!exc?.has_data}
+            />
+          )}
+        </>
+      )}
       <JournalForm
         tradeKey={t.trade_key}
         initialNote={data.note}

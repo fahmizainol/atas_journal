@@ -13,11 +13,17 @@ export function useTradeChart(scope: FilterScope, tradeNo: number | null, tf: st
   });
 }
 
-export function useExcursion(scope: FilterScope, tradeNo: number | null) {
+export function useExcursion(
+  scope: FilterScope,
+  tradeNo: number | null,
+  enabled = true,
+) {
   return useQuery({
     queryKey: qk.excursion(tradeNo ?? -1),
     queryFn: () => apiGet<Excursion>(`/trades/${tradeNo}/excursion`, scopeParams(scope)),
-    enabled: tradeNo != null,
+    // Excursion loads Databento bars (slow on a cold cache), so callers can
+    // defer it — e.g. only fetch once the chart/analysis is revealed.
+    enabled: enabled && tradeNo != null,
   });
 }
 
