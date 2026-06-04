@@ -233,7 +233,7 @@ function VideoPanel({
                     // panel is sticky so it doesn't eat the screen while you
                     // scroll the trades table. Click-to-seek still works in
                     // compact mode; "Hide" removes it entirely.
-                    maxHeight: stuck ? 300 : "min(55vh, 480px)",
+                    maxHeight: stuck ? 450 : "min(82vh, 720px)",
                     background: "#000",
                     borderRadius: 6,
                     display: "block",
@@ -246,7 +246,7 @@ function VideoPanel({
                   width: stuck ? 240 : 280,
                   // Cap matches the video's maxHeight so a long bookmark list
                   // scrolls within the panel rather than stretching the row.
-                  maxHeight: stuck ? 300 : "min(55vh, 480px)",
+                  maxHeight: stuck ? 450 : "min(82vh, 720px)",
                   display: "flex",
                   flexDirection: "column",
                   gap: 8,
@@ -255,16 +255,20 @@ function VideoPanel({
               >
                 <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                   <span className="section-cap" style={{ marginRight: 2 }}>Speed</span>
-                  {[1, 1.5, 2].map((r) => (
-                    <button
-                      key={r}
-                      type="button"
-                      className={speed === r ? "active" : ""}
-                      onClick={() => setRate(r)}
-                    >
-                      {r}×
-                    </button>
-                  ))}
+                  {/* .radio-group is the styled selector for .active buttons
+                      (matches the attempt-selector pattern in DayExplorer). */}
+                  <div className="radio-group">
+                    {[1, 1.5, 2].map((r) => (
+                      <button
+                        key={r}
+                        type="button"
+                        className={speed === r ? "active" : ""}
+                        onClick={() => setRate(r)}
+                      >
+                        {r}×
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <button type="button" className="btn-accent" onClick={addFreeForm}>
                   + Bookmark here
