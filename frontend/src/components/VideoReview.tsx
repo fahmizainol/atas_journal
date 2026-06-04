@@ -202,46 +202,88 @@ function VideoPanel({
       )}
 
       <div style={{ display: collapsed ? "none" : "block" }}>
-        {video.exists && video.playable && (
+        {video.exists && video.playable ? (
           <>
-            <video
-              ref={videoRef}
-              src={streamUrl}
-              controls
-              preload="metadata"
-              onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+            {/* Two-column body: video on the left, controls + bookmarks on the
+                right. The right column holds speed (HTML5 native controls
+                don't expose a speed selector — only Chrome's right-click
+                menu — so we surface it here), the free-form add button, and
+                the mixed bookmark list. */}
+            <div
               style={{
-                width: stuck ? "auto" : "100%",
-                // Full size at the top of the page; auto-shrink to a thumbnail
-                // once the panel is sticky so it doesn't eat the screen while
-                // you scroll the trades table. Click-to-seek still works on
-                // the thumbnail; "Show" expands manually if you prefer.
-                maxHeight: stuck ? 180 : "min(50vh, 420px)",
-                background: "#000",
-                borderRadius: 6,
-                display: "block",
+                display: "flex",
+                gap: 12,
+                alignItems: "stretch",
+                marginTop: 6,
               }}
-            />
-            <ScrubBar bookmarks={bookmarks} duration={duration} onSeek={seek} />
-            <div style={{ display: "flex", gap: 6, alignItems: "center", margin: "8px 0", flexWrap: "wrap" }}>
-              <span className="section-cap" style={{ marginRight: 4 }}>Speed</span>
-              {[1, 1.5, 2].map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  className={speed === r ? "active" : ""}
-                  onClick={() => setRate(r)}
-                >
-                  {r}×
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <video
+                  ref={videoRef}
+                  src={streamUrl}
+                  controls
+                  preload="metadata"
+                  onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+                  style={{
+                    width: "100%",
+                    // Full size at the top of the page; auto-shrink once the
+                    // panel is sticky so it doesn't eat the screen while you
+                    // scroll the trades table. Click-to-seek still works in
+                    // compact mode; "Hide" removes it entirely.
+                    maxHeight: stuck ? 220 : "min(55vh, 480px)",
+                    background: "#000",
+                    borderRadius: 6,
+                    display: "block",
+                    objectFit: "contain",
+                  }}
+                />
+              </div>
+              <aside
+                style={{
+                  width: stuck ? 220 : 280,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                  minHeight: 0,
+                }}
+              >
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <span className="section-cap" style={{ marginRight: 2 }}>Speed</span>
+                  {[1, 1.5, 2].map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      className={speed === r ? "active" : ""}
+                      onClick={() => setRate(r)}
+                    >
+                      {r}×
+                    </button>
+                  ))}
+                </div>
+                <button type="button" className="btn-accent" onClick={addFreeForm}>
+                  + Bookmark here
                 </button>
-              ))}
-              <button type="button" className="btn-accent" style={{ marginLeft: "auto" }} onClick={addFreeForm}>
-                + Bookmark here
-              </button>
+                {/* Bookmark list scrolls within the side panel so a long list
+                    doesn't push the video off-screen. */}
+                <div
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    overflowY: "auto",
+                    paddingRight: 4,
+                  }}
+                >
+                  <BookmarkList sourceFile={sourceFile} bookmarks={bookmarks} onSeek={seek} />
+                </div>
+              </aside>
             </div>
+            <ScrubBar bookmarks={bookmarks} duration={duration} onSeek={seek} />
           </>
+        ) : (
+          // No playable video yet — still surface bookmarks (e.g. after the
+          // file was moved); they're keyed by source_file so they survive.
+          <BookmarkList sourceFile={sourceFile} bookmarks={bookmarks} onSeek={seek} />
         )}
-        <BookmarkList sourceFile={sourceFile} bookmarks={bookmarks} onSeek={seek} />
       </div>
     </div>
     </>
