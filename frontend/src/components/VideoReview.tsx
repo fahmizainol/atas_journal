@@ -209,11 +209,14 @@ function VideoPanel({
                 don't expose a speed selector — only Chrome's right-click
                 menu — so we surface it here), the free-form add button, and
                 the mixed bookmark list. */}
+            {/* Shared height cap for video + side panel: many bookmarks would
+                otherwise stretch the aside (and the whole row) instead of
+                scrolling within it. */}
             <div
               style={{
                 display: "flex",
                 gap: 12,
-                alignItems: "stretch",
+                alignItems: "flex-start",
                 marginTop: 6,
               }}
             >
@@ -230,7 +233,7 @@ function VideoPanel({
                     // panel is sticky so it doesn't eat the screen while you
                     // scroll the trades table. Click-to-seek still works in
                     // compact mode; "Hide" removes it entirely.
-                    maxHeight: stuck ? 220 : "min(55vh, 480px)",
+                    maxHeight: stuck ? 300 : "min(55vh, 480px)",
                     background: "#000",
                     borderRadius: 6,
                     display: "block",
@@ -240,7 +243,10 @@ function VideoPanel({
               </div>
               <aside
                 style={{
-                  width: stuck ? 220 : 280,
+                  width: stuck ? 240 : 280,
+                  // Cap matches the video's maxHeight so a long bookmark list
+                  // scrolls within the panel rather than stretching the row.
+                  maxHeight: stuck ? 300 : "min(55vh, 480px)",
                   display: "flex",
                   flexDirection: "column",
                   gap: 8,
