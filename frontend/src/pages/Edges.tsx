@@ -61,7 +61,7 @@ export function Edges() {
         </div>
         <div>
           <EdgeTable title={`By hour (${tzLabel})`} data={data.by_hour_kl} />
-          <EdgeTable title="By hour (US Eastern / session)" data={data.by_hour_et} />
+          <EdgeTable title="By session block (US Eastern)" data={data.by_hour_et} />
         </div>
       </div>
     </div>

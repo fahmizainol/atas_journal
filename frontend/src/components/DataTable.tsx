@@ -16,8 +16,10 @@ interface Props<T> {
   onRowClick?: (row: T) => void;
   initialSort?: SortingState;
   // When provided, rows become collapsible accordions: clicking a row toggles
-  // a full-width detail panel rendered beneath it (single-expand, auto-scroll).
+  // a full-width detail panel rendered beneath it (single-expand).
   renderExpanded?: (row: T) => ReactNode;
+  // When true (default), expanding a row scrolls it to the top of the viewport.
+  scrollOnExpand?: boolean;
   // Controlled open-row key. Omit to let the table own the state internally.
   expandedKey?: string | number | null;
   onExpandedChange?: (key: string | number | null) => void;
@@ -32,6 +34,7 @@ export function DataTable<T>({
   onRowClick,
   initialSort = [],
   renderExpanded,
+  scrollOnExpand = true,
   expandedKey,
   onExpandedChange,
 }: Props<T>) {
@@ -52,10 +55,10 @@ export function DataTable<T>({
 
   const expandedRowRef = useRef<HTMLTableRowElement | null>(null);
   useEffect(() => {
-    if (currentExpanded != null && expandedRowRef.current) {
+    if (scrollOnExpand && currentExpanded != null && expandedRowRef.current) {
       expandedRowRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
     }
-  }, [currentExpanded]);
+  }, [currentExpanded, scrollOnExpand]);
 
   const toggle = (key: string | number) => {
     const next = key === currentExpanded ? null : key;
