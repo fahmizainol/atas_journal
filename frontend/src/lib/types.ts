@@ -118,6 +118,27 @@ export interface Note {
   tags: string[];
 }
 
+export interface VideoBookmark {
+  id: number;
+  source_file: string;
+  offset_s: number;
+  label: string;
+  trade_key: string | null; // bound trade; null = free-form bookmark
+  created_at: string;
+}
+
+export interface VideoInfo {
+  path: string;
+  duration_s: number | null;
+  exists: boolean; // file present at the linked path
+  playable: boolean; // extension a browser <video> can play
+}
+
+export interface VideoData {
+  video: VideoInfo | null; // null = no recording linked to this attempt
+  bookmarks: VideoBookmark[];
+}
+
 export interface Reconcile {
   logical_net_pnl: number;
   atas_journal_pnl: number;

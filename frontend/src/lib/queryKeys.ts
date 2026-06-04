@@ -50,4 +50,5 @@ export const qk = {
   aiTrade: (tradeKey: string) => ["ai-trade", tradeKey] as const,
   aiPeriod: (scope: FilterScope) => ["ai-period", scope] as const,
   settings: (key: string) => ["settings", key] as const,
+  video: (sourceFile: string) => ["video", sourceFile] as const,
 };
