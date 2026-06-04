@@ -4,6 +4,7 @@ import { useFilters } from "../hooks/useFilters";
 import { useCalendar } from "../hooks/useCalendar";
 import { CalendarHeatmap } from "../components/charts/CalendarHeatmap";
 import { DayExplorer } from "../components/DayExplorer";
+import { RecordingsCard } from "../components/RecordingsCard";
 
 export function Calendar() {
   const { scope } = useFilters();
@@ -31,6 +32,7 @@ export function Calendar() {
 
   return (
     <div>
+      <RecordingsCard scope={scope} />
       <div className="section-title">Monthly PnL calendar</div>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 8, maxWidth: 360, marginBottom: 12 }}>
         <button

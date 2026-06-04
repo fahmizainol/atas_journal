@@ -17,3 +17,20 @@ export function useSaveProfile() {
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.settings("trading_profile") }),
   });
 }
+
+// The single folder the auto-link scanner searches for recordings.
+export function useRecordingsFolder() {
+  return useQuery({
+    queryKey: qk.settings("recordings_folder"),
+    queryFn: () => apiGet<{ folder: string }>("/settings/recordings_folder"),
+  });
+}
+
+export function useSaveRecordingsFolder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (folder: string) =>
+      apiSend<{ ok: boolean }>("PUT", "/settings/recordings_folder", { folder }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.settings("recordings_folder") }),
+  });
+}

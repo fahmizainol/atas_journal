@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend, toQuery } from "../lib/api";
 import { qk, scopeParams, type FilterScope } from "../lib/queryKeys";
-import type { SyncResult, VideoBookmark, VideoData } from "../lib/types";
+import type { ScanResult, SyncResult, VideoBookmark, VideoData } from "../lib/types";
 
 // All video state is keyed by the attempt's source_file (the stable id; the
 // "Attempt N" label is positional and shifts when takes are deleted).
@@ -83,6 +83,22 @@ export function useSyncTrades(sourceFile: string, scope: FilterScope) {
         { duration_s: vars.duration_s },
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+  });
+}
+
+// Batch auto-link: scan the configured folder and link every attempt whose
+// expected recording is found. Scope params go along so the backend builds the
+// same attempt set the calendar shows. On success, refresh the calendar (video
+// badges) and any open day's video panel.
+export function useScanRecordings(scope: FilterScope) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiSend<ScanResult>("POST", `/videos/scan?${toQuery(scopeParams(scope))}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["calendar"] });
+      qc.invalidateQueries({ queryKey: ["video"] });
+    },
   });
 }
 

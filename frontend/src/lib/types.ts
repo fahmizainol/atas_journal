@@ -143,6 +143,18 @@ export interface VideoInfo {
   playable: boolean; // extension a browser <video> can play
 }
 
+export interface ScanLinked {
+  source_file: string;
+  day: string; // ISO date of the replayed session
+  attempt_no: number; // parsed from the export filename
+  filename: string; // the recording that matched, e.g. 13-JUN-2026-01.mp4
+}
+
+export interface ScanResult {
+  linked: ScanLinked[]; // attempts newly auto-linked this scan
+  count: number;
+}
+
 export interface VideoData {
   video: VideoInfo | null; // null = no recording linked to this attempt
   bookmarks: VideoBookmark[];
