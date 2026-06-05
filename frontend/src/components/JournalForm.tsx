@@ -48,7 +48,7 @@ export function JournalForm({
         <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={5} />
       </div>
       <div className="field" style={{ marginBottom: 10 }}>
-        <label>Playbooks</label>
+        <label>Setups</label>
         <BadgeInput
           value={playbooks}
           onChange={setPlaybooks}

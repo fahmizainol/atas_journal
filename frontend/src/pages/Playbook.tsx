@@ -86,14 +86,14 @@ export function Playbook() {
 
   return (
     <div>
-      <div className="section-title">Playbook</div>
+      <div className="section-title">Setups</div>
       <div className="section-cap">
-        Per-playbook performance over the current filter scope. A trade can carry several
-        playbooks, so it counts toward each — totals across playbooks may exceed your trade count.
+        Per-setup performance over the current filter scope. A trade can carry several
+        setups, so it counts toward each — totals across setups may exceed your trade count.
       </div>
       {playbooks.length === 0 ? (
         <div className="notice">
-          No playbooks tagged yet. Add playbook badges to trades from their detail panel.
+          No setups tagged yet. Add setup badges to trades from their detail panel.
         </div>
       ) : (
         playbooks.map((p) => <PlaybookCard key={p.name} p={p} />)

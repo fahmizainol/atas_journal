@@ -21,12 +21,12 @@ function Delta({ v, kind }: { v: Num; kind: "pp" | "money" }) {
 // Playbook breakdown nested in each confluence card (inverse of Playbook's table).
 function PlaybookTable({ rows }: { rows: ConfluenceStat[] }) {
   if (rows.length === 0)
-    return <div className="section-cap">No playbooks tagged on these trades yet.</div>;
+    return <div className="section-cap">No setups tagged on these trades yet.</div>;
   return (
     <table className="data-table">
       <thead>
         <tr>
-          <th>Playbook</th>
+          <th>Setup</th>
           <th>Trades</th>
           <th>Win rate</th>
           <th>Net PnL</th>
@@ -78,7 +78,7 @@ function ConfluenceCard({ c }: { c: ConfluenceLeaderStat }) {
       </div>
       <div style={{ marginTop: 10 }}>
         <button type="button" className={open ? "active" : ""} onClick={() => setOpen((o) => !o)}>
-          {open ? "▾ Hide playbooks" : `▸ Playbooks (${c.playbooks.length})`}
+          {open ? "▾ Hide setups" : `▸ Setups (${c.playbooks.length})`}
         </button>
       </div>
       {open && (

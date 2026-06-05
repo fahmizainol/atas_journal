@@ -39,7 +39,7 @@ const dayColumns: ColumnDef<TradeRow, any>[] = [
   },
   {
     id: "playbook",
-    header: "Playbook",
+    header: "Setup",
     enableSorting: false,
     cell: (c) => <BadgeList items={c.row.original.playbooks ?? []} />,
   },
