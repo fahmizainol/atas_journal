@@ -18,7 +18,8 @@ from __future__ import annotations
 import json
 
 import pandas as pd
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from journal import db, metrics
 
@@ -27,6 +28,58 @@ from ..scope import Scope, resolve_scope
 from ..serialize import sanitize
 
 router = APIRouter()
+
+
+# --- Master-list CRUD ----------------------------------------------------
+# Mirror of the setups router CRUD; see there for why names travel in the body
+# (they can contain "/") rather than the path.
+class ConfluenceIn(BaseModel):
+    name: str
+    description: str = ""
+
+
+class ConfluenceUpdate(BaseModel):
+    name: str                     # current name (key)
+    new_name: str | None = None   # omit to edit description only
+    description: str | None = None
+
+
+class ConfluenceDelete(BaseModel):
+    name: str
+
+
+@router.get("/confluences/list")
+def list_confluences() -> dict:
+    """The canonical confluence names + descriptions, independent of any trade."""
+    conn = deps.get_conn()
+    with deps.db_lock():
+        return {"confluences": db.list_taxonomy(conn, "confluences")}
+
+
+@router.post("/confluences/create")
+def create_confluence(body: ConfluenceIn) -> dict:
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    conn = deps.get_conn()
+    with deps.db_lock():
+        db.create_taxonomy(conn, "confluences", body.name, body.description)
+    return {"ok": True}
+
+
+@router.post("/confluences/update")
+def update_confluence(body: ConfluenceUpdate) -> dict:
+    conn = deps.get_conn()
+    with deps.db_lock():
+        db.update_taxonomy(conn, "confluences", body.name, body.new_name, body.description)
+    return {"ok": True}
+
+
+@router.post("/confluences/delete")
+def delete_confluence(body: ConfluenceDelete) -> dict:
+    conn = deps.get_conn()
+    with deps.db_lock():
+        db.delete_taxonomy(conn, "confluences", body.name)
+    return {"ok": True}
 
 
 def _setup_stats(group: pd.DataFrame, setup_map: dict[str, list[str]]) -> list[dict]:

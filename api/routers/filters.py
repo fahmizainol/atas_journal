@@ -29,9 +29,12 @@ def filters(scope: Scope = Depends(resolve_scope)) -> dict:
     with deps.db_lock():
         notes_df = db.all_notes(conn)
         day_notes_df = db.all_day_notes(conn)
+        # Setups/confluences come from the master lists so names created in the
+        # management UI (not yet tagged on a trade) still autocomplete. Union
+        # with any tagged on trades, as a belt-and-braces against drift.
+        all_setups: set[str] = {s["name"] for s in db.list_taxonomy(conn, "setups")}
+        all_confluences: set[str] = {c["name"] for c in db.list_taxonomy(conn, "confluences")}
     all_tags: set[str] = set()
-    all_setups: set[str] = set()
-    all_confluences: set[str] = set()
     if not notes_df.empty:
         for tj in notes_df["tags_json"].dropna():
             all_tags.update(json.loads(tj or "[]"))

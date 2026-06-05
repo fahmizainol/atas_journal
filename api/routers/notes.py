@@ -46,4 +46,9 @@ def put_note(trade_key: str, body: NoteIn) -> dict:
             json.dumps(body.setups),
             json.dumps(body.confluences),
         )
+        # Second create path: any badge typed straight into the trade form is
+        # folded into the master list so it shows up in the management section
+        # and as a suggestion elsewhere.
+        db.register_taxonomy(conn, "setups", body.setups)
+        db.register_taxonomy(conn, "confluences", body.confluences)
     return {"ok": True}
