@@ -9,6 +9,7 @@ uses INSERT OR IGNORE against a stable dedupe key:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
@@ -74,6 +75,23 @@ CREATE TABLE IF NOT EXISTS day_notes (
     updated_at    TEXT
 );
 
+-- Canonical setup/confluence names, independent of any trade. Lets a name
+-- exist (pre-seeded or created in the management UI) before it's ever tagged,
+-- and gives each an editable description. Trades still carry their own tag
+-- arrays in trade_notes.{setups_json,confluences_json}; these tables are the
+-- master list those badges are picked from.
+CREATE TABLE IF NOT EXISTS setups (
+    name          TEXT PRIMARY KEY,
+    description   TEXT DEFAULT '',
+    created_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS confluences (
+    name          TEXT PRIMARY KEY,
+    description   TEXT DEFAULT '',
+    created_at    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS imported_files (
     source_file   TEXT PRIMARY KEY,
     imported_at   TEXT,   -- when we ingested it (UTC)
@@ -124,6 +142,98 @@ CREATE TABLE IF NOT EXISTS video_bookmarks (
 CREATE INDEX IF NOT EXISTS idx_video_bookmarks_sf ON video_bookmarks(source_file);
 """
 
+# One-time curated seed for the setup/confluence master lists (option (b):
+# name + description). Applied once, guarded by the ``setup_confluence_seeded``
+# setting so a user who deletes a seeded entry doesn't have it resurrected on
+# the next startup. INSERT OR IGNORE means it never clobbers a name a user (or
+# the backfill) already created.
+SEED_SETUPS: list[tuple[str, str]] = [
+    ("Failed Breakdown / Bear Trap",
+     "Price breaks below a range/level, fails to follow through, sellers get "
+     "absorbed and price reclaims. A fade by direction (against the breakdown), "
+     "bounce-like by discipline. Reversal thesis. Invalidation: back below the "
+     "absorption zone / the low."),
+    ("Spring / Range Reclaim",
+     "Wyckoff spring: a false breakdown below a range low that reclaims back "
+     "inside the range, trapping sellers. Typically an uptrend pullback -> "
+     "continuation/breakout thesis. Same trap family as Failed Breakdown but "
+     "with a range + continuation context."),
+    ("Value-Area Fade",
+     "Mean-reversion range play: long on absorption at/below VAL, short at/above "
+     "VAH, target POC. A bounce (bet the edge holds). Regime-dependent - only "
+     "valid in balance/range, not trend. Invalidation: acceptance (volume "
+     "building) outside the value area."),
+    ("Level Bounce",
+     "Bet a level holds and trade the rejection. Works on pre-existing S/R, "
+     "dynamic levels (VWAP/EMA/trendline), or a freshly-flipped breakout level "
+     "(a breakout-retest is a Level Bounce on a new S-R flip). Strength comes "
+     "from stacked confluences at the touch."),
+    ("Breakout (Break-Entry)",
+     "Initiative/momentum entry with the move - e.g. a resting buy-stop above "
+     "the prior local high, filled on the thrust. The only setup needing no "
+     "level-hold. Confirmed by acceptance, stacked imbalances/delta expansion, "
+     "volume expansion. Often paired with a tight trailing stop."),
+]
+
+SEED_CONFLUENCES: list[tuple[str, str]] = [
+    ("Absorption",
+     "Large passive orders absorbing aggressive market orders without price "
+     "moving - the side being hit is defending. Confirms responsive setups."),
+    ("Footprint Rejection",
+     "Footprint shows aggressive orders failing at a level (rejection wick / "
+     "drying delta) - confirms a level holding."),
+    ("Footprint Reclaim",
+     "Footprint shows the opposite side stepping in past the prior aggression "
+     "zone (e.g. greens above the selling area), confirming a reclaim/reversal."),
+    ("Liquidity Grab / Sweep",
+     "Price sweeps a pool of resting stops beyond a level, fills size, then "
+     "reverses (stop hunt). The mechanism behind springs/traps."),
+    ("Aggressive Initiative Buying",
+     "Aggressive market buyers lifting offers, initiating an up-move (vs passive "
+     "absorption). Confirms momentum/initiative setups."),
+    ("Stacked Imbalances / Delta Expansion",
+     "Consecutive footprint imbalances / expanding delta in the move's "
+     "direction - confirms genuine momentum vs a fake."),
+    ("Range Reclaim",
+     "Price returns back inside a prior range after breaking out of it (a false "
+     "break)."),
+    ("Acceptance / Follow-Through",
+     "Price trades and stays beyond a level with volume building there - "
+     "confirms a breakout is real (opposite of a failed break)."),
+    ("Volume Expansion",
+     "A surge in volume on the move/break vs the prior drift - supports genuine "
+     "momentum."),
+    ("HTF Trend Alignment",
+     "The higher-timeframe trend agrees with the trade direction (with-trend > "
+     "counter-trend)."),
+    ("Balanced / Range Regime",
+     "Market is balancing/rotating (no trend) - the regime in which value-area "
+     "fades are valid."),
+    ("Break From Tight Base",
+     "Breakout originates from a tight, coiled base/range rather than mid-chop."),
+    ("VAL Sesh", "Value Area Low of the current/regular session volume profile."),
+    ("VAH Sesh", "Value Area High of the current/regular session volume profile."),
+    ("POC Sesh", "Point of Control (highest-volume price) of the current/regular session."),
+    ("VAL ON", "Value Area Low of the overnight (ON) session volume profile."),
+    ("VAH ON", "Value Area High of the overnight (ON) session volume profile."),
+    ("POC ON", "Point of Control of the overnight (ON) session profile."),
+    ("Big Buys", "Notably large buy orders/prints hitting the tape."),
+    ("Big Sells", "Notably large sell orders/prints hitting the tape."),
+    ("Uptrend", "Price in a higher-highs / higher-lows uptrend on the working timeframe."),
+    ("Downtrend", "Price in a lower-highs / lower-lows downtrend on the working timeframe."),
+    ("VWAP Middle", "Price interacting with the VWAP line itself."),
+    ("VWAP Upper", "Price at the upper VWAP band / standard-deviation level."),
+    ("VWAP Lower", "Price at the lower VWAP band / standard-deviation level."),
+    ("PDH", "Prior Day High."),
+    ("PDL", "Prior Day Low."),
+    ("PDC", "Prior Day Close."),
+]
+
+# Table -> the trade_notes JSON column that mirrors it. Used to validate the
+# (internally-supplied, never user-supplied) table name before f-stringing it
+# into SQL, and to know which per-trade column a rename/delete must sweep.
+_TAXONOMY: dict[str, str] = {"setups": "setups_json", "confluences": "confluences_json"}
+
 
 def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     # check_same_thread=False: Streamlit reruns the script across worker threads
@@ -142,6 +252,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _migrate_imported_files(conn)
     _migrate_bookmark_origin(conn)
     _migrate_trade_note_tagging(conn)
+    _migrate_setup_confluence_master(conn)  # needs trade-note columns above
 
 
 def _migrate_video_schema(conn: sqlite3.Connection) -> None:
@@ -207,6 +318,61 @@ def _migrate_trade_note_tagging(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE trade_notes RENAME COLUMN playbooks_json TO setups_json")
         else:
             conn.execute("ALTER TABLE trade_notes ADD COLUMN setups_json TEXT DEFAULT '[]'")
+    conn.commit()
+
+
+def _migrate_setup_confluence_master(conn: sqlite3.Connection) -> None:
+    """Populate the ``setups`` / ``confluences`` master tables.
+
+    Two parts, both idempotent:
+
+    1. **Backfill** — every distinct setup/confluence name already tagged on a
+       trade is inserted (INSERT OR IGNORE, empty description) so existing data
+       shows up in the management UI. Safe to run every startup: it only ever
+       adds names that are already in use.
+    2. **Seed** — the curated :data:`SEED_SETUPS` / :data:`SEED_CONFLUENCES`
+       list (name + description) is inserted once, guarded by the
+       ``setup_confluence_seeded`` setting. The guard means deleting a seeded
+       entry sticks; INSERT OR IGNORE means seeding never overwrites a name the
+       backfill or user already created.
+    """
+    # 1. Backfill from names already tagged on trades.
+    notes = conn.execute(
+        "SELECT setups_json, confluences_json FROM trade_notes"
+    ).fetchall()
+    seen_setups: set[str] = set()
+    seen_confs: set[str] = set()
+    for row in notes:
+        seen_setups.update(json.loads(row["setups_json"] or "[]"))
+        seen_confs.update(json.loads(row["confluences_json"] or "[]"))
+    for name in seen_setups:
+        conn.execute(
+            "INSERT OR IGNORE INTO setups (name, description, created_at) "
+            "VALUES (?, '', datetime('now'))",
+            (name,),
+        )
+    for name in seen_confs:
+        conn.execute(
+            "INSERT OR IGNORE INTO confluences (name, description, created_at) "
+            "VALUES (?, '', datetime('now'))",
+            (name,),
+        )
+
+    # 2. One-time curated seed.
+    if get_setting(conn, "setup_confluence_seeded") != "1":
+        for name, desc in SEED_SETUPS:
+            conn.execute(
+                "INSERT OR IGNORE INTO setups (name, description, created_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (name, desc),
+            )
+        for name, desc in SEED_CONFLUENCES:
+            conn.execute(
+                "INSERT OR IGNORE INTO confluences (name, description, created_at) "
+                "VALUES (?, ?, datetime('now'))",
+                (name, desc),
+            )
+        save_setting(conn, "setup_confluence_seeded", "1")
     conn.commit()
 
 
@@ -477,6 +643,149 @@ def save_note(
 
 def all_notes(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query("SELECT * FROM trade_notes", conn)
+
+
+# --- Setup / confluence master lists -------------------------------------
+# Two near-identical taxonomies (setups, confluences) share one set of helpers
+# parameterised by table name. The table is always one of the internal
+# ``_TAXONOMY`` keys (never user input), so f-stringing it into SQL is safe; we
+# assert it anyway to make that contract explicit.
+def _taxonomy_col(table: str) -> str:
+    col = _TAXONOMY.get(table)
+    if col is None:
+        raise ValueError(f"unknown taxonomy table: {table!r}")
+    return col
+
+
+def _sweep_trade_tags(
+    conn: sqlite3.Connection, json_col: str, old: str, new: str | None
+) -> None:
+    """Rewrite ``old`` -> ``new`` (or drop it when ``new`` is None) in every
+    trade's tag array for ``json_col``. The trade row itself always survives —
+    only the one badge is renamed/removed. Dedupes on rename so a trade already
+    carrying ``new`` doesn't end up with it twice."""
+    rows = conn.execute(
+        f"SELECT trade_key, {json_col} AS j FROM trade_notes"
+    ).fetchall()
+    for r in rows:
+        arr = json.loads(r["j"] or "[]")
+        if old not in arr:
+            continue
+        if new is None:
+            arr = [x for x in arr if x != old]
+        else:
+            arr = [new if x == old else x for x in arr]
+            seen: set[str] = set()
+            arr = [x for x in arr if not (x in seen or seen.add(x))]
+        conn.execute(
+            f"UPDATE trade_notes SET {json_col} = ?, updated_at = datetime('now') "
+            "WHERE trade_key = ?",
+            (json.dumps(arr), r["trade_key"]),
+        )
+
+
+def list_taxonomy(conn: sqlite3.Connection, table: str) -> list[dict]:
+    """All names + descriptions in a master list, A→Z (case-insensitive)."""
+    _taxonomy_col(table)
+    rows = conn.execute(
+        f"SELECT name, description FROM {table} ORDER BY name COLLATE NOCASE"
+    ).fetchall()
+    return [{"name": r["name"], "description": r["description"] or ""} for r in rows]
+
+
+def create_taxonomy(
+    conn: sqlite3.Connection, table: str, name: str, description: str = ""
+) -> None:
+    """Add a name to a master list. No-op if it already exists (INSERT OR
+    IGNORE) so this is safe both for the management UI and for auto-registering
+    inline-typed badges."""
+    _taxonomy_col(table)
+    name = name.strip()
+    if not name:
+        raise ValueError("name is required")
+    conn.execute(
+        f"INSERT OR IGNORE INTO {table} (name, description, created_at) "
+        "VALUES (?, ?, datetime('now'))",
+        (name, description),
+    )
+    conn.commit()
+
+
+def register_taxonomy(conn: sqlite3.Connection, table: str, names: Iterable[str]) -> None:
+    """Bulk INSERT OR IGNORE — used when saving a note to fold any newly typed
+    badge names into the master list (description left blank)."""
+    _taxonomy_col(table)
+    for raw in names:
+        name = (raw or "").strip()
+        if name:
+            conn.execute(
+                f"INSERT OR IGNORE INTO {table} (name, description, created_at) "
+                "VALUES (?, '', datetime('now'))",
+                (name,),
+            )
+    conn.commit()
+
+
+def update_taxonomy(
+    conn: sqlite3.Connection,
+    table: str,
+    name: str,
+    new_name: str | None = None,
+    description: str | None = None,
+) -> None:
+    """Rename and/or re-describe a master-list entry.
+
+    A rename **cascades**: the badge is rewritten on every trade carrying it, so
+    no trade silently loses its tag. If the target name already exists the two
+    merge (the old master row is dropped and its trades fold onto the survivor).
+    Passing only ``description`` edits the blurb in place.
+    """
+    json_col = _taxonomy_col(table)
+    target = (new_name or name).strip()
+    if not target:
+        raise ValueError("name is required")
+    desc = description if description is not None else None
+
+    if target == name:
+        if desc is not None:
+            conn.execute(
+                f"UPDATE {table} SET description = ? WHERE name = ?", (desc, name)
+            )
+        conn.commit()
+        return
+
+    # Renaming to a different name.
+    exists = conn.execute(
+        f"SELECT 1 FROM {table} WHERE name = ?", (target,)
+    ).fetchone()
+    if exists:
+        conn.execute(f"DELETE FROM {table} WHERE name = ?", (name,))
+        if desc is not None:
+            conn.execute(
+                f"UPDATE {table} SET description = ? WHERE name = ?", (desc, target)
+            )
+    else:
+        if desc is not None:
+            conn.execute(
+                f"UPDATE {table} SET name = ?, description = ? WHERE name = ?",
+                (target, desc, name),
+            )
+        else:
+            conn.execute(
+                f"UPDATE {table} SET name = ? WHERE name = ?", (target, name)
+            )
+    _sweep_trade_tags(conn, json_col, name, target)
+    conn.commit()
+
+
+def delete_taxonomy(conn: sqlite3.Connection, table: str, name: str) -> None:
+    """Remove a name from the master list and strip the badge from every trade
+    that carried it. The trades themselves are untouched — they just lose this
+    one tag."""
+    json_col = _taxonomy_col(table)
+    conn.execute(f"DELETE FROM {table} WHERE name = ?", (name,))
+    _sweep_trade_tags(conn, json_col, name, None)
+    conn.commit()
 
 
 def get_day_note(conn: sqlite3.Connection, day: str) -> dict:
