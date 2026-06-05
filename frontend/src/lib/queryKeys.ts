@@ -34,6 +34,8 @@ export const qk = {
   edges: (scope: FilterScope) => ["edges", scope] as const,
   setupStats: (scope: FilterScope) => ["setup-stats", scope] as const,
   confluenceStats: (scope: FilterScope) => ["confluence-stats", scope] as const,
+  setupList: ["setup-list"] as const,
+  confluenceList: ["confluence-list"] as const,
   trades: (scope: FilterScope) => ["trades", scope] as const,
   trade: (scope: FilterScope, no: number) => ["trade", no, scope] as const,
   note: (tradeKey: string) => ["note", tradeKey] as const,

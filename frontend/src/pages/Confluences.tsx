@@ -1,6 +1,8 @@
 import { useState } from "react";
+import { TaxonomyManager } from "../components/TaxonomyManager";
 import { useFilters } from "../hooks/useFilters";
 import { useConfluenceStats } from "../hooks/useConfluences";
+import { useTaxonomyList } from "../hooks/useTaxonomy";
 import { fmt, fmtInt, fmtPct, numValue } from "../lib/format";
 import type { Num } from "../lib/format";
 import type { ConfluenceLeaderStat, ConfluenceStat, StackBucket } from "../lib/types";
@@ -46,7 +48,7 @@ function SetupTable({ rows }: { rows: ConfluenceStat[] }) {
   );
 }
 
-function ConfluenceCard({ c }: { c: ConfluenceLeaderStat }) {
+function ConfluenceCard({ c, description }: { c: ConfluenceLeaderStat; description?: string }) {
   const [open, setOpen] = useState(false);
   const m = c.metrics;
   const cells: [string, React.ReactNode][] = [
@@ -68,6 +70,7 @@ function ConfluenceCard({ c }: { c: ConfluenceLeaderStat }) {
       <div className="section-title">
         <span className="badge">{c.name}</span>
       </div>
+      {description && <div className="section-cap" style={{ marginBottom: 8 }}>{description}</div>}
       <div className="kpi-grid kpi-compact" style={{ gridTemplateColumns: "repeat(6, 1fr)" }}>
         {cells.map(([label, value]) => (
           <div key={label} className="kpi-card">
@@ -122,8 +125,9 @@ function StackingTable({ rows }: { rows: StackBucket[] }) {
 export function Confluences() {
   const { scope } = useFilters();
   const { data, isLoading } = useConfluenceStats(scope);
+  const { data: catalog = [] } = useTaxonomyList("confluences");
+  const descByName = new Map(catalog.map((c) => [c.name, c.description]));
 
-  if (isLoading) return <div className="notice">Loading…</div>;
   const confluences = data?.confluences ?? [];
   const stacking = data?.stacking ?? [];
 
@@ -136,14 +140,19 @@ export function Confluences() {
         compares trades that have a confluence against those that don't, so you can read its win
         rate against your baseline rather than in a vacuum.
       </div>
-      {confluences.length === 0 ? (
+      <TaxonomyManager kind="confluences" noun="confluence" />
+      {isLoading ? (
+        <div className="notice">Loading…</div>
+      ) : confluences.length === 0 ? (
         <div className="notice">
           No confluences tagged yet. Add confluence badges to trades from their detail panel.
         </div>
       ) : (
         <>
           <div className="card-grid-2">
-            {confluences.map((c) => <ConfluenceCard key={c.name} c={c} />)}
+            {confluences.map((c) => (
+              <ConfluenceCard key={c.name} c={c} description={descByName.get(c.name)} />
+            ))}
           </div>
           <div className="section-title" style={{ marginTop: 20 }}>Stacking</div>
           <div className="section-cap">

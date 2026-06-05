@@ -100,6 +100,13 @@ export interface TradeRow {
   setups?: string[]; // attached by GET /trades for table badges
 }
 
+// A master-list entry (setup or confluence): the canonical name + its editable
+// description, independent of any trade. Managed from the Setups/Confluences tabs.
+export interface TaxonomyItem {
+  name: string;
+  description: string;
+}
+
 export interface ConfluenceStat {
   name: string;
   trades: number;

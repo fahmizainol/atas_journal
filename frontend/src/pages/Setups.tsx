@@ -1,6 +1,8 @@
 import { useState } from "react";
+import { TaxonomyManager } from "../components/TaxonomyManager";
 import { useFilters } from "../hooks/useFilters";
 import { useSetupStats } from "../hooks/useSetups";
+import { useTaxonomyList } from "../hooks/useTaxonomy";
 import { fmt, fmtInt, fmtPct } from "../lib/format";
 import type { ConfluenceStat, SetupStat } from "../lib/types";
 
@@ -35,7 +37,7 @@ function ConfluenceTable({ rows }: { rows: ConfluenceStat[] }) {
   );
 }
 
-function SetupCard({ p }: { p: SetupStat }) {
+function SetupCard({ p, description }: { p: SetupStat; description?: string }) {
   const [open, setOpen] = useState(false);
   const m = p.metrics;
   const cells: [string, React.ReactNode][] = [
@@ -55,6 +57,7 @@ function SetupCard({ p }: { p: SetupStat }) {
       <div className="section-title">
         <span className="badge">{p.name}</span>
       </div>
+      {description && <div className="section-cap" style={{ marginBottom: 8 }}>{description}</div>}
       <div className="kpi-grid kpi-compact" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
         {cells.map(([label, value]) => (
           <div key={label} className="kpi-card">
@@ -80,8 +83,9 @@ function SetupCard({ p }: { p: SetupStat }) {
 export function Setups() {
   const { scope } = useFilters();
   const { data, isLoading } = useSetupStats(scope);
+  const { data: catalog = [] } = useTaxonomyList("setups");
+  const descByName = new Map(catalog.map((s) => [s.name, s.description]));
 
-  if (isLoading) return <div className="notice">Loading…</div>;
   const setups = data?.setups ?? [];
 
   return (
@@ -91,13 +95,18 @@ export function Setups() {
         Per-setup performance over the current filter scope. A trade can carry several
         setups, so it counts toward each — totals across setups may exceed your trade count.
       </div>
-      {setups.length === 0 ? (
+      <TaxonomyManager kind="setups" noun="setup" />
+      {isLoading ? (
+        <div className="notice">Loading…</div>
+      ) : setups.length === 0 ? (
         <div className="notice">
           No setups tagged yet. Add setup badges to trades from their detail panel.
         </div>
       ) : (
         <div className="card-grid-2">
-          {setups.map((p) => <SetupCard key={p.name} p={p} />)}
+          {setups.map((p) => (
+            <SetupCard key={p.name} p={p} description={descByName.get(p.name)} />
+          ))}
         </div>
       )}
     </div>
