@@ -4,23 +4,23 @@ import { useFilters } from "../hooks/useFilters";
 import { useFiltersData } from "../hooks/useMeta";
 import { BadgeInput } from "./BadgeInput";
 
-// First WRITE path: save a trade's note + badge-based tags / playbooks / confluences.
+// First WRITE path: save a trade's note + badge-based tags / setups / confluences.
 export function JournalForm({
   tradeKey,
   initialNote,
   initialTags,
-  initialPlaybooks,
+  initialSetups,
   initialConfluences,
 }: {
   tradeKey: string;
   initialNote: string;
   initialTags: string[];
-  initialPlaybooks: string[];
+  initialSetups: string[];
   initialConfluences: string[];
 }) {
   const [note, setNote] = useState(initialNote);
   const [tags, setTags] = useState<string[]>(initialTags);
-  const [playbooks, setPlaybooks] = useState<string[]>(initialPlaybooks);
+  const [setups, setSetups] = useState<string[]>(initialSetups);
   const [confluences, setConfluences] = useState<string[]>(initialConfluences);
   const save = useSaveNote(tradeKey);
   // Known values for autocomplete (global; /filters scans all notes).
@@ -31,13 +31,13 @@ export function JournalForm({
   useEffect(() => {
     setNote(initialNote);
     setTags(initialTags);
-    setPlaybooks(initialPlaybooks);
+    setSetups(initialSetups);
     setConfluences(initialConfluences);
-  }, [tradeKey, initialNote, initialTags, initialPlaybooks, initialConfluences]);
+  }, [tradeKey, initialNote, initialTags, initialSetups, initialConfluences]);
 
   const onSave = (e: React.FormEvent) => {
     e.preventDefault();
-    save.mutate({ note, tags, playbooks, confluences });
+    save.mutate({ note, tags, setups, confluences });
   };
 
   return (
@@ -50,9 +50,9 @@ export function JournalForm({
       <div className="field" style={{ marginBottom: 10 }}>
         <label>Setups</label>
         <BadgeInput
-          value={playbooks}
-          onChange={setPlaybooks}
-          suggestions={opts?.playbooks ?? []}
+          value={setups}
+          onChange={setSetups}
+          suggestions={opts?.setups ?? []}
           placeholder="failed auction, trendlines…"
         />
       </div>

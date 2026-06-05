@@ -13,7 +13,7 @@ export interface Filters {
   date_min: string | null;
   date_max: string | null;
   tags: string[];
-  playbooks: string[];
+  setups: string[];
   confluences: string[];
 }
 
@@ -97,7 +97,7 @@ export interface TradeRow {
   avg_exit: Num;
   net_pnl: number;
   comment: string;
-  playbooks?: string[]; // attached by GET /trades for table badges
+  setups?: string[]; // attached by GET /trades for table badges
 }
 
 export interface ConfluenceStat {
@@ -107,13 +107,13 @@ export interface ConfluenceStat {
   net_pnl: number;
 }
 
-export interface PlaybookStat {
+export interface SetupStat {
   name: string;
   metrics: Metrics;
   confluences: ConfluenceStat[];
 }
 
-// Confluences tab: the inverse pivot of PlaybookStat, plus lift vs baseline.
+// Confluences tab: the inverse pivot of SetupStat, plus lift vs baseline.
 export interface Lift {
   win_rate_delta: number;
   expectancy_delta: Num;
@@ -126,7 +126,7 @@ export interface ConfluenceLeaderStat {
   name: string;
   metrics: Metrics;
   lift: Lift;
-  playbooks: ConfluenceStat[]; // same {name, trades, win_rate, net_pnl} breakdown shape
+  setups: ConfluenceStat[]; // same {name, trades, win_rate, net_pnl} breakdown shape
 }
 
 export interface StackBucket {
@@ -164,7 +164,7 @@ export interface Note {
   note: string;
   tags: string[];
   // Per-trade only; day notes omit these (optional keeps DayJournalForm valid).
-  playbooks?: string[];
+  setups?: string[];
   confluences?: string[];
 }
 

@@ -288,7 +288,7 @@ button:disabled {
   color: #fff;
 }
 
-/* ---- badge input (tags / playbooks / confluences) ---- */
+/* ---- badge input (tags / setups / confluences) ---- */
 .badge-input {
   display: flex;
   flex-wrap: wrap;
@@ -406,6 +406,20 @@ button:disabled {
   padding: 3px 7px;
   font-size: 11px;
   border-radius: 6px;
+}
+
+/* Two-up card layout for the Setups / Confluences sections — halves the
+   scroll length. Collapses to one column on narrow viewports. */
+.card-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .card-grid-2 {
+    grid-template-columns: 1fr;
+  }
 }
 
 .radio-group {

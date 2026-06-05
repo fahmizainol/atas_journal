@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 // as a badge; Backspace on an empty input removes the last badge; each badge has
 // an X (shown on hover/focus) to delete it. Dedupes and trims; empties ignored.
 //
-// `suggestions` are already-existing values (tags/playbooks/confluences): a
+// `suggestions` are already-existing values (tags/setups/confluences): a
 // dropdown of matches opens on focus and filters as you type. Pick with the
 // mouse or ↑/↓ + Enter.
 export function BadgeInput({

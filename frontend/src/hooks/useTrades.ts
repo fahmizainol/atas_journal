@@ -8,7 +8,7 @@ export interface TradeDetail {
   trade: TradeRow;
   note: string;
   tags: string[];
-  playbooks: string[];
+  setups: string[];
   confluences: string[];
 }
 

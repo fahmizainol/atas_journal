@@ -36,10 +36,10 @@ const columns: ColumnDef<TradeRow, any>[] = [
     },
   },
   {
-    id: "playbook",
+    id: "setup",
     header: "Setup",
     enableSorting: false,
-    cell: (c) => <BadgeList items={c.row.original.playbooks ?? []} />,
+    cell: (c) => <BadgeList items={c.row.original.setups ?? []} />,
   },
 ];
 

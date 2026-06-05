@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useFilters } from "../hooks/useFilters";
-import { usePlaybookStats } from "../hooks/usePlaybook";
+import { useSetupStats } from "../hooks/useSetups";
 import { fmt, fmtInt, fmtPct } from "../lib/format";
-import type { ConfluenceStat, PlaybookStat } from "../lib/types";
+import type { ConfluenceStat, SetupStat } from "../lib/types";
 
 function Pnl({ v }: { v: number }) {
   return <span className={v >= 0 ? "pos" : "neg"}>{fmt(v)}</span>;
@@ -35,7 +35,7 @@ function ConfluenceTable({ rows }: { rows: ConfluenceStat[] }) {
   );
 }
 
-function PlaybookCard({ p }: { p: PlaybookStat }) {
+function SetupCard({ p }: { p: SetupStat }) {
   const [open, setOpen] = useState(false);
   const m = p.metrics;
   const cells: [string, React.ReactNode][] = [
@@ -51,7 +51,7 @@ function PlaybookCard({ p }: { p: PlaybookStat }) {
     ["Avg hold", `${(((m.avg_trade_length_s as number) ?? 0) / 60).toFixed(1)}m`],
   ];
   return (
-    <div className="panel" style={{ marginBottom: 14 }}>
+    <div className="panel">
       <div className="section-title">
         <span className="badge">{p.name}</span>
       </div>
@@ -77,12 +77,12 @@ function PlaybookCard({ p }: { p: PlaybookStat }) {
   );
 }
 
-export function Playbook() {
+export function Setups() {
   const { scope } = useFilters();
-  const { data, isLoading } = usePlaybookStats(scope);
+  const { data, isLoading } = useSetupStats(scope);
 
   if (isLoading) return <div className="notice">Loading…</div>;
-  const playbooks = data?.playbooks ?? [];
+  const setups = data?.setups ?? [];
 
   return (
     <div>
@@ -91,12 +91,14 @@ export function Playbook() {
         Per-setup performance over the current filter scope. A trade can carry several
         setups, so it counts toward each — totals across setups may exceed your trade count.
       </div>
-      {playbooks.length === 0 ? (
+      {setups.length === 0 ? (
         <div className="notice">
           No setups tagged yet. Add setup badges to trades from their detail panel.
         </div>
       ) : (
-        playbooks.map((p) => <PlaybookCard key={p.name} p={p} />)
+        <div className="card-grid-2">
+          {setups.map((p) => <SetupCard key={p.name} p={p} />)}
+        </div>
       )}
     </div>
   );

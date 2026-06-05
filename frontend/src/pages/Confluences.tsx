@@ -18,8 +18,8 @@ function Delta({ v, kind }: { v: Num; kind: "pp" | "money" }) {
   return <span className={cls}>{sign}{body}</span>;
 }
 
-// Playbook breakdown nested in each confluence card (inverse of Playbook's table).
-function PlaybookTable({ rows }: { rows: ConfluenceStat[] }) {
+// Setup breakdown nested in each confluence card (inverse of the Setups table).
+function SetupTable({ rows }: { rows: ConfluenceStat[] }) {
   if (rows.length === 0)
     return <div className="section-cap">No setups tagged on these trades yet.</div>;
   return (
@@ -64,7 +64,7 @@ function ConfluenceCard({ c }: { c: ConfluenceLeaderStat }) {
     ["Δ expectancy vs rest", <Delta v={c.lift.expectancy_delta} kind="money" />],
   ];
   return (
-    <div className="panel" style={{ marginBottom: 14 }}>
+    <div className="panel">
       <div className="section-title">
         <span className="badge">{c.name}</span>
       </div>
@@ -78,12 +78,12 @@ function ConfluenceCard({ c }: { c: ConfluenceLeaderStat }) {
       </div>
       <div style={{ marginTop: 10 }}>
         <button type="button" className={open ? "active" : ""} onClick={() => setOpen((o) => !o)}>
-          {open ? "▾ Hide setups" : `▸ Setups (${c.playbooks.length})`}
+          {open ? "▾ Hide setups" : `▸ Setups (${c.setups.length})`}
         </button>
       </div>
       {open && (
         <div style={{ marginTop: 10 }}>
-          <PlaybookTable rows={c.playbooks} />
+          <SetupTable rows={c.setups} />
         </div>
       )}
     </div>
@@ -142,7 +142,9 @@ export function Confluences() {
         </div>
       ) : (
         <>
-          {confluences.map((c) => <ConfluenceCard key={c.name} c={c} />)}
+          <div className="card-grid-2">
+            {confluences.map((c) => <ConfluenceCard key={c.name} c={c} />)}
+          </div>
           <div className="section-title" style={{ marginTop: 20 }}>Stacking</div>
           <div className="section-cap">
             Outcomes bucketed by how many confluences were present on the trade — does stacking
