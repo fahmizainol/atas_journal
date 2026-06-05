@@ -30,13 +30,13 @@ def filters(scope: Scope = Depends(resolve_scope)) -> dict:
         notes_df = db.all_notes(conn)
         day_notes_df = db.all_day_notes(conn)
     all_tags: set[str] = set()
-    all_playbooks: set[str] = set()
+    all_setups: set[str] = set()
     all_confluences: set[str] = set()
     if not notes_df.empty:
         for tj in notes_df["tags_json"].dropna():
             all_tags.update(json.loads(tj or "[]"))
-        for pj in notes_df.get("playbooks_json", pd.Series(dtype=object)).dropna():
-            all_playbooks.update(json.loads(pj or "[]"))
+        for pj in notes_df.get("setups_json", pd.Series(dtype=object)).dropna():
+            all_setups.update(json.loads(pj or "[]"))
         for cj in notes_df.get("confluences_json", pd.Series(dtype=object)).dropna():
             all_confluences.update(json.loads(cj or "[]"))
     if not day_notes_df.empty:
@@ -49,6 +49,6 @@ def filters(scope: Scope = Depends(resolve_scope)) -> dict:
         "date_min": date_min,
         "date_max": date_max,
         "tags": sorted(all_tags),
-        "playbooks": sorted(all_playbooks),
+        "setups": sorted(all_setups),
         "confluences": sorted(all_confluences),
     }

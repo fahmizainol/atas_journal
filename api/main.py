@@ -32,8 +32,8 @@ from .routers import (  # noqa: E402
     meta,
     notes,
     overview,
-    playbook,
     settings,
+    setups,
     statistics,
     trades,
     videos,
@@ -63,7 +63,7 @@ app.include_router(statistics.router, prefix="/api")
 app.include_router(trades.router, prefix="/api")
 app.include_router(notes.router, prefix="/api")
 app.include_router(day_notes.router, prefix="/api")
-app.include_router(playbook.router, prefix="/api")
+app.include_router(setups.router, prefix="/api")
 app.include_router(confluences.router, prefix="/api")
 app.include_router(charts.router, prefix="/api")
 app.include_router(calendar.router, prefix="/api")

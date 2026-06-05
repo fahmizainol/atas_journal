@@ -1,9 +1,9 @@
-"""Per-playbook performance aggregation.
+"""Per-setup performance aggregation.
 
-Groups the in-scope trades by their saved playbook badges (``trade_notes``),
+Groups the in-scope trades by their saved setup badges (``trade_notes``),
 runs the shared :func:`journal.metrics.compute_metrics` over each group, and
-returns a confluence breakdown per playbook. A trade may carry several
-playbooks, so it contributes to each — the groups are not a strict partition.
+returns a confluence breakdown per setup. A trade may carry several setups,
+so it contributes to each — the groups are not a strict partition.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ router = APIRouter()
 
 
 def _confluence_stats(group: pd.DataFrame, conf_map: dict[str, list[str]]) -> list[dict]:
-    """For one playbook's trades, summarise each co-occurring confluence."""
+    """For one setup's trades, summarise each co-occurring confluence."""
     buckets: dict[str, list[float]] = {}
     for _, r in group.iterrows():
         for c in conf_map.get(r["trade_key"], []):
@@ -42,40 +42,40 @@ def _confluence_stats(group: pd.DataFrame, conf_map: dict[str, list[str]]) -> li
     return out
 
 
-@router.get("/playbooks/stats")
-def playbook_stats(scope: Scope = Depends(resolve_scope)) -> dict:
+@router.get("/setups/stats")
+def setup_stats(scope: Scope = Depends(resolve_scope)) -> dict:
     df = scope.filtered
     if df is None or df.empty:
-        return {"playbooks": []}
+        return {"setups": []}
 
     conn = deps.get_conn()
     with deps.db_lock():
         notes_df = db.all_notes(conn)
 
-    pb_map: dict[str, list[str]] = {}
+    setup_map: dict[str, list[str]] = {}
     conf_map: dict[str, list[str]] = {}
     if not notes_df.empty:
         for _, r in notes_df.iterrows():
-            pb_map[r["trade_key"]] = json.loads(r["playbooks_json"] or "[]")
+            setup_map[r["trade_key"]] = json.loads(r["setups_json"] or "[]")
             conf_map[r["trade_key"]] = json.loads(r["confluences_json"] or "[]")
 
-    # Build the set of playbooks present on the in-scope trades.
+    # Build the set of setups present on the in-scope trades.
     names: set[str] = set()
     for k in df["trade_key"]:
-        names.update(pb_map.get(k, []))
+        names.update(setup_map.get(k, []))
 
-    playbooks = []
+    setups = []
     for name in sorted(names):
-        mask = df["trade_key"].apply(lambda k: name in pb_map.get(k, []))
+        mask = df["trade_key"].apply(lambda k: name in setup_map.get(k, []))
         group = df[mask]
         if group.empty:
             continue
-        playbooks.append({
+        setups.append({
             "name": name,
             "metrics": metrics.compute_metrics(group),
             "confluences": _confluence_stats(group, conf_map),
         })
 
     # Most active / profitable first.
-    playbooks.sort(key=lambda p: p["metrics"].get("net_pnl", 0) or 0, reverse=True)
-    return sanitize({"playbooks": playbooks})
+    setups.sort(key=lambda p: p["metrics"].get("net_pnl", 0) or 0, reverse=True)
+    return sanitize({"setups": setups})

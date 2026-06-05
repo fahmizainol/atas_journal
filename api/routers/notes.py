@@ -17,7 +17,7 @@ router = APIRouter()
 class NoteIn(BaseModel):
     note: str = ""
     tags: list[str] = []
-    playbooks: list[str] = []
+    setups: list[str] = []
     confluences: list[str] = []
 
 
@@ -29,7 +29,7 @@ def get_note(trade_key: str) -> dict:
     return {
         "note": n["note"],
         "tags": json.loads(n["tags_json"] or "[]"),
-        "playbooks": json.loads(n["playbooks_json"] or "[]"),
+        "setups": json.loads(n["setups_json"] or "[]"),
         "confluences": json.loads(n["confluences_json"] or "[]"),
     }
 
@@ -43,7 +43,7 @@ def put_note(trade_key: str, body: NoteIn) -> dict:
             trade_key,
             body.note,
             json.dumps(body.tags),
-            json.dumps(body.playbooks),
+            json.dumps(body.setups),
             json.dumps(body.confluences),
         )
     return {"ok": True}

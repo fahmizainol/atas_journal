@@ -150,17 +150,17 @@ def day_detail(
             "entry_ts_local", "exit_ts_local", "duration_s",
             "avg_entry", "avg_exit", "net_pnl"]
     trade_rows = records(day_df, cols)
-    # Attach each trade's playbook badges so the day-view table can render them
+    # Attach each trade's setup badges so the day-view table can render them
     # (same one-scan-mapped-by-key approach as GET /trades).
     conn = deps.get_conn()
     with deps.db_lock():
         notes_df = db.all_notes(conn)
-    pb_map = {
-        r["trade_key"]: json.loads(r["playbooks_json"] or "[]")
+    setup_map = {
+        r["trade_key"]: json.loads(r["setups_json"] or "[]")
         for _, r in notes_df.iterrows()
     } if not notes_df.empty else {}
     for r in trade_rows:
-        r["playbooks"] = pb_map.get(r["trade_key"], [])
+        r["setups"] = setup_map.get(r["trade_key"], [])
     file_modified = next(
         (a["file_modified"] for a in attempts if a["source_file"] == selected), None
     )

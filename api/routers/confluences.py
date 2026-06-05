@@ -1,7 +1,7 @@
 """Per-confluence performance aggregation.
 
-The mirror image of :mod:`api.routers.playbook`: groups the in-scope trades by
-their saved *confluence* badges (``trade_notes``) instead of playbooks, and adds
+The mirror image of :mod:`api.routers.setups`: groups the in-scope trades by
+their saved *confluence* badges (``trade_notes``) instead of setups, and adds
 two analyses confluences invite that setups don't —
 
 * **lift** — how each confluence performs *with* vs *without* it, so a 60% win
@@ -29,14 +29,14 @@ from ..serialize import sanitize
 router = APIRouter()
 
 
-def _playbook_stats(group: pd.DataFrame, pb_map: dict[str, list[str]]) -> list[dict]:
-    """For one confluence's trades, summarise each co-occurring playbook.
+def _setup_stats(group: pd.DataFrame, setup_map: dict[str, list[str]]) -> list[dict]:
+    """For one confluence's trades, summarise each co-occurring setup.
 
-    The exact inverse of ``playbook._confluence_stats`` — same shape, swapped map.
+    The exact inverse of ``setups._confluence_stats`` — same shape, swapped map.
     """
     buckets: dict[str, list[float]] = {}
     for _, r in group.iterrows():
-        for p in pb_map.get(r["trade_key"], []):
+        for p in setup_map.get(r["trade_key"], []):
             buckets.setdefault(p, []).append(float(r["net_pnl"]))
     out = []
     for name, pnls in buckets.items():
@@ -62,11 +62,11 @@ def confluence_stats(scope: Scope = Depends(resolve_scope)) -> dict:
     with deps.db_lock():
         notes_df = db.all_notes(conn)
 
-    pb_map: dict[str, list[str]] = {}
+    setup_map: dict[str, list[str]] = {}
     conf_map: dict[str, list[str]] = {}
     if not notes_df.empty:
         for _, r in notes_df.iterrows():
-            pb_map[r["trade_key"]] = json.loads(r["playbooks_json"] or "[]")
+            setup_map[r["trade_key"]] = json.loads(r["setups_json"] or "[]")
             conf_map[r["trade_key"]] = json.loads(r["confluences_json"] or "[]")
 
     # Baseline: every in-scope trade, the yardstick that lift is measured against.
@@ -100,7 +100,7 @@ def confluence_stats(scope: Scope = Depends(resolve_scope)) -> dict:
                 "without_expectancy": without_exp,
                 "without_trades": without_m.get("trades", 0),
             },
-            "playbooks": _playbook_stats(group, pb_map),
+            "setups": _setup_stats(group, setup_map),
         })
 
     # Most active / profitable first.
