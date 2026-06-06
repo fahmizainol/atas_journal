@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 
 import pandas as pd
 
@@ -81,10 +82,24 @@ def _fetch_day(symbol: str, day: date) -> pd.DataFrame:
     return df
 
 
+@lru_cache(maxsize=256)
+def _read_day_parquet(symbol: str, day: date) -> pd.DataFrame:
+    """In-memory cache over the on-disk parquet read.
+
+    A single day-load can fan out 30+ per-trade ``get_bars`` calls (MAE/MFE +
+    ATR per trade), each landing on the same handful of (symbol, day) parquet
+    files. Caching the parsed frame keeps that down to one disk read per file
+    for the life of the process. Only successful reads are cached — misses are
+    handled at the caller so a not-yet-fetched day can be retried without
+    poisoning the cache. Callers must treat the returned frame as read-only.
+    """
+    return pd.read_parquet(_cache_path(symbol, day))
+
+
 def get_day_bars(symbol: str, day: date, use_cache: bool = True) -> pd.DataFrame | None:
     cache = _cache_path(symbol, day)
     if use_cache and cache.exists():
-        return pd.read_parquet(cache)
+        return _read_day_parquet(symbol, day)
     try:
         df = _fetch_day(symbol, day)
     except DatabentoUnavailable:
