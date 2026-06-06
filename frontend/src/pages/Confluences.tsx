@@ -30,6 +30,8 @@ function SetupTable({ rows }: { rows: ConfluenceStat[] }) {
         <tr>
           <th>Setup</th>
           <th>Trades</th>
+          <th>Longs</th>
+          <th>Shorts</th>
           <th>Win rate</th>
           <th>Net PnL</th>
         </tr>
@@ -39,6 +41,8 @@ function SetupTable({ rows }: { rows: ConfluenceStat[] }) {
           <tr key={p.name}>
             <td><span className="badge badge-sm">{p.name}</span></td>
             <td>{fmtInt(p.trades)}</td>
+            <td>{fmtInt(p.longs)}</td>
+            <td>{fmtInt(p.shorts)}</td>
             <td>{fmtPct(p.win_rate)}</td>
             <td><Pnl v={p.net_pnl} /></td>
           </tr>
@@ -52,7 +56,7 @@ function ConfluenceCard({ c, description }: { c: ConfluenceLeaderStat; descripti
   const [open, setOpen] = useState(false);
   const m = c.metrics;
   const cells: [string, React.ReactNode][] = [
-    ["Trades", fmtInt(m.trades)],
+    ["Trades", `${fmtInt(m.trades)} (${fmtInt(m.longs)}L / ${fmtInt(m.shorts)}S)`],
     ["Win rate", fmtPct(m.win_rate)],
     ["Net PnL", <Pnl v={m.net_pnl as number} />],
     ["Profit factor", fmt(m.profit_factor, false)],
@@ -102,6 +106,8 @@ function StackingTable({ rows }: { rows: StackBucket[] }) {
         <tr>
           <th>Confluences present</th>
           <th>Trades</th>
+          <th>Longs</th>
+          <th>Shorts</th>
           <th>Win rate</th>
           <th>Expectancy</th>
           <th>Net PnL</th>
@@ -112,6 +118,8 @@ function StackingTable({ rows }: { rows: StackBucket[] }) {
           <tr key={b.count}>
             <td>{b.label}</td>
             <td>{fmtInt(b.trades)}</td>
+            <td>{fmtInt(b.longs)}</td>
+            <td>{fmtInt(b.shorts)}</td>
             <td>{fmtPct(b.win_rate)}</td>
             <td>{fmt(b.expectancy)}</td>
             <td><Pnl v={b.net_pnl} /></td>

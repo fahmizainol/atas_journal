@@ -19,6 +19,8 @@ function ConfluenceTable({ rows }: { rows: ConfluenceStat[] }) {
         <tr>
           <th>Confluence</th>
           <th>Trades</th>
+          <th>Longs</th>
+          <th>Shorts</th>
           <th>Win rate</th>
           <th>Net PnL</th>
         </tr>
@@ -28,6 +30,8 @@ function ConfluenceTable({ rows }: { rows: ConfluenceStat[] }) {
           <tr key={c.name}>
             <td><span className="badge badge-sm">{c.name}</span></td>
             <td>{fmtInt(c.trades)}</td>
+            <td>{fmtInt(c.longs)}</td>
+            <td>{fmtInt(c.shorts)}</td>
             <td>{fmtPct(c.win_rate)}</td>
             <td><Pnl v={c.net_pnl} /></td>
           </tr>
@@ -41,7 +45,7 @@ function SetupCard({ p, description }: { p: SetupStat; description?: string }) {
   const [open, setOpen] = useState(false);
   const m = p.metrics;
   const cells: [string, React.ReactNode][] = [
-    ["Trades", fmtInt(m.trades)],
+    ["Trades", `${fmtInt(m.trades)} (${fmtInt(m.longs)}L / ${fmtInt(m.shorts)}S)`],
     ["Win rate", fmtPct(m.win_rate)],
     ["Net PnL", <Pnl v={m.net_pnl as number} />],
     ["Profit factor", fmt(m.profit_factor, false)],

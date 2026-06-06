@@ -21,6 +21,8 @@ import type { Num } from "./format";
 
 export interface Metrics {
   trades: number;
+  longs: number;
+  shorts: number;
   net_pnl: Num;
   gross_profit: Num;
   gross_loss: Num;
@@ -110,6 +112,8 @@ export interface TaxonomyItem {
 export interface ConfluenceStat {
   name: string;
   trades: number;
+  longs: number;
+  shorts: number;
   win_rate: number;
   net_pnl: number;
 }
@@ -140,6 +144,8 @@ export interface StackBucket {
   count: number;
   label: string;
   trades: number;
+  longs: number;
+  shorts: number;
   win_rate: number;
   expectancy: Num;
   net_pnl: number;

@@ -79,19 +79,23 @@ def delete_setup(body: SetupDelete) -> dict:
 
 def _confluence_stats(group: pd.DataFrame, conf_map: dict[str, list[str]]) -> list[dict]:
     """For one setup's trades, summarise each co-occurring confluence."""
-    buckets: dict[str, list[float]] = {}
+    buckets: dict[str, list[tuple[float, str]]] = {}
     for _, r in group.iterrows():
         for c in conf_map.get(r["trade_key"], []):
-            buckets.setdefault(c, []).append(float(r["net_pnl"]))
+            buckets.setdefault(c, []).append((float(r["net_pnl"]), str(r.get("direction", ""))))
     out = []
-    for name, pnls in buckets.items():
-        n = len(pnls)
-        wins = sum(1 for p in pnls if p > 0)
+    for name, rows in buckets.items():
+        n = len(rows)
+        wins = sum(1 for p, _ in rows if p > 0)
+        longs = sum(1 for _, d in rows if d == "Long")
+        shorts = sum(1 for _, d in rows if d == "Short")
         out.append({
             "name": name,
             "trades": n,
+            "longs": longs,
+            "shorts": shorts,
             "win_rate": (wins / n * 100) if n else 0.0,
-            "net_pnl": sum(pnls),
+            "net_pnl": sum(p for p, _ in rows),
         })
     out.sort(key=lambda d: d["net_pnl"], reverse=True)
     return out

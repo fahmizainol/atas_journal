@@ -21,13 +21,16 @@ def _max_consecutive(mask: pd.Series) -> int:
 
 def compute_metrics(trades: pd.DataFrame) -> dict:
     if trades is None or trades.empty:
-        return {"trades": 0}
+        return {"trades": 0, "longs": 0, "shorts": 0}
 
     t = trades.sort_values("entry_ts_utc").reset_index(drop=True)
     pnl = t["net_pnl"].astype(float)
     wins = pnl[pnl > 0]
     losses = pnl[pnl < 0]
     n = len(t)
+    direction = t.get("direction", pd.Series(dtype=str)).astype(str)
+    longs = int((direction == "Long").sum())
+    shorts = int((direction == "Short").sum())
 
     gross_profit = float(wins.sum())
     gross_loss = float(losses.sum())  # negative
@@ -61,6 +64,8 @@ def compute_metrics(trades: pd.DataFrame) -> dict:
 
     return {
         "trades": n,
+        "longs": longs,
+        "shorts": shorts,
         "net_pnl": net,
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,

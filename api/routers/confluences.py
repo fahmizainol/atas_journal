@@ -87,19 +87,23 @@ def _setup_stats(group: pd.DataFrame, setup_map: dict[str, list[str]]) -> list[d
 
     The exact inverse of ``setups._confluence_stats`` — same shape, swapped map.
     """
-    buckets: dict[str, list[float]] = {}
+    buckets: dict[str, list[tuple[float, str]]] = {}
     for _, r in group.iterrows():
         for p in setup_map.get(r["trade_key"], []):
-            buckets.setdefault(p, []).append(float(r["net_pnl"]))
+            buckets.setdefault(p, []).append((float(r["net_pnl"]), str(r.get("direction", ""))))
     out = []
-    for name, pnls in buckets.items():
-        n = len(pnls)
-        wins = sum(1 for p in pnls if p > 0)
+    for name, rows in buckets.items():
+        n = len(rows)
+        wins = sum(1 for p, _ in rows if p > 0)
+        longs = sum(1 for _, d in rows if d == "Long")
+        shorts = sum(1 for _, d in rows if d == "Short")
         out.append({
             "name": name,
             "trades": n,
+            "longs": longs,
+            "shorts": shorts,
             "win_rate": (wins / n * 100) if n else 0.0,
-            "net_pnl": sum(pnls),
+            "net_pnl": sum(p for p, _ in rows),
         })
     out.sort(key=lambda d: d["net_pnl"], reverse=True)
     return out
@@ -170,6 +174,8 @@ def confluence_stats(scope: Scope = Depends(resolve_scope)) -> dict:
             "count": c,
             "label": "4+" if c == 4 else str(c),
             "trades": m.get("trades", 0),
+            "longs": m.get("longs", 0),
+            "shorts": m.get("shorts", 0),
             "win_rate": m.get("win_rate", 0.0),
             "expectancy": m.get("expectancy", 0.0),
             "net_pnl": m.get("net_pnl", 0.0),
