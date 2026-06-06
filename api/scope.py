@@ -53,6 +53,9 @@ class Scope:
     imported_at: dict = field(repr=False, default_factory=dict)  # source_file -> UTC ISO
     file_mtime: dict = field(repr=False, default_factory=dict)    # source_file -> export mtime
     journal: pd.DataFrame = field(repr=False, default_factory=pd.DataFrame)
+    # Carry the notes frame loaded during scope resolution so handlers that need
+    # setup/confluence/tag badges don't re-scan trade_notes themselves.
+    notes: pd.DataFrame = field(repr=False, default_factory=pd.DataFrame)
 
     @property
     def date_range(self):
@@ -166,5 +169,5 @@ def resolve_scope(
         tz_label=tz_label, tz=disp_tz, instruments=instr_list, accounts=account_list,
         start=d0, end=d1, tags=tag_list, base=base, filtered=filtered,
         filtered_all=filtered_all, imported_at=imported, file_mtime=file_mtimes,
-        journal=jr,
+        journal=jr, notes=notes_df,
     )

@@ -150,15 +150,16 @@ def day_detail(
             "entry_ts_local", "exit_ts_local", "duration_s",
             "avg_entry", "avg_exit", "net_pnl"]
     trade_rows = records(day_df, cols)
-    # Attach each trade's setup badges so the day-view table can render them
-    # (same one-scan-mapped-by-key approach as GET /trades).
-    conn = deps.get_conn()
-    with deps.db_lock():
-        notes_df = db.all_notes(conn)
-    setup_map = {
-        r["trade_key"]: json.loads(r["setups_json"] or "[]")
-        for _, r in notes_df.iterrows()
-    } if not notes_df.empty else {}
+    # Attach each trade's setup badges from the notes frame already loaded by
+    # resolve_scope (avoids a second full SELECT * FROM trade_notes per request).
+    # Build the map only over this day's trade_keys instead of the whole table.
+    notes_df = scope.notes
+    day_keys = {r["trade_key"] for r in trade_rows}
+    setup_map: dict[str, list] = {}
+    if not notes_df.empty and day_keys:
+        sub = notes_df[notes_df["trade_key"].isin(day_keys)]
+        for _, r in sub.iterrows():
+            setup_map[r["trade_key"]] = json.loads(r["setups_json"] or "[]")
     for r in trade_rows:
         r["setups"] = setup_map.get(r["trade_key"], [])
     file_modified = next(

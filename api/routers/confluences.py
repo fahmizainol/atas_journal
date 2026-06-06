@@ -111,10 +111,8 @@ def confluence_stats(scope: Scope = Depends(resolve_scope)) -> dict:
     if df is None or df.empty:
         return {"baseline": {"trades": 0}, "confluences": [], "stacking": []}
 
-    conn = deps.get_conn()
-    with deps.db_lock():
-        notes_df = db.all_notes(conn)
-
+    # Reuse the notes frame already loaded by resolve_scope.
+    notes_df = scope.notes
     setup_map: dict[str, list[str]] = {}
     conf_map: dict[str, list[str]] = {}
     if not notes_df.empty:

@@ -24,15 +24,16 @@ TRADE_COLS = [
 @router.get("/trades")
 def list_trades(scope: Scope = Depends(resolve_scope)) -> list[dict]:
     rows = records(scope.filtered, TRADE_COLS)
-    # Attach each trade's setup badges so the day/trades tables can render
-    # them without a per-row fetch. One scan of trade_notes, mapped by key.
-    conn = deps.get_conn()
-    with deps.db_lock():
-        notes_df = db.all_notes(conn)
-    setup_map = {
-        r["trade_key"]: json.loads(r["setups_json"] or "[]")
-        for _, r in notes_df.iterrows()
-    } if not notes_df.empty else {}
+    # Attach each trade's setup badges using the notes frame loaded by
+    # resolve_scope; building the lookup only over the in-scope trade_keys keeps
+    # the JSON parsing proportional to result size, not whole-table size.
+    notes_df = scope.notes
+    keys = {r["trade_key"] for r in rows}
+    setup_map: dict[str, list] = {}
+    if not notes_df.empty and keys:
+        sub = notes_df[notes_df["trade_key"].isin(keys)]
+        for _, r in sub.iterrows():
+            setup_map[r["trade_key"]] = json.loads(r["setups_json"] or "[]")
     for r in rows:
         r["setups"] = setup_map.get(r["trade_key"], [])
     return rows
