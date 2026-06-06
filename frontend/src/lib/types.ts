@@ -87,6 +87,7 @@ export interface DailyPnlPoint {
 export interface TradeRow {
   trade_no: number;
   trade_key: string;
+  source_file: string;
   instrument: string;
   direction: string;
   max_contracts: number;
@@ -189,6 +190,25 @@ export interface VideoBookmark {
   trade_key: string | null; // bound trade; null = free-form bookmark
   created_at: string;
   origin: "manual" | "synced"; // hand-placed/anchor vs auto-synced from trade ts
+}
+
+export interface TradeVideoBookmarkStatus {
+  source_file: string;
+  offset_s: number;
+  label: string;
+  origin: "manual" | "synced";
+}
+
+export interface TradeVideoStatus {
+  source_file: string;
+  has_video: boolean;
+  exists: boolean;
+  playable: boolean;
+  bookmark: TradeVideoBookmarkStatus | null;
+}
+
+export interface TradeVideoStatusResponse {
+  statuses: Record<string, TradeVideoStatus>;
 }
 
 export interface SyncResult {

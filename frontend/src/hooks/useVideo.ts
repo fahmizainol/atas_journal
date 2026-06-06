@@ -1,7 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend, toQuery } from "../lib/api";
 import { qk, scopeParams, type FilterScope } from "../lib/queryKeys";
-import type { ScanResult, SyncResult, VideoBookmark, VideoData } from "../lib/types";
+import type {
+  ScanResult,
+  SyncResult,
+  TradeVideoStatusResponse,
+  VideoBookmark,
+  VideoData,
+} from "../lib/types";
 
 // All video state is keyed by the attempt's source_file (the stable id; the
 // "Attempt N" label is positional and shifts when takes are deleted).
@@ -14,6 +20,13 @@ export function useVideo(sourceFile: string | null) {
   });
 }
 
+export function useTradeVideoStatuses(scope: FilterScope) {
+  return useQuery({
+    queryKey: qk.tradeVideoStatus(scope),
+    queryFn: () => apiGet<TradeVideoStatusResponse>("/videos/trade-status", scopeParams(scope)),
+  });
+}
+
 export function useSaveVideo(sourceFile: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -23,7 +36,10 @@ export function useSaveVideo(sourceFile: string) {
         `/videos?${toQuery({ source_file: sourceFile })}`,
         body,
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.video(sourceFile) });
+      qc.invalidateQueries({ queryKey: ["trade-video-status"] });
+    },
   });
 }
 
@@ -32,7 +48,10 @@ export function useDeleteVideo(sourceFile: string) {
   return useMutation({
     mutationFn: () =>
       apiSend<{ ok: boolean }>("DELETE", `/videos?${toQuery({ source_file: sourceFile })}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.video(sourceFile) });
+      qc.invalidateQueries({ queryKey: ["trade-video-status"] });
+    },
   });
 }
 
@@ -45,7 +64,10 @@ export function useAddBookmark(sourceFile: string) {
         `/videos/bookmarks?${toQuery({ source_file: sourceFile })}`,
         body,
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.video(sourceFile) });
+      qc.invalidateQueries({ queryKey: ["trade-video-status"] });
+    },
   });
 }
 
@@ -57,7 +79,10 @@ export function useUpdateBookmark(sourceFile: string) {
         offset_s: vars.offset_s,
         label: vars.label,
       }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.video(sourceFile) });
+      qc.invalidateQueries({ queryKey: ["trade-video-status"] });
+    },
   });
 }
 
@@ -66,7 +91,10 @@ export function useDeleteBookmark(sourceFile: string) {
   return useMutation({
     mutationFn: (id: number) =>
       apiSend<{ ok: boolean }>("DELETE", `/videos/bookmarks/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.video(sourceFile) });
+      qc.invalidateQueries({ queryKey: ["trade-video-status"] });
+    },
   });
 }
 
@@ -82,7 +110,10 @@ export function useSyncTrades(sourceFile: string, scope: FilterScope) {
         `/videos/sync?${toQuery({ ...scopeParams(scope), source_file: sourceFile })}`,
         { duration_s: vars.duration_s },
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.video(sourceFile) });
+      qc.invalidateQueries({ queryKey: ["trade-video-status"] });
+    },
   });
 }
 
@@ -98,6 +129,7 @@ export function useScanRecordings(scope: FilterScope) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["calendar"] });
       qc.invalidateQueries({ queryKey: ["video"] });
+      qc.invalidateQueries({ queryKey: ["trade-video-status"] });
     },
   });
 }
@@ -110,6 +142,9 @@ export function useClearSynced(sourceFile: string) {
         "DELETE",
         `/videos/synced?${toQuery({ source_file: sourceFile })}`,
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.video(sourceFile) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.video(sourceFile) });
+      qc.invalidateQueries({ queryKey: ["trade-video-status"] });
+    },
   });
 }

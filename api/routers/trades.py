@@ -17,7 +17,7 @@ router = APIRouter()
 TRADE_COLS = [
     "trade_no", "trade_key", "instrument", "direction", "max_contracts",
     "entry_ts_local", "exit_ts_local", "entry_ts_utc", "exit_ts_utc",
-    "duration_s", "avg_entry", "avg_exit", "net_pnl", "comment",
+    "duration_s", "avg_entry", "avg_exit", "net_pnl", "comment", "source_file",
 ]
 
 

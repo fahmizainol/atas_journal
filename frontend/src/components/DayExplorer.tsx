@@ -243,7 +243,9 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
                 columns={dayColumns}
                 rowKey={(r) => r.trade_no}
                 scrollOnExpand={false}
-                renderExpanded={(r) => <TradeDetail scope={scope} tradeNo={r.trade_no} />}
+                renderExpanded={(r) => (
+                  <TradeDetail scope={scope} tradeNo={r.trade_no} showRecording={false} />
+                )}
               />
             </div>
           </div>

@@ -104,6 +104,77 @@ def get_video(source_file: str = Query(...)) -> dict:
     }
 
 
+@router.get("/videos/trade-status")
+def trade_video_status(scope: Scope = Depends(resolve_scope)) -> dict:
+    """Batch video/bookmark status for the visible Trades table rows."""
+    df = scope.filtered
+    if df is None or df.empty:
+        return {"statuses": {}}
+
+    trade_keys = [str(k) for k in df["trade_key"].dropna().unique().tolist()]
+    source_files = [str(s) for s in df["source_file"].dropna().unique().tolist()]
+    if not trade_keys or not source_files:
+        return {"statuses": {}}
+
+    conn = deps.get_conn()
+    with deps.db_lock():
+        sf_ph = ",".join("?" for _ in source_files)
+        video_rows = conn.execute(
+            "SELECT source_file, path, duration_s "
+            f"FROM attempt_videos WHERE source_file IN ({sf_ph})",
+            source_files,
+        ).fetchall()
+
+        key_ph = ",".join("?" for _ in trade_keys)
+        bookmark_rows = conn.execute(
+            "SELECT source_file, offset_s, label, trade_key, origin "
+            f"FROM video_bookmarks WHERE trade_key IN ({key_ph}) ORDER BY offset_s",
+            trade_keys,
+        ).fetchall()
+
+    videos_by_source: dict[str, dict] = {}
+    for row in video_rows:
+        video = dict(row)
+        resolved = _resolve_path(video["path"])
+        videos_by_source[video["source_file"]] = {
+            "path": video["path"],
+            "duration_s": video["duration_s"],
+            "exists": resolved.is_file(),
+            "playable": resolved.suffix.lower() in PLAYABLE_EXTS,
+        }
+
+    bookmark_by_trade: dict[str, dict] = {}
+    for row in bookmark_rows:
+        bm = dict(row)
+        # Match the Day view's first-bookmark behavior: bookmarks are ordered by
+        # offset, and a duplicate trade mark should not make the table unstable.
+        bookmark_by_trade.setdefault(
+            bm["trade_key"],
+            {
+                "source_file": bm["source_file"],
+                "offset_s": bm["offset_s"],
+                "label": bm["label"],
+                "origin": bm["origin"],
+            },
+        )
+
+    statuses: dict[str, dict] = {}
+    for _, trade in df.iterrows():
+        trade_key = str(trade["trade_key"])
+        source_file = str(trade["source_file"])
+        video = videos_by_source.get(source_file)
+        bookmark = bookmark_by_trade.get(trade_key)
+        statuses[trade_key] = {
+            "source_file": source_file,
+            "has_video": video is not None,
+            "exists": bool(video and video["exists"]),
+            "playable": bool(video and video["playable"]),
+            "bookmark": bookmark if bookmark and bookmark["source_file"] == source_file else None,
+        }
+
+    return {"statuses": statuses}
+
+
 @router.put("/videos")
 def put_video(body: VideoIn, source_file: str = Query(...)) -> dict:
     """Link (or relink) a recording to the attempt. Rejects a path that isn't a

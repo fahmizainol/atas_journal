@@ -41,6 +41,7 @@ export const qk = {
   note: (tradeKey: string) => ["note", tradeKey] as const,
   dayNote: (date: string) => ["day-note", date] as const,
   excursion: (no: number) => ["excursion", no] as const,
+  tradeVideoStatus: (scope: FilterScope) => ["trade-video-status", scope] as const,
   bars: (params: Record<string, unknown>) => ["bars", params] as const,
   tradeChart: (scope: FilterScope, no: number, tf: string) =>
     ["trade-chart", no, tf, scope] as const,

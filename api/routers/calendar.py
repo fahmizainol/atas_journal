@@ -148,7 +148,7 @@ def day_detail(
 
     cols = ["trade_no", "trade_key", "instrument", "direction", "max_contracts",
             "entry_ts_local", "exit_ts_local", "duration_s",
-            "avg_entry", "avg_exit", "net_pnl"]
+            "avg_entry", "avg_exit", "net_pnl", "source_file"]
     trade_rows = records(day_df, cols)
     # Attach each trade's setup badges from the notes frame already loaded by
     # resolve_scope (avoids a second full SELECT * FROM trade_notes per request).
