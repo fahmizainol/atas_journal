@@ -58,7 +58,9 @@ def gen_trade_ai(
 
     conn = deps.get_conn()
     with deps.db_lock():
-        note = db.get_note(conn, trade_key)["note"]
+        # The analysis is cached under the view's trade_key, but the note it
+        # reads is journaled against the logical trade.
+        note = db.get_note(conn, trade["logical_trade_key"])["note"]
         profile = db.get_setting(conn, "trading_profile")
     comment = trade.get("comment", "") or ""
     lv = levels_mod.compute_levels(trade["instrument"], levels_mod.rth_date_for(trade["entry_ts_utc"]))

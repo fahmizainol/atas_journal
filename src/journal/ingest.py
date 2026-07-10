@@ -155,6 +155,22 @@ def _auto_source_tz(path: Path) -> ZoneInfo:
     return auto_source_tz_for_date(datetime.fromtimestamp(path.stat().st_mtime).date())
 
 
+def _infer_session(journal: list[dict]) -> tuple[str, str | None]:
+    """(mode, modal account) for an export, from the accounts on its journal rows.
+
+    A file whose every row is the ``Replay`` account is a replay; anything else
+    touched a real account and counts as live. ``backtest`` is never inferred —
+    it's a deliberate choice made in the UI, since nothing in the export says a
+    session exercised one model exclusively.
+    """
+    accounts = [r["account"] for r in journal if r.get("account")]
+    if not accounts:
+        return "replay", None
+    mode = "replay" if all(a == "Replay" for a in accounts) else "live"
+    modal = max(set(accounts), key=accounts.count)
+    return mode, modal
+
+
 def import_file(
     conn: sqlite3.Connection,
     path: Path,
@@ -168,6 +184,10 @@ def import_file(
         "statistics": db.insert_statistics(conn, parsed["statistics"]),
     }
     db.mark_imported(conn, path.name, file_mtime=file_mtime)
+    # INSERT OR IGNORE: re-importing an export must not undo a mode set to
+    # backtest, or un-archive a session the user archived.
+    mode, account = _infer_session(parsed["journal"])
+    db.upsert_session(conn, path.name, mode, account)
     return counts
 
 

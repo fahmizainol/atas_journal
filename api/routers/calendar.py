@@ -65,10 +65,12 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
     if tf.empty:
         return {"months": [], "days": []}
 
-    # tf is already latest-attempt-per-day, so the cell PnL never blends takes.
-    # Count distinct attempts from the unreduced frame to badge re-done days,
-    # and collect each day's source files so a day can be badged when *any* of
-    # its attempts has a recording linked.
+    # A day cell sums *every* in-scope attempt of that day: collapsing to the
+    # latest take is what made replay stats survivorship-biased. Filter by mode
+    # (or pick a single attempt in the day explorer) to read one take alone.
+    # Count distinct attempts from the archive-inclusive frame to badge re-done
+    # days, and collect each day's source files so a day can be badged when
+    # *any* of its attempts has a recording linked.
     attempts_by_day: dict = {}
     files_by_day: dict = {}
     allf = scope.filtered_all
@@ -146,22 +148,23 @@ def day_detail(
         for _, r in day_df.iterrows()
     ]
 
-    cols = ["trade_no", "trade_key", "instrument", "direction", "max_contracts",
-            "entry_ts_local", "exit_ts_local", "duration_s",
-            "avg_entry", "avg_exit", "net_pnl", "source_file"]
+    cols = ["trade_no", "trade_key", "logical_trade_key", "instrument", "direction",
+            "max_contracts", "entry_ts_local", "exit_ts_local", "duration_s",
+            "avg_entry", "avg_exit", "net_pnl", "source_file", "model_id"]
     trade_rows = records(day_df, cols)
     # Attach each trade's setup badges from the notes frame already loaded by
     # resolve_scope (avoids a second full SELECT * FROM trade_notes per request).
-    # Build the map only over this day's trade_keys instead of the whole table.
+    # Build the map only over this day's keys instead of the whole table. Notes
+    # are keyed by the logical trade, so this resolves in either view.
     notes_df = scope.notes
-    day_keys = {r["trade_key"] for r in trade_rows}
+    day_keys = {r["logical_trade_key"] for r in trade_rows}
     setup_map: dict[str, list] = {}
     if not notes_df.empty and day_keys:
         sub = notes_df[notes_df["trade_key"].isin(day_keys)]
         for _, r in sub.iterrows():
             setup_map[r["trade_key"]] = json.loads(r["setups_json"] or "[]")
     for r in trade_rows:
-        r["setups"] = setup_map.get(r["trade_key"], [])
+        r["setups"] = setup_map.get(r["logical_trade_key"], [])
     file_modified = next(
         (a["file_modified"] for a in attempts if a["source_file"] == selected), None
     )

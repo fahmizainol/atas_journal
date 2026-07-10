@@ -1,9 +1,14 @@
-"""Per-setup performance aggregation.
+"""Per-setup performance aggregation — **legacy, read-only**.
 
-Groups the in-scope trades by their saved setup badges (``trade_notes``),
-runs the shared :func:`journal.metrics.compute_metrics` over each group, and
-returns a confluence breakdown per setup. A trade may carry several setups,
-so it contributes to each — the groups are not a strict partition.
+Setups were superseded by models + rule compliance (see ``api.routers.models``):
+a trade carried 0..n setups, whereas it has exactly one model, so only models
+partition the scope. These reads survive to render the archived pre-cutover era's
+badges; the create/update/delete endpoints are gone, and nothing registers new
+names any more.
+
+Groups the in-scope trades by their saved setup badges (``trade_notes``), runs
+the shared :func:`journal.metrics.compute_metrics` over each group, and returns a
+confluence breakdown per setup.
 """
 
 from __future__ import annotations
@@ -11,8 +16,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends
 
 from journal import db, metrics
 
@@ -23,26 +27,6 @@ from ..serialize import sanitize
 router = APIRouter()
 
 
-# --- Master-list CRUD ----------------------------------------------------
-# Names can contain "/" (e.g. "Failed Breakdown / Bear Trap"), so the target
-# name travels in the JSON body, not the path — POST action endpoints sidestep
-# path-encoding entirely. The management UI and the inline badge field both
-# feed the same ``setups`` table.
-class SetupIn(BaseModel):
-    name: str
-    description: str = ""
-
-
-class SetupUpdate(BaseModel):
-    name: str                     # current name (key)
-    new_name: str | None = None   # omit to edit description only
-    description: str | None = None
-
-
-class SetupDelete(BaseModel):
-    name: str
-
-
 @router.get("/setups/list")
 def list_setups() -> dict:
     """The canonical setup names + descriptions, independent of any trade."""
@@ -51,37 +35,11 @@ def list_setups() -> dict:
         return {"setups": db.list_taxonomy(conn, "setups")}
 
 
-@router.post("/setups/create")
-def create_setup(body: SetupIn) -> dict:
-    if not body.name.strip():
-        raise HTTPException(status_code=400, detail="name is required")
-    conn = deps.get_conn()
-    with deps.db_lock():
-        db.create_taxonomy(conn, "setups", body.name, body.description)
-    return {"ok": True}
-
-
-@router.post("/setups/update")
-def update_setup(body: SetupUpdate) -> dict:
-    conn = deps.get_conn()
-    with deps.db_lock():
-        db.update_taxonomy(conn, "setups", body.name, body.new_name, body.description)
-    return {"ok": True}
-
-
-@router.post("/setups/delete")
-def delete_setup(body: SetupDelete) -> dict:
-    conn = deps.get_conn()
-    with deps.db_lock():
-        db.delete_taxonomy(conn, "setups", body.name)
-    return {"ok": True}
-
-
 def _confluence_stats(group: pd.DataFrame, conf_map: dict[str, list[str]]) -> list[dict]:
     """For one setup's trades, summarise each co-occurring confluence."""
     buckets: dict[str, list[tuple[float, str]]] = {}
     for _, r in group.iterrows():
-        for c in conf_map.get(r["trade_key"], []):
+        for c in conf_map.get(r["logical_trade_key"], []):
             buckets.setdefault(c, []).append((float(r["net_pnl"]), str(r.get("direction", ""))))
     out = []
     for name, rows in buckets.items():
@@ -118,12 +76,12 @@ def setup_stats(scope: Scope = Depends(resolve_scope)) -> dict:
 
     # Build the set of setups present on the in-scope trades.
     names: set[str] = set()
-    for k in df["trade_key"]:
+    for k in df["logical_trade_key"]:
         names.update(setup_map.get(k, []))
 
     setups = []
     for name in sorted(names):
-        mask = df["trade_key"].apply(lambda k: name in setup_map.get(k, []))
+        mask = df["logical_trade_key"].apply(lambda k: name in setup_map.get(k, []))
         group = df[mask]
         if group.empty:
             continue

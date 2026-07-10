@@ -1,4 +1,8 @@
-"""Per-confluence performance aggregation.
+"""Per-confluence performance aggregation — **legacy, read-only**.
+
+Superseded by per-model rule compliance (``api.routers.models``), which asks the
+sharper question: what is my expectancy when I actually follow model X? These
+reads survive to render the archived pre-cutover era; the CRUD endpoints are gone.
 
 The mirror image of :mod:`api.routers.setups`: groups the in-scope trades by
 their saved *confluence* badges (``trade_notes``) instead of setups, and adds
@@ -18,8 +22,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends
 
 from journal import db, metrics
 
@@ -30,56 +33,12 @@ from ..serialize import sanitize
 router = APIRouter()
 
 
-# --- Master-list CRUD ----------------------------------------------------
-# Mirror of the setups router CRUD; see there for why names travel in the body
-# (they can contain "/") rather than the path.
-class ConfluenceIn(BaseModel):
-    name: str
-    description: str = ""
-
-
-class ConfluenceUpdate(BaseModel):
-    name: str                     # current name (key)
-    new_name: str | None = None   # omit to edit description only
-    description: str | None = None
-
-
-class ConfluenceDelete(BaseModel):
-    name: str
-
-
 @router.get("/confluences/list")
 def list_confluences() -> dict:
     """The canonical confluence names + descriptions, independent of any trade."""
     conn = deps.get_conn()
     with deps.db_lock():
         return {"confluences": db.list_taxonomy(conn, "confluences")}
-
-
-@router.post("/confluences/create")
-def create_confluence(body: ConfluenceIn) -> dict:
-    if not body.name.strip():
-        raise HTTPException(status_code=400, detail="name is required")
-    conn = deps.get_conn()
-    with deps.db_lock():
-        db.create_taxonomy(conn, "confluences", body.name, body.description)
-    return {"ok": True}
-
-
-@router.post("/confluences/update")
-def update_confluence(body: ConfluenceUpdate) -> dict:
-    conn = deps.get_conn()
-    with deps.db_lock():
-        db.update_taxonomy(conn, "confluences", body.name, body.new_name, body.description)
-    return {"ok": True}
-
-
-@router.post("/confluences/delete")
-def delete_confluence(body: ConfluenceDelete) -> dict:
-    conn = deps.get_conn()
-    with deps.db_lock():
-        db.delete_taxonomy(conn, "confluences", body.name)
-    return {"ok": True}
 
 
 def _setup_stats(group: pd.DataFrame, setup_map: dict[str, list[str]]) -> list[dict]:
@@ -89,7 +48,7 @@ def _setup_stats(group: pd.DataFrame, setup_map: dict[str, list[str]]) -> list[d
     """
     buckets: dict[str, list[tuple[float, str]]] = {}
     for _, r in group.iterrows():
-        for p in setup_map.get(r["trade_key"], []):
+        for p in setup_map.get(r["logical_trade_key"], []):
             buckets.setdefault(p, []).append((float(r["net_pnl"]), str(r.get("direction", ""))))
     out = []
     for name, rows in buckets.items():
@@ -129,12 +88,12 @@ def confluence_stats(scope: Scope = Depends(resolve_scope)) -> dict:
 
     # --- Leaderboard + lift -------------------------------------------------
     names: set[str] = set()
-    for k in df["trade_key"]:
+    for k in df["logical_trade_key"]:
         names.update(conf_map.get(k, []))
 
     confluences = []
     for name in sorted(names):
-        mask = df["trade_key"].apply(lambda k: name in conf_map.get(k, []))
+        mask = df["logical_trade_key"].apply(lambda k: name in conf_map.get(k, []))
         group = df[mask]
         if group.empty:
             continue
@@ -163,7 +122,7 @@ def confluence_stats(scope: Scope = Depends(resolve_scope)) -> dict:
 
     # --- Stacking -----------------------------------------------------------
     # Bucket each trade by how many confluences it carries; lump 4+ together.
-    counts = df["trade_key"].apply(lambda k: len(conf_map.get(k, [])))
+    counts = df["logical_trade_key"].apply(lambda k: len(conf_map.get(k, [])))
     stacking = []
     for c in (1, 2, 3, 4):
         bucket = df[counts == c] if c < 4 else df[counts >= 4]

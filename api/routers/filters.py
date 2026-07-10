@@ -34,6 +34,13 @@ def filters(scope: Scope = Depends(resolve_scope)) -> dict:
         # with any tagged on trades, as a belt-and-braces against drift.
         all_setups: set[str] = {s["name"] for s in db.list_taxonomy(conn, "setups")}
         all_confluences: set[str] = {c["name"] for c in db.list_taxonomy(conn, "confluences")}
+        model_opts = [
+            {"id": m["id"], "name": m["name"]}
+            for m in db.list_models(conn, include_archived=True)
+        ]
+        # Read off ``sessions`` rather than the scope frame: a mode with no
+        # in-scope trades must stay selectable, or you can never switch back to it.
+        mode_opts = sorted({s["mode"] for s in db.sessions_map(conn).values()})
     all_tags: set[str] = set()
     if not notes_df.empty:
         for tj in notes_df["tags_json"].dropna():
@@ -54,4 +61,6 @@ def filters(scope: Scope = Depends(resolve_scope)) -> dict:
         "tags": sorted(all_tags),
         "setups": sorted(all_setups),
         "confluences": sorted(all_confluences),
+        "modes": mode_opts or ["live", "replay", "backtest"],
+        "models": model_opts,
     }

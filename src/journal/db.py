@@ -140,6 +140,63 @@ CREATE TABLE IF NOT EXISTS video_bookmarks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_video_bookmarks_sf ON video_bookmarks(source_file);
+
+-- A session is one ATAS export (one source_file) — the same key attempt_videos
+-- and video_bookmarks already use, so linking sessions costs no migration.
+--   live     — prop firm / real money
+--   replay   — a simulated re-run of a past session
+--   backtest — one model exercised exclusively for the whole session
+-- ``model_id`` only carries meaning for backtests, where it binds every trade in
+-- the session; otherwise a trade's model comes from ``trade_model``.
+CREATE TABLE IF NOT EXISTS sessions (
+    source_file TEXT PRIMARY KEY,
+    mode        TEXT NOT NULL DEFAULT 'replay',
+    account     TEXT,
+    model_id    INTEGER,
+    archived    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT,
+    updated_at  TEXT
+);
+
+-- A trading model: the fixed approach a trade is executed under. Unlike the
+-- name-keyed setups/confluences above this uses an integer surrogate PK, because
+-- three tables reference it and a rename must not cascade through them.
+CREATE TABLE IF NOT EXISTS models (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT DEFAULT '',
+    archived    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT
+);
+
+-- The entry rules a model declares. ``active`` is a soft delete: retiring a rule
+-- must not rewrite the compliance score of trades already checked against it.
+CREATE TABLE IF NOT EXISTS model_rules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id   INTEGER NOT NULL,
+    label      TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT
+);
+
+-- Exactly one model per trade, or none (NULL = off-model). A strict partition,
+-- so per-model PnL plus the unassigned bucket sums to the scope total. Keyed by
+-- the LOGICAL trade key so the badge survives a logical<->ATAS view switch.
+CREATE TABLE IF NOT EXISTS trade_model (
+    trade_key  TEXT PRIMARY KEY,
+    model_id   INTEGER,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS trade_rule_checks (
+    trade_key TEXT NOT NULL,
+    rule_id   INTEGER NOT NULL,
+    met       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (trade_key, rule_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_rules_model ON model_rules(model_id);
 """
 
 # One-time curated seed for the setup/confluence master lists (option (b):
@@ -253,6 +310,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _migrate_bookmark_origin(conn)
     _migrate_trade_note_tagging(conn)
     _migrate_setup_confluence_master(conn)  # needs trade-note columns above
+    _migrate_journal_model(conn)
 
 
 def _migrate_video_schema(conn: sqlite3.Connection) -> None:
@@ -373,6 +431,52 @@ def _migrate_setup_confluence_master(conn: sqlite3.Connection) -> None:
                 (name, desc),
             )
         save_setting(conn, "setup_confluence_seeded", "1")
+    conn.commit()
+
+
+def _migrate_journal_model(conn: sqlite3.Connection) -> None:
+    """Back-fill ``sessions`` for already-imported exports and seed ``models``.
+
+    Both halves are one-time, each guarded by its own settings key (the
+    ``setup_confluence_seeded`` pattern), and both use INSERT OR IGNORE so a
+    re-run can never re-archive a session the user un-archived, clobber a manual
+    ``backtest`` binding, or resurrect a deleted model.
+
+    The cutover archives every pre-existing session: the trading approach changed,
+    so the old era is browsable but out of the default statistics. ``mode`` is
+    inferred from the accounts on the export's rows — a file whose every row is
+    the ``Replay`` account is a replay, anything else touched a real account and
+    counts as live. Old setup badges are deliberately *not* mapped onto
+    ``trade_model``: a trade historically carried 0..n setups and a model is
+    exactly 1, so any automatic mapping would be semantically wrong.
+    """
+    if get_setting(conn, "sessions_cutover_done") != "1":
+        rows = conn.execute(
+            "SELECT source_file, account, COUNT(*) AS n FROM atas_journal "
+            "GROUP BY source_file, account"
+        ).fetchall()
+        by_file: dict[str, list[tuple[str, int]]] = {}
+        for r in rows:
+            by_file.setdefault(r["source_file"], []).append((r["account"], r["n"]))
+        for source_file, accounts in by_file.items():
+            mode = "replay" if all(a == "Replay" for a, _ in accounts) else "live"
+            modal = max(accounts, key=lambda p: p[1])[0]
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions "
+                "(source_file, mode, account, model_id, archived, created_at, updated_at) "
+                "VALUES (?, ?, ?, NULL, 1, datetime('now'), datetime('now'))",
+                (source_file, mode, modal),
+            )
+        save_setting(conn, "sessions_cutover_done", "1")
+
+    if get_setting(conn, "models_seeded") != "1":
+        for name, desc in SEED_SETUPS:
+            conn.execute(
+                "INSERT OR IGNORE INTO models (name, description, archived, created_at) "
+                "VALUES (?, ?, 0, datetime('now'))",
+                (name, desc),
+            )
+        save_setting(conn, "models_seeded", "1")
     conn.commit()
 
 
@@ -786,6 +890,299 @@ def delete_taxonomy(conn: sqlite3.Connection, table: str, name: str) -> None:
     conn.execute(f"DELETE FROM {table} WHERE name = ?", (name,))
     _sweep_trade_tags(conn, json_col, name, None)
     conn.commit()
+
+
+# --- Sessions ------------------------------------------------------------
+# One row per ATAS export. The ingest path creates them un-archived; the cutover
+# created the historical ones archived. Only ``upsert_session`` is called from
+# ingest, and it never overwrites — so a mode/archive choice made in the UI
+# survives re-importing the same export.
+def upsert_session(
+    conn: sqlite3.Connection, source_file: str, mode: str, account: str | None = None
+) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO sessions "
+        "(source_file, mode, account, model_id, archived, created_at, updated_at) "
+        "VALUES (?, ?, ?, NULL, 0, datetime('now'), datetime('now'))",
+        (source_file, mode, account),
+    )
+    conn.commit()
+
+
+def sessions_map(conn: sqlite3.Connection) -> dict[str, dict]:
+    """{source_file: {mode, account, model_id, archived}} for scope resolution."""
+    return {
+        r["source_file"]: {
+            "mode": r["mode"],
+            "account": r["account"],
+            "model_id": r["model_id"],
+            "archived": bool(r["archived"]),
+        }
+        for r in conn.execute(
+            "SELECT source_file, mode, account, model_id, archived FROM sessions"
+        )
+    }
+
+
+def list_sessions(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT s.source_file, s.mode, s.account, s.model_id, s.archived, s.updated_at, "
+        "       m.name AS model_name "
+        "FROM sessions s LEFT JOIN models m ON m.id = s.model_id "
+        "ORDER BY s.source_file"
+    ).fetchall()
+    return [{**dict(r), "archived": bool(r["archived"])} for r in rows]
+
+
+def update_session(
+    conn: sqlite3.Connection,
+    source_file: str,
+    mode: str | None = None,
+    model_id: int | None = None,
+    archived: bool | None = None,
+    clear_model: bool = False,
+) -> None:
+    """Patch a session; unspecified fields are left as-is.
+
+    ``model_id`` only binds trades when ``mode='backtest'``; pass ``clear_model``
+    to unbind (a plain ``model_id=None`` means "don't touch", matching the other
+    optional fields).
+    """
+    sets: list[str] = []
+    params: list[object] = []
+    if mode is not None:
+        sets.append("mode = ?")
+        params.append(mode)
+    if clear_model:
+        sets.append("model_id = NULL")
+    elif model_id is not None:
+        sets.append("model_id = ?")
+        params.append(model_id)
+    if archived is not None:
+        sets.append("archived = ?")
+        params.append(1 if archived else 0)
+    if not sets:
+        return
+    sets.append("updated_at = datetime('now')")
+    params.append(source_file)
+    conn.execute(f"UPDATE sessions SET {', '.join(sets)} WHERE source_file = ?", params)
+    conn.commit()
+
+
+# --- Models + their rule checklists ---------------------------------------
+def list_models(conn: sqlite3.Connection, include_archived: bool = False) -> list[dict]:
+    """Models A→Z, each with its rules. Archived rules are excluded from the
+    checklist, but stay in the DB so old trades' compliance scores keep meaning."""
+    where = "" if include_archived else "WHERE archived = 0"
+    models = conn.execute(
+        f"SELECT id, name, description, archived FROM models {where} "
+        "ORDER BY name COLLATE NOCASE"
+    ).fetchall()
+    rules = conn.execute(
+        "SELECT id, model_id, label, sort_order FROM model_rules "
+        "WHERE active = 1 ORDER BY sort_order, id"
+    ).fetchall()
+    by_model: dict[int, list[dict]] = {}
+    for r in rules:
+        by_model.setdefault(r["model_id"], []).append(dict(r))
+    return [
+        {
+            "id": m["id"],
+            "name": m["name"],
+            "description": m["description"] or "",
+            "archived": bool(m["archived"]),
+            "rules": by_model.get(m["id"], []),
+        }
+        for m in models
+    ]
+
+
+def create_model(conn: sqlite3.Connection, name: str, description: str = "") -> int:
+    name = name.strip()
+    if not name:
+        raise ValueError("name is required")
+    cur = conn.execute(
+        "INSERT INTO models (name, description, archived, created_at) "
+        "VALUES (?, ?, 0, datetime('now'))",
+        (name, description),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def update_model(
+    conn: sqlite3.Connection,
+    model_id: int,
+    name: str | None = None,
+    description: str | None = None,
+    archived: bool | None = None,
+) -> None:
+    sets: list[str] = []
+    params: list[object] = []
+    if name is not None:
+        if not name.strip():
+            raise ValueError("name is required")
+        sets.append("name = ?")
+        params.append(name.strip())
+    if description is not None:
+        sets.append("description = ?")
+        params.append(description)
+    if archived is not None:
+        sets.append("archived = ?")
+        params.append(1 if archived else 0)
+    if not sets:
+        return
+    params.append(model_id)
+    conn.execute(f"UPDATE models SET {', '.join(sets)} WHERE id = ?", params)
+    conn.commit()
+
+
+def archive_model(conn: sqlite3.Connection, model_id: int) -> None:
+    """Soft-delete: the model leaves the picker but trades tagged with it keep
+    resolving, so historical per-model stats never silently reshuffle."""
+    update_model(conn, model_id, archived=True)
+
+
+def list_rules(
+    conn: sqlite3.Connection, model_id: int, include_inactive: bool = False
+) -> list[dict]:
+    where = "" if include_inactive else "AND active = 1"
+    rows = conn.execute(
+        f"SELECT id, model_id, label, sort_order, active FROM model_rules "
+        f"WHERE model_id = ? {where} ORDER BY sort_order, id",
+        (model_id,),
+    ).fetchall()
+    return [{**dict(r), "active": bool(r["active"])} for r in rows]
+
+
+def create_rule(
+    conn: sqlite3.Connection, model_id: int, label: str, sort_order: int | None = None
+) -> int:
+    label = label.strip()
+    if not label:
+        raise ValueError("label is required")
+    if sort_order is None:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM model_rules "
+            "WHERE model_id = ?",
+            (model_id,),
+        ).fetchone()
+        sort_order = int(row["n"])
+    cur = conn.execute(
+        "INSERT INTO model_rules (model_id, label, sort_order, active, created_at) "
+        "VALUES (?, ?, ?, 1, datetime('now'))",
+        (model_id, label, sort_order),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def update_rule(
+    conn: sqlite3.Connection,
+    rule_id: int,
+    label: str | None = None,
+    sort_order: int | None = None,
+    active: bool | None = None,
+) -> None:
+    sets: list[str] = []
+    params: list[object] = []
+    if label is not None:
+        if not label.strip():
+            raise ValueError("label is required")
+        sets.append("label = ?")
+        params.append(label.strip())
+    if sort_order is not None:
+        sets.append("sort_order = ?")
+        params.append(sort_order)
+    if active is not None:
+        sets.append("active = ?")
+        params.append(1 if active else 0)
+    if not sets:
+        return
+    params.append(rule_id)
+    conn.execute(f"UPDATE model_rules SET {', '.join(sets)} WHERE id = ?", params)
+    conn.commit()
+
+
+def retire_rule(conn: sqlite3.Connection, rule_id: int) -> None:
+    """Soft-delete a rule. Its ``trade_rule_checks`` rows stay, so a trade
+    scored 3/4 against the old checklist still reads 3/4."""
+    update_rule(conn, rule_id, active=False)
+
+
+# --- Per-trade model assignment + rule compliance -------------------------
+# All keyed by the LOGICAL trade key (see ``trades.lot_to_logical_map``), so a
+# trade journaled in logical view keeps its model when viewed as ATAS rows.
+def get_trade_model(conn: sqlite3.Connection, trade_key: str) -> int | None:
+    row = conn.execute(
+        "SELECT model_id FROM trade_model WHERE trade_key = ?", (trade_key,)
+    ).fetchone()
+    return None if row is None else row["model_id"]
+
+
+def trade_model_map(conn: sqlite3.Connection) -> dict[str, int]:
+    """{logical trade_key: model_id} for rows that actually name a model.
+
+    Rows with a NULL ``model_id`` (explicitly marked off-model) are omitted —
+    they resolve the same as an absent row, and leaving them out keeps the
+    caller's ``.get(key)`` returning None either way.
+    """
+    return {
+        r["trade_key"]: r["model_id"]
+        for r in conn.execute(
+            "SELECT trade_key, model_id FROM trade_model WHERE model_id IS NOT NULL"
+        )
+    }
+
+
+def set_trade_model(conn: sqlite3.Connection, trade_key: str, model_id: int | None) -> None:
+    conn.execute(
+        "INSERT INTO trade_model (trade_key, model_id, updated_at) "
+        "VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(trade_key) DO UPDATE SET "
+        "model_id=excluded.model_id, updated_at=excluded.updated_at",
+        (trade_key, model_id),
+    )
+    conn.commit()
+
+
+def get_rule_checks(conn: sqlite3.Connection, trade_key: str) -> dict[int, bool]:
+    return {
+        r["rule_id"]: bool(r["met"])
+        for r in conn.execute(
+            "SELECT rule_id, met FROM trade_rule_checks WHERE trade_key = ?", (trade_key,)
+        )
+    }
+
+
+def set_rule_checks(
+    conn: sqlite3.Connection, trade_key: str, model_id: int | None, rules_met: Iterable[int]
+) -> None:
+    """Record which of ``model_id``'s active rules this trade met.
+
+    Every check whose rule doesn't belong to the trade's current model is swept —
+    changing a trade's model must not leave the previous model's checks behind,
+    where they'd inflate the new model's compliance denominator. Rows are written
+    for *all* the model's active rules (met 0 or 1), so "unmet" and "never
+    reviewed" stay distinguishable: a trade with no rows was never scored.
+    """
+    conn.execute("DELETE FROM trade_rule_checks WHERE trade_key = ?", (trade_key,))
+    if model_id is not None:
+        met = set(rules_met)
+        for rule in list_rules(conn, model_id):
+            conn.execute(
+                "INSERT INTO trade_rule_checks (trade_key, rule_id, met) VALUES (?, ?, ?)",
+                (trade_key, rule["id"], 1 if rule["id"] in met else 0),
+            )
+    conn.commit()
+
+
+def all_rule_checks(conn: sqlite3.Connection) -> dict[str, dict[int, bool]]:
+    """{trade_key: {rule_id: met}} — one scan, for the /models/stats aggregation."""
+    out: dict[str, dict[int, bool]] = {}
+    for r in conn.execute("SELECT trade_key, rule_id, met FROM trade_rule_checks"):
+        out.setdefault(r["trade_key"], {})[r["rule_id"]] = bool(r["met"])
+    return out
 
 
 def get_day_note(conn: sqlite3.Connection, day: str) -> dict:

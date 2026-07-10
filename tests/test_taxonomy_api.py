@@ -1,4 +1,9 @@
-"""Setup/confluence CRUD endpoints + note auto-register + filters sourcing.
+"""Legacy setup/confluence read endpoints + filters sourcing.
+
+Setups/confluences are read-only since the model cutover: the CRUD endpoints and
+the note-save auto-registration are gone (that auto-registration is what let any
+typed badge become a permanent master entry). What remains is rendering the
+archived pre-cutover era's badges, which is what these cover.
 
 Calls the router functions directly with a temp DB injected into deps._conn
 (same pattern as test_scan_endpoint.py).
@@ -16,11 +21,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from journal import db  # noqa: E402
 from api import deps  # noqa: E402
 from api.routers import confluences, filters, notes, setups  # noqa: E402
-from api.scope import resolve_scope  # noqa: E402
+from helpers import make_scope  # noqa: E402
 
 
 def _setup(tmp: Path):
@@ -31,10 +37,7 @@ def _setup(tmp: Path):
 
 
 def _scope():
-    return resolve_scope(
-        view="atas", instruments=None, accounts=None,
-        start=None, end=None, tags=None, tz=None,
-    )
+    return make_scope(view="atas")
 
 
 def test_list_returns_seeded():
@@ -48,32 +51,19 @@ def test_list_returns_seeded():
         assert "VAL Sesh" in cnames and "PDC" in cnames
 
 
-def test_create_update_delete_setup():
-    with tempfile.TemporaryDirectory() as d:
-        conn = _setup(Path(d))
-        setups.create_setup(setups.SetupIn(name="Scalp", description="quick"))
-        assert "Scalp" in [s["name"] for s in setups.list_setups()["setups"]]
-        setups.update_setup(setups.SetupUpdate(name="Scalp", new_name="Scalper"))
-        names = [s["name"] for s in setups.list_setups()["setups"]]
-        assert "Scalper" in names and "Scalp" not in names
-        setups.delete_setup(setups.SetupDelete(name="Scalper"))
-        assert "Scalper" not in [s["name"] for s in setups.list_setups()["setups"]]
-        _ = conn
+def test_taxonomy_crud_endpoints_are_gone():
+    """The sprawl in the old taxonomy was structural: every badge typed into the
+    trade form registered a permanent name. Removing the write path is the fix."""
+    gone = [
+        (setups, "create_setup"), (setups, "update_setup"), (setups, "delete_setup"),
+        (confluences, "create_confluence"), (confluences, "update_confluence"),
+        (confluences, "delete_confluence"),
+    ]
+    for mod, name in gone:
+        assert not hasattr(mod, name), f"{mod.__name__}.{name} still exists"
 
 
-def test_create_rejects_blank():
-    from fastapi import HTTPException
-
-    with tempfile.TemporaryDirectory() as d:
-        _setup(Path(d))
-        try:
-            setups.create_setup(setups.SetupIn(name="   "))
-            raise AssertionError("expected HTTPException")
-        except HTTPException as e:
-            assert e.status_code == 400
-
-
-def test_put_note_auto_registers():
+def test_put_note_does_not_register_new_names():
     with tempfile.TemporaryDirectory() as d:
         _setup(Path(d))
         notes.put_note(
@@ -84,31 +74,42 @@ def test_put_note_auto_registers():
                 confluences=["Totally New Conf"],
             ),
         )
-        assert "Totally New Setup" in [s["name"] for s in setups.list_setups()["setups"]]
-        assert "Totally New Conf" in [c["name"] for c in confluences.list_confluences()["confluences"]]
+        assert "Totally New Setup" not in [s["name"] for s in setups.list_setups()["setups"]]
+        assert "Totally New Conf" not in [
+            c["name"] for c in confluences.list_confluences()["confluences"]
+        ]
+        # The badge still saves on the trade — only the master list is protected.
+        assert notes.get_note("kx1")["setups"] == ["Totally New Setup"]
 
 
-def test_filters_includes_unused_master_names():
+def test_filters_includes_master_names():
     with tempfile.TemporaryDirectory() as d:
         _setup(Path(d))
-        # A setup created but never tagged on a trade must still autocomplete.
-        setups.create_setup(setups.SetupIn(name="Unused Setup"))
         out = filters.filters(_scope())
-        assert "Unused Setup" in out["setups"]
         assert "Value-Area Fade" in out["setups"]  # seeded, unused
+        assert "Absorption" in out["confluences"]
 
 
-def test_delete_cascades_through_endpoints():
+def test_filters_exposes_modes_and_models():
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d))
+        out = filters.filters(_scope())
+        # No sessions imported yet, so the mode options fall back to the full set.
+        assert set(out["modes"]) == {"live", "replay", "backtest"}
+        names = [m["name"] for m in out["models"]]
+        assert "Value-Area Fade" in names  # seeded as a starter model
+
+
+def test_note_survives_taxonomy_read():
     with tempfile.TemporaryDirectory() as d:
         conn = _setup(Path(d))
         notes.put_note(
             "kx1",
             notes.NoteIn(note="keep me", setups=["Level Bounce"], confluences=["Absorption"]),
         )
-        setups.delete_setup(setups.SetupDelete(name="Level Bounce"))
         note = db.get_note(conn, "kx1")
         assert note["note"] == "keep me"
-        assert json.loads(note["setups_json"]) == []
+        assert json.loads(note["setups_json"]) == ["Level Bounce"]
         assert json.loads(note["confluences_json"]) == ["Absorption"]
 
 

@@ -164,6 +164,10 @@ def _finalize(
 
     out.append({
         "trade_key": _trade_key(lots.iloc[0]["dedupe_key"], instrument),
+        # Every ATAS lot this logical trade absorbed. Lets ``lot_to_logical_map``
+        # resolve an ATAS row back to the logical trade that owns it, so notes /
+        # model / rule checks bind to the same key in either view.
+        "lot_keys": lots["dedupe_key"].tolist(),
         "source_file": lots.iloc[0]["source_file"],
         "instrument": instrument,
         "account": account,
@@ -184,6 +188,27 @@ def _finalize(
         "fills": _window_fills(executions, account, instrument, entry_ts_utc, exit_ts_utc),
         "comment": "; ".join(dict.fromkeys(comments)),
     })
+
+
+def lot_to_logical_map(
+    journal: pd.DataFrame, executions: pd.DataFrame | None = None
+) -> dict[str, str]:
+    """{ATAS lot ``dedupe_key``: owning logical ``trade_key``}.
+
+    The journaling key must not depend on which view you happen to be looking at.
+    A logical trade's key hashes only its *first* lot, so an ATAS row can't derive
+    it — this map is the bridge. ``executions`` is accepted for signature
+    symmetry with :func:`build_logical_trades` and defaults to None: fill markers
+    cost real time to window and play no part in the grouping.
+    """
+    logical = build_logical_trades(journal, executions)
+    if logical.empty:
+        return {}
+    return {
+        lot: row["trade_key"]
+        for _, row in logical.iterrows()
+        for lot in row["lot_keys"]
+    }
 
 
 def localize(df: pd.DataFrame, tz) -> pd.DataFrame:
@@ -227,8 +252,11 @@ def atas_trades(journal: pd.DataFrame) -> pd.DataFrame:
     df["fills"] = None
     df = df.sort_values("entry_ts_utc").reset_index(drop=True)
     df.insert(0, "trade_no", range(1, len(df) + 1))
+    # dedupe_key survives into the frame (it doesn't in the logical view) purely
+    # so ``lot_to_logical_map`` can rejoin an ATAS row to its logical trade.
     keep = [
-        "trade_no", "trade_key", "source_file", "instrument", "account", "direction",
+        "trade_no", "trade_key", "dedupe_key", "source_file", "instrument", "account",
+        "direction",
         "avg_entry", "avg_exit", "max_contracts", "leg_count", "entry_ts_utc",
         "exit_ts_utc", "entry_ts_local", "exit_ts_local", "duration_s", "gross_pnl",
         "commission", "net_pnl", "open_position", "fills", "comment",

@@ -30,8 +30,10 @@ from .routers import (  # noqa: E402
     filters,
     imports,
     meta,
+    models,
     notes,
     overview,
+    sessions,
     settings,
     setups,
     statistics,
@@ -63,6 +65,8 @@ app.include_router(statistics.router, prefix="/api")
 app.include_router(trades.router, prefix="/api")
 app.include_router(notes.router, prefix="/api")
 app.include_router(day_notes.router, prefix="/api")
+app.include_router(models.router, prefix="/api")
+app.include_router(sessions.router, prefix="/api")
 app.include_router(setups.router, prefix="/api")
 app.include_router(confluences.router, prefix="/api")
 app.include_router(charts.router, prefix="/api")

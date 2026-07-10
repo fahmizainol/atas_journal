@@ -13,11 +13,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from journal import db  # noqa: E402
 from api import deps  # noqa: E402
 from api.routers import videos  # noqa: E402
-from api.scope import resolve_scope  # noqa: E402
+from helpers import make_scope  # noqa: E402
 
 
 def _journal_row(source_file: str, day: str) -> dict:
@@ -59,11 +60,7 @@ def _setup(tmp: Path):
 
 def _scope():
     # ATAS view needs no executions; default tz. resolve_scope reads deps._conn.
-    # Pass every arg explicitly — the defaults are FastAPI Query markers.
-    return resolve_scope(
-        view="atas", instruments=None, accounts=None,
-        start=None, end=None, tags=None, tz=None,
-    )
+    return make_scope(view="atas")
 
 
 def test_scan_links_matching_and_reports():
