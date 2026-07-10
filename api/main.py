@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from . import deps  # noqa: E402
 from .routers import (  # noqa: E402
     ai,
+    backtests,
     calendar,
     charts,
     confluences,
@@ -53,8 +54,13 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     deps.init()
+    # Auto-import watcher: scans data/imports/ every WATCH_INTERVAL_S. Async
+    # handler so the task lands on the running event loop.
+    from . import watcher
+
+    watcher.start()
 
 
 app.include_router(meta.router, prefix="/api")
@@ -66,6 +72,7 @@ app.include_router(trades.router, prefix="/api")
 app.include_router(notes.router, prefix="/api")
 app.include_router(day_notes.router, prefix="/api")
 app.include_router(models.router, prefix="/api")
+app.include_router(backtests.router, prefix="/api")
 app.include_router(sessions.router, prefix="/api")
 app.include_router(setups.router, prefix="/api")
 app.include_router(confluences.router, prefix="/api")

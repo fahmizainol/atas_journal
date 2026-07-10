@@ -30,6 +30,9 @@ class SessionPatch(BaseModel):
     mode: str | None = None
     model_id: int | None = None
     archived: bool | None = None
+    # Session-level journal (hypothesis, conditions, verdict) — the narrative a
+    # backtest run needs that no single trade note can carry.
+    note: str | None = None
 
 
 @router.get("/sessions/list")
@@ -66,7 +69,7 @@ def patch_session(source_file: str, body: SessionPatch) -> dict:
         db.update_session(
             conn, source_file,
             mode=body.mode, model_id=None if clear_model else model_id,
-            archived=body.archived, clear_model=clear_model,
+            archived=body.archived, clear_model=clear_model, note=body.note,
         )
         return {"ok": True, "session": next(
             s for s in db.list_sessions(conn) if s["source_file"] == source_file

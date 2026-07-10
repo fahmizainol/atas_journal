@@ -15,6 +15,7 @@ export interface SessionPatch {
   mode?: SessionMode;
   model_id?: number | null;
   archived?: boolean;
+  note?: string;
 }
 
 // Mode and archive decide which aggregates a session's trades reach, so a patch
@@ -34,6 +35,7 @@ export function usePatchSession() {
       for (const k of [
         "metrics", "summary-extras", "equity-curve", "daily-pnl", "distribution",
         "edges", "trades", "trade", "calendar", "day", "model-stats",
+        "backtests-overview", "backtest-detail",
       ]) {
         qc.invalidateQueries({ queryKey: [k] });
       }

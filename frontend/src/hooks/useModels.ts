@@ -42,6 +42,8 @@ function useInvalidateModels() {
     qc.invalidateQueries({ queryKey: ["trades"] });
     qc.invalidateQueries({ queryKey: ["trade"] });
     qc.invalidateQueries({ queryKey: ["day"] });
+    qc.invalidateQueries({ queryKey: ["backtests-overview"] });
+    qc.invalidateQueries({ queryKey: ["backtest-detail"] });
   };
 }
 
@@ -57,8 +59,13 @@ export function useCreateModel() {
 export function useUpdateModel() {
   const invalidate = useInvalidateModels();
   return useMutation({
-    mutationFn: (body: { id: number; name?: string; description?: string; archived?: boolean }) =>
-      apiSend<{ ok: boolean }>("POST", "/models/update", body),
+    mutationFn: (body: {
+      id: number;
+      name?: string;
+      description?: string;
+      archived?: boolean;
+      target_sample?: number; // 0 clears the target
+    }) => apiSend<{ ok: boolean }>("POST", "/models/update", body),
     onSuccess: invalidate,
   });
 }

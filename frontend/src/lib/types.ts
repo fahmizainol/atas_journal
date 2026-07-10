@@ -128,6 +128,8 @@ export interface Model {
   name: string;
   description: string;
   archived: boolean;
+  folder: string | null; // export drop-box slug under data/imports/backtest/
+  target_sample: number | null; // backtest sample-size goal
   rules: ModelRule[];
 }
 
@@ -184,7 +186,78 @@ export interface Session {
   model_id: number | null; // bound session-wide when mode is 'backtest'
   model_name: string | null;
   archived: boolean;
+  note: string; // session-level journal (hypothesis, conditions, verdict)
   updated_at: string | null;
+}
+
+// --- Backtests: per-model monitoring + the auto-import watcher feed -------
+export interface SlimMetrics {
+  trades: number;
+  net_pnl?: Num;
+  win_rate?: number;
+  expectancy?: Num;
+  profit_factor?: Num;
+  avg_win?: Num;
+  avg_loss?: Num;
+  max_drawdown?: Num;
+}
+
+export interface BacktestModelCard {
+  id: number;
+  name: string;
+  description: string;
+  archived: boolean;
+  folder: string | null;
+  target_sample: number | null;
+  sessions: number;
+  last_import: string | null;
+  metrics: SlimMetrics;
+}
+
+export interface BacktestSessionRow {
+  source_file: string;
+  archived: boolean;
+  note: string;
+  imported_at: string | null;
+  first_day: string | null;
+  last_day: string | null;
+  metrics: SlimMetrics;
+}
+
+export interface BacktestDetail {
+  model: {
+    id: number;
+    name: string;
+    description: string;
+    archived: boolean;
+    folder: string | null;
+    target_sample: number | null;
+  };
+  metrics: Metrics;
+  equity: EquityPoint[];
+  distribution: number[];
+  comparison: Record<SessionMode, SlimMetrics>;
+  sessions: BacktestSessionRow[];
+}
+
+export interface ImportFeedEvent {
+  seq: number;
+  ts: string;
+  kind: "imported" | "unknown_folder" | "error";
+  file: string;
+  folder?: string;
+  mode?: SessionMode;
+  model_id?: number | null;
+  model_name?: string | null;
+  counts?: { executions: number; journal: number; statistics: number };
+  message?: string;
+}
+
+export interface ImportFeed {
+  seq: number;
+  last_scan_at: string | null;
+  interval_s: number;
+  events: ImportFeedEvent[];
 }
 
 export interface EdgeRow {

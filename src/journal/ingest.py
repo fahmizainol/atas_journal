@@ -160,7 +160,11 @@ def import_file(
     path: Path,
     source_tz: ZoneInfo = DEFAULT_SOURCE_TZ,
     file_mtime: str | None = None,
+    mode: str | None = None,
+    model_id: int | None = None,
 ) -> dict[str, int]:
+    """``mode``/``model_id`` override the inferred session mode — the watcher
+    passes ``mode='backtest'`` plus the model its drop-box folder declares."""
     parsed = parse_file(path, source_tz=source_tz)
     counts = {
         "executions": db.insert_executions(conn, parsed["executions"]),
@@ -170,8 +174,8 @@ def import_file(
     db.mark_imported(conn, path.name, file_mtime=file_mtime)
     # INSERT OR IGNORE: re-importing an export must not undo a mode set to
     # backtest, or un-archive a session the user archived.
-    mode, account = db.infer_session(r["account"] for r in parsed["journal"])
-    db.upsert_session(conn, path.name, mode, account)
+    inferred, account = db.infer_session(r["account"] for r in parsed["journal"])
+    db.upsert_session(conn, path.name, mode or inferred, account, model_id=model_id)
     return counts
 
 

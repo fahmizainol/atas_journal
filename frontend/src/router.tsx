@@ -5,6 +5,7 @@ import { Calendar } from "./pages/Calendar";
 import { Edges } from "./pages/Edges";
 import { Trades } from "./pages/Trades";
 import { Models } from "./pages/Models";
+import { Backtests } from "./pages/Backtests";
 import { AiReview } from "./pages/AiReview";
 import { CrossCheck } from "./pages/CrossCheck";
 
@@ -20,6 +21,7 @@ export const router = createBrowserRouter([
       { path: "trades", element: <Trades /> },
       { path: "trades/:tradeNo", element: <Trades /> },
       { path: "models", element: <Models /> },
+      { path: "backtests", element: <Backtests /> },
       { path: "ai", element: <AiReview /> },
       { path: "cross-check", element: <CrossCheck /> },
     ],

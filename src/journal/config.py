@@ -14,11 +14,19 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
 IMPORTS_DIR = DATA_DIR / "imports"
+# Exports saved under backtest/<model-folder>/ import as that model's backtest;
+# the folder name is the declaration (created by the app when a model is made).
+BACKTEST_DIR = IMPORTS_DIR / "backtest"
 CACHE_DIR = DATA_DIR / "cache"
 DB_PATH = DATA_DIR / "journal.db"
 
-for _d in (IMPORTS_DIR, CACHE_DIR):
+for _d in (IMPORTS_DIR, BACKTEST_DIR, CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
+
+# Seconds between watcher scans of IMPORTS_DIR, and the age past which a file
+# counts as settled without needing to survive a tick unchanged.
+WATCH_INTERVAL_S = 60
+WATCH_SETTLED_AGE_S = 120
 
 # --- Timezones -----------------------------------------------------------
 # ATAS Journal/Executions timestamps are local Asia/Kuala_Lumpur (UTC+8).

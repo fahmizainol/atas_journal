@@ -1,18 +1,38 @@
-"""Import ATAS .xlsx exports: from the watched dir, or via upload."""
+"""Import ATAS .xlsx exports: auto-watched, from the watched dir, or via upload."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from journal import db, ingest
-from journal.config import IMPORTS_DIR
+from journal.config import IMPORTS_DIR, WATCH_INTERVAL_S
 
-from .. import deps
+from .. import deps, watcher
 
 router = APIRouter()
+
+
+@router.get("/import/feed")
+def import_feed() -> dict:
+    """What the watcher has done lately, newest first. The UI polls this to
+    surface auto-imports (and mis-filed exports) within a minute."""
+    return {
+        "seq": watcher.state.seq,
+        "last_scan_at": watcher.state.last_scan_at,
+        "interval_s": WATCH_INTERVAL_S,
+        "events": list(reversed(watcher.state.events)),
+    }
+
+
+@router.post("/import/scan")
+async def import_scan() -> dict:
+    """Run one watcher pass right now instead of waiting for the next tick."""
+    imported = await asyncio.to_thread(watcher.scan_now)
+    return {"ok": True, "imported": imported, "seq": watcher.state.seq}
 
 
 def _resolve_tz(source_tz: str | None) -> ZoneInfo:

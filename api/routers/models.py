@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from journal import db, metrics
+from journal.config import BACKTEST_DIR
 
 from .. import deps
 from ..scope import Scope, resolve_scope
@@ -35,6 +36,8 @@ class ModelUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     archived: bool | None = None
+    # Backtest sample-size goal. None = don't touch; 0 = clear the target.
+    target_sample: int | None = None
 
 
 class ModelDelete(BaseModel):
@@ -73,14 +76,41 @@ def create_model(body: ModelIn) -> dict:
             model_id = db.create_model(conn, body.name, body.description)
         except Exception as exc:  # UNIQUE(name)
             raise HTTPException(status_code=400, detail=f"model exists: {exc}") from exc
-    return {"ok": True, "id": model_id}
+        folder = (db.get_model(conn, model_id) or {}).get("folder")
+    # The model's backtest drop-box exists from birth, so "export there" is
+    # never a step the user has to remember to set up.
+    if folder:
+        (BACKTEST_DIR / folder).mkdir(parents=True, exist_ok=True)
+    return {"ok": True, "id": model_id, "folder": folder}
 
 
 @router.post("/models/update")
 def update_model(body: ModelUpdate) -> dict:
     conn = deps.get_conn()
     with deps.db_lock():
-        db.update_model(conn, body.id, body.name, body.description, body.archived)
+        current = db.get_model(conn, body.id)
+        if current is None:
+            raise HTTPException(status_code=404, detail=f"no model {body.id}")
+        # A rename moves the drop-box with it: the folder is keyed to the model
+        # id in the DB, so nothing breaks mid-rename, but keeping the slug in
+        # step with the name is what makes the folder recognizable in ATAS's
+        # save dialog.
+        new_folder = None
+        if body.name is not None and body.name.strip() != current["name"]:
+            new_folder = db.unique_model_folder(conn, body.name.strip(), exclude_id=body.id)
+        db.update_model(
+            conn, body.id, body.name, body.description, body.archived,
+            folder=new_folder,
+            target_sample=body.target_sample or None,
+            clear_target=body.target_sample == 0,
+        )
+    if new_folder and new_folder != current["folder"]:
+        old_dir = BACKTEST_DIR / current["folder"] if current["folder"] else None
+        new_dir = BACKTEST_DIR / new_folder
+        if old_dir is not None and old_dir.is_dir() and not new_dir.exists():
+            old_dir.rename(new_dir)
+        else:
+            new_dir.mkdir(parents=True, exist_ok=True)
     return {"ok": True}
 
 

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { Sidebar } from "../components/Sidebar";
 import { FilterBar } from "../components/FilterBar";
+import { useImportFeed } from "../hooks/useBacktests";
 
 const TABS = [
   { to: "/", label: "Overview", end: true },
@@ -9,12 +10,16 @@ const TABS = [
   { to: "/edges", label: "Edges", end: false },
   { to: "/trades", label: "Trades", end: false },
   { to: "/models", label: "Models", end: false },
+  { to: "/backtests", label: "Backtests", end: false },
   { to: "/ai", label: "AI Review", end: false },
   { to: "/cross-check", label: "ATAS Cross-check", end: false },
 ];
 
 export function Layout() {
   const { search } = useLocation();
+  // Poll the auto-import watcher from the shell so any page refreshes when a
+  // new export lands, not just the Backtests tab.
+  useImportFeed();
   // The data/timezone sidebar is hidden by default to maximise content width;
   // toggle it open with the ☰ button in the tab bar.
   const [sidebarOpen, setSidebarOpen] = useState(false);

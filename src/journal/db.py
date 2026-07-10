@@ -10,6 +10,7 @@ uses INSERT OR IGNORE against a stable dedupe key:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     account     TEXT,
     model_id    INTEGER,
     archived    INTEGER NOT NULL DEFAULT 0,
+    note        TEXT NOT NULL DEFAULT '',
     created_at  TEXT,
     updated_at  TEXT
 );
@@ -161,12 +163,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- A trading model: the fixed approach a trade is executed under. Unlike the
 -- name-keyed setups/confluences above this uses an integer surrogate PK, because
 -- three tables reference it and a rename must not cascade through them.
+-- ``folder`` is the model's export drop-box under data/imports/backtest/ — a
+-- stable slug the watcher resolves back to the model, so it survives renames.
+-- ``target_sample`` is the backtest sample size the model is working toward.
 CREATE TABLE IF NOT EXISTS models (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL UNIQUE,
-    description TEXT DEFAULT '',
-    archived    INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL UNIQUE,
+    description   TEXT DEFAULT '',
+    archived      INTEGER NOT NULL DEFAULT 0,
+    folder        TEXT,
+    target_sample INTEGER,
+    created_at    TEXT
 );
 
 -- The entry rules a model declares. ``active`` is a soft delete: retiring a rule
@@ -311,6 +318,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _migrate_trade_note_tagging(conn)
     _migrate_setup_confluence_master(conn)  # needs trade-note columns above
     _migrate_journal_model(conn)
+    _migrate_backtest_journaling(conn)
 
 
 def _migrate_video_schema(conn: sqlite3.Connection) -> None:
@@ -471,6 +479,31 @@ def _migrate_journal_model(conn: sqlite3.Connection) -> None:
                 (name, desc),
             )
         save_setting(conn, "models_seeded", "1")
+    conn.commit()
+
+
+def _migrate_backtest_journaling(conn: sqlite3.Connection) -> None:
+    """Add the backtest-journaling columns to installs that predate them.
+
+    ``models.folder`` (the watcher's export drop-box slug) is backfilled from
+    each model's name so existing models get a folder without a rename;
+    ``models.target_sample`` and ``sessions.note`` start empty.
+    """
+    model_cols = {r[1] for r in conn.execute("PRAGMA table_info(models)")}
+    if "folder" not in model_cols:
+        conn.execute("ALTER TABLE models ADD COLUMN folder TEXT")
+    if "target_sample" not in model_cols:
+        conn.execute("ALTER TABLE models ADD COLUMN target_sample INTEGER")
+    session_cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+    if "note" not in session_cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+
+    for r in conn.execute("SELECT id, name FROM models WHERE folder IS NULL").fetchall():
+        conn.execute(
+            "UPDATE models SET folder = ? WHERE id = ?",
+            (unique_model_folder(conn, r["name"], exclude_id=r["id"]), r["id"]),
+        )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_models_folder ON models(folder)")
     conn.commit()
 
 
@@ -913,13 +946,19 @@ def infer_session(accounts: Iterable[str]) -> tuple[str, str | None]:
 # ingest, and it never overwrites — so a mode/archive choice made in the UI
 # survives re-importing the same export.
 def upsert_session(
-    conn: sqlite3.Connection, source_file: str, mode: str, account: str | None = None
+    conn: sqlite3.Connection,
+    source_file: str,
+    mode: str,
+    account: str | None = None,
+    model_id: int | None = None,
 ) -> None:
+    """``model_id`` is only meaningful with ``mode='backtest'`` — the watcher
+    passes the model a backtest folder resolved to."""
     conn.execute(
         "INSERT OR IGNORE INTO sessions "
         "(source_file, mode, account, model_id, archived, created_at, updated_at) "
-        "VALUES (?, ?, ?, NULL, 0, datetime('now'), datetime('now'))",
-        (source_file, mode, account),
+        "VALUES (?, ?, ?, ?, 0, datetime('now'), datetime('now'))",
+        (source_file, mode, account, model_id),
     )
     conn.commit()
 
@@ -941,8 +980,8 @@ def sessions_map(conn: sqlite3.Connection) -> dict[str, dict]:
 
 def list_sessions(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
-        "SELECT s.source_file, s.mode, s.account, s.model_id, s.archived, s.updated_at, "
-        "       m.name AS model_name "
+        "SELECT s.source_file, s.mode, s.account, s.model_id, s.archived, s.note, "
+        "       s.updated_at, m.name AS model_name "
         "FROM sessions s LEFT JOIN models m ON m.id = s.model_id "
         "ORDER BY s.source_file"
     ).fetchall()
@@ -956,6 +995,7 @@ def update_session(
     model_id: int | None = None,
     archived: bool | None = None,
     clear_model: bool = False,
+    note: str | None = None,
 ) -> None:
     """Patch a session; unspecified fields are left as-is.
 
@@ -976,6 +1016,9 @@ def update_session(
     if archived is not None:
         sets.append("archived = ?")
         params.append(1 if archived else 0)
+    if note is not None:
+        sets.append("note = ?")
+        params.append(note)
     if not sets:
         return
     sets.append("updated_at = datetime('now')")
@@ -985,12 +1028,61 @@ def update_session(
 
 
 # --- Models + their rule checklists ---------------------------------------
+def slugify_folder(name: str) -> str:
+    """Model name -> filesystem-safe folder slug: 'Silver Bullet v2' -> 'silver-bullet-v2'."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "model"
+
+
+def unique_model_folder(
+    conn: sqlite3.Connection, name: str, exclude_id: int | None = None
+) -> str:
+    """The name's slug, suffixed -2/-3/… past any other model already holding it."""
+    base = slugify_folder(name)
+    taken = {
+        r["folder"]
+        for r in conn.execute(
+            "SELECT folder FROM models WHERE folder IS NOT NULL AND id != ?",
+            (exclude_id or -1,),
+        )
+    }
+    folder = base
+    n = 2
+    while folder in taken:
+        folder = f"{base}-{n}"
+        n += 1
+    return folder
+
+
+def model_folder_map(conn: sqlite3.Connection) -> dict[str, dict]:
+    """{folder: {id, name, archived}} — how the watcher resolves a backtest
+    subfolder back to the model it declares."""
+    return {
+        r["folder"]: {"id": r["id"], "name": r["name"], "archived": bool(r["archived"])}
+        for r in conn.execute(
+            "SELECT id, name, archived, folder FROM models WHERE folder IS NOT NULL"
+        )
+    }
+
+
+def get_model(conn: sqlite3.Connection, model_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT id, name, description, archived, folder, target_sample "
+        "FROM models WHERE id = ?",
+        (model_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {**dict(row), "archived": bool(row["archived"])}
+
+
 def list_models(conn: sqlite3.Connection, include_archived: bool = False) -> list[dict]:
     """Models A→Z, each with its rules. Archived rules are excluded from the
     checklist, but stay in the DB so old trades' compliance scores keep meaning."""
     where = "" if include_archived else "WHERE archived = 0"
     models = conn.execute(
-        f"SELECT id, name, description, archived FROM models {where} "
+        f"SELECT id, name, description, archived, folder, target_sample "
+        f"FROM models {where} "
         "ORDER BY name COLLATE NOCASE"
     ).fetchall()
     rules = conn.execute(
@@ -1006,6 +1098,8 @@ def list_models(conn: sqlite3.Connection, include_archived: bool = False) -> lis
             "name": m["name"],
             "description": m["description"] or "",
             "archived": bool(m["archived"]),
+            "folder": m["folder"],
+            "target_sample": m["target_sample"],
             "rules": by_model.get(m["id"], []),
         }
         for m in models
@@ -1017,9 +1111,9 @@ def create_model(conn: sqlite3.Connection, name: str, description: str = "") -> 
     if not name:
         raise ValueError("name is required")
     cur = conn.execute(
-        "INSERT INTO models (name, description, archived, created_at) "
-        "VALUES (?, ?, 0, datetime('now'))",
-        (name, description),
+        "INSERT INTO models (name, description, archived, folder, created_at) "
+        "VALUES (?, ?, 0, ?, datetime('now'))",
+        (name, description, unique_model_folder(conn, name)),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -1031,7 +1125,12 @@ def update_model(
     name: str | None = None,
     description: str | None = None,
     archived: bool | None = None,
+    folder: str | None = None,
+    target_sample: int | None = None,
+    clear_target: bool = False,
 ) -> None:
+    """``target_sample=None`` means "don't touch" (like the other optionals);
+    pass ``clear_target`` to actually null it out."""
     sets: list[str] = []
     params: list[object] = []
     if name is not None:
@@ -1045,6 +1144,14 @@ def update_model(
     if archived is not None:
         sets.append("archived = ?")
         params.append(1 if archived else 0)
+    if folder is not None:
+        sets.append("folder = ?")
+        params.append(folder)
+    if clear_target:
+        sets.append("target_sample = NULL")
+    elif target_sample is not None:
+        sets.append("target_sample = ?")
+        params.append(target_sample)
     if not sets:
         return
     params.append(model_id)
