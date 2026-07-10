@@ -121,6 +121,25 @@ def test_switching_model_sweeps_the_old_models_rule_checks():
         assert db.get_rule_checks(conn, key) == {rb: True}
 
 
+def test_resaving_a_note_keeps_checks_against_a_retired_rule():
+    """Retiring a rule is a soft delete. Re-journaling the trade must not quietly
+    erase the score it earned under the old checklist."""
+    with tempfile.TemporaryDirectory() as d:
+        conn = _with_trades(Path(d))
+        mid = db.create_model(conn, "M")
+        r1 = db.create_rule(conn, mid, "rule 1")
+        r2 = db.create_rule(conn, mid, "rule 2")
+        key = make_scope().filtered.iloc[0]["logical_trade_key"]
+
+        notes.put_note(key, notes.NoteIn(model_id=mid, rules_met=[r1, r2]))
+        db.retire_rule(conn, r1)
+
+        notes.put_note(key, notes.NoteIn(note="edited later", model_id=mid, rules_met=[r2]))
+        checks = db.get_rule_checks(conn, key)
+        assert checks[r1] is True, "the retired rule's check was erased"
+        assert checks[r2] is True
+
+
 def test_compliance_split_and_unscored_bucket():
     with tempfile.TemporaryDirectory() as d:
         conn = _with_trades(Path(d))

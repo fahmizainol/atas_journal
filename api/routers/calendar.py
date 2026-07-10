@@ -68,26 +68,20 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
     # A day cell sums *every* in-scope attempt of that day: collapsing to the
     # latest take is what made replay stats survivorship-biased. Filter by mode
     # (or pick a single attempt in the day explorer) to read one take alone.
-    # Count distinct attempts from the archive-inclusive frame to badge re-done
-    # days, and collect each day's source files so a day can be badged when
-    # *any* of its attempts has a recording linked.
-    attempts_by_day: dict = {}
-    files_by_day: dict = {}
-    allf = scope.filtered_all
-    if not allf.empty:
-        ac = allf.copy()
-        ac["date"] = ac["entry_ts_local"].dt.date
-        attempts_by_day = ac.groupby("date")["source_file"].nunique().to_dict()
-        files_by_day = (
-            ac.groupby("date")["source_file"].apply(lambda s: set(s.dropna())).to_dict()
-        )
+    #
+    # The attempt count and video badge are derived from the same frame as the
+    # cell's PnL, so a day whose archived attempts are filtered out can't badge
+    # "3 attempts" over a total that only covers one.
+    t = tf.copy()
+    t["date"] = t["entry_ts_local"].dt.date
+    attempts_by_day = t.groupby("date")["source_file"].nunique().to_dict()
+    files_by_day = (
+        t.groupby("date")["source_file"].apply(lambda s: set(s.dropna())).to_dict()
+    )
 
     conn = deps.get_conn()
     with deps.db_lock():
         linked = db.linked_video_source_files(conn)
-
-    t = tf.copy()
-    t["date"] = t["entry_ts_local"].dt.date
     days = []
     for d, g in t.groupby("date"):
         pnl = g["net_pnl"].astype(float)

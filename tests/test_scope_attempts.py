@@ -62,6 +62,25 @@ def test_calendar_day_cell_sums_every_attempt():
         assert cell["attempts"] == 2
 
 
+def test_calendar_badge_agrees_with_the_cell_it_labels():
+    """The attempt count must describe the same trades the cell's PnL sums —
+    badging "2 attempts" over a total covering one is a contradiction."""
+    with tempfile.TemporaryDirectory() as d:
+        conn = _setup(Path(d))
+        db.update_session(conn, "take1.xlsx", archived=True)
+
+        out = calendar.calendar(make_scope(view="atas"))
+        cell = next(c for c in out["days"] if c["date"] == DAY)
+        assert cell["attempts"] == 1
+        assert cell["trades"] == 1
+        assert cell["net_pnl"] == 1200.0
+
+        # With the archive toggle on, both takes are back in the cell and badge.
+        out = calendar.calendar(make_scope(view="atas", include_archived=True))
+        cell = next(c for c in out["days"] if c["date"] == DAY)
+        assert cell["attempts"] == 2 and cell["trades"] == 2 and cell["net_pnl"] == 400.0
+
+
 def test_day_explorer_still_isolates_one_attempt():
     """The aggregate sums the takes; the day view shows exactly one."""
     with tempfile.TemporaryDirectory() as d:

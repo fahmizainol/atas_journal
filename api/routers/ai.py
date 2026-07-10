@@ -46,7 +46,9 @@ def gen_trade_ai(
     if not dbn.is_available():
         raise HTTPException(400, "Excursion data unavailable (Databento not configured)")
 
-    tf = scope.filtered
+    # filtered_all, matching ``trades.trade_detail``: any trade the detail panel
+    # can show must be analyzable, including one from an archived session.
+    tf = scope.filtered_all
     match = tf[tf["trade_key"] == trade_key] if not tf.empty else tf
     if match.empty:
         raise HTTPException(404, "Trade not in scope")

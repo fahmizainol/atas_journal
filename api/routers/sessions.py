@@ -54,9 +54,13 @@ def patch_session(source_file: str, body: SessionPatch) -> dict:
         model_id = body.model_id if body.model_id is not None else current["model_id"]
         if mode == "backtest" and model_id is None:
             raise HTTPException(400, "a backtest session must bind a model")
-        # Leaving backtest unbinds the model: outside a backtest it would still
-        # be read as the session's model by nothing, but a stale id invites the
-        # next reader to trust it.
+        # Only a backtest binds a model session-wide. Rejecting rather than
+        # silently dropping a model_id sent with any other mode: an "ok" that
+        # discards what you asked for is worse than an error.
+        if mode != "backtest" and body.model_id is not None:
+            raise HTTPException(400, "only a backtest session can bind a model")
+        # Leaving backtest unbinds the model, so a stale id can't invite the next
+        # reader to trust it.
         clear_model = mode != "backtest"
 
         db.update_session(

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useSaveNote } from "../hooks/useTrades";
 import { useFilters } from "../hooks/useFilters";
 import { useFiltersData } from "../hooks/useMeta";
-import { useModels } from "../hooks/useModels";
+import { selectableModels, useModels } from "../hooks/useModels";
 import { BadgeInput, BadgeList } from "./BadgeInput";
 
 const OFF_MODEL = "";
@@ -54,6 +54,9 @@ export function JournalForm({
 
   const model = models.find((m) => m.id === modelId) ?? null;
   const rules = model?.rules ?? [];
+  // An archived model stays offered while this trade is bound to it, so the
+  // binding and its checklist remain visible and editable.
+  const options = selectableModels(models, modelId);
   const legacy = initialSetups.length > 0 || initialConfluences.length > 0;
 
   const pickModel = (raw: string) => {
@@ -93,9 +96,10 @@ export function JournalForm({
           onChange={(e) => pickModel(e.target.value)}
         >
           <option value={OFF_MODEL}>Off-model</option>
-          {models.map((m) => (
+          {options.map((m) => (
             <option key={m.id} value={String(m.id)}>
               {m.name}
+              {m.archived ? " (archived)" : ""}
             </option>
           ))}
         </select>

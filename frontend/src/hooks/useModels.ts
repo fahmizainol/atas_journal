@@ -4,12 +4,24 @@ import { qk, scopeParams } from "../lib/queryKeys";
 import type { FilterScope } from "../lib/queryKeys";
 import type { Model, ModelStatsResponse } from "../lib/types";
 
+// Every model, archived included. Archiving is a soft delete: trades stay bound
+// to an archived model, so a picker that couldn't see it would render those
+// trades as "Off-model" and hide their rule checklist. Callers offering a choice
+// filter to `!archived` themselves, keeping the already-bound one selectable.
 export function useModels() {
   return useQuery({
     queryKey: qk.modelList,
-    queryFn: () => apiGet<{ models: Model[] }>("/models/list").then((d) => d.models),
+    queryFn: () =>
+      apiGet<{ models: Model[] }>("/models/list", { include_archived: 1 }).then(
+        (d) => d.models,
+      ),
     staleTime: 30_000,
   });
+}
+
+/** The models to offer in a picker: the live ones, plus `boundId` if it's archived. */
+export function selectableModels(models: Model[], boundId: number | null): Model[] {
+  return models.filter((m) => !m.archived || m.id === boundId);
 }
 
 export function useModelStats(scope: FilterScope) {

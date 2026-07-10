@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from fastapi import HTTPException  # noqa: E402
 
-from journal import db, ingest  # noqa: E402
+from journal import db  # noqa: E402
 from api import deps  # noqa: E402
 from api.routers import sessions as sessions_router  # noqa: E402
 from test_scope_eviction import _row  # noqa: E402
@@ -65,11 +65,10 @@ def test_cutover_never_re_archives_an_unarchived_session():
 def test_ingest_infers_mode_and_leaves_new_sessions_unarchived():
     with tempfile.TemporaryDirectory() as d:
         conn = _fresh(Path(d))
-        journal = [{"account": "Replay"}, {"account": "Replay"}]
-        mode, account = ingest._infer_session(journal)
-        assert (mode, account) == ("replay", "Replay")
-        mode, _ = ingest._infer_session([{"account": "Replay"}, {"account": "PROP-1"}])
-        assert mode == "live"
+        assert db.infer_session(["Replay", "Replay"]) == ("replay", "Replay")
+        # Any real account in the file makes the whole session live.
+        assert db.infer_session(["Replay", "PROP-1"])[0] == "live"
+        assert db.infer_session([]) == ("replay", None)
 
         db.upsert_session(conn, "fresh.xlsx", "replay", "Replay")
         assert db.sessions_map(conn)["fresh.xlsx"]["archived"] is False
@@ -112,6 +111,22 @@ def test_patch_requires_a_model_for_backtest_and_unbinds_on_leaving():
         )
         sess = db.sessions_map(conn)["replay.xlsx"]
         assert sess["mode"] == "replay" and sess["model_id"] is None
+
+
+def test_patch_rejects_a_model_on_a_non_backtest_session():
+    """Only a backtest binds a model session-wide. An "ok" that silently discards
+    the model_id you sent is worse than a 400."""
+    with tempfile.TemporaryDirectory() as d:
+        conn = _fresh(Path(d))
+        model_id = db.create_model(conn, "Test Model")
+        try:
+            sessions_router.patch_session(
+                "replay.xlsx", sessions_router.SessionPatch(model_id=model_id)
+            )
+            raise AssertionError("expected a 400")
+        except HTTPException as e:
+            assert e.status_code == 400
+        assert db.sessions_map(conn)["replay.xlsx"]["model_id"] is None
 
 
 def test_patch_rejects_unknown_mode_and_missing_session():

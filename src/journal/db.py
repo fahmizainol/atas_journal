@@ -444,23 +444,17 @@ def _migrate_journal_model(conn: sqlite3.Connection) -> None:
 
     The cutover archives every pre-existing session: the trading approach changed,
     so the old era is browsable but out of the default statistics. ``mode`` is
-    inferred from the accounts on the export's rows — a file whose every row is
-    the ``Replay`` account is a replay, anything else touched a real account and
-    counts as live. Old setup badges are deliberately *not* mapped onto
+    inferred by :func:`infer_session`, the same rule the ingest path uses. Old
+    setup badges are deliberately *not* mapped onto
     ``trade_model``: a trade historically carried 0..n setups and a model is
     exactly 1, so any automatic mapping would be semantically wrong.
     """
     if get_setting(conn, "sessions_cutover_done") != "1":
-        rows = conn.execute(
-            "SELECT source_file, account, COUNT(*) AS n FROM atas_journal "
-            "GROUP BY source_file, account"
-        ).fetchall()
-        by_file: dict[str, list[tuple[str, int]]] = {}
-        for r in rows:
-            by_file.setdefault(r["source_file"], []).append((r["account"], r["n"]))
+        by_file: dict[str, list[str]] = {}
+        for r in conn.execute("SELECT source_file, account FROM atas_journal"):
+            by_file.setdefault(r["source_file"], []).append(r["account"])
         for source_file, accounts in by_file.items():
-            mode = "replay" if all(a == "Replay" for a, _ in accounts) else "live"
-            modal = max(accounts, key=lambda p: p[1])[0]
+            mode, modal = infer_session(accounts)
             conn.execute(
                 "INSERT OR IGNORE INTO sessions "
                 "(source_file, mode, account, model_id, archived, created_at, updated_at) "
@@ -893,6 +887,27 @@ def delete_taxonomy(conn: sqlite3.Connection, table: str, name: str) -> None:
 
 
 # --- Sessions ------------------------------------------------------------
+# ``infer_session`` is the single definition of what an export *is*, shared by
+# the cutover backfill and the ingest path. Splitting it would let freshly
+# imported sessions classify differently from back-filled historical ones, and
+# silently change which trades count as real money.
+def infer_session(accounts: Iterable[str]) -> tuple[str, str | None]:
+    """(mode, modal account) from the accounts on an export's journal rows.
+
+    A file whose every row is the ``Replay`` account is a replay; anything else
+    touched a real account and counts as live. ``backtest`` is never inferred —
+    nothing in an export says a session exercised one model exclusively, so it's
+    a deliberate choice made in the UI.
+    """
+    accounts = [a for a in accounts if a]
+    if not accounts:
+        return "replay", None
+    mode = "replay" if all(a == "Replay" for a in accounts) else "live"
+    modal = max(set(accounts), key=accounts.count)
+    return mode, modal
+
+
+
 # One row per ATAS export. The ingest path creates them un-archived; the cutover
 # created the historical ones archived. Only ``upsert_session`` is called from
 # ingest, and it never overwrites — so a mode/archive choice made in the UI
@@ -1162,18 +1177,32 @@ def set_rule_checks(
 
     Every check whose rule doesn't belong to the trade's current model is swept —
     changing a trade's model must not leave the previous model's checks behind,
-    where they'd inflate the new model's compliance denominator. Rows are written
-    for *all* the model's active rules (met 0 or 1), so "unmet" and "never
-    reviewed" stay distinguishable: a trade with no rows was never scored.
+    where they'd inflate the new model's compliance denominator. A check against a
+    *retired* rule of the same model survives, so re-saving a note doesn't erase
+    the score a trade earned under the old checklist.
+
+    Rows are written for all the model's active rules (met 0 or 1), so "unmet" and
+    "never reviewed" stay distinguishable: a trade with no rows was never scored.
     """
-    conn.execute("DELETE FROM trade_rule_checks WHERE trade_key = ?", (trade_key,))
-    if model_id is not None:
-        met = set(rules_met)
-        for rule in list_rules(conn, model_id):
-            conn.execute(
-                "INSERT INTO trade_rule_checks (trade_key, rule_id, met) VALUES (?, ?, ?)",
-                (trade_key, rule["id"], 1 if rule["id"] in met else 0),
-            )
+    if model_id is None:
+        conn.execute("DELETE FROM trade_rule_checks WHERE trade_key = ?", (trade_key,))
+        conn.commit()
+        return
+
+    own = [r["id"] for r in list_rules(conn, model_id, include_inactive=True)]
+    placeholders = ",".join("?" for _ in own)
+    # NOT IN () is invalid SQL; a model with no rules sweeps every check.
+    keep = f"AND rule_id NOT IN ({placeholders})" if own else ""
+    conn.execute(
+        f"DELETE FROM trade_rule_checks WHERE trade_key = ? {keep}", (trade_key, *own)
+    )
+    met = set(rules_met)
+    for rule in list_rules(conn, model_id):
+        conn.execute(
+            "INSERT INTO trade_rule_checks (trade_key, rule_id, met) VALUES (?, ?, ?) "
+            "ON CONFLICT(trade_key, rule_id) DO UPDATE SET met = excluded.met",
+            (trade_key, rule["id"], 1 if rule["id"] in met else 0),
+        )
     conn.commit()
 
 

@@ -72,7 +72,7 @@ function extrasCards(x: SummaryExtras, avgHoldS: number | null): Card[] {
 }
 
 export function Overview() {
-  const { scope } = useFilters();
+  const { scope, setMode, setIncludeArchived } = useFilters();
   const { data: m, isLoading } = useMetrics(scope);
   const { data: eq } = useEquityCurve(scope);
   const { data: daily } = useDailyPnl(scope);
@@ -80,8 +80,25 @@ export function Overview() {
   const { data: extras } = useSummaryExtras(scope);
 
   if (isLoading) return <div className="notice">Loading…</div>;
+  // Everything before the model cutover is archived, and the default scope is
+  // live-only. Without this, a journal made entirely of pre-cutover replays
+  // opens on a blank Overview that reads as data loss.
   if (!m || m.trades === 0)
-    return <div className="notice">No trades match the current filters.</div>;
+    return (
+      <div className="notice">
+        <div>No trades match the current filters.</div>
+        {(!scope.includeArchived || scope.mode !== "all") && (
+          <div className="section-cap" style={{ marginTop: 8 }}>
+            Sessions from before the model cutover are archived, and the Session
+            filter defaults to <strong>Live</strong>. Nothing was deleted —{" "}
+            <button type="button" onClick={() => { setMode("all"); setIncludeArchived(true); }}>
+              show every session, archived included
+            </button>
+            .
+          </div>
+        )}
+      </div>
+    );
 
   const hero: Card[] = [
     {

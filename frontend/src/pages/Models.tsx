@@ -315,9 +315,12 @@ function ModelManager() {
   const [open, setOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
-  const { data: models = [], isLoading } = useModels();
+  const { data: all = [], isLoading } = useModels();
   const create = useCreateModel();
-  const exists = models.some((m) => m.name.toLowerCase() === newName.trim().toLowerCase());
+  // Only live models are manageable; archived ones survive for their trades.
+  const models = all.filter((m) => !m.archived);
+  // The name check spans archived models too — the DB's UNIQUE(name) does.
+  const exists = all.some((m) => m.name.toLowerCase() === newName.trim().toLowerCase());
 
   const add = (e: React.FormEvent) => {
     e.preventDefault();

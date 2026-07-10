@@ -118,13 +118,12 @@ def _apply_filters(
     df: pd.DataFrame, instruments: list[str], accounts: list[str], start: date | None,
     end: date | None, tags: list[str], notes_df: pd.DataFrame,
     day_notes_df: pd.DataFrame, modes: list[str], models: list[int],
-    include_archived: bool,
 ) -> pd.DataFrame:
+    """Every filter except the archive flag, which ``resolve_scope`` applies last
+    so the archive-inclusive and archive-excluded frames share one pass."""
     if df.empty:
         return df
     out = df
-    if not include_archived:
-        out = out[~out["session_archived"].astype(bool)]
     if modes:
         out = out[out["session_mode"].isin(modes)]
     if models:
@@ -217,13 +216,18 @@ def resolve_scope(
             base["logical_trade_key"] = base["trade_key"]
         base = _attach_session_columns(base, sessions, model_by_trade)
 
-    common = dict(
-        instruments=instr_list, accounts=account_list, start=d0, end=d1,
+    # Filter once. ``filtered`` is exactly ``filtered_all`` minus archived rows,
+    # so deriving it rather than re-running the (tag-map building, per-row masking)
+    # pipeline both halves the work and makes the two frames impossible to desync.
+    filtered_all = _apply_filters(
+        base, instruments=instr_list, accounts=account_list, start=d0, end=d1,
         tags=tag_list, notes_df=notes_df, day_notes_df=day_notes_df,
         modes=mode_list, models=model_list,
     )
-    filtered = _apply_filters(base, include_archived=include_archived, **common)
-    filtered_all = _apply_filters(base, include_archived=True, **common)
+    filtered = filtered_all
+    if not include_archived and not filtered_all.empty:
+        keep = ~filtered_all["session_archived"].astype(bool)
+        filtered = filtered_all[keep].reset_index(drop=True)
     return Scope(
         view="atas" if view == "atas" else "logical",
         tz_label=tz_label, tz=disp_tz, instruments=instr_list, accounts=account_list,

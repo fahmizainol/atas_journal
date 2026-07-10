@@ -1,4 +1,4 @@
-import { useModels } from "../hooks/useModels";
+import { selectableModels, useModels } from "../hooks/useModels";
 import { usePatchSession, useSessions } from "../hooks/useSessions";
 import type { SessionMode } from "../lib/types";
 
@@ -23,11 +23,19 @@ export function SessionControl({ sourceFile }: { sourceFile: string }) {
 
   if (!session) return null;
 
+  // An archived model stays offered while this session is bound to it.
+  const options = selectableModels(models, session.model_id);
+  const live = models.filter((m) => !m.archived);
+
   const setMode = (mode: SessionMode) => {
+    if (mode !== "backtest") {
+      // The API rejects a model_id on any other mode — it unbinds on its own.
+      patch.mutate({ sourceFile, patch: { mode } });
+      return;
+    }
     // A backtest binds a model session-wide, so it can't be chosen without one.
-    const model_id =
-      mode === "backtest" ? session.model_id ?? models[0]?.id ?? null : undefined;
-    if (mode === "backtest" && model_id == null) {
+    const model_id = session.model_id ?? live[0]?.id ?? null;
+    if (model_id == null) {
       window.alert("Create a model first — a backtest session has to bind one.");
       return;
     }
@@ -68,9 +76,10 @@ export function SessionControl({ sourceFile }: { sourceFile: string }) {
                 })
               }
             >
-              {models.map((m) => (
+              {options.map((m) => (
                 <option key={m.id} value={String(m.id)}>
                   {m.name}
+                  {m.archived ? " (archived)" : ""}
                 </option>
               ))}
             </select>
