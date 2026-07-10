@@ -8,8 +8,7 @@ const TABS = [
   { to: "/calendar", label: "Calendar", end: false },
   { to: "/edges", label: "Edges", end: false },
   { to: "/trades", label: "Trades", end: false },
-  { to: "/setups", label: "Setups", end: false },
-  { to: "/confluences", label: "Confluences", end: false },
+  { to: "/models", label: "Models", end: false },
   { to: "/ai", label: "AI Review", end: false },
   { to: "/cross-check", label: "ATAS Cross-check", end: false },
 ];

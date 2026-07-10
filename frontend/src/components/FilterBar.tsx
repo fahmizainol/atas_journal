@@ -1,15 +1,28 @@
 import { useFilters } from "../hooks/useFilters";
 import { useFiltersData } from "../hooks/useMeta";
 
-// Top filter bar — mirrors the bordered container in app.py: view radio,
-// instrument multiselect, date range, tag multiselect. All state is in the URL.
+const MODE_LABELS: Record<string, string> = {
+  live: "Live",
+  replay: "Replay",
+  backtest: "Backtest",
+  all: "All",
+};
+
+// Top filter bar — mirrors the bordered container in app.py: view radio, session
+// mode, instrument multiselect, date range, model + tag multiselects, archive
+// toggle. All state is in the URL.
 export function FilterBar() {
-  const { scope, setView, setInstruments, setAccounts, setDates, setTags } = useFilters();
+  const {
+    scope, setView, setInstruments, setAccounts, setDates, setTags,
+    setMode, setModels, setIncludeArchived,
+  } = useFilters();
   const { data } = useFiltersData(scope);
 
   const instruments = data?.instruments ?? [];
   const accounts = data?.accounts ?? [];
   const tags = data?.tags ?? [];
+  const models = data?.models ?? [];
+  const modes = [...(data?.modes ?? ["live", "replay", "backtest"]), "all"];
 
   const multi = (e: React.ChangeEvent<HTMLSelectElement>): string[] =>
     Array.from(e.target.selectedOptions, (o) => o.value);
@@ -31,6 +44,28 @@ export function FilterBar() {
           >
             ATAS rows
           </button>
+        </div>
+      </div>
+
+      {/* Single-select on purpose: live is real money, replay and backtest are
+          practice, and one number over all three means nothing. */}
+      <div className="field">
+        <label>Session</label>
+        <div className="radio-group">
+          {modes.map((m) => (
+            <button
+              key={m}
+              className={scope.mode === m ? "active" : ""}
+              onClick={() => setMode(m)}
+              title={
+                m === "all"
+                  ? "Blend every session mode — rarely what you want."
+                  : `Only ${m} sessions`
+              }
+            >
+              {MODE_LABELS[m] ?? m}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -94,6 +129,23 @@ export function FilterBar() {
       </div>
 
       <div className="field">
+        <label>Model</label>
+        <select
+          multiple
+          value={scope.models}
+          onChange={(e) => setModels(multi(e))}
+          size={1}
+        >
+          {models.length === 0 && <option disabled>(none)</option>}
+          {models.map((m) => (
+            <option key={m.id} value={String(m.id)}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="field">
         <label>Tags</label>
         <select
           multiple
@@ -108,6 +160,18 @@ export function FilterBar() {
             </option>
           ))}
         </select>
+      </div>
+
+      <div className="field">
+        <label>Archive</label>
+        <button
+          type="button"
+          className={scope.includeArchived ? "active" : ""}
+          onClick={() => setIncludeArchived(!scope.includeArchived)}
+          title="Include pre-cutover sessions. They're archived, not deleted — out of the default statistics, still browsable."
+        >
+          {scope.includeArchived ? "Included" : "Excluded"}
+        </button>
       </div>
     </div>
   );

@@ -10,6 +10,7 @@ import { DayJournalForm } from "./DayJournalForm";
 import { EquityCurveChart } from "./charts/EquityCurveChart";
 import { PerTradeBarChart } from "./charts/PerTradeBarChart";
 import { TradeDetail } from "./TradeDetail";
+import { SessionControl } from "./SessionControl";
 import { VideoReviewProvider, VideoPanel, TradeVideoCell } from "./VideoReview";
 import { BadgeList } from "./BadgeInput";
 import { fmt, fmtDateTime, fmtInt, fmtPct, fmtTime } from "../lib/format";
@@ -218,6 +219,7 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
           ))}
         </div>
       )}
+      <SessionControl sourceFile={data.source_file} />
       <VideoReviewProvider sourceFile={data.source_file}>
         <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
         <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />

@@ -9,6 +9,11 @@ export interface FilterScope {
   end: string | null;
   tags: string[];
   tz: string;
+  // A single session mode, defaulting to "live". Blending 1,246 replay trades
+  // with 203 live ones is what made Overview meaningless; one mode at a time.
+  mode: string;
+  models: string[]; // model ids, as strings (they live in the query string)
+  includeArchived: boolean;
 }
 
 export function scopeParams(scope: FilterScope): Record<string, unknown> {
@@ -20,6 +25,11 @@ export function scopeParams(scope: FilterScope): Record<string, unknown> {
     end: scope.end,
     tags: scope.tags,
     tz: scope.tz,
+    // "all" is the UI's way of saying "no mode filter"; the API reads an absent
+    // param the same way, and toQuery drops undefined.
+    modes: scope.mode === "all" ? undefined : scope.mode,
+    models: scope.models,
+    include_archived: scope.includeArchived ? 1 : undefined,
   };
 }
 
@@ -32,10 +42,9 @@ export const qk = {
   dailyPnl: (scope: FilterScope) => ["daily-pnl", scope] as const,
   distribution: (scope: FilterScope) => ["distribution", scope] as const,
   edges: (scope: FilterScope) => ["edges", scope] as const,
-  setupStats: (scope: FilterScope) => ["setup-stats", scope] as const,
-  confluenceStats: (scope: FilterScope) => ["confluence-stats", scope] as const,
-  setupList: ["setup-list"] as const,
-  confluenceList: ["confluence-list"] as const,
+  modelList: ["model-list"] as const,
+  modelStats: (scope: FilterScope) => ["model-stats", scope] as const,
+  sessions: ["sessions"] as const,
   trades: (scope: FilterScope) => ["trades", scope] as const,
   trade: (scope: FilterScope, no: number) => ["trade", no, scope] as const,
   note: (tradeKey: string) => ["note", tradeKey] as const,

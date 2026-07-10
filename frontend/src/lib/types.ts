@@ -15,6 +15,13 @@ export interface Filters {
   tags: string[];
   setups: string[];
   confluences: string[];
+  modes: string[]; // session modes present in the DB: live | replay | backtest
+  models: ModelOption[];
+}
+
+export interface ModelOption {
+  id: number;
+  name: string;
 }
 
 import type { Num } from "./format";
@@ -86,7 +93,10 @@ export interface DailyPnlPoint {
 
 export interface TradeRow {
   trade_no: number;
-  trade_key: string;
+  trade_key: string; // view-local key (logical hash, or the ATAS lot's own)
+  // The key every journal entry binds to. Identical to trade_key in logical
+  // view; in ATAS view it points at the logical trade that absorbed this lot.
+  logical_trade_key: string;
   source_file: string;
   instrument: string;
   direction: string;
@@ -100,62 +110,81 @@ export interface TradeRow {
   avg_exit: Num;
   net_pnl: number;
   comment: string;
+  model_id: number | null; // effective model (own binding, or a backtest session's)
   setups?: string[]; // attached by GET /trades for table badges
 }
 
-// A master-list entry (setup or confluence): the canonical name + its editable
-// description, independent of any trade. Managed from the Setups/Confluences tabs.
-export interface TaxonomyItem {
+// --- Models: the live taxonomy, replacing setups + confluences -----------
+export interface ModelRule {
+  id: number;
+  model_id: number;
+  label: string;
+  sort_order: number;
+  active?: boolean;
+}
+
+export interface Model {
+  id: number;
   name: string;
   description: string;
+  archived: boolean;
+  rules: ModelRule[];
 }
 
-export interface ConfluenceStat {
-  name: string;
+export interface ComplianceBucket {
+  label: "followed" | "partial" | "broke";
   trades: number;
-  longs: number;
-  shorts: number;
-  win_rate: number;
-  net_pnl: number;
-}
-
-export interface SetupStat {
-  name: string;
-  metrics: Metrics;
-  confluences: ConfluenceStat[];
-}
-
-// Confluences tab: the inverse pivot of SetupStat, plus lift vs baseline.
-export interface Lift {
-  win_rate_delta: number;
-  expectancy_delta: Num;
-  without_win_rate: number;
-  without_expectancy: Num;
-  without_trades: number;
-}
-
-export interface ConfluenceLeaderStat {
-  name: string;
-  metrics: Metrics;
-  lift: Lift;
-  setups: ConfluenceStat[]; // same {name, trades, win_rate, net_pnl} breakdown shape
-}
-
-export interface StackBucket {
-  count: number;
-  label: string;
-  trades: number;
-  longs: number;
-  shorts: number;
   win_rate: number;
   expectancy: Num;
   net_pnl: number;
 }
 
-export interface ConfluencesResponse {
-  baseline: Metrics;
-  confluences: ConfluenceLeaderStat[];
-  stacking: StackBucket[];
+export interface Compliance {
+  rules: number;
+  buckets: ComplianceBucket[];
+  unscored: number; // assigned to the model but never checked against its rules
+}
+
+export interface RuleStat {
+  id: number;
+  label: string;
+  met_trades: number;
+  met_expectancy: Num;
+  met_win_rate: number;
+  met_net_pnl: number;
+  missed_trades: number;
+  missed_expectancy: Num;
+  missed_win_rate: number;
+  missed_net_pnl: number;
+}
+
+export interface ModelStat {
+  id: number;
+  name: string;
+  description: string;
+  archived: boolean;
+  metrics: Metrics;
+  compliance: Compliance;
+  rules: RuleStat[];
+}
+
+export interface ModelStatsResponse {
+  models: ModelStat[];
+  unassigned: Metrics; // off-model trades; models + unassigned == total
+  total: Metrics;
+}
+
+// --- Sessions: one per ATAS export (source_file) --------------------------
+export type SessionMode = "live" | "replay" | "backtest";
+
+export interface Session {
+  source_file: string;
+  mode: SessionMode;
+  account: string | null;
+  model_id: number | null; // bound session-wide when mode is 'backtest'
+  model_name: string | null;
+  archived: boolean;
+  updated_at: string | null;
 }
 
 export interface EdgeRow {
@@ -178,8 +207,11 @@ export interface Note {
   note: string;
   tags: string[];
   // Per-trade only; day notes omit these (optional keeps DayJournalForm valid).
+  // setups/confluences are the archived era's badges — read-only in the UI now.
   setups?: string[];
   confluences?: string[];
+  model_id?: number | null; // null = off-model
+  rules_met?: number[]; // ids of the model's rules this trade satisfied
 }
 
 export interface VideoBookmark {

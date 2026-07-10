@@ -10,6 +10,10 @@ export interface TradeDetail {
   tags: string[];
   setups: string[];
   confluences: string[];
+  // The trade's own model binding — not the effective one, which may come from a
+  // backtest session and shows through `trade.model_id`.
+  model_id: number | null;
+  rules_met: number[];
 }
 
 export function useTrades(scope: FilterScope) {
@@ -37,6 +41,8 @@ export function useSaveNote(tradeKey: string) {
       qc.invalidateQueries({ queryKey: ["trades"] });
       qc.invalidateQueries({ queryKey: ["day"] });
       qc.invalidateQueries({ queryKey: ["filters"] });
+      // A model or rule-check change moves the trade between per-model buckets.
+      qc.invalidateQueries({ queryKey: ["model-stats"] });
     },
   });
 }

@@ -59,11 +59,14 @@ export function TradeDetail({
   ];
   const journal = (
     <JournalForm
-      tradeKey={t.trade_key}
+      // The logical trade owns the journal entry, in either view.
+      tradeKey={t.logical_trade_key}
       initialNote={data.note}
       initialTags={data.tags}
       initialSetups={data.setups}
       initialConfluences={data.confluences}
+      initialModelId={data.model_id}
+      initialRulesMet={data.rules_met}
     />
   );
 

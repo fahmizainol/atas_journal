@@ -4,8 +4,15 @@ import type { FilterScope } from "../lib/queryKeys";
 
 const CSV = (v: string | null): string[] => (v ? v.split(",").filter(Boolean) : []);
 
+// Live is the money. Replay and backtest are practice, and blending all three
+// into one aggregate is what made the old statistics unreadable — so the mode is
+// a single choice defaulting to live, not an all-on multiselect. "all" is an
+// explicit opt-in that clears the filter server-side.
+export const ALL_MODES = "all";
+const DEFAULT_MODE = "live";
+
 // URL <-> filter state. The full scope lives in the query string so views are
-// refresh-safe and shareable (?view=&instruments=&start=&end=&tags=&tz=).
+// refresh-safe and shareable (?view=&instruments=&start=&end=&tags=&tz=&mode=).
 export function useFilters() {
   const [params, setParams] = useSearchParams();
 
@@ -18,6 +25,9 @@ export function useFilters() {
       end: params.get("end"),
       tags: CSV(params.get("tags")),
       tz: params.get("tz") || "",
+      mode: params.get("mode") || DEFAULT_MODE,
+      models: CSV(params.get("models")),
+      includeArchived: params.get("archived") === "1",
     }),
     [params],
   );
@@ -48,5 +58,8 @@ export function useFilters() {
     setDates: (start: string | null, end: string | null) => patch({ start, end }),
     setTags: (tags: string[]) => patch({ tags }),
     setTz: (tz: string) => patch({ tz }),
+    setMode: (mode: string) => patch({ mode }),
+    setModels: (models: string[]) => patch({ models }),
+    setIncludeArchived: (on: boolean) => patch({ archived: on ? "1" : null }),
   };
 }
