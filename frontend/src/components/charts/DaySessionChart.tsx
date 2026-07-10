@@ -4,7 +4,6 @@ import { useDayChart } from "../../hooks/useCharts";
 import type { FilterScope } from "../../lib/queryKeys";
 import { CandlestickChart } from "./CandlestickChart";
 import { TimeframeRadio } from "./TimeframeRadio";
-import { LevelsToggle } from "./LevelsToggle";
 
 // Full-day session candlestick: every trade's fills + an outcome-tinted holding
 // rectangle (reuses the Phase-4 CandlestickChart + TradeRectanglePrimitive).
@@ -19,7 +18,6 @@ export function DaySessionChart({
 }) {
   const { data: meta } = useMeta();
   const [tf, setTf] = useState("1m");
-  const [showLevels, setShowLevels] = useState(true);
   const { data, isLoading } = useDayChart(scope, date, tf, sourceFile);
 
   if (meta && !meta.databento_available)
@@ -31,17 +29,13 @@ export function DaySessionChart({
 
   return (
     <div className="panel">
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <TimeframeRadio value={tf} onChange={setTf} />
-        <LevelsToggle value={showLevels} onChange={setShowLevels} />
-      </div>
+      <TimeframeRadio value={tf} onChange={setTf} />
       <CandlestickChart
         bars={data.bars}
         vwap={data.vwap}
         atrPoints={data.atr_points}
         markers={data.markers}
         levels={data.levels}
-        showLevels={showLevels}
         tradeRects={data.trades}
         height={580}
       />

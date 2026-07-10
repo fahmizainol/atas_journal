@@ -450,6 +450,49 @@ button:disabled {
   color: #fff;
 }
 
+/* ---- on-chart indicator legend (TV-style) ---- */
+.chart-legend {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.chart-legend-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(14, 17, 23, 0.72);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 4px 8px;
+}
+.chart-legend-row:hover:not(:disabled) {
+  border: none;
+  background: rgba(26, 29, 39, 0.95);
+}
+.chart-legend-row svg {
+  opacity: 0.55;
+}
+.chart-legend-row.off {
+  color: var(--muted);
+}
+.chart-legend-row.off .chart-legend-swatch {
+  opacity: 0.35;
+}
+.chart-legend-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
 /* ---- data table ---- */
 .data-table {
   width: 100%;

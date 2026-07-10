@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CandlestickSeries,
   ColorType,
@@ -7,11 +7,14 @@ import {
   LineSeries,
   createChart,
   type IChartApi,
+  type IPriceLine,
+  type ISeriesApi,
   type Time,
 } from "lightweight-charts";
 import { palette } from "../../theme";
 import { TradeRectanglePrimitive } from "./TradeRectanglePrimitive";
 import { MarkerPrimitive } from "./MarkerPrimitive";
+import { IndicatorLegend, type IndicatorKey, type LegendItem } from "./IndicatorLegend";
 import type { ATRPoint, Bar, ChartMarker, PriceLineSpec, TradeRect, VwapPoint } from "../../lib/chartTypes";
 
 interface Props {
@@ -21,10 +24,11 @@ interface Props {
   markers?: ChartMarker[];
   priceLines?: PriceLineSpec[];
   levels?: PriceLineSpec[];
-  showLevels?: boolean;
   tradeRects?: TradeRect[];
   height?: number;
 }
+
+type Visibility = Record<IndicatorKey, boolean>;
 
 const VOL_UP = "rgba(33,192,122,0.5)";
 const VOL_DOWN = "rgba(245,69,95,0.5)";
@@ -39,11 +43,24 @@ export function CandlestickChart({
   markers,
   priceLines,
   levels,
-  showLevels = true,
   tradeRects,
   height = 520,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+
+  // TV-style hide/show per indicator. Toggling applies to the live chart via
+  // applyRef — it must NOT re-run the build effect (that would rebuild the
+  // chart and lose the user's zoom/scroll position).
+  const [vis, setVis] = useState<Visibility>({ vwap: true, atr: true, levels: true });
+  const visRef = useRef(vis);
+  const applyRef = useRef<((v: Visibility) => void) | null>(null);
+  const toggle = (key: IndicatorKey) =>
+    setVis((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      visRef.current = next;
+      applyRef.current?.(next);
+      return next;
+    });
 
   useEffect(() => {
     if (!ref.current || bars.length === 0) return;
@@ -144,8 +161,12 @@ export function CandlestickChart({
       })),
     );
 
-    if (atrPoints && atrPoints.length > 0) {
-      const atr = chart.addSeries(
+    // ATR gets created/removed (not just hidden) on toggle: hiding the series
+    // would leave its empty sub-pane behind, while removing the last series of
+    // a pane drops the pane too.
+    let atrSeries: ISeriesApi<"Line"> | null = null;
+    const addAtr = () => {
+      atrSeries = chart.addSeries(
         LineSeries,
         {
           color: palette.gold,
@@ -156,7 +177,7 @@ export function CandlestickChart({
         },
         1,
       );
-      atr.setData(atrPoints.map((p) => ({ time: p.time as Time, value: p.atr })));
+      atrSeries.setData(atrPoints!.map((p) => ({ time: p.time as Time, value: p.atr })));
       // Force a price-dominant split — default is 1000:1000 (50/50) for two panes,
       // so set both factors explicitly. Ratio 5:1 ≈ 83% price / 17% ATR.
       const panes = chart.panes();
@@ -164,11 +185,13 @@ export function CandlestickChart({
         panes[0].setStretchFactor(1000);
         panes[1].setStretchFactor(200);
       }
-    }
+    };
 
+    const vwapSeries: ISeriesApi<"Line">[] = [];
     if (vwap && vwap.length > 0) {
       const mid = chart.addSeries(LineSeries, { color: palette.gold, lineWidth: 1, priceLineVisible: false });
       mid.setData(vwap.map((v) => ({ time: v.time as Time, value: v.middle })));
+      vwapSeries.push(mid);
       for (const key of ["upper", "lower"] as const) {
         const line = chart.addSeries(LineSeries, {
           color: palette.muted,
@@ -177,6 +200,7 @@ export function CandlestickChart({
           lastValueVisible: false,
         });
         line.setData(vwap.map((v) => ({ time: v.time as Time, value: v[key] })));
+        vwapSeries.push(line);
       }
     }
 
@@ -197,18 +221,29 @@ export function CandlestickChart({
       });
     }
 
-    if (showLevels) {
-      for (const lv of levels ?? []) {
-        candle.createPriceLine({
-          price: lv.price,
-          color: lv.color,
-          lineWidth: 1,
-          lineStyle: 3,
-          axisLabelVisible: true,
-          title: lv.title,
-        });
+    const levelLines: IPriceLine[] = (levels ?? []).map((lv) =>
+      candle.createPriceLine({
+        price: lv.price,
+        color: lv.color,
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: true,
+        title: lv.title,
+      }),
+    );
+
+    applyRef.current = (v: Visibility) => {
+      for (const s of vwapSeries) s.applyOptions({ visible: v.vwap });
+      for (const l of levelLines) l.applyOptions({ lineVisible: v.levels, axisLabelVisible: v.levels });
+      if (atrPoints && atrPoints.length > 0) {
+        if (v.atr && !atrSeries) addAtr();
+        else if (!v.atr && atrSeries) {
+          chart.removeSeries(atrSeries);
+          atrSeries = null;
+        }
       }
-    }
+    };
+    applyRef.current(visRef.current);
 
     if (tradeRects && tradeRects.length > 0) {
       // Snap entry down / exit up to bar boundaries so the rectangle spans the
@@ -233,10 +268,24 @@ export function CandlestickChart({
     ro.observe(ref.current);
 
     return () => {
+      applyRef.current = null;
       ro.disconnect();
       chart.remove();
     };
-  }, [bars, vwap, atrPoints, markers, priceLines, levels, showLevels, tradeRects, height]);
+  }, [bars, vwap, atrPoints, markers, priceLines, levels, tradeRects, height]);
 
-  return <div ref={ref} style={{ width: "100%" }} />;
+  const legendItems: LegendItem[] = [];
+  if (vwap && vwap.length > 0)
+    legendItems.push({ key: "vwap", label: "VWAP · Globex ±1σ", color: palette.gold });
+  if (atrPoints && atrPoints.length > 0)
+    legendItems.push({ key: "atr", label: "ATR 14", color: palette.gold });
+  if (levels && levels.length > 0)
+    legendItems.push({ key: "levels", label: "Session levels", color: palette.blue });
+
+  return (
+    <div style={{ position: "relative", width: "100%" }}>
+      <div ref={ref} style={{ width: "100%" }} />
+      <IndicatorLegend items={legendItems} visibility={vis} onToggle={toggle} />
+    </div>
+  );
 }

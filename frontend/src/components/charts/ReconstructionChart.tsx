@@ -4,7 +4,6 @@ import { useTradeChart } from "../../hooks/useCharts";
 import type { FilterScope } from "../../lib/queryKeys";
 import { CandlestickChart } from "./CandlestickChart";
 import { TimeframeRadio } from "./TimeframeRadio";
-import { LevelsToggle } from "./LevelsToggle";
 import { KpiGrid } from "../KpiGrid";
 import { fmt, fmtPct } from "../../lib/format";
 import type { Card } from "../KpiCard";
@@ -14,7 +13,6 @@ import type { Card } from "../KpiCard";
 export function ReconstructionChart({ scope, tradeNo }: { scope: FilterScope; tradeNo: number }) {
   const { data: meta } = useMeta();
   const [tf, setTf] = useState("1m");
-  const [showLevels, setShowLevels] = useState(true);
   const { data, isLoading } = useTradeChart(scope, tradeNo, tf);
   // Stable array reference so CandlestickChart's effect doesn't rebuild every render.
   const tradeRects = useMemo(
@@ -56,10 +54,7 @@ export function ReconstructionChart({ scope, tradeNo }: { scope: FilterScope; tr
 
   return (
     <div className="panel">
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <TimeframeRadio value={tf} onChange={setTf} />
-        <LevelsToggle value={showLevels} onChange={setShowLevels} />
-      </div>
+      <TimeframeRadio value={tf} onChange={setTf} />
       <CandlestickChart
         bars={data.bars}
         vwap={data.vwap}
@@ -67,7 +62,6 @@ export function ReconstructionChart({ scope, tradeNo }: { scope: FilterScope; tr
         markers={data.markers}
         priceLines={data.price_lines}
         levels={data.levels}
-        showLevels={showLevels}
         tradeRects={tradeRects}
         height={560}
       />
