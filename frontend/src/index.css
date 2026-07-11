@@ -1,4 +1,5 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+/* Inter is self-hosted via @fontsource (imported in main.tsx) — no
+   render-blocking third-party CSS, works offline. */
 
 :root {
   --bg: #0e1117;
@@ -232,7 +233,16 @@ a {
   margin: 10px 0;
 }
 
+/* ---- route fallback ---- */
+/* Shown while a lazy route chunk loads; the min-height keeps the layout from
+   collapsing and re-expanding (CLS) on route swaps. */
+.page-fallback {
+  min-height: 60vh;
+}
+
 /* ---- filter bar ---- */
+/* Fixed control dimensions: the bar renders at its final size before
+   /api/filters resolves, so options populating doesn't shift the page (CLS). */
 .filter-bar {
   display: flex;
   flex-wrap: wrap;
@@ -243,11 +253,17 @@ a {
   border-radius: 14px;
   padding: 14px 16px;
   margin-bottom: 16px;
+  min-height: 78px;
 }
 .field {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+.field select,
+.field input[type="date"] {
+  min-width: 130px;
+  height: 33px;
 }
 .field label {
   font-size: 11px;

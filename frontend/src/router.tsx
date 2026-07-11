@@ -1,13 +1,17 @@
+import { lazy } from "react";
 import { createBrowserRouter } from "react-router-dom";
 import { Layout } from "./pages/Layout";
-import { Overview } from "./pages/Overview";
-import { Calendar } from "./pages/Calendar";
-import { Edges } from "./pages/Edges";
-import { Trades } from "./pages/Trades";
-import { Models } from "./pages/Models";
-import { Backtests } from "./pages/Backtests";
-import { AiReview } from "./pages/AiReview";
-import { CrossCheck } from "./pages/CrossCheck";
+
+// Every page is lazy so a route's JS (and its chart libraries) loads on first
+// visit instead of in the entry bundle. Pages are named exports, hence the map.
+const Overview = lazy(() => import("./pages/Overview").then((m) => ({ default: m.Overview })));
+const Calendar = lazy(() => import("./pages/Calendar").then((m) => ({ default: m.Calendar })));
+const Edges = lazy(() => import("./pages/Edges").then((m) => ({ default: m.Edges })));
+const Trades = lazy(() => import("./pages/Trades").then((m) => ({ default: m.Trades })));
+const Models = lazy(() => import("./pages/Models").then((m) => ({ default: m.Models })));
+const Backtests = lazy(() => import("./pages/Backtests").then((m) => ({ default: m.Backtests })));
+const AiReview = lazy(() => import("./pages/AiReview").then((m) => ({ default: m.AiReview })));
+const CrossCheck = lazy(() => import("./pages/CrossCheck").then((m) => ({ default: m.CrossCheck })));
 
 export const router = createBrowserRouter([
   {
