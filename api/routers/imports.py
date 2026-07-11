@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -96,6 +97,13 @@ async def import_upload(
         dest = IMPORTS_DIR / uf.filename
         dest.write_bytes(await uf.read())
         mtime = _mtime_iso(mtime_list[i]) if i < len(mtime_list) else None
+        if mtime is not None:
+            # Restamp the saved copy with the export's own "Date modified".
+            # write_bytes stamps the upload time, and the watcher derives the
+            # source tz from on-disk mtime — a post-switch upload of a
+            # pre-switch export would re-import 12h-shifted duplicates.
+            epoch_ns = int(mtime_list[i]) * 10**6
+            os.utime(dest, ns=(epoch_ns, epoch_ns))
         tz = forced_tz or (
             ingest.auto_source_tz_for_date(datetime.fromisoformat(mtime).astimezone().date())
             if mtime

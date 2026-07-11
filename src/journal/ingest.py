@@ -95,6 +95,11 @@ def parse_file(
             continue
         (account, instrument, open_t, open_p, open_v, close_t, close_p,
          close_v, price_pnl, profit_ticks, pnl, comment) = r[:12]
+        if not close_t:
+            # Position still open at export time — ATAS leaves Close time as
+            # an empty string. Skip it: the closed trade arrives (with a real
+            # close and a different dedupe key) in a later export.
+            continue
         rec = {
             "account": str(account),
             "instrument": normalize_instrument(str(instrument)),
