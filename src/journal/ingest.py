@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from contextlib import AbstractContextManager, nullcontext
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -155,6 +156,28 @@ def _auto_source_tz(path: Path) -> ZoneInfo:
     return auto_source_tz_for_date(datetime.fromtimestamp(path.stat().st_mtime).date())
 
 
+def store_parsed(
+    conn: sqlite3.Connection,
+    source_name: str,
+    parsed: dict[str, list[dict]],
+    file_mtime: str | None = None,
+    mode: str | None = None,
+    model_id: int | None = None,
+) -> dict[str, int]:
+    """Write one already-parsed export to the DB (the caller holds any lock)."""
+    counts = {
+        "executions": db.insert_executions(conn, parsed["executions"]),
+        "journal": db.insert_journal(conn, parsed["journal"]),
+        "statistics": db.insert_statistics(conn, parsed["statistics"]),
+    }
+    db.mark_imported(conn, source_name, file_mtime=file_mtime)
+    # INSERT OR IGNORE: re-importing an export must not undo a mode set to
+    # backtest, or un-archive a session the user archived.
+    inferred, account = db.infer_session(r["account"] for r in parsed["journal"])
+    db.upsert_session(conn, source_name, mode or inferred, account, model_id=model_id)
+    return counts
+
+
 def import_file(
     conn: sqlite3.Connection,
     path: Path,
@@ -162,33 +185,33 @@ def import_file(
     file_mtime: str | None = None,
     mode: str | None = None,
     model_id: int | None = None,
+    lock: AbstractContextManager | None = None,
 ) -> dict[str, int]:
     """``mode``/``model_id`` override the inferred session mode — the watcher
-    passes ``mode='backtest'`` plus the model its drop-box folder declares."""
+    passes ``mode='backtest'`` plus the model its drop-box folder declares.
+
+    ``lock`` guards only the DB writes: the slow openpyxl parse runs outside it
+    so concurrent API requests aren't stalled behind an import pass.
+    """
     parsed = parse_file(path, source_tz=source_tz)
-    counts = {
-        "executions": db.insert_executions(conn, parsed["executions"]),
-        "journal": db.insert_journal(conn, parsed["journal"]),
-        "statistics": db.insert_statistics(conn, parsed["statistics"]),
-    }
-    db.mark_imported(conn, path.name, file_mtime=file_mtime)
-    # INSERT OR IGNORE: re-importing an export must not undo a mode set to
-    # backtest, or un-archive a session the user archived.
-    inferred, account = db.infer_session(r["account"] for r in parsed["journal"])
-    db.upsert_session(conn, path.name, mode or inferred, account, model_id=model_id)
-    return counts
+    with lock if lock is not None else nullcontext():
+        return store_parsed(
+            conn, path.name, parsed, file_mtime=file_mtime, mode=mode, model_id=model_id
+        )
 
 
 def import_dir(
     conn: sqlite3.Connection,
     directory: Path = IMPORTS_DIR,
     source_tz: ZoneInfo | None = None,
+    lock: AbstractContextManager | None = None,
 ) -> dict[str, dict]:
     """Import every .xlsx in ``directory``.
 
     ``source_tz`` forces a single tz for every file. When ``None`` (the
     default), each file's tz is chosen from its modified date via
     :func:`_auto_source_tz` — KL before the switch, NY from it on.
+    ``lock``, when given, is held per-file around the DB writes only.
     """
     results: dict[str, dict] = {}
     for path in sorted(Path(directory).glob("*.xlsx")):
@@ -197,6 +220,6 @@ def import_dir(
         # Watched-dir files keep their real mtime, so read it straight off disk.
         tz = source_tz or _auto_source_tz(path)
         results[path.name] = import_file(
-            conn, path, source_tz=tz, file_mtime=_disk_mtime_iso(path)
+            conn, path, source_tz=tz, file_mtime=_disk_mtime_iso(path), lock=lock
         )
     return results

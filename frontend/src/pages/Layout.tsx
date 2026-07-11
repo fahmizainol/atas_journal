@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { Sidebar } from "../components/Sidebar";
 import { FilterBar } from "../components/FilterBar";
@@ -44,7 +44,9 @@ export function Layout() {
           ))}
         </nav>
         <FilterBar />
-        <Outlet />
+        <Suspense fallback={<div className="page-fallback" />}>
+          <Outlet />
+        </Suspense>
       </main>
     </div>
   );

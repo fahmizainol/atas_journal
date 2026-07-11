@@ -1,9 +1,9 @@
 """Background auto-import loop + the feed state the UI polls.
 
 One module-level ``WatcherState`` for the process (single-user app, one watcher).
-The scan itself is synchronous and holds the shared DB lock — same discipline as
-every request handler — so it runs via ``asyncio.to_thread`` to keep the event
-loop free.
+The scan is synchronous, so it runs via ``asyncio.to_thread`` to keep the event
+loop free. It takes the shared DB lock only for short windows (reads + per-file
+writes) — the slow xlsx parsing happens unlocked, so requests aren't stalled.
 """
 
 from __future__ import annotations
@@ -37,8 +37,7 @@ def ensure_model_folders() -> None:
 
 def scan_now() -> int:
     conn = deps.get_conn()
-    with deps.db_lock():
-        return watcher.scan_once(conn, state)
+    return watcher.scan_once(conn, state, lock=deps.db_lock())
 
 
 async def _loop() -> None:

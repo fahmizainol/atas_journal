@@ -32,6 +32,96 @@ from . import deps
 # visible, but never counted as live money.
 DEFAULT_SESSION = {"mode": "replay", "account": None, "model_id": None, "archived": False}
 
+# ---- in-process caches ------------------------------------------------------
+#
+# Every write in the app goes through the one shared connection in ``deps``, and
+# ``sqlite3.Connection.total_changes`` counts every row that connection touches —
+# a free data-version. ``PRAGMA data_version`` additionally flips when a
+# *different* connection writes the DB file (the legacy CLI/Streamlit path,
+# possible under WAL). Together they key the caches with zero manual
+# invalidation: any write anywhere is a miss on the next request.
+#
+# NOTE: if per-request connections are ever adopted, ``total_changes`` stops
+# being a global version — only the ``data_version`` half would still catch
+# cross-connection writes. Revisit this key before making that change.
+#
+# Tier 1 caches the raw DB loads; ``gen`` bumps on every rebuild (including a
+# swapped connection, which the ``conn is`` identity check catches even though a
+# fresh conn restarts ``total_changes`` at 0). Tier 2 caches the built base
+# frame per (view, tz) and validates against ``gen``, so a stale build racing a
+# concurrent write can never be served after the write is seen.
+_loads: dict = {"conn": None, "key": None, "gen": 0, "data": None}
+_bases: dict[tuple[str, str], tuple[int, pd.DataFrame]] = {}
+
+
+def _load_all(conn) -> tuple[int, tuple]:
+    """Memoized raw DB loads. The caller must hold ``deps.db_lock()``."""
+    key = (
+        conn.total_changes,
+        conn.execute("PRAGMA data_version").fetchone()[0],
+    )
+    if _loads["conn"] is conn and _loads["key"] == key:
+        return _loads["gen"], _loads["data"]
+    data = (
+        db.load_executions(conn),
+        db.load_journal(conn),
+        db.all_notes(conn),
+        db.all_day_notes(conn),
+        db.imported_at_map(conn),
+        db.file_mtime_map(conn),
+        db.sessions_map(conn),
+        db.trade_model_map(conn),
+    )
+    _loads.update(conn=conn, key=key, data=data, gen=_loads["gen"] + 1)
+    return _loads["gen"], _loads["data"]
+
+
+def _build_base(gen: int, data: tuple, view: str, tz_label: str) -> pd.DataFrame:
+    """Build (or reuse) the localized, session-annotated base frame.
+
+    The returned frame is shared across requests — treat it as read-only:
+    derive filtered copies, never mutate in place.
+    """
+    cached = _bases.get((view, tz_label))
+    if cached is not None and cached[0] == gen:
+        return cached[1]
+    ex, jr, _notes, _day_notes, _imported, _mtimes, sessions, model_by_trade = data
+    disp_tz = DISPLAY_TZS[tz_label]
+
+    # load_executions parses ts_local as UTC (rows can come from mixed source
+    # tzs). Reproject into the chosen display tz so per-fill timestamps shown
+    # to the AI and in chart markers read in the user's clock. Copy first: the
+    # tier-1 frame is shared and must stay pristine.
+    if not ex.empty:
+        ex = ex.copy()
+        ex["ts_local"] = ex["ts_utc"].dt.tz_convert(disp_tz)
+
+    if view == "atas":
+        base = trades.atas_trades(jr)
+    else:
+        base = trades.build_logical_trades(jr, ex)
+    base = trades.localize(base, disp_tz)
+    if base is None:
+        base = pd.DataFrame()
+
+    if not base.empty:
+        # Journaling (note, model, rule checks) binds to the logical trade in both
+        # views: an ATAS row resolves to whichever logical trade absorbed its lot.
+        if view == "atas":
+            lot_map = trades.lot_to_logical_map(jr)
+            # A lot the grouper couldn't place (it should place all of them)
+            # falls back to its own key rather than becoming NaN and silently
+            # colliding with every other unmapped row.
+            base["logical_trade_key"] = (
+                base["dedupe_key"].map(lot_map).fillna(base["trade_key"])
+            )
+        else:
+            base["logical_trade_key"] = base["trade_key"]
+        base = _attach_session_columns(base, sessions, model_by_trade)
+
+    _bases[(view, tz_label)] = (gen, base)
+    return base
+
 
 def _csv(value: str | None) -> list[str]:
     if not value:
@@ -57,6 +147,9 @@ def _parse_date(value: str | None) -> date | None:
 
 @dataclass
 class Scope:
+    # The frames below may be shared with the in-process cache (with zero
+    # filters, ``filtered_all`` aliases the cached base) — treat them as
+    # read-only: derive new frames, never mutate in place.
     view: str
     tz_label: str
     tz: ZoneInfo
@@ -167,6 +260,7 @@ def resolve_scope(
     models: str | None = Query(None),
     include_archived: bool = Query(False),
 ) -> Scope:
+    view = "atas" if view == "atas" else "logical"
     tz_label = tz if tz in DISPLAY_TZS else DEFAULT_DISPLAY_TZ
     disp_tz = DISPLAY_TZS[tz_label]
     instr_list = _csv(instruments)
@@ -177,44 +271,14 @@ def resolve_scope(
     d0, d1 = _parse_date(start), _parse_date(end)
 
     conn = deps.get_conn()
+    # On a cache hit the lock is held for microseconds (two pragma-ish reads),
+    # which is what keeps requests fast even mid-import.
     with deps.db_lock():
-        ex = db.load_executions(conn)
-        jr = db.load_journal(conn)
-        notes_df = db.all_notes(conn)
-        day_notes_df = db.all_day_notes(conn)
-        imported = db.imported_at_map(conn)
-        file_mtimes = db.file_mtime_map(conn)
-        sessions = db.sessions_map(conn)
-        model_by_trade = db.trade_model_map(conn)
+        gen, data = _load_all(conn)
+    (_ex, jr, notes_df, day_notes_df, imported, file_mtimes, sessions,
+     _model_by_trade) = data
 
-    # load_executions parses ts_local as UTC (rows can come from mixed source
-    # tzs). Reproject into the chosen display tz so per-fill timestamps shown
-    # to the AI and in chart markers read in the user's clock.
-    if not ex.empty:
-        ex["ts_local"] = ex["ts_utc"].dt.tz_convert(disp_tz)
-
-    if view == "atas":
-        base = trades.atas_trades(jr)
-    else:
-        base = trades.build_logical_trades(jr, ex)
-    base = trades.localize(base, disp_tz)
-    if base is None:
-        base = pd.DataFrame()
-
-    if not base.empty:
-        # Journaling (note, model, rule checks) binds to the logical trade in both
-        # views: an ATAS row resolves to whichever logical trade absorbed its lot.
-        if view == "atas":
-            lot_map = trades.lot_to_logical_map(jr)
-            # A lot the grouper couldn't place (it should place all of them)
-            # falls back to its own key rather than becoming NaN and silently
-            # colliding with every other unmapped row.
-            base["logical_trade_key"] = (
-                base["dedupe_key"].map(lot_map).fillna(base["trade_key"])
-            )
-        else:
-            base["logical_trade_key"] = base["trade_key"]
-        base = _attach_session_columns(base, sessions, model_by_trade)
+    base = _build_base(gen, data, view, tz_label)
 
     # Filter once. ``filtered`` is exactly ``filtered_all`` minus archived rows,
     # so deriving it rather than re-running the (tag-map building, per-row masking)
@@ -229,7 +293,7 @@ def resolve_scope(
         keep = ~filtered_all["session_archived"].astype(bool)
         filtered = filtered_all[keep].reset_index(drop=True)
     return Scope(
-        view="atas" if view == "atas" else "logical",
+        view=view,
         tz_label=tz_label, tz=disp_tz, instruments=instr_list, accounts=account_list,
         start=d0, end=d1, tags=tag_list, base=base, filtered=filtered,
         filtered_all=filtered_all, modes=mode_list, models=model_list,

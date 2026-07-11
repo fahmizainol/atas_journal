@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { apiGet } from "../lib/api";
 import { qk } from "../lib/queryKeys";
 import type { Filters, Meta } from "../lib/types";
@@ -17,5 +17,9 @@ export function useFiltersData(scope: FilterScope) {
     queryKey: qk.filters(scope),
     queryFn: () =>
       apiGet<Filters>("/filters", { view: scope.view, tz: scope.tz }),
+    staleTime: 30_000,
+    // Changing view/tz is a new query key; keep showing the previous options
+    // instead of blanking the filter bar while the refetch runs.
+    placeholderData: keepPreviousData,
   });
 }

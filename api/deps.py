@@ -6,6 +6,10 @@ is a single-user local app, we serialize every DB touch through one process-wide
 lock over one shared connection (``check_same_thread=False`` is already set in
 ``db.connect``). ``init_db`` runs once on startup (applies the AI-schema
 migration).
+
+Lock discipline: hold it for short windows only — around the DB statements
+themselves. Never hold it across file parsing (openpyxl) or network I/O; pass
+it down (``lock=``) so the slow work runs unlocked and only the writes take it.
 """
 
 from __future__ import annotations

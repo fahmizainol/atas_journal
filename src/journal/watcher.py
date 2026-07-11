@@ -22,6 +22,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -73,14 +74,19 @@ def scan_once(
     importer: Callable = ingest.import_file,
     settled_age_s: float = WATCH_SETTLED_AGE_S,
     now: float | None = None,
+    lock: AbstractContextManager | None = None,
 ) -> int:
     """One watcher pass; returns how many files were imported.
 
     ``importer``/``now`` are injectable for tests; production uses the real
-    ingest path and the wall clock.
+    ingest path and the wall clock. ``lock`` is held only for the short DB
+    windows (and passed to the importer for its writes) — never across file
+    parsing, so API requests stay responsive during an import pass.
     """
     now = time.time() if now is None else now
-    folders = db.model_folder_map(conn)
+    _lk = lock if lock is not None else nullcontext()
+    with _lk:
+        folders = db.model_folder_map(conn)
 
     # (path, mode override, model row or None). Unknown backtest folders are
     # reported once per file and never imported — a wrong guess would silently
@@ -105,7 +111,8 @@ def scan_once(
                 continue
             targets.append((path, "backtest", model))
 
-    imported_mtimes = db.file_mtime_map(conn)
+    with _lk:
+        imported_mtimes = db.file_mtime_map(conn)
     imported = 0
     for path, mode, model in targets:
         key = str(path)
@@ -133,6 +140,7 @@ def scan_once(
                 file_mtime=mtime_iso,
                 mode=mode,
                 model_id=model["id"] if model else None,
+                lock=lock,
             )
         except Exception as exc:
             state.failed[key] = stat.st_mtime
@@ -141,7 +149,8 @@ def scan_once(
 
         state.pending.pop(key, None)
         state.failed.pop(key, None)
-        session = db.sessions_map(conn).get(path.name, {})
+        with _lk:
+            session = db.sessions_map(conn).get(path.name, {})
         message = None
         if mode and session.get("mode") != mode:
             # The session predates this import (upsert never overwrites), e.g.
