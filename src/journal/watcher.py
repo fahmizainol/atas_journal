@@ -1,11 +1,13 @@
 """Auto-import watcher over ``data/imports/``.
 
 One scan pass per tick. Files in the root classify themselves (live/replay is
-inferred from their accounts, as always); files under ``backtest/<folder>/``
-import as ``mode='backtest'`` bound to the model whose ``models.folder`` matches
-the subfolder — the folder placement *is* the declaration, so nothing is ever
+inferred from their accounts, as always); files under ``live/`` or ``replay/``
+import as that mode; files under ``backtest/<folder>/`` import as
+``mode='backtest'`` bound to the model whose ``models.folder`` matches the
+subfolder — the folder placement *is* the declaration, so nothing is ever
 guessed. A folder matching no model is skipped loudly rather than imported
-wrong.
+wrong, and a file whose accounts contradict its folder is imported but
+flagged in the feed.
 
 ATAS may still be writing an export when a tick fires, so a file is only
 eligible once it has settled: either its size+mtime survived a full tick
@@ -95,6 +97,11 @@ def scan_once(
     seen: set[str] = set()
     for path in _xlsx_in(imports_dir):
         targets.append((path, None, None))
+    # live/ and replay/ declare the mode by placement, same as backtest
+    # folders — but they bind no model.
+    for folder_mode in ("live", "replay"):
+        for path in _xlsx_in(imports_dir / folder_mode):
+            targets.append((path, folder_mode, None))
     for sub in sorted(backtest_dir.iterdir()) if backtest_dir.is_dir() else []:
         if not sub.is_dir():
             continue
@@ -164,12 +171,18 @@ def scan_once(
                 f"session already existed as {session.get('mode')} — left unchanged; "
                 "re-tag it in Session controls if the folder is right"
             )
-        elif mode == "backtest" and session.get("account") not in (None, "Replay"):
-            # Backtests run on the Replay account; a real account in a model
-            # folder is almost certainly a mis-filed live export.
+        elif mode in ("backtest", "replay") and session.get("account") not in (None, "Replay"):
+            # Backtests and replays run on the Replay account; a real account
+            # in one of those folders is almost certainly a mis-filed live
+            # export.
             message = (
                 f"heads up: this file touched account {session['account']} — "
-                "a backtest is expected to be all-Replay"
+                f"a {mode} is expected to be all-Replay"
+            )
+        elif mode == "live" and session.get("account") == "Replay":
+            message = (
+                "heads up: this file is all-Replay — "
+                "is it really a live session?"
             )
         elif model and model.get("archived"):
             message = f"model “{model['name']}” is archived"

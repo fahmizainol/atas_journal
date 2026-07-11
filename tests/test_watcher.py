@@ -127,6 +127,50 @@ def test_backtest_folder_classifies_and_binds_the_model():
         assert state.events[-1]["model_name"] == "Test Model"
 
 
+def test_live_and_replay_folders_declare_the_mode():
+    """Placement in live/ or replay/ is the declaration, same as backtest
+    folders — inference is only for root files."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        conn = _conn(tmp)
+        imports, backtest = _dirs(tmp)
+        _drop(imports / "live", "a.xlsx", age_s=600)
+        _drop(imports / "replay", "b.xlsx", age_s=600)
+        calls: list[dict] = []
+        state = watcher.WatcherState()
+
+        assert _scan(conn, state, imports, backtest, _stub(calls, imports)) == 2
+        assert {c["mode"] for c in calls} == {"live", "replay"}
+        sessions = db.sessions_map(conn)
+        assert sessions["live/a.xlsx"]["mode"] == "live"
+        assert sessions["replay/b.xlsx"]["mode"] == "replay"
+
+
+def test_account_contradicting_the_mode_folder_gets_a_heads_up():
+    """A real account in replay/, or an all-Replay file in live/, is imported
+    but flagged — misfiles must be visible in the feed, not silent."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        conn = _conn(tmp)
+        imports, backtest = _dirs(tmp)
+        _drop(imports / "replay", "real.xlsx", age_s=600)
+        _drop(imports / "live", "sim.xlsx", age_s=600)
+        state = watcher.WatcherState()
+
+        def importer(conn, path, source_tz=None, file_mtime=None, mode=None, model_id=None,
+                     lock=None):
+            source = ingest.source_key(path, imports)
+            account = "PROP-1" if path.name == "real.xlsx" else "Replay"
+            db.mark_imported(conn, source, file_mtime=file_mtime)
+            db.upsert_session(conn, source, mode, account, model_id=model_id)
+            return {"executions": 1, "journal": 1, "statistics": 0}
+
+        assert _scan(conn, state, imports, backtest, importer) == 2
+        messages = {e["file"]: e.get("message") for e in state.events}
+        assert "PROP-1" in messages["replay/real.xlsx"]
+        assert "all-Replay" in messages["live/sim.xlsx"]
+
+
 def test_same_filename_in_root_and_model_folder_are_distinct_sessions():
     """ATAS names exports by date range, so a backtest of a day that was also
     traded live produces the same filename in both places. Path-relative keys

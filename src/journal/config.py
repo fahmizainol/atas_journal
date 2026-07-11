@@ -17,10 +17,14 @@ IMPORTS_DIR = DATA_DIR / "imports"
 # Exports saved under backtest/<model-folder>/ import as that model's backtest;
 # the folder name is the declaration (created by the app when a model is made).
 BACKTEST_DIR = IMPORTS_DIR / "backtest"
+# Same idea for live/ and replay/: the folder declares the session mode.
+# Root files still classify themselves from their accounts.
+LIVE_DIR = IMPORTS_DIR / "live"
+REPLAY_DIR = IMPORTS_DIR / "replay"
 CACHE_DIR = DATA_DIR / "cache"
 DB_PATH = DATA_DIR / "journal.db"
 
-for _d in (IMPORTS_DIR, BACKTEST_DIR, CACHE_DIR):
+for _d in (IMPORTS_DIR, BACKTEST_DIR, LIVE_DIR, REPLAY_DIR, CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # Seconds between watcher scans of IMPORTS_DIR, and the age past which a file
