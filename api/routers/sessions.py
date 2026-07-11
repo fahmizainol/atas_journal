@@ -42,7 +42,9 @@ def list_sessions() -> dict:
         return {"sessions": db.list_sessions(conn)}
 
 
-@router.patch("/sessions/{source_file}")
+# :path — backtest sessions are keyed 'backtest/<folder>/<file>.xlsx', and a
+# plain {source_file} segment would 404 on the slashes.
+@router.patch("/sessions/{source_file:path}")
 def patch_session(source_file: str, body: SessionPatch) -> dict:
     if body.mode is not None and body.mode not in MODES:
         raise HTTPException(400, f"mode must be one of {', '.join(MODES)}")

@@ -54,6 +54,22 @@ def _journal_key(row: dict) -> str:
     return hashlib.sha1("|".join(parts).encode()).hexdigest()
 
 
+def source_key(path: Path, base: Path = IMPORTS_DIR) -> str:
+    """The identity a file imports under: its path relative to the imports dir.
+
+    Root files keep their bare name (so every pre-existing DB row is already
+    keyed correctly); files under ``backtest/<folder>/`` become
+    ``backtest/<folder>/<name>``, which makes the folders independent
+    namespaces — ATAS reuses date-range filenames, so a backtest export must
+    never collide with a same-named live/replay export in the root. Files
+    outside ``base`` (e.g. one-off CLI imports) keep their bare name too.
+    """
+    try:
+        return path.resolve().relative_to(base.resolve()).as_posix()
+    except ValueError:
+        return path.name
+
+
 def _sheet_rows(wb, name: str) -> list[tuple]:
     if name not in wb.sheetnames:
         return []
@@ -69,7 +85,7 @@ def parse_file(
     recorded in (i.e. whatever ATAS was set to at export time).
     """
     wb = openpyxl.load_workbook(path, data_only=True)
-    source = path.name
+    source = source_key(path)
 
     executions: list[dict] = []
     for r in _sheet_rows(wb, "Executions")[1:]:
@@ -201,7 +217,8 @@ def import_file(
     parsed = parse_file(path, source_tz=source_tz)
     with lock if lock is not None else nullcontext():
         return store_parsed(
-            conn, path.name, parsed, file_mtime=file_mtime, mode=mode, model_id=model_id
+            conn, source_key(path), parsed,
+            file_mtime=file_mtime, mode=mode, model_id=model_id,
         )
 
 

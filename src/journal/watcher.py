@@ -116,13 +116,17 @@ def scan_once(
     imported = 0
     for path, mode, model in targets:
         key = str(path)
+        # DB identity: path relative to the imports dir (bare name for root
+        # files), so a backtest export never collides with a same-named root
+        # file. ``key`` above is the on-disk path for the in-memory state maps.
+        source = ingest.source_key(path, imports_dir)
         seen.add(key)
         try:
             stat = path.stat()
         except OSError:
             continue  # deleted between glob and stat
         mtime_iso = datetime.fromtimestamp(stat.st_mtime, tz=UTC_TZ).isoformat()
-        if imported_mtimes.get(path.name) == mtime_iso:
+        if imported_mtimes.get(source) == mtime_iso:
             continue  # this exact version is already in
         if state.failed.get(key) == stat.st_mtime:
             continue
@@ -144,13 +148,13 @@ def scan_once(
             )
         except Exception as exc:
             state.failed[key] = stat.st_mtime
-            state.push("error", path.name, message=str(exc))
+            state.push("error", source, message=str(exc))
             continue
 
         state.pending.pop(key, None)
         state.failed.pop(key, None)
         with _lk:
-            session = db.sessions_map(conn).get(path.name, {})
+            session = db.sessions_map(conn).get(source, {})
         message = None
         if mode and session.get("mode") != mode:
             # The session predates this import (upsert never overwrites), e.g.
@@ -170,7 +174,7 @@ def scan_once(
         elif model and model.get("archived"):
             message = f"model “{model['name']}” is archived"
         state.push(
-            "imported", path.name,
+            "imported", source,
             mode=session.get("mode"),
             model_id=session.get("model_id"),
             model_name=model["name"] if model else None,

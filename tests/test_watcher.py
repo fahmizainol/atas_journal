@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from journal import db, watcher  # noqa: E402
+from journal import db, ingest, watcher  # noqa: E402
 
 SETTLED = 120.0
 
@@ -31,19 +31,21 @@ def _conn(tmp: Path):
     return conn
 
 
-def _stub(calls: list[dict]):
+def _stub(calls: list[dict], imports: Path):
     """Importer stand-in: records the call and marks the file imported, so the
-    dedupe path (file_mtime comparison) behaves like the real ingest."""
+    dedupe path (file_mtime comparison) behaves like the real ingest — which
+    keys the DB by the path relative to the imports dir, not the bare name."""
 
     def importer(conn, path, source_tz=None, file_mtime=None, mode=None, model_id=None,
                  lock=None):
+        source = ingest.source_key(path, imports)
         calls.append({
             "file": path.name, "mode": mode, "model_id": model_id,
             "file_mtime": file_mtime,
         })
-        db.mark_imported(conn, path.name, file_mtime=file_mtime)
+        db.mark_imported(conn, source, file_mtime=file_mtime)
         inferred = mode or "replay"
-        db.upsert_session(conn, path.name, inferred, None, model_id=model_id)
+        db.upsert_session(conn, source, inferred, None, model_id=model_id)
         return {"executions": 1, "journal": 1, "statistics": 0}
 
     return importer
@@ -81,7 +83,7 @@ def test_settled_root_file_imports_first_tick_as_inferred():
         calls: list[dict] = []
         state = watcher.WatcherState()
 
-        assert _scan(conn, state, imports, backtest, _stub(calls)) == 1
+        assert _scan(conn, state, imports, backtest, _stub(calls, imports)) == 1
         assert calls[0]["mode"] is None and calls[0]["model_id"] is None
         assert state.events[-1]["kind"] == "imported"
         assert state.events[-1]["mode"] == "replay"
@@ -95,7 +97,7 @@ def test_young_file_waits_until_it_survives_a_tick_unchanged():
         path = _drop(imports, "hot.xlsx", age_s=0)
         calls: list[dict] = []
         state = watcher.WatcherState()
-        stub = _stub(calls)
+        stub = _stub(calls, imports)
 
         assert _scan(conn, state, imports, backtest, stub) == 0, "first sight: settle"
         # Still being written: size/mtime change resets the settle clock.
@@ -116,11 +118,36 @@ def test_backtest_folder_classifies_and_binds_the_model():
         calls: list[dict] = []
         state = watcher.WatcherState()
 
-        assert _scan(conn, state, imports, backtest, _stub(calls)) == 1
+        assert _scan(conn, state, imports, backtest, _stub(calls, imports)) == 1
         assert calls[0]["mode"] == "backtest" and calls[0]["model_id"] == model_id
-        sess = db.sessions_map(conn)["bt.xlsx"]
+        # Keyed by the imports-relative path: a backtest export can never
+        # collide with a same-named live/replay export in the root.
+        sess = db.sessions_map(conn)[f"backtest/{folder}/bt.xlsx"]
         assert sess["mode"] == "backtest" and sess["model_id"] == model_id
         assert state.events[-1]["model_name"] == "Test Model"
+
+
+def test_same_filename_in_root_and_model_folder_are_distinct_sessions():
+    """ATAS names exports by date range, so a backtest of a day that was also
+    traded live produces the same filename in both places. Path-relative keys
+    keep them from fighting over one DB row."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        conn = _conn(tmp)
+        imports, backtest = _dirs(tmp)
+        model_id = db.create_model(conn, "Test Model")
+        folder = db.get_model(conn, model_id)["folder"]
+        _drop(imports, "same.xlsx", age_s=600)
+        _drop(backtest / folder, "same.xlsx", age_s=600)
+        calls: list[dict] = []
+        state = watcher.WatcherState()
+        stub = _stub(calls, imports)
+
+        assert _scan(conn, state, imports, backtest, stub) == 2
+        sessions = db.sessions_map(conn)
+        assert sessions["same.xlsx"]["mode"] == "replay"
+        assert sessions[f"backtest/{folder}/same.xlsx"]["mode"] == "backtest"
+        assert _scan(conn, state, imports, backtest, stub) == 0, "both settled: done"
 
 
 def test_unknown_folder_skips_and_warns_exactly_once():
@@ -131,7 +158,7 @@ def test_unknown_folder_skips_and_warns_exactly_once():
         _drop(backtest / "no-such-model", "x.xlsx", age_s=600)
         calls: list[dict] = []
         state = watcher.WatcherState()
-        stub = _stub(calls)
+        stub = _stub(calls, imports)
 
         assert _scan(conn, state, imports, backtest, stub) == 0
         assert _scan(conn, state, imports, backtest, stub) == 0
@@ -148,7 +175,7 @@ def test_same_version_never_reimports_but_a_new_export_does():
         path = _drop(imports, "a.xlsx", age_s=600)
         calls: list[dict] = []
         state = watcher.WatcherState()
-        stub = _stub(calls)
+        stub = _stub(calls, imports)
 
         assert _scan(conn, state, imports, backtest, stub) == 1
         assert _scan(conn, state, imports, backtest, stub) == 0, "same mtime: done"
@@ -174,8 +201,9 @@ def test_real_account_in_a_backtest_folder_gets_a_heads_up():
 
         def importer(conn, path, source_tz=None, file_mtime=None, mode=None, model_id=None,
                      lock=None):
-            db.mark_imported(conn, path.name, file_mtime=file_mtime)
-            db.upsert_session(conn, path.name, mode, "PROP-1", model_id=model_id)
+            source = ingest.source_key(path, imports)
+            db.mark_imported(conn, source, file_mtime=file_mtime)
+            db.upsert_session(conn, source, mode, "PROP-1", model_id=model_id)
             return {"executions": 1, "journal": 1, "statistics": 0}
 
         assert _scan(conn, state, imports, backtest, importer) == 1

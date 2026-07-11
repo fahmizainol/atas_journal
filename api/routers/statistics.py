@@ -21,7 +21,10 @@ def statistics_files() -> dict:
     return {"files": files}
 
 
-@router.get("/statistics/{source_file}")
+# :path — backtest sessions are keyed 'backtest/<folder>/<file>.xlsx', and a
+# plain {source_file} segment would 404 on the slashes. /statistics/files
+# still wins for its exact path because it is registered first.
+@router.get("/statistics/{source_file:path}")
 def statistics_detail(source_file: str) -> dict:
     conn = deps.get_conn()
     with deps.db_lock():
