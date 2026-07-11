@@ -35,7 +35,8 @@ def _stub(calls: list[dict]):
     """Importer stand-in: records the call and marks the file imported, so the
     dedupe path (file_mtime comparison) behaves like the real ingest."""
 
-    def importer(conn, path, source_tz=None, file_mtime=None, mode=None, model_id=None):
+    def importer(conn, path, source_tz=None, file_mtime=None, mode=None, model_id=None,
+                 lock=None):
         calls.append({
             "file": path.name, "mode": mode, "model_id": model_id,
             "file_mtime": file_mtime,
@@ -171,7 +172,8 @@ def test_real_account_in_a_backtest_folder_gets_a_heads_up():
         _drop(backtest / folder, "oops.xlsx", age_s=600)
         state = watcher.WatcherState()
 
-        def importer(conn, path, source_tz=None, file_mtime=None, mode=None, model_id=None):
+        def importer(conn, path, source_tz=None, file_mtime=None, mode=None, model_id=None,
+                     lock=None):
             db.mark_imported(conn, path.name, file_mtime=file_mtime)
             db.upsert_session(conn, path.name, mode, "PROP-1", model_id=model_id)
             return {"executions": 1, "journal": 1, "statistics": 0}
@@ -204,6 +206,57 @@ def test_a_failing_file_reports_once_and_retries_only_when_it_changes():
         os.utime(path, (t, t))
         assert _scan(conn, state, imports, backtest, broken) == 0
         assert len(attempts) == 2, "a changed file gets a fresh attempt"
+
+
+def test_parse_runs_unlocked_and_store_runs_locked():
+    """The whole point of the lock plumbing: openpyxl parsing must never hold
+    the shared DB lock (it stalls every API request), while the DB writes must."""
+    from journal import ingest
+
+    class SpyLock:
+        def __init__(self):
+            self.held = False
+
+        def __enter__(self):
+            assert not self.held, "lock is not reentrant"
+            self.held = True
+            return self
+
+        def __exit__(self, *exc):
+            self.held = False
+            return False
+
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        conn = _conn(tmp)
+        imports, backtest = _dirs(tmp)
+        _drop(imports, "a.xlsx", age_s=600)
+        state = watcher.WatcherState()
+        spy = SpyLock()
+        seen = {"parse_locked": None, "store_locked": None}
+
+        real_parse, real_store = ingest.parse_file, ingest.store_parsed
+
+        def fake_parse(path, source_tz=None):
+            seen["parse_locked"] = spy.held
+            return {"executions": [], "journal": [], "statistics": []}
+
+        def fake_store(conn, source_name, parsed, **kwargs):
+            seen["store_locked"] = spy.held
+            return real_store(conn, source_name, parsed, **kwargs)
+
+        ingest.parse_file, ingest.store_parsed = fake_parse, fake_store
+        try:
+            imported = watcher.scan_once(
+                conn, state, imports_dir=imports, backtest_dir=backtest,
+                settled_age_s=SETTLED, lock=spy,
+            )
+        finally:
+            ingest.parse_file, ingest.store_parsed = real_parse, real_store
+
+        assert imported == 1
+        assert seen["parse_locked"] is False, "parse must run outside the lock"
+        assert seen["store_locked"] is True, "store must run inside the lock"
 
 
 if __name__ == "__main__":

@@ -56,8 +56,7 @@ def import_dir(source_tz: str | None = None) -> dict:
     """
     tz = _resolve_tz(source_tz) if source_tz else None
     conn = deps.get_conn()
-    with deps.db_lock():
-        res = ingest.import_dir(conn, source_tz=tz)
+    res = ingest.import_dir(conn, source_tz=tz, lock=deps.db_lock())
     total_fills = sum(c["executions"] for c in res.values())
     return {
         "files": len(res),
@@ -102,10 +101,9 @@ async def import_upload(
             if mtime
             else ingest.DEFAULT_SOURCE_TZ
         )
-        with deps.db_lock():
-            results[uf.filename] = ingest.import_file(
-                conn, dest, source_tz=tz, file_mtime=mtime
-            )
+        results[uf.filename] = ingest.import_file(
+            conn, dest, source_tz=tz, file_mtime=mtime, lock=deps.db_lock()
+        )
     return {"results": results, "source_tz": str(tz)}
 
 
