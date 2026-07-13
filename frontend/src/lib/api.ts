@@ -4,8 +4,19 @@
 export async function apiGet<T>(path: string, params?: Record<string, unknown>): Promise<T> {
   const qs = params ? "?" + toQuery(params) : "";
   const res = await fetch(`/api${path}${qs}`);
-  if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
+  if (!res.ok) throw new Error(`GET ${path} -> ${res.status}${await detail(res)}`);
   return res.json() as Promise<T>;
+}
+
+// FastAPI puts human-readable validation messages in {"detail": ...}; surface
+// them so a bad strategy config says *what* was bad, not just "400".
+async function detail(res: Response): Promise<string> {
+  try {
+    const j = await res.json();
+    return j?.detail ? `: ${typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail)}` : "";
+  } catch {
+    return "";
+  }
 }
 
 export async function apiSend<T>(
@@ -18,7 +29,7 @@ export async function apiSend<T>(
     headers: body instanceof FormData ? undefined : { "Content-Type": "application/json" },
     body: body instanceof FormData ? body : body != null ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}`);
+  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}${await detail(res)}`);
   return res.json() as Promise<T>;
 }
 

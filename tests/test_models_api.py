@@ -187,6 +187,61 @@ def test_per_model_pnl_partitions_the_scope():
         assert sum(m["metrics"]["trades"] for m in stats["models"]) == 2
 
 
+def test_renaming_a_model_moves_its_sessions_with_the_folder():
+    """A model rename moves its drop-box on disk. Sessions are keyed by the
+    imports-relative path, so they have to move too — otherwise their trades sit
+    under a folder that no longer exists and the watcher re-imports the moved
+    file as a second, empty session (the fills dedupe on content and stay put).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        conn = _setup(tmp)
+        backtest_dir = tmp / "imports" / "backtest"
+        orig_dir = models_router.BACKTEST_DIR
+        models_router.BACKTEST_DIR = backtest_dir
+        try:
+            model_id = db.create_model(conn, "Old Name")
+            folder = db.get_model(conn, model_id)["folder"]
+            (backtest_dir / folder).mkdir(parents=True)
+
+            src = f"backtest/{folder}/s.xlsx"
+            db.insert_journal(conn, [
+                _row(src, "Replay", 300.0, 30),
+                _row(src, "Replay", -100.0, 40),
+            ])
+            db.upsert_session(conn, src, "backtest", "Replay", model_id)
+            before = list(make_scope(modes="backtest").filtered["logical_trade_key"])
+
+            models_router.update_model(models_router.ModelUpdate(id=model_id, name="New Name"))
+
+            new_folder = db.get_model(conn, model_id)["folder"]
+            assert new_folder != folder
+            new_src = f"backtest/{new_folder}/s.xlsx"
+
+            # The drop-box moved on disk...
+            assert (backtest_dir / new_folder).is_dir()
+            assert not (backtest_dir / folder).exists()
+
+            # ...and so did every row keyed by the old path.
+            for table in db.SOURCE_FILE_TABLES:
+                left = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE source_file LIKE ?",
+                    (f"backtest/{folder}/%",),
+                ).fetchone()[0]
+                assert left == 0, f"{table} still has rows under the old folder"
+
+            sessions = db.list_sessions(conn)
+            assert [s["source_file"] for s in sessions] == [new_src]
+            assert sessions[0]["model_id"] == model_id
+
+            # Trade identity is path-independent, so notes/model/rule bindings survive.
+            after = list(make_scope(modes="backtest").filtered["logical_trade_key"])
+            assert after == before
+            assert len(after) == 2
+        finally:
+            models_router.BACKTEST_DIR = orig_dir
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

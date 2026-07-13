@@ -32,16 +32,22 @@ export function DaySessionChart({
       <TimeframeRadio value={tf} onChange={setTf} />
       <CandlestickChart
         bars={data.bars}
-        vwap={data.vwap}
+        vwapGlobex={data.vwap_globex}
+        vwapNy={data.vwap_ny}
         atrPoints={data.atr_points}
         markers={data.markers}
         levels={data.levels}
         tradeRects={data.trades}
+        tickSize={data.tick_size}
+        pointValue={data.point_value}
         height={580}
       />
       <div className="section-cap" style={{ marginTop: 6 }}>
-        Current + prior session — each trade shows a holding rectangle + Buy/Sell fills; gold band =
-        VWAP ±1σ, dotted lines = session levels (ON/PD high-low, prior close, open), lower pane = volume.
+        Current + prior session — each trade shows a holding rectangle + Buy/Sell fills; white band =
+        Globex VWAP ±1σ/±2σ, purple band = NY VWAP ±1σ/±2σ, dotted lines = session levels (ON/PD
+        high-low, prior close, open), lower pane = volume. The right-edge histogram is the volume
+        profile of the bars on screen — gold = POC, blue rows = value area (70%), with POC/VAH/VAL
+        marked on the price axis; zoom to re-profile just the visible window.
       </div>
     </div>
   );

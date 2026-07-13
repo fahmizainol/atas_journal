@@ -111,6 +111,7 @@ export interface TradeRow {
   net_pnl: number;
   comment: string;
   model_id: number | null; // effective model (own binding, or a backtest session's)
+  session_mode: SessionMode; // the owning session's mode; drives the detail layout
   setups?: string[]; // attached by GET /trades for table badges
 }
 

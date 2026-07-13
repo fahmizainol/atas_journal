@@ -34,13 +34,18 @@ export function TradeDetail({
   jumpToOffset?: { offsetS: number; nonce: number } | null;
 }) {
   const { data, isLoading } = useTradeDetail(scope, tradeNo);
-  // Heavy section (chart + excursion-backed AI) is hidden by default and only
-  // fetched when revealed — keeps expanding a trade row instant. Excursion
-  // loads Databento bars, which is the slow part on a cold cache.
-  const [showChart, setShowChart] = useState(false);
+  // Backtest review is chart-first: the chart leads and is open from the start,
+  // and there is no recording to show. Live/replay keep the lazy layout — the
+  // chart is hidden (and so unfetched) until asked for, which keeps expanding a
+  // row instant, since excursion pulls Databento bars on a cold cache.
+  const isBacktest = data?.trade.session_mode === "backtest";
+  const [chartOverride, setChartOverride] = useState<boolean | null>(null);
+  const showChart = chartOverride ?? isBacktest;
+  const withRecording = showRecording && !isBacktest;
+
   const { data: exc } = useExcursion(scope, tradeNo, showChart);
   const { data: videoData, isLoading: isVideoLoading } = useVideo(
-    showRecording ? data?.trade.source_file ?? null : null,
+    withRecording ? data?.trade.source_file ?? null : null,
   );
   if (isLoading || !data) return <div className="notice">Loading trade…</div>;
 
@@ -70,12 +75,51 @@ export function TradeDetail({
     />
   );
 
+  const title = (
+    <div className="section-title">
+      Trade #{t.trade_no} — {fmtDateTime(t.entry_ts_local)}
+    </div>
+  );
+  const chartToggle = (
+    <div style={{ margin: "10px 0 4px" }}>
+      <button
+        type="button"
+        className={showChart ? "active" : ""}
+        onClick={() => setChartOverride(!showChart)}
+        title="Show / hide the reconstruction chart + AI analysis (hidden = not loaded, keeps expand instant)"
+      >
+        {showChart ? "▾ Hide chart & analysis" : "▸ Show chart & analysis"}
+      </button>
+    </div>
+  );
+  // Render once excursion has resolved so the AI panel doesn't flash its
+  // "needs excursion data" notice while bars are still loading.
+  const analysis = showChart && exc !== undefined && (
+    <TradeAnalysis
+      tradeKey={t.trade_key}
+      scope={scope}
+      hasExcursion={!!exc?.available && !!exc?.has_data}
+    />
+  );
+
+  if (isBacktest) {
+    return (
+      <div>
+        {title}
+        {chartToggle}
+        {showChart && <ReconstructionChart scope={scope} tradeNo={tradeNo} />}
+        <KpiGrid cards={row1} template="repeat(5, 1fr)" className="kpi-compact" />
+        <KpiGrid cards={row2} template="repeat(3, 1fr)" className="kpi-compact" />
+        {analysis}
+        {journal}
+      </div>
+    );
+  }
+
   return (
     <div>
-      <div className="section-title">
-        Trade #{t.trade_no} — {fmtDateTime(t.entry_ts_local)}
-      </div>
-      {showRecording && (
+      {title}
+      {withRecording && (
         <TradeRecordingPanel
           sourceFile={t.source_file}
           tradeKey={t.trade_key}
@@ -85,7 +129,7 @@ export function TradeDetail({
           jumpToOffset={jumpToOffset}
         />
       )}
-      {showRecording ? (
+      {withRecording ? (
         <div className="trade-detail-summary-grid">
           <div>
             <KpiGrid cards={row1} template="repeat(3, 1fr)" className="kpi-compact" />
@@ -99,31 +143,10 @@ export function TradeDetail({
           <KpiGrid cards={row2} template="repeat(3, 1fr)" className="kpi-compact" />
         </>
       )}
-      <div style={{ margin: "10px 0 4px" }}>
-        <button
-          type="button"
-          className={showChart ? "active" : ""}
-          onClick={() => setShowChart((s) => !s)}
-          title="Show / hide the reconstruction chart + AI analysis (hidden = not loaded, keeps expand instant)"
-        >
-          {showChart ? "▾ Hide chart & analysis" : "▸ Show chart & analysis"}
-        </button>
-      </div>
-      {showChart && (
-        <>
-          <ReconstructionChart scope={scope} tradeNo={tradeNo} />
-          {/* Render once excursion has resolved so the AI panel doesn't flash
-              its "needs excursion data" notice while bars are still loading. */}
-          {exc !== undefined && (
-            <TradeAnalysis
-              tradeKey={t.trade_key}
-              scope={scope}
-              hasExcursion={!!exc?.available && !!exc?.has_data}
-            />
-          )}
-        </>
-      )}
-      {!showRecording && journal}
+      {chartToggle}
+      {showChart && <ReconstructionChart scope={scope} tradeNo={tradeNo} />}
+      {analysis}
+      {!withRecording && journal}
     </div>
   );
 }

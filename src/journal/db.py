@@ -993,6 +993,44 @@ def list_sessions(conn: sqlite3.Connection) -> list[dict]:
     return [{**dict(r), "archived": bool(r["archived"])} for r in rows]
 
 
+# Every table that identifies its rows by the imports-relative source path.
+SOURCE_FILE_TABLES = (
+    "executions", "atas_journal", "atas_statistics",
+    "sessions", "imported_files", "attempt_videos", "video_bookmarks",
+)
+
+
+def rekey_source_prefix(conn: sqlite3.Connection, old_prefix: str, new_prefix: str) -> int:
+    """Re-point every ``source_file`` under *old_prefix* at *new_prefix*.
+
+    Renaming a model moves its drop-box folder on disk, which would otherwise
+    strand every session already imported from it under a path that no longer
+    exists: the watcher re-imports the moved file as a *new* session, but its
+    fills and lots dedupe on content, so they stay attached to the dead key and
+    the new session lands empty. Re-keying in the same breath as the disk rename
+    keeps a session's identity following its folder.
+
+    ``OR REPLACE`` so a row already squatting on the target key (from an earlier
+    stranded re-import) loses to the original, which is the one carrying the
+    user's mode / model / note / archive choices.
+
+    Safe for trade identity: ``dedupe_key`` hashes only the lot's own contents
+    and ``trade_key`` hashes the first lot's ``dedupe_key``, so neither moves
+    when the path does — notes, model bindings and rule checks all survive.
+    """
+    moved = 0
+    for table in SOURCE_FILE_TABLES:
+        cur = conn.execute(
+            f"UPDATE OR REPLACE {table} "
+            "SET source_file = ? || substr(source_file, ?) "
+            "WHERE source_file LIKE ? || '/%'",
+            (new_prefix, len(old_prefix) + 1, old_prefix),
+        )
+        moved += cur.rowcount
+    conn.commit()
+    return moved
+
+
 def update_session(
     conn: sqlite3.Connection,
     source_file: str,

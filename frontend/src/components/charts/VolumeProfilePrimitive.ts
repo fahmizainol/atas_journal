@@ -1,0 +1,127 @@
+// Draws the volume profile as a horizontal histogram anchored to the right edge
+// of the pane, growing leftward: one bar per price row, widest at the POC.
+// lightweight-charts has no series type that runs along the price axis, so this
+// is drawn by hand — same primitive shape as VwapBandPrimitive.
+//
+// Rows inside the value area are drawn solid, rows outside it faint, and the POC
+// row gold, so VAH/POC/VAL are legible from the histogram alone; the horizontal
+// lines and axis labels for those three prices are price lines owned by the
+// chart (see CandlestickChart).
+
+import type { ISeriesApi } from "lightweight-charts";
+import { palette } from "../../theme";
+import type { VolumeProfile } from "../../lib/volumeProfile";
+
+// Fraction of the pane the widest (POC) row spans. Wide enough to read, narrow
+// enough that it never swallows the price action it sits behind.
+const MAX_WIDTH_FRAC = 0.2;
+const GAP = 1; // px between rows, so they read as a histogram not a block
+
+const FILL_VA = "rgba(59, 130, 246, 0.42)"; // inside the value area
+const FILL_OUT = "rgba(138, 143, 156, 0.22)"; // the tails
+const FILL_POC = "rgba(224, 165, 42, 0.72)"; // point of control
+
+class ProfileRenderer {
+  constructor(
+    private host: VolumeProfilePrimitive,
+    private series: () => ISeriesApi<"Candlestick">,
+  ) {}
+
+  draw(target: any) {
+    const profile = this.host.profile;
+    if (!this.host.isVisible() || !profile || profile.maxVolume <= 0) return;
+
+    target.useMediaCoordinateSpace((scope: any) => {
+      const ctx: CanvasRenderingContext2D = scope.context;
+      const series = this.series();
+      const right = scope.mediaSize.width;
+      const maxWidth = right * MAX_WIDTH_FRAC;
+
+      // The POC row is the one whose price the chart also draws a gold line at;
+      // recomputing it here (rather than storing an index) keeps the renderer
+      // honest if the profile is swapped out mid-flight.
+      const pocRow = profile.rows.reduce((a, b) => (b.volume > a.volume ? b : a));
+
+      for (let i = 0; i < profile.rows.length; i++) {
+        const row = profile.rows[i];
+        if (row.volume <= 0) continue;
+        const yHigh = series.priceToCoordinate(row.high);
+        const yLow = series.priceToCoordinate(row.low);
+        // Off-scale (the price scale is zoomed past this row) — nothing to draw.
+        if (yHigh == null || yLow == null) continue;
+
+        const h = Math.max(1, yLow - yHigh - GAP);
+        const w = (row.volume / profile.maxVolume) * maxWidth;
+        ctx.fillStyle =
+          row === pocRow ? FILL_POC : profile.valueArea.has(i) ? FILL_VA : FILL_OUT;
+        ctx.fillRect(right - w, yHigh, w, h);
+      }
+
+      // A hairline along the histogram's baseline separates it from the price
+      // scale and gives the rows something to sit against.
+      ctx.fillStyle = palette.grid;
+      ctx.fillRect(right - 1, 0, 1, scope.mediaSize.height);
+    });
+  }
+}
+
+class ProfilePaneView {
+  private _renderer: ProfileRenderer;
+  constructor(host: VolumeProfilePrimitive, series: () => ISeriesApi<"Candlestick">) {
+    this._renderer = new ProfileRenderer(host, series);
+  }
+  update() {}
+  renderer() {
+    return this._renderer;
+  }
+  // Behind the candles: the profile is context, not the subject.
+  zOrder() {
+    return "bottom" as const;
+  }
+}
+
+export class VolumeProfilePrimitive {
+  private series!: ISeriesApi<"Candlestick">;
+  private views: ProfilePaneView[] = [];
+  private requestUpdate?: () => void;
+  private visible = true;
+
+  constructor(public profile: VolumeProfile | null) {}
+
+  // The profile is recomputed as the user pans/zooms (it covers the visible
+  // bars), so unlike the VWAP band this primitive's data is mutable.
+  setProfile(profile: VolumeProfile | null) {
+    this.profile = profile;
+    this.requestUpdate?.();
+  }
+
+  // A primitive has no `visible` option, so it culls itself in draw() and asks
+  // for a repaint — same trick as VwapBandPrimitive.
+  setVisible(v: boolean) {
+    this.visible = v;
+    this.requestUpdate?.();
+  }
+
+  isVisible() {
+    return this.visible;
+  }
+
+  attached(param: any) {
+    this.series = param.series;
+    this.requestUpdate = param.requestUpdate;
+    this.views = [new ProfilePaneView(this, () => this.series)];
+    this.requestUpdate?.();
+  }
+
+  detached() {
+    this.views = [];
+  }
+
+  updateAllViews() {
+    this.views.forEach((v) => v.update());
+  }
+
+  paneViews() {
+    return this.views;
+  }
+}

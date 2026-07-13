@@ -11,6 +11,7 @@ const TABS = [
   { to: "/trades", label: "Trades", end: false },
   { to: "/models", label: "Models", end: false },
   { to: "/backtests", label: "Backtests", end: false },
+  { to: "/strategies", label: "Strategies", end: false },
   { to: "/ai", label: "AI Review", end: false },
   { to: "/cross-check", label: "ATAS Cross-check", end: false },
 ];

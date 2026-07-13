@@ -57,18 +57,22 @@ export function ReconstructionChart({ scope, tradeNo }: { scope: FilterScope; tr
       <TimeframeRadio value={tf} onChange={setTf} />
       <CandlestickChart
         bars={data.bars}
-        vwap={data.vwap}
+        vwapGlobex={data.vwap_globex}
+        vwapNy={data.vwap_ny}
         atrPoints={data.atr_points}
         markers={data.markers}
         priceLines={data.price_lines}
         levels={data.levels}
         tradeRects={tradeRects}
+        tickSize={data.tick_size}
+        pointValue={data.point_value}
         height={560}
       />
       <div className="section-cap" style={{ marginTop: 6 }}>
         Drag = pan · wheel = zoom. Buy/Sell arrows = fills, dashed lines = avg entry/exit,
         dotted lines = session levels (ON/PD high-low, prior close, open), circles = MAE/MFE,
-        gold band = VWAP ±1σ, lower pane = volume. Hover the trade for its PnL.
+        white band = Globex VWAP ±1σ/±2σ, purple band = NY VWAP ±1σ/±2σ, lower pane = volume.
+        Hover the trade for its PnL.
       </div>
       {excCards.length > 0 && <KpiGrid cards={excCards} template="repeat(4, 1fr)" />}
     </div>

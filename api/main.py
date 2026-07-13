@@ -34,10 +34,12 @@ from .routers import (  # noqa: E402
     models,
     notes,
     overview,
+    regime,
     sessions,
     settings,
     setups,
     statistics,
+    strategies,
     trades,
     videos,
 )
@@ -82,6 +84,8 @@ app.include_router(settings.router, prefix="/api")
 app.include_router(ai.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
 app.include_router(videos.router, prefix="/api")
+app.include_router(strategies.router, prefix="/api")
+app.include_router(regime.router, prefix="/api")
 
 
 # --- Prod static frontend (mounted last; only if a build exists) ---------

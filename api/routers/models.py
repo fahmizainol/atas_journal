@@ -111,6 +111,17 @@ def update_model(body: ModelUpdate) -> dict:
             old_dir.rename(new_dir)
         else:
             new_dir.mkdir(parents=True, exist_ok=True)
+        # Sessions are keyed by imports-relative path, so a moved drop-box must
+        # take its already-imported sessions with it. Skipping this strands them
+        # under the old path and the watcher re-imports the moved files as new,
+        # empty sessions (their trades dedupe on content and never move).
+        if current["folder"]:
+            with deps.db_lock():
+                db.rekey_source_prefix(
+                    conn,
+                    f"{BACKTEST_DIR.name}/{current['folder']}",
+                    f"{BACKTEST_DIR.name}/{new_folder}",
+                )
     return {"ok": True}
 
 

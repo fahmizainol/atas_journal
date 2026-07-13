@@ -1,0 +1,160 @@
+"""Developing volume profile — POC / VAH / VAL, from the true tape.
+
+Unlike ``frontend/src/lib/volumeProfile.ts``, which has to *reconstruct* a
+profile by spreading each bar's volume across its high-low range, this bins the
+actual traded size at the actual traded price. We have the tick stream, so no
+reconstruction is needed and none is done: every contract lands on the price it
+printed at. The two therefore do not agree to the cent, and the engine trades
+this one.
+
+"Developing" means session-anchored and cumulative: the profile at bar *k* is
+built from every tick from the session open through the close of bar *k*, which
+is what a live developing-profile indicator shows. Levels are recomputed once
+per bar close, not once per tick — the value-area scan is O(levels) and a fill
+is judged against the last *closed* bar's levels anyway (see engine.py), so a
+per-tick profile would cost real time to produce a number nothing may read.
+
+Value area: the classic Market Profile expansion — start at the POC and keep
+annexing whichever neighbouring *pair* of levels carries more volume until 70%
+of the volume traded so far is enclosed. Comparing pairs rather than single
+levels is what stops the area creeping up one thin level at a time on a
+lopsided distribution.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+VALUE_AREA_PCT = 0.70
+
+
+@dataclass(frozen=True)
+class DevelopingProfile:
+    """Per-bar developing levels, positionally aligned to a bar frame.
+
+    ``poc``/``vah``/``val`` are real price levels (a level the tape actually
+    printed at), not row edges — there are no rows here to have edges.
+    """
+
+    poc: np.ndarray  # (n_bars,)
+    vah: np.ndarray
+    val: np.ndarray
+
+    def __len__(self) -> int:
+        return len(self.poc)
+
+
+def _value_area(hist: np.ndarray, poc: int, total: float, pct: float) -> tuple[int, int]:
+    """(lo, hi) level indices enclosing ``pct`` of ``total``, expanding from the POC."""
+    target = total * pct
+    acc = float(hist[poc])
+    lo = hi = poc
+    top = len(hist) - 1
+
+    while acc < target and (lo > 0 or hi < top):
+        # Volume of the next two levels beyond each edge; -1 marks an edge that
+        # has run out of levels, so the other side always wins the comparison.
+        up = float(hist[hi + 1] + (hist[hi + 2] if hi + 2 <= top else 0.0)) if hi < top else -1.0
+        down = float(hist[lo - 1] + (hist[lo - 2] if lo - 2 >= 0 else 0.0)) if lo > 0 else -1.0
+        if up < 0 and down < 0:
+            break
+        if up >= down:
+            for _ in range(2):
+                if hi >= top:
+                    break
+                hi += 1
+                acc += float(hist[hi])
+        else:
+            for _ in range(2):
+                if lo <= 0:
+                    break
+                lo -= 1
+                acc += float(hist[lo])
+    return lo, hi
+
+
+def developing_profile(
+    ticks: pd.DataFrame,
+    bars: pd.DataFrame,
+    tick_size: float,
+    pct: float = VALUE_AREA_PCT,
+) -> DevelopingProfile:
+    """Cumulative POC/VAH/VAL as of each bar's close, one row per bar.
+
+    ``bars`` must carry ``end_idx`` (inclusive tick positions into ``ticks``), as
+    ``bars.tick_bars`` produces. Accumulation starts at the first tick, so the
+    caller anchors the session by slicing the tick frame — same contract as
+    ``vwap.vwap_bands``.
+    """
+    if ticks.empty or bars.empty:
+        return DevelopingProfile(np.array([]), np.array([]), np.array([]))
+
+    price = ticks["price"].to_numpy(dtype="float64")
+    size = ticks["size"].to_numpy(dtype="float64")
+
+    # Price -> integer level index. Rounding to the instrument's tick grid is what
+    # makes the histogram dense: raw floats would scatter one bin per distinct
+    # price and the pair-expansion would step over holes that aren't really there.
+    lv = np.rint(price / tick_size).astype("int64")
+    base = int(lv.min())
+    idx = lv - base
+    n_levels = int(lv.max()) - base + 1
+
+    hist = np.zeros(n_levels, dtype="float64")
+    ends = bars["end_idx"].to_numpy(dtype="int64")
+
+    poc = np.full(len(bars), np.nan)
+    vah = np.full(len(bars), np.nan)
+    val = np.full(len(bars), np.nan)
+
+    total = 0.0
+    cursor = 0
+    for k, end in enumerate(ends):
+        stop = int(end) + 1  # end_idx is inclusive
+        if stop > cursor:
+            hist += np.bincount(idx[cursor:stop], weights=size[cursor:stop], minlength=n_levels)
+            total += float(size[cursor:stop].sum())
+            cursor = stop
+        if total <= 0:
+            continue  # a whole bar of zero-size prints: no profile to speak of yet
+        p = int(np.argmax(hist))
+        lo, hi = _value_area(hist, p, total, pct)
+        poc[k] = (base + p) * tick_size
+        vah[k] = (base + hi) * tick_size
+        val[k] = (base + lo) * tick_size
+
+    return DevelopingProfile(poc=poc, vah=vah, val=val)
+
+
+def levels_in_force(
+    profile: DevelopingProfile, bars: pd.DataFrame, n_ticks: int, edge: str = "vah"
+) -> np.ndarray:
+    """One profile level per *tick*, as known to a trader standing at that tick.
+
+    ``edge`` selects which level ("vah" | "val" | "poc"): a long from above value
+    is judged against VAH, its short mirror against VAL.
+
+    The value at tick ``i`` is the level of the last bar to have **closed strictly
+    before** ``i``. A bar that closes on ``i`` does not count: the engine settles
+    fills before it processes that bar, so letting its level apply at ``i`` would
+    hand a fill a number derived partly from ticks it hadn't seen yet.
+
+    Ticks before the first bar close get NaN — there is genuinely no profile yet,
+    and every caller must decide what that means rather than inherit a zero.
+    """
+    if edge not in ("vah", "val", "poc"):
+        raise ValueError(f"edge must be vah|val|poc, got {edge!r}")
+    out = np.full(n_ticks, np.nan)
+    if len(profile) == 0 or bars.empty:
+        return out
+    level = getattr(profile, edge)
+    ends = bars["end_idx"].to_numpy(dtype="int64")
+    for k, end in enumerate(ends):
+        start = int(end) + 1  # in force from the tick *after* the close
+        stop = int(ends[k + 1]) + 1 if k + 1 < len(ends) else n_ticks
+        if start < n_ticks:
+            out[start:min(stop, n_ticks)] = level[k]
+    return out

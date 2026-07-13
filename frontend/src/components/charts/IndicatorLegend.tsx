@@ -1,4 +1,10 @@
-export type IndicatorKey = "vwap" | "atr" | "levels";
+export type IndicatorKey =
+  | "vwapGlobex"
+  | "vwapNy"
+  | "atr"
+  | "levels"
+  | "volumeProfile"
+  | "developingProfile";
 
 export interface LegendItem {
   key: IndicatorKey;

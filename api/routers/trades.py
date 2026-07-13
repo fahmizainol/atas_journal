@@ -19,6 +19,10 @@ TRADE_COLS = [
     "max_contracts", "entry_ts_local", "exit_ts_local", "entry_ts_utc", "exit_ts_utc",
     "duration_s", "avg_entry", "avg_exit", "net_pnl", "comment", "source_file",
     "model_id",
+    # The owning session's mode. Backtest trades get a chart-first detail layout
+    # with no recording, so the trade must carry its own mode — keying off the
+    # FilterBar would misrender them whenever the mode filter is "all".
+    "session_mode",
 ]
 
 

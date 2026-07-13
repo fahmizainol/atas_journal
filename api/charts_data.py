@@ -16,13 +16,23 @@ from journal import excursion
 from journal import levels as levels_mod
 from journal import databento_client as dbn
 from journal.atr import atr_series
-from journal.config import ET_TZ
+from journal.config import ET_TZ, point_value, tick_size
 
 _RULE = {"1m": "1min", "5m": "5min", "15m": "15min"}
 _ATR_PERIOD = 14
 # Extra resampled bars pulled *before* the plotted window so Wilder's ATR has
 # converged by the time the visible candles start (period + smoothing margin).
 _ATR_LOOKBACK_BARS = 30
+
+# The two VWAP anchors, as ET wall-clock opens. Each starts a fresh accumulation
+# that runs until the next one 24h later (so the NY VWAP keeps extending through
+# the evening rather than terminating at the cash close).
+VWAP_ANCHORS = {"globex": time(18, 0), "ny": time(9, 30)}
+# A VWAP group is only honest if the loaded bars actually reach back to its
+# anchor. Bars starting at the Globex open, say, join the *prior* day's 09:30
+# group mid-flight — accumulating from 18:00 would draw a band that never
+# existed. Groups whose first bar lags the anchor by more than this are dropped.
+_ANCHOR_TOLERANCE = pd.Timedelta(minutes=20)
 
 # Palette (mirrors charts.py / theme.ts) for marker + line colors.
 GREEN = "#21c07a"
@@ -96,30 +106,62 @@ def _bars_rows(bars: pd.DataFrame, tz) -> list[dict]:
     return out
 
 
-def _vwap_rows(plot_bars: pd.DataFrame, anchor_bars: pd.DataFrame | None, tz) -> list[dict]:
-    """Session VWAP ±1σ band. Anchored at the 18:00 ET Globex open, computed
-    over *anchor_bars* (full session) then restricted to *plot_bars* timestamps.
-    Ports charts._vwap_series."""
+def _vwap_rows(
+    plot_bars: pd.DataFrame,
+    anchor_bars: pd.DataFrame | None,
+    tz,
+    anchor: str = "globex",
+) -> list[dict]:
+    """Anchored VWAP with ±1σ and ±2σ bands.
+
+    *anchor* is a key of ``VWAP_ANCHORS`` — "globex" (18:00 ET) or "ny" (09:30
+    ET). Accumulation restarts at each anchor and runs the full 24h until the
+    next one. Computed over *anchor_bars* (the full session, so the band is
+    right even when the visible window starts mid-session) then restricted to
+    *plot_bars* timestamps.
+    """
     src = anchor_bars if anchor_bars is not None else plot_bars
+    if src is None or src.empty:
+        return []
+    open_t = VWAP_ANCHORS[anchor]
+    off = pd.Timedelta(hours=open_t.hour, minutes=open_t.minute)
+
+    # Wall-clock ET, so the anchor stays at 18:00/09:30 local across DST.
+    et = pd.to_datetime(src["ts_utc"], utc=True).dt.tz_convert(ET_TZ).dt.tz_localize(None)
+    session = (et - off).dt.date
+
     typ = (src["high"] + src["low"] + src["close"]) / 3
     vol = src["volume"].astype(float)
-    et = pd.to_datetime(src["ts_utc"], utc=True).dt.tz_convert(ET_TZ)
-    session = (et - pd.Timedelta(hours=18)).dt.date
     cum = vol.groupby(session).cumsum().where(lambda c: c != 0)
     vwap = (typ * vol).groupby(session).cumsum() / cum
     var = (typ * typ * vol).groupby(session).cumsum() / cum - vwap**2
     std = var.clip(lower=0) ** 0.5
+
     df = pd.DataFrame({
         "ts_utc": pd.to_datetime(src["ts_utc"], utc=True),
-        "upper": vwap + std, "middle": vwap, "lower": vwap - std,
-    }).dropna(subset=["middle"])
+        "middle": vwap,
+        "upper1": vwap + std, "lower1": vwap - std,
+        "upper2": vwap + 2 * std, "lower2": vwap - 2 * std,
+    })
+    # Drop groups the loaded bars joined late (see _ANCHOR_TOLERANCE).
+    first_bar = et.groupby(session).transform("min")
+    anchor_at = pd.to_datetime(pd.Index(session)) + off
+    df = df[(first_bar - pd.Series(anchor_at, index=df.index)) <= _ANCHOR_TOLERANCE]
+    df = df.dropna(subset=["middle"])
+
     if anchor_bars is not None:
         window = pd.to_datetime(plot_bars["ts_utc"], utc=True)
         df = df[df["ts_utc"].isin(window)]
+    if df.empty:
+        return []
     times = _epoch_local(df["ts_utc"], tz)
     return [
-        {"time": int(t), "upper": float(u), "middle": float(m), "lower": float(low)}
-        for t, u, m, low in zip(times, df["upper"], df["middle"], df["lower"])
+        {"time": int(t), "middle": float(m),
+         "upper1": float(u1), "lower1": float(l1),
+         "upper2": float(u2), "lower2": float(l2)}
+        for t, m, u1, l1, u2, l2 in zip(
+            times, df["middle"], df["upper1"], df["lower1"], df["upper2"], df["lower2"]
+        )
     ]
 
 
@@ -262,12 +304,15 @@ def trade_chart(trade: pd.Series, tf: str, tz) -> dict:
     payload = {
         "available": True,
         "bars": _bars_rows(pbars, tz),
-        "vwap": _vwap_rows(pbars, psess, tz),
+        "vwap_globex": _vwap_rows(pbars, psess, tz, "globex"),
+        "vwap_ny": _vwap_rows(pbars, psess, tz, "ny"),
         "atr_points": _atr_rows(pbars, psess, tz),
         "markers": markers,
         "price_lines": _price_lines(trade),
         "levels": _near_levels(_levels_rows(lv), pbars),
         "trade_rect": _trade_rect(trade, tz),
+        "tick_size": tick_size(instrument),
+        "point_value": point_value(instrument),
     }
     if exc:
         payload["excursion"] = {k: v for k, v in exc.items() if k != "bars"}
@@ -304,11 +349,14 @@ def day_chart(day_df: pd.DataFrame, day, tf: str, tz) -> dict:
         "available": True,
         "instrument": instrument,
         "bars": _bars_rows(pbars, tz),
-        "vwap": _vwap_rows(pbars, None, tz),
+        "vwap_globex": _vwap_rows(pbars, None, tz, "globex"),
+        "vwap_ny": _vwap_rows(pbars, None, tz, "ny"),
         "atr_points": _atr_rows(pbars, None, tz),
         "markers": markers,
         "levels": _levels_rows(lv),
         "trades": rects,
+        "tick_size": tick_size(instrument),
+        "point_value": point_value(instrument),
     }
 
 
