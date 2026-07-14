@@ -136,10 +136,16 @@ FIELDS: tuple[Field, ...] = (
           unit="bar closes", min=0, zero_means_off=True, on_default=1,
           help="Exit at market after this many consecutive closes back inside the "
                "developing value area — the trade was taken from outside it."),
-    Field("trail_step_ticks", "int", "exit", "Step trail", unit="ticks", min=0,
+    Field("trail_stop_ticks", "int", "exit", "Trailing stop", unit="ticks", min=1,
           zero_means_off=True, on_default=75,
-          help="Each step in your favour ratchets the stop one step behind price, "
-               "so the first step buys breakeven. The stop never loosens."),
+          help="How far behind the best price the trade has seen the stop follows. "
+               "Nothing moves until the trade is this far in front, and the first "
+               "move is to breakeven — the trail can never tighten a loss."),
+    Field("trail_step_ticks", "int", "exit", "Trail step", unit="ticks", min=0,
+          help="The grid the trailing stop moves on, measured from the entry: with "
+               "a 50-tick trail and a 25-tick step it sits at breakeven from +50, "
+               "at +25 from +75, and so on. 0 moves it in single clicks of the full "
+               "trail distance. Ignored when the trailing stop is off."),
 
     # --- filters / lifecycle ---
     Field("min_band_width_ticks", "int", "filters", "Minimum band width",
@@ -308,6 +314,13 @@ def parse(raw: dict) -> SimConfig:
         v = coerce(f, v)
         _check_range(f, v)
         kw[name] = v
+
+    if "trail_stop_ticks" not in raw and kw["trail_step_ticks"]:
+        # A config written before the trail's distance and its step were separate
+        # knobs: back then the single trail_step_ticks was both, so that is what it
+        # still means. Every stored run's config.json is read back through here, and
+        # a run must always replay to the trades it reported.
+        kw["trail_stop_ticks"] = kw["trail_step_ticks"]
 
     cfg = SimConfig(**kw)
     _check_cross_field(cfg)

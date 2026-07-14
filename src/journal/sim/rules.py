@@ -59,10 +59,19 @@ class SimConfig:
     # of invalidate_below_mid_bars. Fills on the tick after the close, like any
     # market order a close could have triggered.
     exit_below_vah_bars: int = 0
-    # 0 = off. A step ratchet: once price has run N * trail_step_ticks in the
-    # trade's favour, the stop moves to entry + (N-1) steps. So the first step
-    # buys breakeven, the second locks one step of profit, and so on. The stop
-    # only ever moves toward the trade — a pullback never loosens it.
+    # 0 = off, and the trail's master switch. How far behind the best price the
+    # trade has seen the stop wants to sit. Nothing moves until the trade is this
+    # far in front: the first ratchet lands the stop on the entry, so the trail
+    # can only ever buy breakeven or better, never a tightened loss.
+    trail_stop_ticks: int = 0
+    # The grid the trailed stop is allowed to rest on, measured from the entry.
+    # The stop keeps trail_stop_ticks behind the high-water price but only moves
+    # in whole steps, so with a 50-tick trail and a 25-tick step it goes to
+    # breakeven at +50, +25 at +75, +50 at +100 — always 50 to 74 ticks behind.
+    # 0 = one step per trail distance (the trail moves in single clicks of
+    # trail_stop_ticks), which is what the trail did before the two decoupled.
+    # Ignored when trail_stop_ticks is 0. The stop only ever moves toward the
+    # trade — a pullback never loosens it.
     trail_step_ticks: int = 0
 
     # --- filters / lifecycle ---

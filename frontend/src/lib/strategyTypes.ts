@@ -26,8 +26,11 @@ export interface SimConfig {
   target_rr: number | null;
   /** N consecutive bar closes back below the developing VAH exit at market. 0 = off. */
   exit_below_vah_bars: number;
-  /** Step ratchet: N steps in favour move the stop to entry + (N-1) steps, so the
-   * first step buys breakeven. 0 = off (fixed stop). */
+  /** How far behind the best price seen the stop follows, and the trail's master
+   * switch. 0 = off (fixed stop). The first ratchet lands on breakeven. */
+  trail_stop_ticks: number;
+  /** The grid the trailed stop rests on, measured from the entry: trail 50 / step 25
+   * is breakeven from +50, +25 from +75. 0 = one click per trail distance. */
   trail_step_ticks: number;
   min_band_width_ticks: number;
   invalidate_below_mid_bars: number;

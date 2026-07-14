@@ -164,7 +164,10 @@ def run_session(
     acc_min = cfg.acceptance_min_ticks * tick
     entry_off = cfg.entry_stop_offset_ticks * tick
     limit_off = cfg.entry_limit_offset_ticks * tick
-    trail_pts = cfg.trail_step_ticks * tick
+    # The trail's two knobs, in ticks (the arithmetic below stays on the integer
+    # tick grid — see _trail). A 0 step means "one click per trail distance".
+    trail_dist_t = cfg.trail_stop_ticks
+    trail_step_t = cfg.trail_step_ticks or trail_dist_t
 
     price = t["price"].to_numpy(dtype="float64").tolist()
     ts = t["ts_utc"]
@@ -289,8 +292,19 @@ def run_session(
         return None
 
     def _trail(p_: _Pos, p: float) -> None:
-        """Ratchet the stop on a print that extends the run. N steps in favour
-        put the stop at entry + (N-1) steps, so the first step buys breakeven.
+        """Ratchet the stop on a print that extends the run.
+
+        The stop wants to sit trail_stop_ticks behind the print, but it may only
+        rest on the step grid measured from the entry — so it lands on the entry
+        itself the moment the trade is one trail distance in front, and climbs one
+        step at a time after that, never less than a trail distance behind. It is
+        deliberately floored at the entry rather than at (print - trail): a trail
+        that could tighten a stop *below* breakeven would cut winners' losses for
+        them, which is a different rule than the one this measures.
+
+        Counted in whole ticks, not points: every price here is on the tick grid,
+        and floor() on a float distance would drop a step on the boundary print
+        that earned it.
 
         Read off the current print rather than a stored high-water mark: the stop
         is monotone in the trade's direction, so a pullback simply computes a
@@ -299,12 +313,13 @@ def run_session(
         that is beyond the stop it installs, so the new stop can never be hit by
         the print that created it, and the old stop stays in force for exactly
         the ticks it was really resting under."""
-        if not trail_pts:
+        if not trail_dist_t:
             return
-        steps = int(s * (p - p_.entry_price) / trail_pts)
-        if steps < 1:
+        fav_t = round(s * (p - p_.entry_price) / tick)
+        if fav_t < trail_dist_t:
             return
-        lvl = p_.entry_price + s * (steps - 1) * trail_pts
+        steps = (fav_t - trail_dist_t) // trail_step_t
+        lvl = p_.entry_price + s * steps * trail_step_t * tick
         if s * (lvl - p_.stop_price) > 0:
             p_.stop_price = lvl
 

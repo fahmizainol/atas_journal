@@ -647,10 +647,26 @@ def test_bools_do_not_leak_into_number_fields():
 
 
 def test_a_stored_config_predating_a_knob_still_loads():
-    """Artifacts written before trail_step_ticks existed simply lack the key.
+    """Artifacts written before trail_stop_ticks existed simply lack the key.
     Absent means default; only *unknown* keys are an error."""
     cfg = store.config_from_json({"instrument": "NQ", "stop_ticks": 75})
-    assert cfg.trail_step_ticks == 0
+    assert cfg.trail_stop_ticks == 0 and cfg.trail_step_ticks == 0
+
+
+def test_a_stored_one_knob_trail_still_means_what_it_meant():
+    """Before the trail's distance and its step were separate knobs, the single
+    trail_step_ticks was both. Every stored run is read back through parse, and a
+    run must replay to the trades it reported — so an artifact that carries only
+    the old key loads as a trail of that distance, not as a trail switched off."""
+    cfg = store.config_from_json({"trail_step_ticks": 75})
+    assert cfg.trail_stop_ticks == 75 and cfg.trail_step_ticks == 75
+
+    # ...and the new form, which always writes both, is taken at its word: an
+    # explicit 0 distance is the trail off, whatever the step happens to hold.
+    off = store.config_from_json({"trail_stop_ticks": 0, "trail_step_ticks": 75})
+    assert off.trail_stop_ticks == 0
+    both = store.config_from_json({"trail_stop_ticks": 50, "trail_step_ticks": 25})
+    assert both.trail_stop_ticks == 50 and both.trail_step_ticks == 25
 
 
 def test_every_knob_is_reachable_from_the_form():

@@ -814,7 +814,7 @@ def test_trail_off_changes_nothing():
         print("   (skipped: tick cache cold)")
         return
     base, _, _, _ = engine.run_session(SimConfig(), DAY)
-    off, _, _, _ = engine.run_session(SimConfig(trail_step_ticks=0), DAY)
+    off, _, _, _ = engine.run_session(SimConfig(trail_stop_ticks=0), DAY)
     assert len(base) == len(off)
     for a, b in zip(base, off):
         for col in ("avg_entry", "avg_exit", "stop_price", "exit_reason", "points"):
@@ -831,10 +831,10 @@ def test_trail_stop_never_loosens_and_lands_on_a_step():
     if not _have_ticks():
         print("   (skipped: tick cache cold)")
         return
-    cfg = SimConfig(trail_step_ticks=75)
+    cfg = SimConfig(trail_stop_ticks=75)
     trades, _, _, _ = engine.run_session(cfg, DAY)
     assert trades
-    step = cfg.trail_step_ticks * TICK
+    step = cfg.trail_stop_ticks * TICK
     moved = 0
     for tr in trades:
         fs, e = tr["final_stop_price"], tr["avg_entry"]
@@ -857,7 +857,7 @@ def test_trail_breakeven_exit_is_its_own_reason():
     if not _have_ticks():
         print("   (skipped: tick cache cold)")
         return
-    trades, _, _, _ = engine.run_session(SimConfig(trail_step_ticks=75), DAY)
+    trades, _, _, _ = engine.run_session(SimConfig(trail_stop_ticks=75), DAY)
     trailed = [tr for tr in trades if tr["exit_reason"] == "trail"]
     assert trailed, "no trailed exits on this session — the test proves nothing"
     for tr in trailed:
@@ -883,7 +883,7 @@ def test_trail_r_multiple_still_measures_entry_risk():
     if not _have_ticks():
         print("   (skipped: tick cache cold)")
         return
-    cfg = SimConfig(trail_step_ticks=75)
+    cfg = SimConfig(trail_stop_ticks=75)
     trades, _, _, _ = engine.run_session(cfg, DAY)
     risk = cfg.stop_ticks * TICK
     for tr in trades:
@@ -896,12 +896,12 @@ def test_trail_mirrors_onto_a_short():
     if not _have_ticks():
         print("   (skipped: tick cache cold)")
         return
-    cfg = SimConfig(trail_step_ticks=75)
+    cfg = SimConfig(trail_stop_ticks=75)
     trades, _, _, _ = engine.run_session(cfg, DAY, side="short")
     if not trades:
         print("   (skipped: no short trades this session)")
         return
-    step = cfg.trail_step_ticks * TICK
+    step = cfg.trail_stop_ticks * TICK
     for tr in trades:
         fs, e = tr["final_stop_price"], tr["avg_entry"]
         # A short's stop sits ABOVE entry and can only come down.
@@ -923,19 +923,59 @@ def test_trail_applies_to_vetoed_ghosts():
         print("   (skipped: tick cache cold)")
         return
     cfg = SimConfig(
-        trail_step_ticks=75,
+        trail_stop_ticks=75,
         confluences={"volume_profile": {"enabled": True, "min_ticks_above_vah": 40}},
     )
     _, vetoed, _, _ = engine.run_session(cfg, DAY)
     if not vetoed:
         print("   (skipped: the gate vetoed nothing this session)")
         return
-    step = cfg.trail_step_ticks * TICK
+    step = cfg.trail_stop_ticks * TICK
     for tr in vetoed:
         assert tr["final_stop_price"] >= tr["stop_price"] - 1e-9
         n = (tr["final_stop_price"] - tr["avg_entry"]) / step
         if abs(tr["final_stop_price"] - tr["stop_price"]) > 1e-9:
             assert abs(n - round(n)) < 1e-9
+
+
+def test_a_zero_step_is_one_click_per_trail_distance():
+    """The step's 0 sentinel: with no step of its own the trail moves in single
+    clicks of its own distance, which is the one-knob trail this grew out of. So
+    the two configs are the same run, and that is what lets every artifact written
+    before the split still replay to the trades it reported."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    implied, _, _, _ = engine.run_session(SimConfig(trail_stop_ticks=75), DAY)
+    spelled, _, _, _ = engine.run_session(
+        SimConfig(trail_stop_ticks=75, trail_step_ticks=75), DAY)
+    assert len(implied) == len(spelled) and implied
+    for a, b in zip(implied, spelled):
+        for col in ("avg_entry", "avg_exit", "final_stop_price", "exit_reason"):
+            assert a[col] == b[col], col
+
+
+def test_the_step_is_the_grid_and_the_trail_is_the_distance():
+    """The two knobs do different jobs: the trail distance says when the stop
+    starts moving (and how far behind it stays), the step says what levels it may
+    rest on. A 50/25 trail therefore sits on 25-tick multiples of the entry —
+    levels a 50-tick step could never land on."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    cfg = SimConfig(trail_stop_ticks=50, trail_step_ticks=25)
+    trades, _, _, _ = engine.run_session(cfg, DAY)
+    assert trades
+    step = cfg.trail_step_ticks * TICK
+    moved = [tr for tr in trades
+             if abs(tr["final_stop_price"] - tr["stop_price"]) > 1e-9]
+    assert moved, "no trade trailed — the test proves nothing"
+    for tr in moved:
+        # Breakeven or better, on the step grid measured from the entry: the trail
+        # never installs a stop that tightens the loss it was entered with.
+        n = (tr["final_stop_price"] - tr["avg_entry"]) / step
+        assert abs(n - round(n)) < 1e-9, (tr["final_stop_price"], tr["avg_entry"])
+        assert round(n) >= 0
 
 
 # --- the daily loss stop ------------------------------------------------------
