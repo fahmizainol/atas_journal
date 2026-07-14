@@ -29,9 +29,15 @@ export interface SimConfig {
   /** How far behind the best price seen the stop follows, and the trail's master
    * switch. 0 = off (fixed stop). The first ratchet lands on breakeven. */
   trail_stop_ticks: number;
-  /** The grid the trailed stop rests on, measured from the entry: trail 50 / step 25
-   * is breakeven from +50, +25 from +75. 0 = one click per trail distance. */
+  /** The grid the trailed stop rests on, measured from its first level: trail 50 /
+   * step 25 scratches from +50, one step up from +75. 0 = one click per distance. */
   trail_step_ticks: number;
+  /** Where the trail's first click lands beyond the entry, so a scratch clears the
+   * round trip's commission instead of booking it. 0 = on the entry (gross breakeven). */
+  trail_breakeven_ticks: number;
+  /** Take the first click and no other: a breakeven stop, not a trail. The step is
+   * then irrelevant. */
+  trail_breakeven_only: boolean;
   min_band_width_ticks: number;
   invalidate_below_mid_bars: number;
   rearm_after_exit: boolean;

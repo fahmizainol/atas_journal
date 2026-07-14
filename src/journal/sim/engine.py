@@ -164,10 +164,14 @@ def run_session(
     acc_min = cfg.acceptance_min_ticks * tick
     entry_off = cfg.entry_stop_offset_ticks * tick
     limit_off = cfg.entry_limit_offset_ticks * tick
-    # The trail's two knobs, in ticks (the arithmetic below stays on the integer
-    # tick grid — see _trail). A 0 step means "one click per trail distance".
+    # The trail's knobs, in ticks (the arithmetic below stays on the integer tick
+    # grid — see _trail). A 0 step means "one click per trail distance"; a 0
+    # breakeven offset puts the first click on the entry itself.
     trail_dist_t = cfg.trail_stop_ticks
     trail_step_t = cfg.trail_step_ticks or trail_dist_t
+    trail_be_t = cfg.trail_breakeven_ticks
+    # A breakeven stop, not a trail: the first click is the only one.
+    trail_be_only = cfg.trail_breakeven_only
 
     price = t["price"].to_numpy(dtype="float64").tolist()
     ts = t["ts_utc"]
@@ -295,12 +299,17 @@ def run_session(
         """Ratchet the stop on a print that extends the run.
 
         The stop wants to sit trail_stop_ticks behind the print, but it may only
-        rest on the step grid measured from the entry — so it lands on the entry
-        itself the moment the trade is one trail distance in front, and climbs one
-        step at a time after that, never less than a trail distance behind. It is
-        deliberately floored at the entry rather than at (print - trail): a trail
-        that could tighten a stop *below* breakeven would cut winners' losses for
-        them, which is a different rule than the one this measures.
+        rest on the step grid, whose origin is trail_breakeven_ticks beyond the
+        entry — so it lands on that first level the moment the trade is one trail
+        distance in front of it, and climbs one step at a time after that, never
+        less than a trail distance behind. It is deliberately floored at that
+        level rather than at (print - trail): a trail that could tighten a stop
+        *below* the scratch it promises would cut winners' losses for them, which
+        is a different rule than the one this measures.
+
+        The offset is what makes the first click a real scratch and not a small
+        loss: a stop on the entry is breakeven gross, and the round trip's
+        commission then turns it into exactly that commission, lost.
 
         Counted in whole ticks, not points: every price here is on the tick grid,
         and floor() on a float distance would drop a step on the boundary print
@@ -316,10 +325,13 @@ def run_session(
         if not trail_dist_t:
             return
         fav_t = round(s * (p - p_.entry_price) / tick)
-        if fav_t < trail_dist_t:
+        # Measured from the first level, not from the entry: the stop is never
+        # closer than a full trail distance behind the print that installed it,
+        # offset or no offset.
+        if fav_t < trail_dist_t + trail_be_t:
             return
-        steps = (fav_t - trail_dist_t) // trail_step_t
-        lvl = p_.entry_price + s * steps * trail_step_t * tick
+        steps = 0 if trail_be_only else (fav_t - trail_dist_t - trail_be_t) // trail_step_t
+        lvl = p_.entry_price + s * (trail_be_t + steps * trail_step_t) * tick
         if s * (lvl - p_.stop_price) > 0:
             p_.stop_price = lvl
 

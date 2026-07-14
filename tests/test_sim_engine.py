@@ -11,6 +11,7 @@ Run directly:  ``.venv/bin/python tests/test_sim_engine.py``
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -953,6 +954,102 @@ def test_a_zero_step_is_one_click_per_trail_distance():
     for a, b in zip(implied, spelled):
         for col in ("avg_entry", "avg_exit", "final_stop_price", "exit_reason"):
             assert a[col] == b[col], col
+
+
+def test_the_scratch_level_lifts_the_trail_off_the_entry():
+    """A stop on the entry is breakeven *gross*, so the round trip books its
+    commission as a loss. The offset moves the trail's whole grid up by that much
+    — the first click lands there, and every step is measured from it."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    be = 4
+    cfg = SimConfig(trail_stop_ticks=75, trail_step_ticks=25, trail_breakeven_ticks=be)
+    trades, _, _, _ = engine.run_session(cfg, DAY)
+    moved = [tr for tr in trades
+             if abs(tr["final_stop_price"] - tr["stop_price"]) > 1e-9]
+    assert moved, "no trade trailed — the test proves nothing"
+    for tr in moved:
+        # Never below the scratch level, and on the step grid measured FROM it.
+        off = (tr["final_stop_price"] - tr["avg_entry"]) / TICK
+        assert off >= be - 1e-6, (off, be)
+        n = (off - be) / cfg.trail_step_ticks
+        assert abs(n - round(n)) < 1e-6, (off, n)
+
+    # And the point of the whole knob: a trade stopped on the lifted trail is out
+    # for a real scratch — commission paid — not for the commission itself.
+    comm = 2 * cfg.commission_per_side * cfg.contracts
+    scratched = [tr for tr in trades
+                 if tr["exit_reason"] == "trail"
+                 and abs(tr["final_stop_price"] - tr["avg_entry"] - be * TICK) < 1e-6]
+    assert scratched, "no trade stopped on the scratch level — the test proves nothing"
+    for tr in scratched:
+        # Gross covers the round trip. Not asserted on net: the stop fills at the
+        # print that traded THROUGH it, which can be a tick or more beyond, and
+        # that fill-through is the engine's rule, not a rounding slip.
+        assert tr["gross_pnl"] > 0
+        assert tr["net_pnl"] > -comm, (tr["net_pnl"], comm)
+
+
+def test_a_breakeven_stop_takes_the_first_click_and_no_other():
+    """The stop moves to the scratch level once and stays there — it is a breakeven
+    stop, not a trail. So every trailed stop in the run sits on exactly that one
+    level, whatever the step says and however far the trade ran."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    be = 4
+    cfg = SimConfig(trail_stop_ticks=75, trail_step_ticks=25,
+                    trail_breakeven_ticks=be, trail_breakeven_only=True)
+    trades, _, _, _ = engine.run_session(cfg, DAY)
+    moved = [tr for tr in trades
+             if abs(tr["final_stop_price"] - tr["stop_price"]) > 1e-9]
+    assert moved, "no trade trailed — the test proves nothing"
+    for tr in moved:
+        off = (tr["final_stop_price"] - tr["avg_entry"]) / TICK
+        assert abs(off - be) < 1e-6, (off, be)   # the one level, never a step above
+
+
+def test_a_breakeven_stop_owes_nothing_to_the_step():
+    """Without the flag, 'breakeven only' can only be *simulated* — by a step so
+    wide the second click can never come, which is a claim about the target, not
+    about the stop, and quietly fails the moment the target moves further out.
+    The flag makes the step irrelevant instead: same stops at any step, while the
+    trail proper ratchets straight past the scratch level."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    base = SimConfig(trail_stop_ticks=75, trail_breakeven_ticks=4)
+    fine, _, _, _ = engine.run_session(
+        replace(base, trail_breakeven_only=True, trail_step_ticks=25), DAY)
+    coarse, _, _, _ = engine.run_session(
+        replace(base, trail_breakeven_only=True, trail_step_ticks=250), DAY)
+    assert fine and len(fine) == len(coarse)
+    for a, b in zip(fine, coarse):
+        assert a["final_stop_price"] == b["final_stop_price"]
+        assert a["exit_reason"] == b["exit_reason"]
+
+    # ...and the flag is doing real work: the same trail without it climbs.
+    trailed, _, _, _ = engine.run_session(replace(base, trail_step_ticks=25), DAY)
+    climbed = [tr for tr in trailed
+               if (tr["final_stop_price"] - tr["avg_entry"]) / TICK > 4 + 1e-6]
+    assert climbed, "nothing ratcheted past the scratch level — the test proves nothing"
+
+
+def test_a_zero_scratch_level_still_trails_off_the_entry():
+    """The offset's 0 sentinel is the trail this grew out of: first click on the
+    entry. Every artifact written before the knob existed lacks the key, and must
+    replay to the trades it reported."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    a, _, _, _ = engine.run_session(SimConfig(trail_stop_ticks=75, trail_step_ticks=25), DAY)
+    b, _, _, _ = engine.run_session(
+        SimConfig(trail_stop_ticks=75, trail_step_ticks=25, trail_breakeven_ticks=0), DAY)
+    assert a and len(a) == len(b)
+    for x, y in zip(a, b):
+        assert x["final_stop_price"] == y["final_stop_price"]
+        assert x["exit_reason"] == y["exit_reason"]
 
 
 def test_the_step_is_the_grid_and_the_trail_is_the_distance():

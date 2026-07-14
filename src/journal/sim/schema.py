@@ -142,10 +142,23 @@ FIELDS: tuple[Field, ...] = (
                "Nothing moves until the trade is this far in front, and the first "
                "move is to breakeven — the trail can never tighten a loss."),
     Field("trail_step_ticks", "int", "exit", "Trail step", unit="ticks", min=0,
-          help="The grid the trailing stop moves on, measured from the entry: with "
-               "a 50-tick trail and a 25-tick step it sits at breakeven from +50, "
-               "at +25 from +75, and so on. 0 moves it in single clicks of the full "
-               "trail distance. Ignored when the trailing stop is off."),
+          help="The grid the trailing stop moves on, measured from its first level: "
+               "with a 50-tick trail and a 25-tick step it sits at the first level "
+               "from +50, one step above it from +75, and so on. 0 moves it in "
+               "single clicks of the full trail distance. Ignored when the trailing "
+               "stop is off."),
+    Field("trail_breakeven_ticks", "int", "exit", "Scratch level", unit="ticks",
+          min=1, zero_means_off=True, on_default=4,
+          help="Where the trail's first click lands beyond the entry. A stop on the "
+               "entry itself is breakeven gross, so the round trip still books its "
+               "commission as a loss — lift it far enough to pay for the trip (a "
+               "tick is $5 on NQ, so $14 of commission needs 3, and a 4th covers the "
+               "stop's fill-through). Ignored when the trailing stop is off."),
+    Field("trail_breakeven_only", "bool", "exit", "Breakeven stop, not a trail",
+          help="Take the first click and no other: the stop moves to the scratch "
+               "level once the trade is the trail distance in front of it, and then "
+               "stays there. The step is then irrelevant. Ignored when the trailing "
+               "stop is off."),
 
     # --- filters / lifecycle ---
     Field("min_band_width_ticks", "int", "filters", "Minimum band width",

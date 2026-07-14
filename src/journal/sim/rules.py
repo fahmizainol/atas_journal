@@ -73,6 +73,21 @@ class SimConfig:
     # Ignored when trail_stop_ticks is 0. The stop only ever moves toward the
     # trade — a pullback never loosens it.
     trail_step_ticks: int = 0
+    # Where the trail's first click lands, in ticks beyond the entry — and so the
+    # origin of the whole step grid. 0 puts it on the entry itself, which is only
+    # breakeven *gross*: the round trip still owes commission, so a stop there
+    # books a loss of exactly that. Set it far enough past the entry to pay the
+    # round trip (on NQ a tick is $5, so a $14 round trip needs 3, and a 4th
+    # covers the stop's fill-through) and a scratch is really a scratch.
+    # Ignored when trail_stop_ticks is 0.
+    trail_breakeven_ticks: int = 0
+    # Take the first click and no other: the stop moves to the scratch level once
+    # the trade is trail_stop_ticks in front of it, and then never again. That is
+    # a breakeven stop rather than a trail, and it is its own rule — a trail that
+    # keeps ratcheting hands back open profit on every pullback, which is exactly
+    # what a breakeven stop refuses to do. The step is then irrelevant (there is
+    # no second step to take). Ignored when trail_stop_ticks is 0.
+    trail_breakeven_only: bool = False
 
     # --- filters / lifecycle ---
     min_band_width_ticks: int = 0        # 0 = off. Skip entry if dev2-dev1 is tighter.
