@@ -68,6 +68,9 @@ function kpiCards(m: SimMetrics): Card[] {
     { label: "Max drawdown", value: fmt(m.max_drawdown), tone: "neg" },
     { label: "Mean R", value: fmt(m.r_mean, false), tone: tone(m.r_mean ?? 0) },
     { label: "Best R", value: fmt(m.r_best, false), tone: "pos" },
+    // Per trade, not annualized — see SimMetrics.sharpe.
+    { label: "Sharpe / trade", value: fmt(m.sharpe, false), tone: tone(m.sharpe ?? 0) },
+    { label: "Sortino / trade", value: fmt(m.sortino, false), tone: tone(m.sortino ?? 0) },
   ];
 }
 
@@ -1152,6 +1155,18 @@ export function StrategyDetail() {
               {deltaCell(r, "r_mean")}
             </span>
           );
+        },
+      },
+      {
+        id: "sharpe",
+        header: "Sharpe",
+        // Per trade — a run that trades twice as often to reach the same Sharpe is
+        // not the same run. Sort on it, don't rank a sweep by it alone.
+        accessorFn: (r) => r.metrics.sharpe ?? 0,
+        cell: (c) => {
+          const r = c.row.original;
+          if (r.state.status !== "done") return null;
+          return <span className={tone(r.metrics.sharpe ?? 0)}>{fmt(r.metrics.sharpe, false)}</span>;
         },
       },
       {

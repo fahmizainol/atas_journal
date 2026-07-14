@@ -109,6 +109,15 @@ export interface SimMetrics {
   r_mean?: number;
   r_median?: number;
   r_best?: number;
+  /** Per TRADE, not annualized: mean net P&L over its standard deviation. It says
+   * how cleanly the edge repeats from trade to trade, and says nothing about how
+   * often the strategy trades — two runs with the same Sharpe are not the same
+   * business if one of them takes twice as many trades to get there. */
+  sharpe?: number;
+  /** Sharpe with only losing trades in the denominator: upside volatility is not
+   * risk. Reads higher than Sharpe by construction. */
+  sortino?: number;
+  recovery_factor?: number | "inf";
   band_width_median_ticks?: number;
   band_width_min_ticks?: number;
   exit_reasons?: Record<string, number>;
