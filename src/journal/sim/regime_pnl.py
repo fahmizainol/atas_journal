@@ -36,7 +36,7 @@ from . import ticks as tickmod
 # Bump when a definition here changes meaning. A snapshot written under an older
 # number is recomputed rather than served — the same guard REGIME_VERSION applies
 # to the artifacts this reads.
-STATS_VERSION = 1
+STATS_VERSION = 2
 
 PERMUTATIONS = 500
 SEED = 0x5EED
@@ -47,7 +47,11 @@ SEED = 0x5EED
 KPIS: list[dict] = [
     {"key": "abr", "label": "Above both VWAPs (ABR)", "pct": True},
     {"key": "bbr", "label": "Below both VWAPs (BBR)", "pct": True},
+    {"key": "net_conviction", "label": "Net conviction (ABR − BBR)"},
     {"key": "quadrant_transitions_rate", "label": "Quadrant transitions / hr"},
+    {"key": "deep_flip_rate", "label": "Deep flips / hr (side changes)"},
+    {"key": "shallow_flip_rate", "label": "Shallow flips / hr (anchor churn)"},
+    {"key": "net_travel", "label": "Net travel (close−open ÷ range)"},
     {"key": "ny_touch_hold_ratio", "label": "NY +1σ touch → hold", "pct": True},
     {"key": "gx_touch_hold_ratio", "label": "Globex +1σ touch → hold", "pct": True},
     {"key": "ny_upper_channel_occupancy", "label": "NY upper-channel occupancy", "pct": True},
@@ -77,6 +81,7 @@ CLASS_LABEL = {
     "trend_up": "Trend up",
     "trend_down": "Trend down",
     "balance": "Balance",
+    "parked": "Parked",
     "mixed": "Mixed",
     "unknown": "Unknown",
 }

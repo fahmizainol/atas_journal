@@ -286,7 +286,7 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
         return {"available": False}
     trade = row.iloc[0]
 
-    cfg = store.config_from_json(cfg_json)
+    cfg = store.config_from_json(cfg_json, registry.get(slug).config_cls)
     globex = _is_globex(slug)
     entry_ts, exit_ts = _utc(trade["entry_ts_utc"]), _utc(trade["exit_ts_utc"])
     day = entry_ts.tz_convert("America/New_York").date()
@@ -400,7 +400,7 @@ def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
     if r is None:
         return {"available": False}
     cfg_json, trades, _ = r
-    cfg = store.config_from_json(cfg_json)
+    cfg = store.config_from_json(cfg_json, registry.get(slug).config_cls)
     globex = _is_globex(slug)
 
     frame = _session_frame(cfg, day, tz, overnight=globex)

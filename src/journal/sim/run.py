@@ -55,6 +55,9 @@ def main() -> None:
     args = ap.parse_args()
 
     strat = registry.get(args.strategy)
+    if strat.config_cls is not SimConfig:
+        ap.error(f"{strat.slug} takes a {strat.config_cls.__name__}; this CLI only "
+                 f"builds SimConfigs — run it from the UI or the API instead")
     base = SimConfig(
         min_band_width_ticks=args.min_band_width,
         stop_ticks=args.stop_ticks,

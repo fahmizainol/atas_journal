@@ -23,6 +23,35 @@ if TYPE_CHECKING:
     from .confluences import SessionCtx
 
 
+# The regime-artifact checkpoints a gate may read, and the ET wall-clock minute
+# each one becomes knowable. Only listed checkpoints are legal knob values — a
+# free-form read time would invite fitting the clock to the sample. 09:30 is
+# absent on purpose: the NY anchor has no closed bars yet, so every NY KPI is
+# None there and a gate reading it could only ever be blind.
+CHECKPOINT_MINUTES: dict[str, int] = {
+    "09:45": 9 * 60 + 45,
+    "10:30": 10 * 60 + 30,
+}
+_CHECKPOINT_CHOICES = tuple((c, c) for c in CHECKPOINT_MINUTES)
+
+
+def _checkpoint(section: dict, default: str) -> str:
+    v = section.get("checkpoint", default)
+    if v not in CHECKPOINT_MINUTES:
+        raise ValueError(
+            f"checkpoint must be one of {sorted(CHECKPOINT_MINUTES)}, got {v!r}")
+    return v
+
+
+def _veto_from(ctx: "SessionCtx", minute: int) -> np.ndarray:
+    """Mask of ticks at or after the given ET wall-clock minute. Overnight ticks
+    in a globex frame also read past mid-morning on a wall clock, but entries
+    only ever fire inside the entry window, so a gate is never consulted there."""
+    et = ctx.ticks["ts_utc"].dt.tz_convert(ET_TZ)
+    mins = (et.dt.hour * 60 + et.dt.minute).to_numpy()
+    return mins >= minute
+
+
 class VolumeProfileGate:
     """Veto any entry that does not fill beyond the developing value area.
 
@@ -94,7 +123,10 @@ class VolumeProfileGate:
         assert ctx.value_edge_at_tick is not None, "gate declared needs_profile"
         self._edge = ctx.value_edge_at_tick
         self._margin = self.min_ticks_above_vah * tick_size(ctx.cfg.instrument)
-        self._side = 1.0 if ctx.side == "long" else -1.0
+        # Signed by the side of value the setup lives on, not the trade's
+        # direction: a bounce long and a FADE SHORT both trade from above the
+        # VAH, and both must fill above it.
+        self._side = 1.0 if ctx.band_side() == "upper" else -1.0
 
     def allows(self, i: int, fill: float) -> bool:
         assert self._edge is not None, "prepare() not called"
@@ -106,8 +138,8 @@ class VolumeProfileGate:
 
 
 class VwapSlopeGate:
-    """Veto every entry after 10:30 ET on a day whose NY VWAP has no upward
-    grade at 10:30.
+    """Veto every entry after its checkpoint ET on a day whose NY VWAP has no
+    upward grade at that checkpoint.
 
     The idea it enforces: the long bounce pays on days that establish an upward
     grade by mid-morning. Across Oct 2025 – Jan 2026 the 10:30 NY VWAP slope was
@@ -118,45 +150,55 @@ class VwapSlopeGate:
     Honesty clause: that correlation is mostly *recorded* by 10:30, not
     predictive from it. In the same sample, the post-10:30 entries this gate
     would veto at slope_min=0 were net POSITIVE — the slope-negative damage came
-    from morning entries the gate cannot lawfully touch. This gate exists so
+    from morning entries a 10:30 read cannot lawfully touch. This gate exists so
     that threshold variants can be A/B'd for free off one run's ghost ledger
     (vetoed.parquet), not because a profitable setting is already known.
 
-    Same clock discipline as the regime gate: 10:30 is fixed, entries before it
-    pass untouched (the number does not exist yet), and it reads the artifact's
-    10:30 checkpoint — never a fresher slope — so what it acts on is exactly
-    what was knowable.
+    The checkpoint is a knob (09:45 or 10:30, default 10:30). 09:45 exists
+    because the Jun 2025 – Jan 2026 09:30-entry study put nearly all of this
+    strategy's edge before 10:30 — the one window a 10:30 read can never
+    protect — and its 09:45 board held ``ny_vwap_slope_deg`` past the
+    Bonferroni bar (top tercile +$801/day at 70.6% win rate vs −$116/−$350 for
+    the rest). Same clock discipline either way: entries before the checkpoint
+    pass untouched (the number does not exist yet), and the gate reads the
+    artifact's checkpoint — never a fresher slope — so what it acts on is
+    exactly what was knowable.
 
     Config section::
 
-        {"vwap_slope": {"enabled": true, "slope_min": 0.0}}
+        {"vwap_slope": {"enabled": true, "slope_min": 0.0, "checkpoint": "10:30"}}
 
     ``slope_min`` is the stand-down threshold in points per minute (the KPI's
-    native unit, over the checkpoint's 30-minute window): at or below it, no
-    entries for the rest of the session. 0.0 demands any upward grade at all.
+    native unit, over the checkpoint's trailing 30-minute window — 15 minutes
+    at 09:45): at or below it, no entries for the rest of the session. 0.0
+    demands any upward grade at all.
 
     Blind days — no artifact, or a checkpoint too thin to carry a slope — are
-    vetoed after 10:30. "No data" must not read as "confirmed".
+    vetoed after the checkpoint. "No data" must not read as "confirmed".
     """
 
     name = "vwap_slope"
     needs_profile = False
 
-    _CHECKPOINT = "10:30"
-    _CHECKPOINT_MIN = 10 * 60 + 30
-
     SCHEMA: tuple[Field, ...] = (
         Field("enabled", "bool", name, "Stand down without upward VWAP grade",
               default=False,
-              help="After 10:30 ET, vetoes every entry on a day whose NY VWAP "
-                   "slope at 10:30 is at or below the threshold — the day has "
-                   "not established the upward grade the bounce pays on."),
-        Field("slope_min", "float", name, "Min NY VWAP slope at 10:30",
+              help="After the checkpoint ET, vetoes every entry on a day whose "
+                   "NY VWAP slope at the checkpoint is at or below the "
+                   "threshold — the day has not established the upward grade "
+                   "the bounce pays on."),
+        Field("slope_min", "float", name, "Min NY VWAP slope at the checkpoint",
               unit="pts/min", min=-5.0, max=5.0, default=0.0,
               depends_on=("enabled", True),
-              help="Slope of the NY-anchored VWAP over the 30 minutes into the "
-                   "10:30 checkpoint. At or below this, the rest of the session "
-                   "is stood down. 0 demands any upward grade at all."),
+              help="Slope of the NY-anchored VWAP into the checkpoint. At or "
+                   "below this, the rest of the session is stood down. 0 "
+                   "demands any upward grade at all."),
+        Field("checkpoint", "enum", name, "Checkpoint",
+              choices=_CHECKPOINT_CHOICES, default="10:30",
+              depends_on=("enabled", True),
+              help="When the slope is read, and from when the stand-down "
+                   "applies. 09:45 is the earliest read the NY anchor can "
+                   "carry — the only one that reaches the open-driven morning."),
     )
 
     KNOBS = {f.name for f in SCHEMA}
@@ -172,18 +214,119 @@ class VwapSlopeGate:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not -5.0 <= v <= 5.0:
             raise ValueError(f"slope_min must be a number in [-5, 5], got {v!r}")
         self.slope_min = float(v)
+        self.checkpoint = _checkpoint(section, "10:30")
         self._blocked: np.ndarray | None = None
 
     def prepare(self, ctx: "SessionCtx") -> None:
         art = regmod.get_regime(ctx.cfg.contract, ctx.day)
-        slope = ((art or {}).get("checkpoints", {}).get(self._CHECKPOINT)
+        slope = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
                  or {}).get("ny_vwap_slope_ppm")
         if slope is not None and slope > self.slope_min:
             self._blocked = None  # the grade is there; the gate is inert today
             return
-        et = ctx.ticks["ts_utc"].dt.tz_convert(ET_TZ)
-        mins = (et.dt.hour * 60 + et.dt.minute).to_numpy()
-        self._blocked = mins >= self._CHECKPOINT_MIN
+        self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class VwapSlopeCapGate:
+    """Veto every entry after its checkpoint ET on a day whose NY VWAP has
+    already established a steep grade AWAY from the mean, at that checkpoint.
+
+    The slope gate's mirror, for the strategies that FIGHT the grade instead of
+    leaning on it: the dev1 fade short sells the return to the upper band, and
+    on a day that is trending away from the VWAP that return keeps travelling.
+
+    The grade is read in the faded band's frame, so one threshold serves both
+    sides: an upward grade stands the short (upper band) down, a downward grade
+    the long (lower band). ``slope_max`` is therefore a magnitude in the fade's
+    own direction — it is not a signed reading of the tape.
+    Across the Aug 2025 – Jan 2026 variant-B fade study the 09:45 NY VWAP slope
+    separated the bleeding cleanly on every config tried (ρ ≈ −0.26 to −0.33,
+    500 permutations): the steepest tercile of days averaged −$450 to −$760/day
+    while the other two terciles were flat to positive — on the far-band-target
+    combos, +$150 to +$320/day.
+
+    Honesty clause: the 1.1 pts/min default is that sample's 09:45 top-tercile
+    boundary — a threshold read off the same days the board was computed on,
+    not held-out evidence. And the tercile arithmetic assumes the vetoed days'
+    trades simply vanish, which ghost-ledger experience says over-promises
+    (entries interact through rearm) — the setting has to earn its keep on an
+    actual A/B run.
+
+    Same clock discipline as every checkpoint gate: entries before the
+    checkpoint pass untouched, and the gate reads the artifact's checkpoint —
+    never a fresher slope — so what it acts on is exactly what was knowable.
+
+    Config section::
+
+        {"vwap_slope_cap": {"enabled": true, "slope_max": 1.1,
+                            "checkpoint": "09:45"}}
+
+    ``slope_max`` is the stand-down threshold in points per minute (the KPI's
+    native unit): at or above it, no entries for the rest of the session.
+
+    Blind days — no artifact, or a checkpoint too thin to carry a slope — are
+    vetoed after the checkpoint. "No data" must not read as "confirmed".
+    """
+
+    name = "vwap_slope_cap"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Stand down against a runaway VWAP grade",
+              default=False,
+              help="After the checkpoint ET, vetoes every entry on a day whose "
+                   "NY VWAP slope at the checkpoint runs away from the mean the "
+                   "fade reverts to — upward on the short, downward on the long "
+                   "— by at least the threshold."),
+        Field("slope_max", "float", name, "Max NY VWAP slope at the checkpoint",
+              unit="pts/min", min=-5.0, max=5.0, default=1.1,
+              depends_on=("enabled", True),
+              help="Slope of the NY-anchored VWAP into the checkpoint, read in "
+                   "the fade's own direction (a long reads a −1.1 pts/min tape "
+                   "as 1.1). At or above this, the rest of the session is stood "
+                   "down. The default is the steepest-tercile boundary of the "
+                   "Aug'25–Jan'26 fade study at 09:45."),
+        Field("checkpoint", "enum", name, "Checkpoint",
+              choices=_CHECKPOINT_CHOICES, default="09:45",
+              depends_on=("enabled", True),
+              help="When the slope is read, and from when the stand-down "
+                   "applies. 09:45 is the earliest read the NY anchor can "
+                   "carry — the only one that reaches the open-driven morning."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown vwap_slope_cap knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        v = section.get("slope_max", 1.1)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not -5.0 <= v <= 5.0:
+            raise ValueError(f"slope_max must be a number in [-5, 5], got {v!r}")
+        self.slope_max = float(v)
+        self.checkpoint = _checkpoint(section, "09:45")
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        # The grade is read in the faded band's frame: what stands a fade down is
+        # a day trending AWAY from the mean it reverts to, which is upward for the
+        # short above the upper band and downward for the long beneath the lower
+        # one. u flips the sign so one threshold serves both — the short's
+        # behaviour is the u=+1 case, unchanged.
+        u = 1.0 if ctx.band_side() == "upper" else -1.0
+        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        slope = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
+                 or {}).get("ny_vwap_slope_ppm")
+        if slope is not None and u * slope < self.slope_max:
+            self._blocked = None  # no runaway grade; the gate is inert today
+            return
+        self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
 
     def allows(self, i: int, fill: float) -> bool:
         return self._blocked is None or not self._blocked[i]
@@ -270,9 +413,110 @@ class GxRescueGate:
                 # No break to read yet, or the rescues are there: inert today.
                 self._blocked = None
                 return
-        et = ctx.ticks["ts_utc"].dt.tz_convert(ET_TZ)
-        mins = (et.dt.hour * 60 + et.dt.minute).to_numpy()
-        self._blocked = mins >= self._CHECKPOINT_MIN
+        self._blocked = _veto_from(ctx, self._CHECKPOINT_MIN)
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class GxRescueCapGate:
+    """Veto every entry after its checkpoint ET on a day whose broken session
+    bands ARE being caught by the Globex band behind them.
+
+    The rescue gate's mirror, for the strategies the rescue works against: when
+    the Globex +1σ keeps catching pullbacks that break the session +1σ, the
+    market is refusing to revert — and shorting the return to that band is
+    selling into the very floor doing the catching. The fade-long reads the
+    mirror event (``gx_lower_rescue_ratio``): the Globex −1σ standing ABOVE the
+    session −1σ and catching the rallies that break it, which is the ceiling the
+    long would be buying into. Across the Aug 2025 –
+    Jan 2026 variant-B fade study ``gx_upper_rescue_ratio`` at 10:30 was the
+    strongest KPI on nearly every config's board (ρ ≈ −0.39 to −0.57, 500
+    permutations, past the holdout on most), with the most-rescued tercile
+    averaging −$790 to −$1,230/day while the other terciles were flat to
+    positive.
+
+    Honesty clause: the 0.4 default is that sample's 10:30 top-tercile
+    boundary — read off the same days the board was computed on, not held-out
+    evidence — and tercile arithmetic over-promises (entries interact through
+    rearm); the setting has to earn its keep on an actual A/B run. The 10:30
+    default checkpoint also means the open-driven morning passes unprotected:
+    at 09:45 the ratio is defined on too few days to carry the default.
+
+    Three distinct silences, same doctrine as the rescue gate:
+
+    - No artifact, or a ``partial`` day (no Globex anchor, no wrap to read) —
+      blind. Vetoes after the checkpoint: "no data" must not read as
+      "confirmed".
+    - Artifact present, ratio ``None`` — the session's +1σ hasn't been broken
+      with the wrap present yet. The absence of the event, not blindness; the
+      gate stays inert.
+    - Ratio at or above the threshold — stood down for the rest of the session.
+
+    Config section::
+
+        {"gx_rescue_cap": {"enabled": true, "rescue_max": 0.4,
+                           "checkpoint": "10:30"}}
+    """
+
+    name = "gx_rescue_cap"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Stand down when Globex is catching",
+              default=False,
+              help="After the checkpoint ET, vetoes every entry on a day whose "
+                   "broken session dev1 keeps getting rescued by the Globex "
+                   "dev1 behind it — the floor the short would be selling into, "
+                   "the ceiling the long would be buying into. Days with no such "
+                   "break yet pass untouched."),
+        Field("rescue_max", "float", name, "Max rescue ratio at the checkpoint",
+              min=0.0, max=1.0, default=0.4, depends_on=("enabled", True),
+              help="Share of session-dev1 breaks the Globex dev1 has caught by "
+                   "the checkpoint, on the faded side. At or above it, the rest "
+                   "of the session is "
+                   "stood down. The 0.4 default is the top-tercile boundary of "
+                   "the Aug'25–Jan'26 fade study at 10:30."),
+        Field("checkpoint", "enum", name, "Checkpoint",
+              choices=_CHECKPOINT_CHOICES, default="10:30",
+              depends_on=("enabled", True),
+              help="When the ratio is read, and from when the stand-down "
+                   "applies. At 09:45 the ratio is defined on few days — most "
+                   "sessions haven't broken the band yet."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown gx_rescue_cap knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        v = section.get("rescue_max", 0.4)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
+            raise ValueError(f"rescue_max must be a number in [0, 1], got {v!r}")
+        self.rescue_max = float(v)
+        self.checkpoint = _checkpoint(section, "10:30")
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        # The rescue on the faded band's side: the Globex +1σ catching breaks of
+        # the session +1σ from underneath is the floor a fade-short sells into;
+        # the Globex −1σ catching breaks of the session −1σ from above is the
+        # ceiling a fade-long buys into. Same event, mirrored.
+        key = ("gx_upper_rescue_ratio" if ctx.band_side() == "upper"
+               else "gx_lower_rescue_ratio")
+        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        if art is not None and not art.get("partial"):
+            ratio = (art.get("checkpoints", {}).get(self.checkpoint)
+                     or {}).get(key)
+            if ratio is None or ratio < self.rescue_max:
+                # No break to read yet, or the rescues aren't there: inert today.
+                self._blocked = None
+                return
+        self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
 
     def allows(self, i: int, fill: float) -> bool:
         return self._blocked is None or not self._blocked[i]
@@ -343,14 +587,17 @@ class GxFloorGate:
 
     def prepare(self, ctx: "SessionCtx") -> None:
         self._max_pts = self.max_ticks_below * tick_size(ctx.cfg.instrument)
-        self._side = 1.0 if ctx.side == "long" else -1.0
+        # The Globex band on the setup's side of the market (see
+        # VolumeProfileGate.prepare on why this is the band side, not the
+        # trade's direction).
+        self._side = 1.0 if ctx.band_side() == "upper" else -1.0
         self._line = None
         contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
         on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
         if on is None or on.empty:
             return  # blind: no overnight, no Globex anchor — veto everything
         w = vwapmod.vwap_bands(pd.concat([on, ctx.ticks], ignore_index=True))
-        col = "upper1" if ctx.side == "long" else "lower1"
+        col = "upper1" if ctx.band_side() == "upper" else "lower1"
         self._line = w[col].to_numpy(dtype="float64")[len(on):]
 
     def allows(self, i: int, fill: float) -> bool:
@@ -366,34 +613,38 @@ class GxFloorGate:
 
 
 class RegimeGate:
-    """Veto every entry after 10:30 ET on a day whose first RTH hour lived
-    below the VWAPs.
+    """Veto every entry after its checkpoint ET on a day whose morning so far
+    has lived below the VWAPs.
 
     The idea it enforces: the band bounce needs price residing on the traded
     side of value to have anything to lean on. A session that has spent most of
-    its first hour below *both* anchored VWAPs (``bbr``, the below-both ratio
-    from the regime artifact's 10:30 checkpoint) is already telling you it is
-    not that day — across the Oct–Dec sample, bbr at 10:30 was the strongest
-    early predictor of the strategy bleeding for the rest of the session, and
-    every day it flagged was a post-10:30 loser.
+    its morning below *both* anchored VWAPs (``bbr``, the below-both ratio from
+    the regime artifact's checkpoint) is already telling you it is not that day
+    — across the Oct–Dec sample, bbr at 10:30 was the strongest early predictor
+    of the strategy bleeding for the rest of the session, and every day it
+    flagged was a post-10:30 loser.
 
-    10:30 is fixed, not a knob. It is the earliest checkpoint at which the NY
-    anchor has enough bars to mean anything (09:45 predicted nothing), and a
-    configurable read time would invite fitting the clock to the sample.
-    Entries before 10:30 pass untouched — the number does not exist yet, and a
-    gate acting on it earlier would be trading on hindsight.
+    The checkpoint is a knob (09:45 or 10:30, default 10:30). On the original
+    Oct–Dec sample 09:45 predicted nothing, which is why 10:30 was once fixed —
+    but the Jun 2025 – Jan 2026 09:30-entry study put nearly all of this
+    strategy's edge before 10:30, the one window a 10:30 read can never
+    protect, and its 09:45 board cleared the Bonferroni bar on five KPIs. Only
+    the listed checkpoints are legal — a free-form read time would invite
+    fitting the clock to the sample. Entries before the checkpoint pass
+    untouched — the number does not exist yet, and a gate acting on it earlier
+    would be trading on hindsight.
 
     Config section::
 
-        {"regime": {"enabled": true, "bbr_max": 0.6}}
+        {"regime": {"enabled": true, "bbr_max": 0.6, "checkpoint": "10:30"}}
 
     ``bbr_max`` is the stand-down threshold: at or above it, no entries for the
     rest of the session. The 0.6 default mirrors regime.classify()'s trend
     convention rather than anything tuned on strategy P&L.
 
     When the checkpoint cannot be read at all — no regime artifact, or a bbr of
-    None because the session has no Globex anchor — the gate vetoes after
-    10:30. Same doctrine as the profile gate: "no data" must not read as
+    None because the session has no Globex anchor — the gate vetoes after the
+    checkpoint. Same doctrine as the profile gate: "no data" must not read as
     "confirmed", and a day the dual-VWAP regime cannot describe is a day this
     filter has no business waving through.
     """
@@ -401,21 +652,24 @@ class RegimeGate:
     name = "regime"
     needs_profile = False
 
-    _CHECKPOINT = "10:30"
-    _CHECKPOINT_MIN = 10 * 60 + 30
-
     SCHEMA: tuple[Field, ...] = (
         Field("enabled", "bool", name, "Stand down on below-VWAP mornings",
               default=False,
-              help="After 10:30 ET, vetoes every entry on a day whose first RTH "
-                   "hour spent too long below both anchored VWAPs — the regime "
-                   "in which the bounce has nothing to lean on."),
-        Field("bbr_max", "float", name, "Max below-both-VWAPs ratio at 10:30",
+              help="After the checkpoint ET, vetoes every entry on a day whose "
+                   "morning spent too long below both anchored VWAPs — the "
+                   "regime in which the bounce has nothing to lean on."),
+        Field("bbr_max", "float", name, "Max below-both-VWAPs ratio",
               min=0.0, max=1.0, default=0.6, depends_on=("enabled", True),
-              help="Share of the first hour spent below both VWAPs at or above "
-                   "which the rest of the session is stood down. The default "
-                   "mirrors classify()'s trend threshold; it was not fitted to "
-                   "strategy P&L."),
+              help="Share of the morning spent below both VWAPs at or above "
+                   "which the rest of the session is stood down, read at the "
+                   "checkpoint. The default mirrors classify()'s trend "
+                   "threshold; it was not fitted to strategy P&L."),
+        Field("checkpoint", "enum", name, "Checkpoint",
+              choices=_CHECKPOINT_CHOICES, default="10:30",
+              depends_on=("enabled", True),
+              help="When the bbr is read, and from when the stand-down "
+                   "applies. 09:45 is the earliest read the NY anchor can "
+                   "carry — the only one that reaches the open-driven morning."),
     )
 
     KNOBS = {f.name for f in SCHEMA}
@@ -431,21 +685,291 @@ class RegimeGate:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
             raise ValueError(f"bbr_max must be a number in [0, 1], got {v!r}")
         self.bbr_max = float(v)
+        self.checkpoint = _checkpoint(section, "10:30")
         self._blocked: np.ndarray | None = None
 
     def prepare(self, ctx: "SessionCtx") -> None:
         art = regmod.get_regime(ctx.cfg.contract, ctx.day)
-        bbr = ((art or {}).get("checkpoints", {}).get(self._CHECKPOINT) or {}).get("bbr")
+        bbr = ((art or {}).get("checkpoints", {}).get(self.checkpoint) or {}).get("bbr")
         if bbr is not None and bbr < self.bbr_max:
             self._blocked = None  # the morning qualified; the gate is inert today
             return
         # Stood down (or blind — see class docstring): veto every tick at or
-        # after the checkpoint, by ET wall clock. Overnight ticks in a globex
-        # frame also read >= 10:30 on a wall clock, but entries only ever fire
-        # inside the entry window, so the gate is never consulted there.
-        et = ctx.ticks["ts_utc"].dt.tz_convert(ET_TZ)
-        mins = (et.dt.hour * 60 + et.dt.minute).to_numpy()
-        self._blocked = mins >= self._CHECKPOINT_MIN
+        # after the checkpoint, by ET wall clock.
+        self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class VwapCrossGate:
+    """Veto every entry after its checkpoint ET on a day whose price has been
+    churning back and forth across the NY VWAP.
+
+    The idea it enforces: the bounce pays on days that pick a side of the NY
+    VWAP and stay there; a morning that keeps recrossing it is rotation, and
+    rotation is the regime in which a +1σ pullback keeps travelling. The regime
+    artifact counts exactly that (``ny_vwap_cross_rate``, crossings of the NY
+    VWAP per hour up to the checkpoint). On the Jun 2025 – Jan 2026 09:30-entry
+    study it held past the Bonferroni bar at both readable checkpoints (09:45:
+    ρ ≈ −0.31; 10:30: ρ ≈ −0.28, 500 permutations): the calmest tercile of days
+    averaged +$339/day at 09:45 while the churniest averaged −$221/day.
+
+    Honesty clause: the 12/hr default is that sample's 09:45 top-tercile
+    boundary — a threshold read off the same days the board was computed on,
+    not held-out evidence. And ghost-ledger arithmetic has over-promised before
+    (entries interact through rearm), so the setting still has to earn its keep
+    on an actual A/B run.
+
+    Same clock discipline as the regime gate: entries before the checkpoint
+    pass untouched, and the gate reads the artifact's checkpoint — never a
+    fresher count — so what it acts on is exactly what was knowable.
+
+    Config section::
+
+        {"vwap_cross": {"enabled": true, "cross_max": 12.0, "checkpoint": "09:45"}}
+
+    ``cross_max`` is the stand-down threshold in crossings per hour: at or
+    above it, no entries for the rest of the session.
+
+    Blind days — no artifact, or a checkpoint too thin to carry a rate — are
+    vetoed after the checkpoint. "No data" must not read as "confirmed".
+    """
+
+    name = "vwap_cross"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Stand down on VWAP-churn mornings",
+              default=False,
+              help="After the checkpoint ET, vetoes every entry on a day whose "
+                   "price has crossed the NY VWAP too often — rotation, the "
+                   "regime in which a band pullback keeps travelling."),
+        Field("cross_max", "float", name, "Max NY VWAP crossings",
+              unit="/ hr", min=0.0, max=60.0, default=12.0,
+              depends_on=("enabled", True),
+              help="Crossings of the NY VWAP per hour up to the checkpoint. At "
+                   "or above this, the rest of the session is stood down. The "
+                   "default is the churniest-tercile boundary of the Jun'25–"
+                   "Jan'26 sample at 09:45."),
+        Field("checkpoint", "enum", name, "Checkpoint",
+              choices=_CHECKPOINT_CHOICES, default="09:45",
+              depends_on=("enabled", True),
+              help="When the rate is read, and from when the stand-down "
+                   "applies. 09:45 is the earliest read the NY anchor can "
+                   "carry — the only one that reaches the open-driven morning."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown vwap_cross knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        v = section.get("cross_max", 12.0)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 60.0:
+            raise ValueError(f"cross_max must be a number in [0, 60], got {v!r}")
+        self.cross_max = float(v)
+        self.checkpoint = _checkpoint(section, "09:45")
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        rate = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
+                or {}).get("ny_vwap_cross_rate")
+        if rate is not None and rate < self.cross_max:
+            self._blocked = None  # the morning held its side; inert today
+            return
+        self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class UpperOccupancyGate:
+    """Veto every entry after its checkpoint ET on a day whose price has spent
+    too little of the morning in the NY upper channel.
+
+    The idea it enforces: the upper-band bounce is a bet that the market keeps
+    living between the NY +1σ and +2σ; a morning that has barely visited that
+    channel has not established the residence the bounce leans on. The regime
+    artifact measures exactly that (``ny_upper_channel_occupancy``, the share
+    of closed bars inside the channel up to the checkpoint). On the Jun 2025 –
+    Jan 2026 09:30-entry study it was the strongest 10:30 discriminator to
+    clear the Bonferroni bar (ρ ≈ +0.38, 500 permutations): the lowest tercile
+    of days averaged −$367/day at a 37.9% win rate, the highest +$622/day at
+    67.6% — and it already held at 09:45 (ρ ≈ +0.25).
+
+    Honesty clause: the 0.17 default is that sample's 10:30 bottom-tercile
+    boundary — a threshold read off the same days the board was computed on,
+    not held-out evidence. And ghost-ledger arithmetic has over-promised before
+    (entries interact through rearm), so the setting still has to earn its keep
+    on an actual A/B run.
+
+    Same clock discipline as the regime gate: entries before the checkpoint
+    pass untouched, and the gate reads the artifact's checkpoint — never a
+    fresher share — so what it acts on is exactly what was knowable.
+
+    Config section::
+
+        {"upper_occupancy": {"enabled": true, "occupancy_min": 0.17,
+                             "checkpoint": "10:30"}}
+
+    ``occupancy_min`` is the stand-down threshold: at or below it, no entries
+    for the rest of the session.
+
+    Blind days — no artifact, or a checkpoint with no closed bars — are vetoed
+    after the checkpoint. "No data" must not read as "confirmed".
+    """
+
+    name = "upper_occupancy"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Stand down outside the upper channel",
+              default=False,
+              help="After the checkpoint ET, vetoes every entry on a day whose "
+                   "price has spent too little of the morning between the NY "
+                   "+1σ and +2σ — the residence the bounce leans on."),
+        Field("occupancy_min", "float", name, "Min upper-channel occupancy",
+              min=0.0, max=1.0, default=0.17, depends_on=("enabled", True),
+              help="Share of the morning's bars closed inside the NY upper "
+                   "channel, read at the checkpoint. At or below this, the "
+                   "rest of the session is stood down. The default is the "
+                   "bottom-tercile boundary of the Jun'25–Jan'26 sample at "
+                   "10:30."),
+        Field("checkpoint", "enum", name, "Checkpoint",
+              choices=_CHECKPOINT_CHOICES, default="10:30",
+              depends_on=("enabled", True),
+              help="When the occupancy is read, and from when the stand-down "
+                   "applies. 09:45 is the earliest read the NY anchor can "
+                   "carry — the only one that reaches the open-driven morning."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown upper_occupancy knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        v = section.get("occupancy_min", 0.17)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
+            raise ValueError(f"occupancy_min must be a number in [0, 1], got {v!r}")
+        self.occupancy_min = float(v)
+        self.checkpoint = _checkpoint(section, "10:30")
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        occ = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
+               or {}).get("ny_upper_channel_occupancy")
+        if occ is not None and occ > self.occupancy_min:
+            self._blocked = None  # the morning lived up there; inert today
+            return
+        self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class UpperOccupancyCapGate:
+    """Veto every entry after its checkpoint ET on a day whose price has spent
+    too much of the morning living in the NY upper channel.
+
+    The occupancy gate's mirror: residence between the NY +1σ and +2σ is what
+    the bounce leans on, and exactly what the dev1 fade short is betting
+    against — a morning already camped up there is accepting those prices, not
+    overextending past them. The fade-long reads the NY lower channel instead;
+    the knob keeps its long-flavoured name and means "the faded side's channel"
+    on both. Across the Aug 2025 – Jan 2026 variant-B fade
+    study the 09:45 reading separated on most configs (ρ ≈ −0.25 to −0.31, 500
+    permutations; past the holdout at 10:30 on several): the most-occupied
+    tercile averaged −$390 to −$670/day while the least-occupied was flat to
+    positive.
+
+    Honesty clause: the 0.33 default is that sample's 09:45 top-tercile
+    boundary — read off the same days the board was computed on, not held-out
+    evidence — and tercile arithmetic over-promises (entries interact through
+    rearm); the setting has to earn its keep on an actual A/B run.
+
+    Same clock discipline as every checkpoint gate: entries before the
+    checkpoint pass untouched, and the gate reads the artifact's checkpoint —
+    never a fresher share — so what it acts on is exactly what was knowable.
+
+    Config section::
+
+        {"upper_occupancy_cap": {"enabled": true, "occupancy_max": 0.33,
+                                 "checkpoint": "09:45"}}
+
+    ``occupancy_max`` is the stand-down threshold: at or above it, no entries
+    for the rest of the session.
+
+    Blind days — no artifact, or a checkpoint with no closed bars — are vetoed
+    after the checkpoint. "No data" must not read as "confirmed".
+    """
+
+    name = "upper_occupancy_cap"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Stand down inside the faded channel",
+              default=False,
+              help="After the checkpoint ET, vetoes every entry on a day whose "
+                   "price has spent too much of the morning inside the NY "
+                   "channel the fade sells into (+1σ to +2σ on the short, −1σ "
+                   "to −2σ on the long) — accepted residence, not the "
+                   "overextension the fade trades."),
+        Field("occupancy_max", "float", name, "Max faded-channel occupancy",
+              min=0.0, max=1.0, default=0.33, depends_on=("enabled", True),
+              help="Share of the morning's bars closed inside the NY channel on "
+                   "the faded side, read at the checkpoint. At or above this, the "
+                   "rest of the session is stood down. The default is the "
+                   "top-tercile boundary of the Aug'25–Jan'26 fade study at "
+                   "09:45."),
+        Field("checkpoint", "enum", name, "Checkpoint",
+              choices=_CHECKPOINT_CHOICES, default="09:45",
+              depends_on=("enabled", True),
+              help="When the occupancy is read, and from when the stand-down "
+                   "applies. 09:45 is the earliest read the NY anchor can "
+                   "carry — the only one that reaches the open-driven morning."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown upper_occupancy_cap knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        v = section.get("occupancy_max", 0.33)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
+            raise ValueError(f"occupancy_max must be a number in [0, 1], got {v!r}")
+        self.occupancy_max = float(v)
+        self.checkpoint = _checkpoint(section, "09:45")
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        # The channel on the setup's side of the market: a fade-long lives under
+        # the lower band, and the residence it is betting against is residence
+        # in the NY *lower* channel. The knob keeps its long-flavoured name and
+        # reads as "channel occupancy on the faded side" (see VolumeProfileGate).
+        key = ("ny_upper_channel_occupancy" if ctx.band_side() == "upper"
+               else "ny_lower_channel_occupancy")
+        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        occ = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
+               or {}).get(key)
+        if occ is not None and occ < self.occupancy_max:
+            self._blocked = None  # the morning stayed out of the channel; inert
+            return
+        self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
 
     def allows(self, i: int, fill: float) -> bool:
         return self._blocked is None or not self._blocked[i]

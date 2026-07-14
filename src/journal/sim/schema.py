@@ -1,4 +1,4 @@
-"""Field descriptors for SimConfig: one table, three jobs.
+"""Field descriptors for the config classes: one table per class, three jobs.
 
 The knobs in rules.SimConfig are a dataclass, which says what a field is called
 and what type it holds — and nothing about what values are *legal*. That gap is
@@ -37,7 +37,7 @@ from dataclasses import dataclass, replace
 from datetime import date, time
 
 from ..config import CONTRACT_SPECS
-from .rules import SimConfig
+from .rules import FadeConfig, SimConfig
 
 
 @dataclass(frozen=True)
@@ -208,15 +208,126 @@ FIELDS: tuple[Field, ...] = (
 
 BY_NAME: dict[str, Field] = {f.name: f for f in FIELDS}
 
+
+# --- the fade's table ---------------------------------------------------------
+# FadeConfig's descriptors. A knob whose name, meaning and bounds are the same
+# on both classes reuses the bounce's Field outright (the default the form shows
+# comes from the config class, not the descriptor, so a shared Field can still
+# carry a different default per class). A knob whose rule differs gets its own.
+
+FADE_GROUPS: tuple[dict, ...] = tuple(
+    {"key": "arming", "title": "Arming", "collapsed": False}
+    if g["key"] == "acceptance" else g
+    for g in GROUPS
+)
+
+FADE_FIELDS: tuple[Field, ...] = (
+    # --- window ---
+    BY_NAME["start_date"], BY_NAME["end_date"],
+
+    # --- arming (what makes the fade live) ---
+    Field("arm_stretch_side", "enum", "arming", "The arming stretch runs",
+          choices=(("beyond", "Beyond dev1 — the overextension, faded"),
+                   ("inside", "Inside dev1 — the broken band, retested")),
+          help="Which side of dev1 the stretch that arms the setup runs to. "
+               "Beyond: price overextends out of the channel and the fade sells "
+               "the return down to the band. Inside: price rips back through the "
+               "band into the channel and the fade sells the retest back up to "
+               "it — the same short at dev1, armed by the break instead of the "
+               "overextension. Only the stretch flips: the stop, the targets, "
+               "the dev2 cap and the dev1 re-acceptance exit are unmoved."),
+    Field("arm_extension_ticks", "int", "arming", "Arming stretch",
+          unit="ticks", min=1,
+          help="The setup arms when price prints more than this far past dev1, "
+               "on the side the arming stretch runs to. Re-arming needs a fresh "
+               "stretch: price must first come back within this distance of the "
+               "band."),
+    Field("arm_require_mid_cross", "bool", "arming",
+          "Approach must start from the VWAP mid",
+          help="Only arm a stretch whose move began at the mid: price must have "
+               "printed at or past the mid since the last fill."),
+    Field("arm_cap_at_dev2", "bool", "arming", "Stand down past dev2",
+          help="A bar close beyond dev2 disarms the armed setup — that stretch "
+               "is a runaway, not an overextension — and a fresh stretch is then "
+               "required. An open position is never touched."),
+
+    # --- entry ---
+    Field("entry_variant", "enum", "entry", "Entry variant",
+          choices=(("A", "A — rest a limit at dev1"),
+                   ("B", "B — stop into the continuation of the rejection")),
+          help="A fills on the return to the band, no confirmation. B waits for "
+               "a bar to close back inside dev1 and enters as price continues "
+               "away from the band."),
+    Field("entry_limit_offset_ticks", "int", "entry", "Limit offset in front of dev1",
+          unit="ticks", min=0, depends_on=("entry_variant", "A"),
+          help="Rest the limit this far in front of dev1 — toward the stretch, "
+               "whichever side it ran to — so the return fills before it reaches "
+               "the band. 0 rests the limit on dev1 itself. May not exceed the "
+               "arming stretch, or the limit would already be through the "
+               "market when the setup arms."),
+    Field("entry_stop_offset_ticks", "int", "entry", "Stop-entry offset",
+          unit="ticks", min=0, depends_on=("entry_variant", "B"),
+          help="How far past dev1, into the channel, the entry stop sits after "
+               "the confirming close."),
+
+    # --- exit ---
+    BY_NAME["stop_ticks"],
+    Field("target", "enum", "exit", "Target",
+          choices=(("mid", "The VWAP mid"),
+                   ("opp_dev1", "The opposite dev1"),
+                   ("rr", "A fixed R multiple")),
+          help="mid and the opposite dev1 are tracked live, like the bounce's "
+               "dev2 — the level in force at the exit is the one that fills."),
+    BY_NAME["target_rr"],
+    Field("invalidate_beyond_dev1_bars", "int", "exit",
+          "Exit when price is re-accepted beyond dev1",
+          unit="bar closes", min=0, zero_means_off=True, on_default=5,
+          help="Exit at market after this many consecutive closes back beyond "
+               "dev1 — that is the bounce's acceptance, and so the fade's "
+               "structural invalidation. The fixed stop stays behind it as the "
+               "hard backstop."),
+    BY_NAME["trail_stop_ticks"], BY_NAME["trail_step_ticks"],
+    BY_NAME["trail_breakeven_ticks"], BY_NAME["trail_breakeven_only"],
+
+    # --- filters / lifecycle ---
+    BY_NAME["min_band_width_ticks"],
+    Field("rearm_after_exit", "bool", "filters", "Re-arm after every exit",
+          help="Any exit disarms the setup — a fresh stretch (and a fresh mid "
+               "touch, when required) must build before the next trade."),
+    BY_NAME["daily_loss_stop"],
+
+    # --- scope / bars / session / size ---
+    BY_NAME["instrument"], BY_NAME["contract"],
+    BY_NAME["ticks_per_bar"],
+    BY_NAME["entry_open"], BY_NAME["entry_close"], BY_NAME["flat_by"],
+    BY_NAME["contracts"], BY_NAME["commission_per_side"],
+)
+
+FADE_BY_NAME: dict[str, Field] = {f.name: f for f in FADE_FIELDS}
+
+
+# config class -> (groups, fields, by-name index). The registry's config_cls is
+# the key, so parsing, validation and the served form blueprint all follow from
+# one declaration on the strategy.
+_TABLES: dict[type, tuple[tuple[dict, ...], tuple[Field, ...], dict[str, Field]]] = {
+    SimConfig: (GROUPS, FIELDS, BY_NAME),
+    FadeConfig: (FADE_GROUPS, FADE_FIELDS, FADE_BY_NAME),
+}
+
 # `confluences` is the one field with no descriptor: it is an open-ended dict of
 # namespaced gate sections, and each gate publishes its own knobs (see
 # confluences.gate_schema). Guard the invariant that everything *else* is covered
-# — a knob added to SimConfig without a descriptor would be silently unreachable
-# from the form and silently unvalidated on the way in.
+# both ways — a knob without a descriptor would be silently unreachable from the
+# form and unvalidated on the way in; a descriptor without a knob would render a
+# widget whose value the parser then rejects as an unknown key.
 _UNDESCRIBED = {"confluences"}
-_missing = set(SimConfig().to_json()) - set(BY_NAME) - _UNDESCRIBED
-if _missing:  # pragma: no cover - a developer error, caught at import
-    raise RuntimeError(f"SimConfig fields with no schema.Field: {sorted(_missing)}")
+for _cls, (_, _, _by) in _TABLES.items():
+    _missing = set(_cls().to_json()) - set(_by) - _UNDESCRIBED
+    _extra = set(_by) - set(_cls().to_json())
+    if _missing or _extra:  # pragma: no cover - a developer error, caught at import
+        raise RuntimeError(
+            f"{_cls.__name__} fields with no schema.Field: {sorted(_missing)}; "
+            f"schema.Fields with no {_cls.__name__} field: {sorted(_extra)}")
 
 
 # --- coercion ---------------------------------------------------------------
@@ -282,37 +393,52 @@ def _check_range(f: Field, v: object) -> None:
         raise ValueError(f"{f.name} must be <= {f.max}, got {v}")
 
 
-def _check_cross_field(cfg: SimConfig) -> None:
+def _check_cross_field(cfg) -> None:
     """Rules that read more than one knob. Each of these is a config the engine
     accepts and then quietly does something other than what it says."""
     if cfg.target == "rr" and not cfg.target_rr:
         # Engine: `if cfg.target == "rr" and cfg.target_rr` — a null here trades
-        # the dev2 target while the config claims an R target.
+        # the live target (dev2, or the fade's mid) while claiming an R target.
         raise ValueError("target 'rr' needs a target_rr")
-    if (cfg.entry_variant == "A"
-            and cfg.entry_limit_offset_ticks > cfg.acceptance_min_ticks):
-        # The acceptance close sits just over acceptance_min_ticks beyond dev1, so a
-        # limit offset further than that is already through the market at the moment
-        # the setup arms. A real broker fills a marketable limit instantly at the
-        # market; the engine rests it and waits for a touch that has already
-        # happened — it would quietly trade a different rule than the one on screen.
-        raise ValueError(
-            f"entry_limit_offset_ticks ({cfg.entry_limit_offset_ticks}) may not "
-            f"exceed acceptance_min_ticks ({cfg.acceptance_min_ticks}): the limit "
-            f"would sit beyond the acceptance close, on the far side of the market")
     if cfg.start_date > cfg.end_date:
         raise ValueError(
             f"start_date {cfg.start_date} is after end_date {cfg.end_date}")
+    if isinstance(cfg, SimConfig):
+        if (cfg.entry_variant == "A"
+                and cfg.entry_limit_offset_ticks > cfg.acceptance_min_ticks):
+            # The acceptance close sits just over acceptance_min_ticks beyond dev1, so a
+            # limit offset further than that is already through the market at the moment
+            # the setup arms. A real broker fills a marketable limit instantly at the
+            # market; the engine rests it and waits for a touch that has already
+            # happened — it would quietly trade a different rule than the one on screen.
+            raise ValueError(
+                f"entry_limit_offset_ticks ({cfg.entry_limit_offset_ticks}) may not "
+                f"exceed acceptance_min_ticks ({cfg.acceptance_min_ticks}): the limit "
+                f"would sit beyond the acceptance close, on the far side of the market")
+    if isinstance(cfg, FadeConfig):
+        if (cfg.entry_variant == "A"
+                and cfg.entry_limit_offset_ticks > cfg.arm_extension_ticks):
+            # Same rule, read against the fade's arming: the stretch print is only
+            # arm_extension_ticks past dev1 (strictly more, in fact), so a limit
+            # offset beyond that is already through the market when the setup arms.
+            # Side-agnostic — the limit and the stretch are on the same side of
+            # dev1 by construction, whichever side arm_stretch_side names.
+            raise ValueError(
+                f"entry_limit_offset_ticks ({cfg.entry_limit_offset_ticks}) may not "
+                f"exceed arm_extension_ticks ({cfg.arm_extension_ticks}): the limit "
+                f"would sit beyond the arming stretch, on the far side of the market")
 
 
-def parse(raw: dict) -> SimConfig:
-    """A user's JSON -> a canonical, validated SimConfig.
+def parse(raw: dict, config_cls: type = SimConfig):
+    """A user's JSON -> a canonical, validated config of the strategy's class.
 
     Partial configs are legal: whatever is absent takes the field's default.
     Unknown keys are not — a typo that silently no-ops would masquerade as a real
-    experiment (and this is the check that makes `stop_tickss: 50` a 400).
+    experiment (and this is the check that makes `stop_tickss: 50` a 400). A
+    bounce knob posted at a fade strategy is exactly such a key.
     """
-    defaults = SimConfig().to_json()
+    _, _, by_name = _TABLES[config_cls]
+    defaults = config_cls().to_json()
     unknown = sorted(set(raw) - set(defaults))
     if unknown:
         raise ValueError(f"unknown config keys {unknown}")
@@ -323,19 +449,20 @@ def parse(raw: dict) -> SimConfig:
         if name == "confluences":
             kw[name] = _parse_confluences(v)
             continue
-        f = BY_NAME[name]
+        f = by_name[name]
         v = coerce(f, v)
         _check_range(f, v)
         kw[name] = v
 
-    if "trail_stop_ticks" not in raw and kw["trail_step_ticks"]:
+    if config_cls is SimConfig and "trail_stop_ticks" not in raw and kw["trail_step_ticks"]:
         # A config written before the trail's distance and its step were separate
         # knobs: back then the single trail_step_ticks was both, so that is what it
         # still means. Every stored run's config.json is read back through here, and
-        # a run must always replay to the trades it reported.
+        # a run must always replay to the trades it reported. (SimConfig only: no
+        # fade run predates the split.)
         kw["trail_stop_ticks"] = kw["trail_step_ticks"]
 
-    cfg = SimConfig(**kw)
+    cfg = config_cls(**kw)
     _check_cross_field(cfg)
     return cfg
 
@@ -377,7 +504,7 @@ def _parse_confluences(v: object) -> dict:
     return out
 
 
-def canonicalize(cfg: SimConfig) -> SimConfig:
+def canonicalize(cfg):
     """Collapse a gate that is switched off to its absence.
 
     ``{"volume_profile": {"enabled": false}}`` and ``{}`` simulate identically —
@@ -430,7 +557,8 @@ def _field_json(f: Field, defaults: dict) -> dict:
     return d
 
 
-def config_schema(supported_confluences: tuple[str, ...] = ()) -> dict:
+def config_schema(supported_confluences: tuple[str, ...] = (),
+                  config_cls: type = SimConfig) -> dict:
     """The form's blueprint: groups, fields, and the gates this strategy allows.
 
     Served alongside default_config so the browser never hard-codes the knob list
@@ -438,10 +566,11 @@ def config_schema(supported_confluences: tuple[str, ...] = ()) -> dict:
     """
     from .confluences import gate_schema
 
-    defaults = SimConfig().to_json()
+    groups, fields, _ = _TABLES[config_cls]
+    defaults = config_cls().to_json()
     return {
-        "groups": [dict(g) for g in GROUPS],
-        "fields": [_field_json(f, defaults) for f in FIELDS],
+        "groups": [dict(g) for g in groups],
+        "fields": [_field_json(f, defaults) for f in fields],
         "confluences": [
             {
                 "name": name,

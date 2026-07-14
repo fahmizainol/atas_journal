@@ -39,7 +39,7 @@ REGIME_DIR = CACHE_DIR / "regime"
 
 # Bump when a KPI's definition changes. Old files are then simply ignored and
 # recomputed — never migrated, never silently reinterpreted under a new meaning.
-REGIME_VERSION = 5
+REGIME_VERSION = 7
 
 # What "knowable at time T" means. The intraday checkpoints are where a model
 # would actually have to choose; "eod" is the hindsight snapshot.
@@ -138,6 +138,45 @@ def _touch_hold(close: np.ndarray, pierce: np.ndarray, line: np.ndarray,
     return None if hits == 0 else _f(holds / hits)
 
 
+def _net_travel(close: np.ndarray) -> float | None:
+    """(close − open) over the range, all from 1-minute closes — the scale-free
+    "did the day actually go anywhere". A trend day closes near an extreme
+    (|ntr| → 1); a day that gapped somewhere and parked never travels (|ntr| → 0),
+    however one-sided its closes were. Anchor-free, so it exists on partial days.
+    """
+    if len(close) < 2:
+        return None
+    rng = float(close.max() - close.min())
+    return None if rng <= 0 else _f((close[-1] - close[0]) / rng)
+
+
+def _flip_rates(state: np.ndarray, n_bars: int) -> tuple[float | None, float | None]:
+    """Quadrant transitions split by whether the side actually changed.
+
+    A deep flip is above-both → below-both (however long the single-anchor churn
+    zone held in between); a shallow one dips into an "only" state and returns to
+    the side it left. The distinction is the point: v5's raw transition count
+    treated both alike, and shallow churn is what a trend day produces whenever
+    the two anchors run close together — it says nothing about the day's side.
+    """
+    deep = shallow = 0
+    last_side = 0
+    prev = None
+    for s in state:
+        if prev is not None and s != prev:
+            side = 1 if s == ABOVE_BOTH else (-1 if s == BELOW_BOTH else 0)
+            if side and last_side and side != last_side:
+                deep += 1
+            elif side and side == last_side:
+                shallow += 1
+        if s == ABOVE_BOTH:
+            last_side = 1
+        elif s == BELOW_BOTH:
+            last_side = -1
+        prev = s
+    return _per_hour(deep, n_bars), _per_hour(shallow, n_bars)
+
+
 def _vwap_slope(mid: np.ndarray, high: np.ndarray, low: np.ndarray,
                 close: np.ndarray) -> tuple[float | None, float | None]:
     """VWAP slope over the last SPREAD_SLOPE_MIN bars, in two units.
@@ -214,30 +253,36 @@ def _band_kpis(b: pd.DataFrame, w: pd.DataFrame) -> dict:
     }
 
 
-def _gx_rescue(close: np.ndarray, low: np.ndarray, ny_up1: np.ndarray,
-               gx_up1: np.ndarray, within: int = 5) -> float | None:
-    """Of the pullbacks that *broke* the session +1σ on a closing basis while the
-    Globex +1σ ran below it, the fraction where the lows held at or above the
-    Globex line and price closed back above the session line within *within* bars.
+def _gx_rescue(close: np.ndarray, pierce: np.ndarray, ny_1: np.ndarray,
+               gx_1: np.ndarray, u: float = 1.0, within: int = 5) -> float | None:
+    """Of the pullbacks that *broke* the session dev1 on a closing basis while the
+    Globex dev1 ran beyond it, the fraction where the wicks held short of the
+    Globex line and price closed back past the session line within *within* bars.
 
     This is the "bounced at Globex's dev1 instead of the session's" event: the
-    session band failed, but the deeper band the overnight anchor put underneath
-    it caught the pullback anyway. Only computable when the wrap geometry is
-    actually present at the break (gx_up1 < ny_up1) — a break with the Globex
-    line *above* the session line has no second floor to be rescued by.
+    session band failed, but the deeper band the overnight anchor put behind it
+    caught the pullback anyway. Only computable when the wrap geometry is
+    actually present at the break — a break with the Globex line on the *near*
+    side of the session line has no second floor to be rescued by.
+
+    Read in a signed frame so the two bands are one function: ``u`` = +1 is the
+    upper side (the floor underneath a broken +1σ, *pierce* = the bar lows), −1
+    the lower (the ceiling above a broken −1σ, *pierce* = the highs). Every
+    comparison below is the upper-side one multiplied through by ``u``.
     """
     n = len(close)
     events = rescues = 0
     for i in range(1, n):
-        broke = close[i - 1] > ny_up1[i - 1] and close[i] <= ny_up1[i]
-        if not broke or not gx_up1[i] < ny_up1[i]:
+        broke = (u * (close[i - 1] - ny_1[i - 1]) > 0
+                 and u * (close[i] - ny_1[i]) <= 0)
+        if not broke or not u * (gx_1[i] - ny_1[i]) < 0:
             continue
         events += 1
         j1 = min(i + within, n - 1)
         for j in range(i, j1 + 1):
-            if low[j] < gx_up1[j]:
+            if u * (pierce[j] - gx_1[j]) < 0:
                 break  # sliced the Globex line too: both bands failed
-            if close[j] > ny_up1[j]:
+            if u * (close[j] - ny_1[j]) > 0:
                 rescues += 1
                 break
     return None if events == 0 else _f(rescues / events)
@@ -258,16 +303,21 @@ def _dual_kpis(b: pd.DataFrame, wg: pd.DataFrame, wn: pd.DataFrame) -> dict:
     exist. This is where the user's own read lives: the model works on days that
     hold above both and fails on days that churn between them."""
     n = len(b)
-    empty = {"abr": None, "bbr": None, "longest_hold_min": None,
+    empty = {"abr": None, "bbr": None, "net_conviction": None,
+             "longest_hold_min": None,
              "longest_hold_below_min": None, "quadrant_transitions_rate": None,
+             "deep_flip_rate": None, "shallow_flip_rate": None,
              "norm_spread": None, "spread_slope": None,
              "upper_wrap_occupancy": None, "upper_dev1_gap_sigma": None,
-             "gx_upper_rescue_ratio": None}
+             "gx_upper_rescue_ratio": None,
+             "lower_wrap_occupancy": None, "lower_dev1_gap_sigma": None,
+             "gx_lower_rescue_ratio": None}
     if n < 2:
         return empty
 
     close = b["close"].to_numpy(dtype="float64")
     low = b["low"].to_numpy(dtype="float64")
+    high = b["high"].to_numpy(dtype="float64")
     mid_g = wg["mid"].to_numpy(dtype="float64")
     mid_n = wn["mid"].to_numpy(dtype="float64")
     std_g = wg["std"].to_numpy(dtype="float64")
@@ -276,11 +326,16 @@ def _dual_kpis(b: pd.DataFrame, wg: pd.DataFrame, wn: pd.DataFrame) -> dict:
     gx_up2 = wg["upper2"].to_numpy(dtype="float64")
     ny_up1 = wn["upper1"].to_numpy(dtype="float64")
     ny_up2 = wn["upper2"].to_numpy(dtype="float64")
+    gx_lo1 = wg["lower1"].to_numpy(dtype="float64")
+    gx_lo2 = wg["lower2"].to_numpy(dtype="float64")
+    ny_lo1 = wn["lower1"].to_numpy(dtype="float64")
+    ny_lo2 = wn["lower2"].to_numpy(dtype="float64")
 
     above_both = (close > mid_g) & (close > mid_n)
     below_both = (close < mid_g) & (close < mid_n)
     state = _quadrant(close, mid_g, mid_n)
     transitions = int(np.count_nonzero(state[1:] != state[:-1]))
+    deep_rate, shallow_rate = _flip_rates(state, n)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         spread = np.where(std_g > 0, (mid_n - mid_g) / std_g, np.nan)
@@ -289,18 +344,33 @@ def _dual_kpis(b: pd.DataFrame, wg: pd.DataFrame, wn: pd.DataFrame) -> dict:
     # The wrap geometry: the Globex upper channel containing the session's, so a
     # pullback through the session +1σ still has the Globex +1σ underneath it.
     wrapped = (gx_up1 <= ny_up1) & (gx_up2 >= ny_up2)
+    # The same read on the lower bands, mirrored: the Globex −1σ ABOVE the
+    # session's is the ceiling a rally through the session −1σ runs into. It is
+    # what the fade-long would be buying into, exactly as the upper wrap is the
+    # floor the fade-short sells into.
+    wrapped_lo = (gx_lo1 >= ny_lo1) & (gx_lo2 <= ny_lo2)
     with np.errstate(divide="ignore", invalid="ignore"):
         dev1_gap = np.where(std_n > 0, (ny_up1 - gx_up1) / std_n, np.nan)
+        dev1_gap_lo = np.where(std_n > 0, (gx_lo1 - ny_lo1) / std_n, np.nan)
 
     return {
         "upper_wrap_occupancy": _f(wrapped.mean()),
         "upper_dev1_gap_sigma": _f(np.nanmean(dev1_gap)),
-        "gx_upper_rescue_ratio": _gx_rescue(close, low, ny_up1, gx_up1),
+        "gx_upper_rescue_ratio": _gx_rescue(close, low, ny_up1, gx_up1, u=1.0),
+        "lower_wrap_occupancy": _f(wrapped_lo.mean()),
+        "lower_dev1_gap_sigma": _f(np.nanmean(dev1_gap_lo)),
+        "gx_lower_rescue_ratio": _gx_rescue(close, high, ny_lo1, gx_lo1, u=-1.0),
         "abr": _f(above_both.mean()),
         "bbr": _f(below_both.mean()),
+        # One number for "whose day was it": +1 is every close above both
+        # anchors, −1 every close below both. classify() reads this, so the two
+        # occupancies can't disagree with the label through separate thresholds.
+        "net_conviction": _f(above_both.mean() - below_both.mean()),
         "longest_hold_min": _longest_run(above_both),
         "longest_hold_below_min": _longest_run(below_both),
         "quadrant_transitions_rate": _per_hour(transitions, n),
+        "deep_flip_rate": deep_rate,
+        "shallow_flip_rate": shallow_rate,
         "norm_spread": _f(spread[-1]),
         "spread_slope": _f(spread[-1] - spread[-1 - k]),
     }
@@ -345,25 +415,37 @@ def _overnight_kpis(b: pd.DataFrame, w: pd.DataFrame, first_rth) -> dict:
 # --- classification ---------------------------------------------------------
 
 def classify(k: dict) -> str:
-    """A day's regime from its end-of-day KPIs.
+    """A day's regime from one checkpoint's KPIs.
 
-    PROVISIONAL — these thresholds are a first guess, not a fitted model. They
-    exist so the calendar and the tiles have something to say on day one; the
-    KPI-vs-P&L scatter is the thing that will actually tune them, and until it
-    has, nothing should be trusted to more than "this day looked like that day".
+    PROVISIONAL, second draft. v5 filed 56% of the collected days as "mixed",
+    nearly all of them one-sided days disqualified by the raw quadrant-transition
+    count — shallow churn against a nearby anchor, not actual side changes. This
+    rule reads three things instead: net conviction (whose day it was), deep
+    flips (did price actually change sides), and net travel (did it go anywhere).
+    A one-sided day that never travelled is its own class — "parked" — because
+    a gap that spends the session flat is not a trend, however high its ABR.
+
+    Thresholds were calibrated on the 173 cached sessions from 2025-06..2026-01
+    (trend days sit at |net_travel| 0.65+, parked at ~0.2; one-sided days show
+    well under 1.5 side changes an hour). Still not a fit: the KPI-vs-P&L
+    scatter is what will actually tune them, and until it has, nothing here
+    should be trusted to more than "this day looked like that day".
     """
     abr, bbr = k.get("abr"), k.get("bbr")
-    trans = k.get("quadrant_transitions_rate")
+    deep = k.get("deep_flip_rate")
+    ntr = k.get("net_travel")
     # The NY anchor is the intraday reference — it is the one a 09:30 decision
     # watches develop, and the one the churn shows up against first.
     vx = k.get("ny_vwap_cross_rate")
     if abr is None or bbr is None:
         return "unknown"  # no Globex anchor: there is no dual-VWAP regime to read
-    if abr >= 0.7 and (trans is None or trans <= 2):
-        return "trend_up"
-    if bbr >= 0.7 and (trans is None or trans <= 2):
-        return "trend_down"
-    if abr < 0.6 and bbr < 0.6 and (vx is not None and vx >= 2):
+    nc = abr - bbr
+    if abs(nc) >= 0.5 and (deep is None or deep <= 1.5):
+        if ntr is not None and abs(ntr) < 0.3:
+            return "parked"
+        return "trend_up" if nc > 0 else "trend_down"
+    if abs(nc) < 0.3 and ((vx is not None and vx >= 2)
+                          or (deep is not None and deep >= 2)):
         return "balance"
     return "mixed"
 
@@ -451,7 +533,12 @@ def compute_regime(symbol: str, day: date) -> dict | None:
         else:
             kp.update({f"gx_{k}": v for k, v in _band_kpis(rb, gx).items()})
             kp.update(_dual_kpis(rb, gx, ny))
+        kp["net_travel"] = _net_travel(rb["close"].to_numpy(dtype="float64"))
         kp["bars"] = int(len(rb))
+        # Each checkpoint carries the class its own KPIs support: the label at
+        # "12:00" is what the day looked like at noon, not a preview of the
+        # verdict. Only the eod one is hindsight, and it is mirrored at top level.
+        kp["class"] = classify(kp)
         checkpoints[name] = kp
 
     # Ribbon: the quadrant state per minute across the whole session. Pre-RTH bars
@@ -480,7 +567,7 @@ def compute_regime(symbol: str, day: date) -> dict | None:
         "symbol": symbol,
         "date": day.isoformat(),
         "partial": bool(partial),
-        "class": classify(checkpoints["eod"]),
+        "class": checkpoints["eod"]["class"],
         "checkpoints": checkpoints,
         "ribbon": ribbon,
     }

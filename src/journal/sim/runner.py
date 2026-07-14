@@ -21,7 +21,7 @@ from .registry import Strategy
 from .rules import SimConfig
 
 
-def preflight(cfg: SimConfig, session: str = "rth",
+def preflight(cfg, session: str = "rth",
               fetch_overnight: bool = True) -> dict:
     """What would this run touch? Sessions in the window, how many lack a tick
     cache (each of those is a Databento download that costs real money), and a
@@ -107,7 +107,7 @@ def _r_stats(df: pd.DataFrame) -> dict:
     }
 
 
-def start(strategy: Strategy, cfg: SimConfig) -> str:
+def start(strategy: Strategy, cfg) -> str:
     """Validate and create the run folder in 'running' state; returns the run id
     without simulating anything. Pair with ``run_to_completion``."""
     confmod.validate(cfg, strategy.confluences)
@@ -117,7 +117,7 @@ def start(strategy: Strategy, cfg: SimConfig) -> str:
     return store.init_run(strategy.slug, cfg, strategy.version, len(days))
 
 
-def run_to_completion(strategy: Strategy, cfg: SimConfig, rid: str,
+def run_to_completion(strategy: Strategy, cfg, rid: str,
                       fetch_overnight: bool = True) -> None:
     """The actual work; runs in a background thread for API calls, inline for
     the CLI. All failures land in state.json — a run can never just vanish.
@@ -172,7 +172,7 @@ def run_to_completion(strategy: Strategy, cfg: SimConfig, rid: str,
         store.fail_run(strategy.slug, rid, f"{type(exc).__name__}: {exc}")
 
 
-def _snapshot_regime_pnl(slug: str, rid: str, cfg: SimConfig, trades: pd.DataFrame) -> None:
+def _snapshot_regime_pnl(slug: str, rid: str, cfg, trades: pd.DataFrame) -> None:
     """Write the regime-vs-P&L study next to the metrics, so it exists for anything
     that isn't the browser — a file an LLM can read beats a table only a mounted
     React component has ever computed.
@@ -191,7 +191,7 @@ def _snapshot_regime_pnl(slug: str, rid: str, cfg: SimConfig, trades: pd.DataFra
         pass
 
 
-def execute(strategy: Strategy, cfg: SimConfig,
+def execute(strategy: Strategy, cfg,
             fetch_overnight: bool = True) -> str:
     """Synchronous start + run; the CLI path."""
     rid = start(strategy, cfg)

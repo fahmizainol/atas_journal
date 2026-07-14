@@ -30,9 +30,10 @@ sys.path.insert(0, str(ROOT))
 
 from fastapi import BackgroundTasks, HTTPException  # noqa: E402
 
+from journal import edges  # noqa: E402
 from journal.sim import confluences as confmod  # noqa: E402
 from journal.sim import engine, registry, runner, schema, store, ticks  # noqa: E402
-from journal.sim.rules import SimConfig  # noqa: E402
+from journal.sim.rules import FadeConfig, SimConfig  # noqa: E402
 from api.routers import strategies as api  # noqa: E402
 
 DAY = date(2025, 10, 13)
@@ -202,15 +203,19 @@ def test_vetoed_entries_become_ghost_trades():
         confmod.GATE_FACTORIES.pop("test_veto", None)
 
 
-def _regime_ctx(day=DAY):
+def _regime_ctx(day=DAY, band=None):
     """A minimal SessionCtx for the regime gate: it reads only cfg, day, and
-    tick timestamps. Ticks straddle the 10:30 ET checkpoint."""
+    tick timestamps. Ticks straddle the 10:30 ET checkpoint.
+
+    ``band`` is the side of the market the setup lives on — None leaves it to
+    derive the bounce's way (a long lives on the upper band). Pass "lower" for
+    the fade-long, whose caps must read the lower band's KPIs."""
     ts = pd.to_datetime(
         ["2025-10-13 13:35", "2025-10-13 14:29", "2025-10-13 14:30", "2025-10-13 15:00"],
         utc=True)  # 09:35, 10:29, 10:30, 11:00 ET
     t = pd.DataFrame({"ts_utc": ts})
     return confmod.SessionCtx(cfg=SimConfig(), day=day, ticks=t, bars=pd.DataFrame(),
-                              value_edge_at_tick=None, profile=None)
+                              value_edge_at_tick=None, profile=None, band=band)
 
 
 def test_regime_gate_stands_down_after_1030_on_below_vwap_days():
@@ -237,11 +242,21 @@ def test_regime_gate_stands_down_after_1030_on_below_vwap_days():
             g = gatesmod.RegimeGate({"enabled": True})
             g.prepare(_regime_ctx())
             assert g.allows(1, 0.0) and not g.allows(2, 0.0), f"blind case {blind!r}"
+
+        # checkpoint="09:45" reads the 09:45 bbr and stands down from 09:45 —
+        # only the 09:35 tick is still before the read.
+        art = {"checkpoints": {"09:45": {"bbr": 0.8}, "10:30": {"bbr": 0.2}}}
+        g = gatesmod.RegimeGate({"enabled": True, "checkpoint": "09:45"})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
     finally:
         gatesmod.regmod.get_regime = real
 
     for bad in ({"enabled": True, "bbr": 0.6}, {"enabled": True, "bbr_max": 1.5},
-                {"enabled": True, "bbr_max": True}):
+                {"enabled": True, "bbr_max": True},
+                {"enabled": True, "checkpoint": "09:30"},
+                {"enabled": True, "checkpoint": "12:00"}):
         try:
             gatesmod.RegimeGate(bad)
             raise AssertionError(f"expected ValueError for {bad!r}")
@@ -280,13 +295,127 @@ def test_vwap_slope_gate_stands_down_after_1030_without_upward_grade():
             g = gatesmod.VwapSlopeGate({"enabled": True})
             g.prepare(_regime_ctx())
             assert g.allows(1, 0.0) and not g.allows(2, 0.0), f"blind case {blind!r}"
+
+        # checkpoint="09:45" reads the 09:45 slope and stands down from 09:45.
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": -0.4},
+                               "10:30": {"ny_vwap_slope_ppm": 0.7}}}
+        g = gatesmod.VwapSlopeGate({"enabled": True, "checkpoint": "09:45"})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
     finally:
         gatesmod.regmod.get_regime = real
 
     for bad in ({"enabled": True, "slope": 0.0}, {"enabled": True, "slope_min": 9.0},
-                {"enabled": True, "slope_min": True}):
+                {"enabled": True, "slope_min": True},
+                {"enabled": True, "checkpoint": "11:00"}):
         try:
             gatesmod.VwapSlopeGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_vwap_cross_gate_stands_down_on_churn_mornings():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    art = {"checkpoints": {"09:45": {"ny_vwap_cross_rate": 16.0}}}
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+        g = gatesmod.VwapCrossGate({"enabled": True, "cross_max": 12.0})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
+
+        # A rate exactly at the threshold stands down: the knob is "at or above".
+        art = {"checkpoints": {"09:45": {"ny_vwap_cross_rate": 12.0}}}
+        g = gatesmod.VwapCrossGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert not g.allows(1, 0.0)
+
+        # A morning that held its side leaves the gate inert.
+        art = {"checkpoints": {"09:45": {"ny_vwap_cross_rate": 2.0}}}
+        g = gatesmod.VwapCrossGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # checkpoint="10:30" reads the 10:30 rate and stands down from 10:30.
+        art = {"checkpoints": {"09:45": {"ny_vwap_cross_rate": 2.0},
+                               "10:30": {"ny_vwap_cross_rate": 16.0}}}
+        g = gatesmod.VwapCrossGate({"enabled": True, "checkpoint": "10:30"})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0) and g.allows(1, 0.0), "pre-checkpoint entries pass"
+        assert not g.allows(2, 0.0) and not g.allows(3, 0.0), "stood down from 10:30"
+
+        # Blind — no artifact, or no rate — must not read as confirmed.
+        for blind in (None, {"checkpoints": {}},
+                      {"checkpoints": {"09:45": {"ny_vwap_cross_rate": None}}}):
+            art = blind
+            g = gatesmod.VwapCrossGate({"enabled": True})
+            g.prepare(_regime_ctx())
+            assert g.allows(0, 0.0) and not g.allows(1, 0.0), f"blind case {blind!r}"
+    finally:
+        gatesmod.regmod.get_regime = real
+
+    for bad in ({"enabled": True, "cross": 12.0}, {"enabled": True, "cross_max": -1.0},
+                {"enabled": True, "cross_max": True},
+                {"enabled": True, "checkpoint": "eod"}):
+        try:
+            gatesmod.VwapCrossGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_upper_occupancy_gate_stands_down_when_price_never_lived_up_there():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    art = {"checkpoints": {"10:30": {"ny_upper_channel_occupancy": 0.05}}}
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+        g = gatesmod.UpperOccupancyGate({"enabled": True, "occupancy_min": 0.17})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0) and g.allows(1, 0.0), "pre-checkpoint entries pass"
+        assert not g.allows(2, 0.0) and not g.allows(3, 0.0), "stood down from 10:30"
+
+        # An occupancy exactly at the threshold stands down: "at or below".
+        art = {"checkpoints": {"10:30": {"ny_upper_channel_occupancy": 0.17}}}
+        g = gatesmod.UpperOccupancyGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert not g.allows(2, 0.0)
+
+        # A morning lived in the channel leaves the gate inert.
+        art = {"checkpoints": {"10:30": {"ny_upper_channel_occupancy": 0.5}}}
+        g = gatesmod.UpperOccupancyGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # checkpoint="09:45" reads the 09:45 share and stands down from 09:45.
+        art = {"checkpoints": {"09:45": {"ny_upper_channel_occupancy": 0.05},
+                               "10:30": {"ny_upper_channel_occupancy": 0.5}}}
+        g = gatesmod.UpperOccupancyGate({"enabled": True, "checkpoint": "09:45"})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
+
+        # Blind — no artifact, or no occupancy — must not read as confirmed.
+        for blind in (None, {"checkpoints": {}},
+                      {"checkpoints": {"10:30": {"ny_upper_channel_occupancy": None}}}):
+            art = blind
+            g = gatesmod.UpperOccupancyGate({"enabled": True})
+            g.prepare(_regime_ctx())
+            assert g.allows(1, 0.0) and not g.allows(2, 0.0), f"blind case {blind!r}"
+    finally:
+        gatesmod.regmod.get_regime = real
+
+    for bad in ({"enabled": True, "occupancy": 0.2},
+                {"enabled": True, "occupancy_min": 1.5},
+                {"enabled": True, "occupancy_min": True},
+                {"enabled": True, "checkpoint": "09:30"}):
+        try:
+            gatesmod.UpperOccupancyGate(bad)
             raise AssertionError(f"expected ValueError for {bad!r}")
         except ValueError:
             pass
@@ -338,6 +467,304 @@ def test_gx_rescue_gate_reads_the_0945_ratio_and_knows_its_three_silences():
             raise AssertionError(f"expected ValueError for {bad!r}")
         except ValueError:
             pass
+
+
+def test_vwap_slope_cap_gate_stands_down_against_a_steep_upward_grade():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": 2.0}}}
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+        g = gatesmod.VwapSlopeCapGate({"enabled": True, "slope_max": 1.1})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
+
+        # A slope exactly at the threshold stands down: the knob is "at or above".
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": 1.1}}}
+        g = gatesmod.VwapSlopeCapGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert not g.allows(2, 0.0)
+
+        # A flat or downward grade leaves the gate inert.
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": -0.4}}}
+        g = gatesmod.VwapSlopeCapGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # checkpoint="10:30" reads the 10:30 slope and stands down from 10:30.
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": 5.0},
+                               "10:30": {"ny_vwap_slope_ppm": 2.0}}}
+        g = gatesmod.VwapSlopeCapGate({"enabled": True, "checkpoint": "10:30"})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0) and g.allows(1, 0.0), "pre-checkpoint entries pass"
+        assert not g.allows(2, 0.0) and not g.allows(3, 0.0), "stood down from 10:30"
+
+        # Blind — no artifact, or no slope — must not read as confirmed.
+        for blind in (None, {"checkpoints": {}},
+                      {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": None}}}):
+            art = blind
+            g = gatesmod.VwapSlopeCapGate({"enabled": True})
+            g.prepare(_regime_ctx())
+            assert g.allows(0, 0.0) and not g.allows(1, 0.0), f"blind case {blind!r}"
+    finally:
+        gatesmod.regmod.get_regime = real
+
+    for bad in ({"enabled": True, "slope": 1.0}, {"enabled": True, "slope_max": 9.0},
+                {"enabled": True, "slope_max": True},
+                {"enabled": True, "checkpoint": "11:00"}):
+        try:
+            gatesmod.VwapSlopeCapGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_upper_occupancy_cap_gate_stands_down_when_price_lives_up_there():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    art = {"checkpoints": {"09:45": {"ny_upper_channel_occupancy": 0.6}}}
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+        g = gatesmod.UpperOccupancyCapGate({"enabled": True, "occupancy_max": 0.33})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
+
+        # An occupancy exactly at the threshold stands down: "at or above".
+        art = {"checkpoints": {"09:45": {"ny_upper_channel_occupancy": 0.33}}}
+        g = gatesmod.UpperOccupancyCapGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert not g.allows(2, 0.0)
+
+        # A morning that stayed out of the channel leaves the gate inert.
+        art = {"checkpoints": {"09:45": {"ny_upper_channel_occupancy": 0.05}}}
+        g = gatesmod.UpperOccupancyCapGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # checkpoint="10:30" reads the 10:30 share and stands down from 10:30.
+        art = {"checkpoints": {"09:45": {"ny_upper_channel_occupancy": 0.9},
+                               "10:30": {"ny_upper_channel_occupancy": 0.6}}}
+        g = gatesmod.UpperOccupancyCapGate({"enabled": True, "checkpoint": "10:30"})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0) and g.allows(1, 0.0), "pre-checkpoint entries pass"
+        assert not g.allows(2, 0.0) and not g.allows(3, 0.0), "stood down from 10:30"
+
+        # Blind — no artifact, or no occupancy — must not read as confirmed.
+        for blind in (None, {"checkpoints": {}},
+                      {"checkpoints": {"09:45": {"ny_upper_channel_occupancy": None}}}):
+            art = blind
+            g = gatesmod.UpperOccupancyCapGate({"enabled": True})
+            g.prepare(_regime_ctx())
+            assert g.allows(0, 0.0) and not g.allows(1, 0.0), f"blind case {blind!r}"
+    finally:
+        gatesmod.regmod.get_regime = real
+
+    for bad in ({"enabled": True, "occupancy": 0.2},
+                {"enabled": True, "occupancy_max": 1.5},
+                {"enabled": True, "occupancy_max": True},
+                {"enabled": True, "checkpoint": "09:30"}):
+        try:
+            gatesmod.UpperOccupancyCapGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_gx_rescue_cap_gate_stands_down_when_globex_is_catching():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    art = {"partial": False,
+           "checkpoints": {"10:30": {"gx_upper_rescue_ratio": 0.5}}}
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+        g = gatesmod.GxRescueCapGate({"enabled": True, "rescue_max": 0.4})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0) and g.allows(1, 0.0), "pre-checkpoint entries pass"
+        assert not g.allows(2, 0.0) and not g.allows(3, 0.0), "stood down from 10:30"
+
+        # A ratio exactly at the threshold stands down: "at or above".
+        art = {"partial": False,
+               "checkpoints": {"10:30": {"gx_upper_rescue_ratio": 0.4}}}
+        g = gatesmod.GxRescueCapGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert not g.allows(2, 0.0)
+
+        # Rescues below the threshold leave the gate inert.
+        art = {"partial": False,
+               "checkpoints": {"10:30": {"gx_upper_rescue_ratio": 0.0}}}
+        g = gatesmod.GxRescueCapGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # A described day whose band simply hasn't broken yet is NOT blind:
+        # the absence of the event must not stand the day down.
+        art = {"partial": False,
+               "checkpoints": {"10:30": {"gx_upper_rescue_ratio": None}}}
+        g = gatesmod.GxRescueCapGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # checkpoint="09:45" reads the 09:45 ratio and stands down from 09:45.
+        art = {"partial": False,
+               "checkpoints": {"09:45": {"gx_upper_rescue_ratio": 0.5},
+                               "10:30": {"gx_upper_rescue_ratio": 0.0}}}
+        g = gatesmod.GxRescueCapGate({"enabled": True, "checkpoint": "09:45"})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
+
+        # Blind — no artifact, or no Globex anchor — must not read as confirmed.
+        for blind in (None,
+                      {"partial": True,
+                       "checkpoints": {"10:30": {"gx_upper_rescue_ratio": None}}}):
+            art = blind
+            g = gatesmod.GxRescueCapGate({"enabled": True})
+            g.prepare(_regime_ctx())
+            assert g.allows(1, 0.0) and not g.allows(2, 0.0), f"blind case {blind!r}"
+    finally:
+        gatesmod.regmod.get_regime = real
+
+    for bad in ({"enabled": True, "rescue": 0.3}, {"enabled": True, "rescue_max": 1.5},
+                {"enabled": True, "rescue_max": True},
+                {"enabled": True, "checkpoint": "12:00"}):
+        try:
+            gatesmod.GxRescueCapGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+# --- the caps, mirrored onto the lower band (the fade-long) --------------------
+#
+# The three caps are the fade's regime stand-downs, and each was written in the
+# short's flavour: an UPWARD grade, the UPPER channel, a floor UNDERNEATH. On the
+# lower band every one of those reverses. These are the tests a sign error would
+# have to survive — and the failure they guard against is silent, because a cap
+# pointed at the wrong side doesn't error, it just waves through exactly the days
+# it was meant to stop (and stands down the ones it should have passed).
+
+def test_vwap_slope_cap_mirrors_onto_the_lower_band():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+
+        # A steep DOWNWARD grade is the fade-long's runaway: the tape is
+        # trending away from the mean it buys back toward.
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": -2.0}}}
+        g = gatesmod.VwapSlopeCapGate({"enabled": True, "slope_max": 1.1})
+        g.prepare(_regime_ctx(band="lower"))
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
+
+        # And the same grade the SHORT stands down for leaves the long inert:
+        # an upward tape carries price back to the lower band it is fading.
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": 2.0}}}
+        g = gatesmod.VwapSlopeCapGate({"enabled": True, "slope_max": 1.1})
+        g.prepare(_regime_ctx(band="lower"))
+        assert all(g.allows(i, 0.0) for i in range(4)), "an upward grade is not the long's enemy"
+        g.prepare(_regime_ctx())  # the short, same day, same artifact
+        assert not g.allows(2, 0.0), "the very grade that stands the short down"
+
+        # Exactly at the threshold, in the long's own frame: "at or above".
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": -1.1}}}
+        g = gatesmod.VwapSlopeCapGate({"enabled": True})
+        g.prepare(_regime_ctx(band="lower"))
+        assert not g.allows(2, 0.0)
+
+        # Blind stays blind on the mirror too: "no data" is not "confirmed".
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": None}}}
+        g = gatesmod.VwapSlopeCapGate({"enabled": True})
+        g.prepare(_regime_ctx(band="lower"))
+        assert g.allows(0, 0.0) and not g.allows(1, 0.0)
+    finally:
+        gatesmod.regmod.get_regime = real
+
+
+def test_upper_occupancy_cap_mirrors_onto_the_lower_channel():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+
+        # A morning camped in the NY lower channel is accepting those prices —
+        # the residence the fade-long is betting against. The gate must read
+        # THAT number, not the upper one it is named after.
+        art = {"checkpoints": {"09:45": {"ny_lower_channel_occupancy": 0.6,
+                                         "ny_upper_channel_occupancy": 0.0}}}
+        g = gatesmod.UpperOccupancyCapGate({"enabled": True, "occupancy_max": 0.33})
+        g.prepare(_regime_ctx(band="lower"))
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
+        g.prepare(_regime_ctx())  # the short reads the upper channel: empty, inert
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # And the reverse day: upper channel busy, lower empty. The long passes.
+        art = {"checkpoints": {"09:45": {"ny_lower_channel_occupancy": 0.0,
+                                         "ny_upper_channel_occupancy": 0.6}}}
+        g = gatesmod.UpperOccupancyCapGate({"enabled": True, "occupancy_max": 0.33})
+        g.prepare(_regime_ctx(band="lower"))
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # Blind on the mirror's key — the upper reading must not stand in for it.
+        art = {"checkpoints": {"09:45": {"ny_upper_channel_occupancy": 0.0}}}
+        g = gatesmod.UpperOccupancyCapGate({"enabled": True})
+        g.prepare(_regime_ctx(band="lower"))
+        assert g.allows(0, 0.0) and not g.allows(1, 0.0)
+    finally:
+        gatesmod.regmod.get_regime = real
+
+
+def test_gx_rescue_cap_mirrors_onto_the_lower_band():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+
+        # The mirror event: the Globex −1σ standing ABOVE the session −1σ and
+        # catching the rallies that break it — the ceiling the long buys into.
+        art = {"partial": False,
+               "checkpoints": {"10:30": {"gx_lower_rescue_ratio": 0.5,
+                                         "gx_upper_rescue_ratio": 0.0}}}
+        g = gatesmod.GxRescueCapGate({"enabled": True, "rescue_max": 0.4})
+        g.prepare(_regime_ctx(band="lower"))
+        assert g.allows(1, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (2, 3)), "stood down from 10:30"
+        g.prepare(_regime_ctx())  # the short reads its own side: no rescues, inert
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # A day rescuing on the upper side only says nothing about the long.
+        art = {"partial": False,
+               "checkpoints": {"10:30": {"gx_lower_rescue_ratio": 0.0,
+                                         "gx_upper_rescue_ratio": 0.9}}}
+        g = gatesmod.GxRescueCapGate({"enabled": True})
+        g.prepare(_regime_ctx(band="lower"))
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # The lower band simply hasn't broken yet: absence of the event, not
+        # blindness. The gate stays inert — same doctrine as the short's.
+        art = {"partial": False,
+               "checkpoints": {"10:30": {"gx_lower_rescue_ratio": None}}}
+        g = gatesmod.GxRescueCapGate({"enabled": True})
+        g.prepare(_regime_ctx(band="lower"))
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # But a partial day (no Globex anchor) is blind, on this side too.
+        art = {"partial": True,
+               "checkpoints": {"10:30": {"gx_lower_rescue_ratio": None}}}
+        g = gatesmod.GxRescueCapGate({"enabled": True})
+        g.prepare(_regime_ctx(band="lower"))
+        assert g.allows(1, 0.0) and not g.allows(2, 0.0)
+    finally:
+        gatesmod.regmod.get_regime = real
 
 
 def test_gx_floor_gate_wants_the_globex_line_just_beneath_the_fill():
@@ -534,6 +961,81 @@ def test_api_create_run_dedupes_and_conflicts():
 
         pf = api.preflight(SLUG, body)
         assert pf["exists"] and pf["uncached_sessions"] == 0
+
+
+def test_run_edges_partition_the_run_and_only_a_sim_knows_why_it_exited():
+    """Every cut is a partition: the same trades, sliced. If a bucket goes missing
+    (a weekday nobody traded, a session block off the grid) the table silently
+    under-reports the run, so the totals are what this pins."""
+    if not ticks._cache_path("NQZ5", DAY).exists():
+        print("   (skipped: tick cache cold)")
+        return
+    with _TmpStore():
+        body = api.ConfigIn(config={"start_date": "2025-10-13", "end_date": "2025-10-13"})
+        bt = BackgroundTasks()
+        rid = api.create_run(SLUG, body, bt)["run_id"]
+        _drain(bt)
+
+        _, trades, metrics = store.read_run(SLUG, rid)
+        if trades.empty:
+            print("   (skipped: no trades that session)")
+            return
+
+        payload = api.run_edges(SLUG, rid, compare=None)
+        traded = payload["scopes"]["traded"]
+        assert traded["trades"] == len(trades)
+        assert [c["name"] for c in traded["cuts"]] == list(api.TRADED_CUTS)
+
+        for cut in traded["cuts"]:
+            rows = cut["rows"]
+            assert sum(r["trades"] for r in rows) == len(trades), f"{cut['name']} loses trades"
+            assert abs(sum(r["net_pnl"] for r in rows) - metrics["net_pnl"]) < 1e-6, cut["name"]
+
+        # The cut the journal cannot have: the engine is the only thing that knows
+        # a trade died on its stop rather than at its target.
+        by_name = {c["name"]: c for c in traded["cuts"]}
+        exits = by_name["by_exit_reason"]
+        assert {r["bucket"] for r in exits["rows"]} <= set(trades["exit_reason"])
+
+        # ...and the one it must never *score*: a stop is a loss by construction, so
+        # a permutation test would call it significant every single time.
+        assert exits["knowable"] is False and exits["luck"] is None
+        assert by_name["by_hold_time"]["luck"] is None, "hold time is an outcome too"
+
+        try:
+            api.run_edges(SLUG, "no-such-run", compare=None)
+            raise AssertionError("expected 404")
+        except HTTPException as exc:
+            assert exc.status_code == 404
+
+
+def test_a_cut_that_separates_nothing_does_not_hold():
+    """The luck column earns its place by being hard to satisfy. Trades whose P&L
+    has nothing to do with their bucket must not clear the bar — and a cut that
+    perfectly predicts P&L must, or the test is decoration."""
+    n = 60
+    ts = pd.date_range("2025-10-13 14:00", periods=n, freq="5min", tz="UTC")
+    noise = [(-1) ** i * (100 + 7 * i) for i in range(n)]  # sign has no weekday pattern
+    base = pd.DataFrame({
+        "entry_ts_utc": ts,
+        "entry_ts_local": ts.tz_convert("America/New_York"),
+        "duration_s": [120.0] * n,
+        "direction": ["Long"] * n,
+        "net_pnl": noise,
+        "r_multiple": [v / 400 for v in noise],
+    })
+    assert edges.luck(base, "by_hour_et") > edges.luck_bar(("by_hour_et",))
+
+    # Now make the bucket *be* the answer: every trade in the first hour wins.
+    rigged = base.copy()
+    rigged["net_pnl"] = [500.0 if t.hour == 14 else -500.0 for t in ts]
+    p = edges.luck(rigged, "by_hour_et")
+    assert p <= edges.luck_bar(("by_hour_et",)), p
+
+    # And the R column is the average of the R's, not a re-derivation from dollars.
+    row = edges.by_direction(base).iloc[0]
+    assert abs(row["avg_r"] - base["r_multiple"].mean()) < 1e-9
+    assert row["trades"] == n
 
 
 def test_api_bad_config_is_a_400_not_a_run():
@@ -734,6 +1236,106 @@ def test_api_rerun_baseline_uses_current_version():
         assert st["status"] == "done"
         assert st["engine_version"] == registry.get(SLUG).version
         assert store.read_state(SLUG, rid_old) is not None, "the old artifact survives"
+
+
+# --- the fade's config class ---------------------------------------------------
+#
+# The fade is the first strategy with its own config class (registry.config_cls),
+# so these pin the seams that make two classes safe to coexist: per-class parsing
+# and schema, per-class cross-field rules — and, above all, that adding the fade
+# changed NOTHING about how a bounce config serializes, because run identity
+# hashes the serialization and every stored bounce run must keep its id.
+
+FADE_SLUG = "vwap-dev1-fade-short"
+FADE_LONG_SLUG = "vwap-dev1-fade-long"
+
+
+def test_fade_registry_entry():
+    strat = registry.get(FADE_SLUG)
+    assert strat.config_cls is FadeConfig
+    assert strat.version == "2"   # v2: arm_stretch_side
+    assert strat.session == "rth"
+    assert strat.confluences == ("volume_profile", "vwap_slope_cap",
+                                 "upper_occupancy_cap", "gx_rescue_cap")
+
+
+def test_fade_long_registry_entry_is_the_short_reflected():
+    """Same config class, same schema, same caps — one strategy, two sides. The
+    long is a separate registry entry (and so a separate run history) because
+    the band it reads is coded, not configured."""
+    long_, short = registry.get(FADE_LONG_SLUG), registry.get(FADE_SLUG)
+    assert long_.config_cls is short.config_cls is FadeConfig
+    assert long_.confluences == short.confluences
+    assert long_.session == short.session
+    assert long_.run_session is engine.run_session_fade_long
+    assert long_.run_session is not short.run_session
+    # Distinct histories: the same config on the two sides is two different runs.
+    assert store.run_id(FadeConfig(), long_.version) == store.run_id(
+        FadeConfig(), short.version), "identity hashes the config, not the slug"
+    assert long_.slug != short.slug
+
+
+def test_fade_config_is_its_own_identity():
+    assert store.run_id(FadeConfig(), "1") != store.run_id(SimConfig(), "1"), \
+        "a fade run and a bounce run of the same window must never share an id"
+    assert store.run_id(FadeConfig(), "1") != store.run_id(
+        FadeConfig(arm_extension_ticks=60), "1"), "config must fork the id"
+    # Coercion applies to the fade exactly as to the bounce: one spelling, one id.
+    a = store.config_from_json({"daily_loss_stop": 500}, FadeConfig)
+    b = store.config_from_json({"daily_loss_stop": 500.0}, FadeConfig)
+    assert store.run_id(a, "1") == store.run_id(b, "1")
+
+
+def test_fade_config_rejects_what_its_engine_cannot_read():
+    for bad in ({"acceptance_min_ticks": 30},          # a bounce knob
+                {"exit_below_vah_bars": 1},            # ditto
+                {"arm_extension_ticks": 0},            # below its minimum
+                {"entry_limit_offset_ticks": 60},      # beyond the default 50 stretch
+                {"target": "dev2"},                    # the bounce's target
+                {"target": "rr", "target_rr": None}):
+        try:
+            store.config_from_json(bad, FadeConfig)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected a ValueError for {bad}")
+    # And the mirror: a fade knob is an unknown key on a bounce config.
+    try:
+        store.config_from_json({"arm_extension_ticks": 50})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected a ValueError for a fade knob on SimConfig")
+
+
+def test_fade_default_config_roundtrips():
+    cfg = FadeConfig()
+    assert store.config_from_json(cfg.to_json(), FadeConfig) == cfg
+
+
+def test_fade_schema_covers_every_field_both_ways():
+    described = {f.name for f in schema.FADE_FIELDS}
+    assert set(FadeConfig().to_json()) - described == {"confluences"}
+    assert described - set(FadeConfig().to_json()) == set()
+
+
+def test_adding_the_fade_left_bounce_identity_untouched():
+    """The reason FadeConfig is a class and not new SimConfig fields: a knob
+    added to the shared class would change every stored bounce run's hash. The
+    default bounce config must serialize exactly the fields it always had."""
+    d = SimConfig().to_json()
+    assert "arm_extension_ticks" not in d
+    assert store.run_id(store.config_from_json({}), "6") == store.run_id(SimConfig(), "6")
+
+
+def test_fade_strategy_detail_serves_its_own_schema():
+    detail = api.strategy_detail(FADE_SLUG)
+    assert detail["default_config"] == FadeConfig().to_json()
+    names = {f["name"] for f in detail["config_schema"]["fields"]}
+    assert "arm_extension_ticks" in names and "acceptance_min_ticks" not in names
+    assert [g["key"] for g in detail["config_schema"]["groups"]].count("arming") == 1
+    assert [c["name"] for c in detail["config_schema"]["confluences"]] == [
+        "volume_profile", "vwap_slope_cap", "upper_occupancy_cap", "gx_rescue_cap"]
 
 
 if __name__ == "__main__":

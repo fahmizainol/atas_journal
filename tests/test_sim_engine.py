@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
-from datetime import date
+from datetime import date, time
 from pathlib import Path
 
 import pandas as pd
@@ -28,7 +28,7 @@ from journal.sim import confluences as confmod  # noqa: E402
 from journal.sim import engine, ticks  # noqa: E402
 from journal.sim import profile as profmod  # noqa: E402
 from journal.sim import vwap as vwapmod  # noqa: E402
-from journal.sim.rules import SimConfig  # noqa: E402
+from journal.sim.rules import FadeConfig, SimConfig  # noqa: E402
 
 TICK = 0.25
 DAY = date(2025, 10, 13)
@@ -1108,6 +1108,270 @@ def test_daily_loss_stop_halts_the_rest_of_the_session():
     assert cum[-1] > -limit, "the base run must recover — proves nothing"
     halted, _, _, _ = engine.run_session(SimConfig(daily_loss_stop=limit), day, side="short")
     assert halted == base[: trip + 1]
+
+
+# --- the dev1 fade -------------------------------------------------------------
+#
+# Synthetic, by the same square-wave trick as the Globex tests, but the wave sits
+# *inside* RTH because the fade's VWAP is session-anchored: 4000 heavy prints
+# alternating 20030/19970 pin mid=20000 and sigma=30 (upper1=20030, upper2=20060),
+# and the light size-1 scenario ticks that follow can't move the bands more than
+# a few hundredths. The wave also outlasts 09:31, so the scenario plays entirely
+# inside the entry window. Default FadeConfig: 50-tick arming stretch (12.5 pts,
+# armed above ~20042.5), 50-tick stop, target mid.
+
+SQ_RTH = [20030.0 if k % 2 == 0 else 19970.0 for k in range(4000)]
+
+
+class _fade_cache:
+    """One synthetic RTH session served through the real tick cache."""
+
+    def __init__(self, scenario, base: float = 0.0):
+        # ``base`` reflects the whole tape: every price p becomes base - p, for
+        # the long/short mirror test.
+        self.prices = [float(p) for p in SQ_RTH] + [float(p) for p in scenario]
+        if base:
+            self.prices = [base - p for p in self.prices]
+
+    def __enter__(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = ticks.TICK_CACHE_DIR
+        ticks.TICK_CACHE_DIR = Path(self._tmp.name)
+        ticks._read_day_parquet.cache_clear()
+        ticks.TICK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({
+            "ts_utc": pd.date_range(RTH_OPEN_UTC, periods=len(self.prices), freq="s", tz="UTC"),
+            "price": self.prices,
+            "size": [100] * len(SQ_RTH) + [1] * (len(self.prices) - len(SQ_RTH)),
+            "side": ["A"] * len(self.prices),
+        }).to_parquet(ticks._cache_path("TEST", DAY, "rth"), index=False)
+        return FadeConfig(contract="TEST", ticks_per_bar=50)
+
+    def __exit__(self, *exc):
+        ticks.TICK_CACHE_DIR = self._old
+        ticks._read_day_parquet.cache_clear()
+        self._tmp.cleanup()
+
+
+# Stretch to 20050 (well past the 20042.5 arming line), return through dev1
+# (the variant-A fill), keep going through the mid (the target).
+FADE_TAPE = _grid((20000, 20050, 100), (20050, 20025, 100), (20025, 19995, 100))
+
+
+def test_fade_arms_on_the_stretch_and_fades_the_return():
+    with _fade_cache(FADE_TAPE) as cfg:
+        trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+    assert len(trades) == 1, trades
+    tr = trades[0]
+    assert tr["direction"] == "Short"
+    assert abs(tr["avg_entry"] - 20030) < 0.5, "the limit rests on dev1"
+    assert tr["exit_reason"] == "target"
+    assert abs(tr["avg_exit"] - 20000) < 0.5, "the mid target, tracked live"
+    assert abs((tr["stop_price"] - tr["avg_entry"]) - cfg.stop_ticks * TICK) < 1e-9
+    # The arming stamp is the stretch print — after the rally began, before the fill.
+    assert tr["acceptance_ts"] > RTH_OPEN_UTC + pd.Timedelta(seconds=len(SQ_RTH))
+    assert tr["acceptance_ts"] < tr["entry_ts_utc"]
+
+
+def test_fade_long_is_the_short_reflected():
+    """Reflect the tape about a constant and the lower-band fade must reproduce
+    the upper-band fade's trades exactly, reflected — the one test a sign error
+    anywhere in the u/s frame cannot survive."""
+    with _fade_cache(FADE_TAPE) as cfg:
+        short, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+    with _fade_cache(FADE_TAPE, base=40000.0) as cfg:
+        long_, _, _, _ = engine.run_session_fade(cfg, DAY, side="long")
+    assert len(short) == len(long_) == 1
+    for s_, l_ in zip(short, long_):
+        assert l_["direction"] == "Long"
+        assert (s_["entry_idx"], s_["exit_idx"]) == (l_["entry_idx"], l_["exit_idx"])
+        assert s_["exit_reason"] == l_["exit_reason"]
+        assert abs(l_["avg_entry"] - (40000 - s_["avg_entry"])) < 1e-6
+        assert abs(l_["avg_exit"] - (40000 - s_["avg_exit"])) < 1e-6
+        assert abs(l_["net_pnl"] - s_["net_pnl"]) < 1e-6
+
+
+def test_fade_stretch_short_of_the_extension_never_arms():
+    # To 20040 only: 10 points past dev1, under the 12.5 the arming needs. The
+    # return then crosses dev1, so an armed machine WOULD have filled.
+    tape = _grid((20000, 20040, 100), (20040, 19990, 200))
+    with _fade_cache(tape) as cfg:
+        trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+    assert trades == [], trades
+
+
+def test_fade_variant_b_stops_into_the_continuation():
+    # The return stalls at 20028 — inside dev1 (a bar closes there, confirming
+    # the rejection) but above the B stop at dev1 - 10 ticks = 20027.5. Only the
+    # next leg's break through 20027.5 may fill, at the traded price.
+    tape = _grid((20000, 20050, 100), (20050, 20028, 50), (20028, 19995, 100))
+    with _fade_cache(tape) as cfg:
+        a_trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+        b_trades, _, _, _ = engine.run_session_fade(
+            replace(cfg, entry_variant="B"), DAY, side="short")
+    assert len(a_trades) == len(b_trades) == 1
+    assert abs(a_trades[0]["avg_entry"] - 20030) < 0.5
+    assert b_trades[0]["avg_entry"] <= 20027.5 + 0.1, "B fills past the offset, at market"
+    assert b_trades[0]["entry_idx"] > a_trades[0]["entry_idx"]
+    assert b_trades[0]["exit_reason"] == "target"
+
+
+def test_fade_mid_cross_requirement_blocks_the_second_setup():
+    """Two stretch/return cycles with no mid touch between them: without the
+    knob both fade; with it, only the first — its approach came off the square
+    wave's mid prints, the second's never went back."""
+    tape = _grid((20000, 20050, 100), (20050, 20015, 100),
+                 (20015, 20055, 100), (20055, 20010, 100))
+    # An R target keeps both exits well above the mid, so the second setup's
+    # approach really never touches it.
+    with _fade_cache(tape) as base:
+        cfg = replace(base, target="rr", target_rr=1.0)
+        both, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+        gated, _, _, _ = engine.run_session_fade(
+            replace(cfg, arm_require_mid_cross=True), DAY, side="short")
+    assert len(both) == 2, both
+    assert all(abs(tr["avg_exit"] - (tr["avg_entry"] - 12.5)) < 1e-9 for tr in both)
+    assert len(gated) == 1, gated
+    assert gated[0] == both[0], "the first setup is untouched by the gate"
+
+
+def test_fade_dev2_cap_stands_the_setup_down():
+    # The stretch runs on: a bar closes above dev2 (20060) while the setup is
+    # armed and unfilled. With the cap that kills it — and the return through
+    # dev1, which fades to the mid without the cap, must fill nothing.
+    tape = _grid((20000, 20075, 150), (20075, 19990, 300))
+    with _fade_cache(tape) as cfg:
+        without, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+        capped, _, _, _ = engine.run_session_fade(
+            replace(cfg, arm_cap_at_dev2=True), DAY, side="short")
+    assert len(without) == 1 and without[0]["exit_reason"] == "target"
+    assert capped == [], capped
+
+
+def test_fade_invalidates_on_reacceptance_beyond_dev1():
+    # Fill at dev1, then price re-accepts above the band: two consecutive bar
+    # closes beyond dev1 (but under the stop) must exit at market with the
+    # fade's own reason, not ride to the stop.
+    tape = _grid((20000, 20050, 100), (20050, 20026, 50), (20035, 20035, 200))
+    with _fade_cache(tape) as base:
+        cfg = replace(base, invalidate_beyond_dev1_bars=2)
+        trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+    assert len(trades) == 1, trades
+    tr = trades[0]
+    assert tr["exit_reason"] == "dev1"
+    assert abs(tr["avg_exit"] - 20035) < 0.5
+    assert tr["net_pnl"] < 0, "the invalidation books its small loss honestly"
+    assert tr["avg_exit"] < tr["stop_price"], "and it fired before the stop could"
+
+
+def test_fade_rearm_needs_a_fresh_stretch():
+    """After the first fade exits, the tape returns to dev1 again WITHOUT a new
+    stretch — nothing may fill: the old overextension was consumed."""
+    tape = _grid((20000, 20050, 100), (20050, 19995, 200),   # trade 1: fill, mid target
+                 (19995, 20035, 100), (20035, 19995, 100))   # back past dev1, no stretch
+    with _fade_cache(tape) as cfg:
+        trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+    assert len(trades) == 1, trades
+
+
+# --- the fade armed from inside the band --------------------------------------
+#
+# arm_stretch_side="inside": the stretch runs DOWN through dev1 into the channel
+# and the short sells the retest back UP to the band. The square wave that pins
+# the bands is itself a run of inside-stretches (every 19970 print is 60 ticks
+# under dev1), so these tapes open the entry window at 10:40 — after the wave
+# (4000s from the 09:30 open ends it at 10:36:40) and after the leg that resets
+# the arming state. What fills is then only what the scenario does.
+#
+#   20040 ─ leg 1: up through dev1, but only 10pts over — arms nothing either way
+#   20030 ═ dev1 ══════════════════════════ leg 3 crosses back up: the A fill
+#   20017.5 ┄ the arming line, 12.5pts under dev1
+#   20010 ─ leg 2: the rip down — ARMED (inside)
+#   20000 ═ mid — the target, reached by leg 4
+
+INSIDE_TAPE = _grid((20000, 20040, 100),   # up over dev1: no beyond-stretch, resets the state
+                    (20040, 20010, 100),   # the rip DOWN through dev1: arms the inside stretch
+                    (20010, 20035, 100),   # the retest back up to dev1: variant A's fill
+                    (20035, 19995, 100))   # and the reversion through the mid: the target
+INSIDE_OPEN = time(10, 40)
+
+
+def test_fade_inside_stretch_sells_the_retest_of_the_broken_band():
+    with _fade_cache(INSIDE_TAPE) as base:
+        cfg = replace(base, arm_stretch_side="inside", entry_open=INSIDE_OPEN)
+        trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+    assert len(trades) == 1, trades
+    tr = trades[0]
+    assert tr["direction"] == "Short"
+    assert abs(tr["avg_entry"] - 20030) < 0.5, "the limit rests on dev1, hit from below"
+    assert tr["exit_reason"] == "target"
+    assert abs(tr["avg_exit"] - 20000) < 0.5, "the mid target, tracked live"
+    # The arming stamp is the rip DOWN through the band — leg 2, the second 100
+    # ticks of the scenario — and not the retest that filled: the setup was armed
+    # by the break, and the fill came back UP to the band from under it.
+    leg2 = [RTH_OPEN_UTC + pd.Timedelta(seconds=len(SQ_RTH) + k) for k in (100, 200)]
+    assert leg2[0] < tr["acceptance_ts"] < leg2[1]
+    assert tr["acceptance_ts"] < tr["entry_ts_utc"]
+
+
+def test_fade_beyond_stretch_never_arms_on_the_inside_tape():
+    """The same tape under the default arming: price never prints 12.5pts ABOVE
+    dev1, so the overextension the fade was built on simply never happens. The
+    two sides are genuinely different setups, not one setup restated."""
+    with _fade_cache(INSIDE_TAPE) as base:
+        cfg = replace(base, entry_open=INSIDE_OPEN)   # arm_stretch_side="beyond"
+        trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+    assert trades == [], trades
+
+
+def test_fade_inside_variant_b_sells_the_failure_of_the_retest():
+    """B's confirming close flips with the stretch and its stop does not: the
+    retest is confirmed by a bar closing back ABOVE dev1, and the entry is the
+    failure back DOWN through dev1 - entry_stop_offset (20027.5), into the
+    channel — the same direction B always stops into."""
+    with _fade_cache(INSIDE_TAPE) as base:
+        cfg = replace(base, arm_stretch_side="inside", entry_open=INSIDE_OPEN)
+        a_trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+        b_trades, _, _, _ = engine.run_session_fade(
+            replace(cfg, entry_variant="B"), DAY, side="short")
+    assert len(a_trades) == len(b_trades) == 1
+    assert b_trades[0]["avg_entry"] <= 20027.5 + 0.1, "B fills past the offset, at market"
+    assert b_trades[0]["entry_idx"] > a_trades[0]["entry_idx"], (
+        "and only after the close above dev1 that A never waits for")
+    assert b_trades[0]["exit_reason"] == "target"
+
+
+def test_fade_inside_long_is_the_inside_short_reflected():
+    """The mirror test, run against the third sign: reflect the tape and the
+    lower-band fade armed INSIDE dev1 must reproduce the upper-band short's
+    trades exactly, reflected. A sign error in the a/u/s frame cannot survive."""
+    with _fade_cache(INSIDE_TAPE) as base:
+        cfg = replace(base, arm_stretch_side="inside", entry_open=INSIDE_OPEN)
+        short, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+    with _fade_cache(INSIDE_TAPE, base=40000.0) as base:
+        cfg = replace(base, arm_stretch_side="inside", entry_open=INSIDE_OPEN)
+        long_, _, _, _ = engine.run_session_fade(cfg, DAY, side="long")
+    assert len(short) == len(long_) == 1
+    for s_, l_ in zip(short, long_):
+        assert l_["direction"] == "Long"
+        assert (s_["entry_idx"], s_["exit_idx"]) == (l_["entry_idx"], l_["exit_idx"])
+        assert s_["exit_reason"] == l_["exit_reason"]
+        assert abs(l_["avg_entry"] - (40000 - s_["avg_entry"])) < 1e-6
+        assert abs(l_["avg_exit"] - (40000 - s_["avg_exit"])) < 1e-6
+        assert abs(l_["net_pnl"] - s_["net_pnl"]) < 1e-6
+
+
+def test_fade_inside_limit_offset_rests_below_the_band():
+    """The offset is "in front of dev1, toward the stretch" — which under an
+    inside arming is BELOW the band. The retest then fills on the way up before
+    it reaches dev1, at a worse price than the band's, not a better one."""
+    with _fade_cache(INSIDE_TAPE) as base:
+        cfg = replace(base, arm_stretch_side="inside", entry_open=INSIDE_OPEN,
+                      entry_limit_offset_ticks=20)   # 5 points under dev1
+        trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
+    assert len(trades) == 1, trades
+    assert abs(trades[0]["avg_entry"] - 20025) < 0.5, "dev1 - 20 ticks"
 
 
 if __name__ == "__main__":

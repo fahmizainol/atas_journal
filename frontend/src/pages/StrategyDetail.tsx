@@ -20,6 +20,7 @@ import {
 } from "../hooks/useStrategies";
 import { ConfigForm } from "../components/strategies/ConfigForm";
 import { RegimePnlPanel } from "../components/strategies/RegimePnlPanel";
+import { RunEdgesPanel } from "../components/strategies/RunEdgesPanel";
 import { RunRegimeCalendar } from "../components/strategies/RunRegimeCalendar";
 import { useRegimeDay } from "../hooks/useRegime";
 import { CLASS_LABEL, type RegimeDay } from "../lib/regimeTypes";
@@ -114,8 +115,9 @@ function RunTradeChart({ slug, runId, tradeNo }: { slug: string; runId: string; 
         height={560}
       />
       <div className="section-cap" style={{ marginTop: 6 }}>
-        {vwapCaption(isGlobexChart(data))} Green circle = the acceptance candle that armed the
-        setup. Blue arrow = entry. Orange arrow = exit. Dashed lines = entry / exit / stop. Hover
+        {vwapCaption(isGlobexChart(data))} Green circle = the signal that armed the setup (the
+        acceptance candle on a bounce, the overextension print on a fade). Blue arrow = entry.
+        Orange arrow = exit. Dashed lines = entry / exit / stop. Hover
         the shaded rectangle for the trade's stats.
         {data.profile && data.profile.length > 0 && (
           <>
@@ -238,7 +240,7 @@ function RunDayChart({
           onTradeClick={onTradeClick}
         />
         <div className="section-cap" style={{ marginTop: 6 }}>
-          Every trade this session. Green circle = acceptance, blue arrow = entry, orange arrow =
+          Every trade this session. Green circle = the arming signal, blue arrow = entry, orange arrow =
           exit, shaded rectangle = the holding period. Hover a rectangle for the trade's stats;
           click it to open that trade in the by-trade view.
           {isGlobexChart(data) && (
@@ -856,6 +858,8 @@ function RunView({
       {/* Scores nothing itself: the study is computed server-side and read back
           from the run's own snapshot, so the panel only needs to say which run. */}
       <RegimePnlPanel slug={slug} runId={run.run_id} />
+
+      <RunEdgesPanel slug={slug} runId={run.run_id} />
 
       <div className="tabs" style={{ marginTop: 20 }}>
         <button

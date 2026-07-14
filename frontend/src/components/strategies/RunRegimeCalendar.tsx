@@ -31,6 +31,26 @@ function monthsBetween(start: string, end: string): { year: number; month: numbe
 const iso = (y: number, m: number, d: number) =>
   `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 
+// The month's net over the days the run actually traded. Days outside the run's
+// window can't contribute — the grid draws them, but they aren't the run's.
+function monthTotal(
+  dayStats: Map<string, { net: number; wins: number; n: number }>,
+  year: number,
+  month: number,
+  start: string,
+  end: string,
+) {
+  const prefix = `${year}-${String(month).padStart(2, "0")}`;
+  let net = 0;
+  let trades = 0;
+  for (const [date, s] of dayStats) {
+    if (!date.startsWith(prefix) || date < start || date > end) continue;
+    net += s.net;
+    trades += s.n;
+  }
+  return { net, trades };
+}
+
 // The run's window as a regime calendar: every session coloured by what kind of
 // day it was, with the run's own net for that day as a badge. This is the view
 // that answers "does this model only work in one regime?" at a glance — and the
@@ -88,79 +108,96 @@ export function RunRegimeCalendar({
         </div>
       </div>
 
-      {monthsBetween(start, end).map(({ year, month }) => (
-        <div className="panel" key={`${year}-${month}`} style={{ marginBottom: 12 }}>
-          <div className="section-cap">
-            {new Date(year, month - 1, 1).toLocaleString("en-US", {
-              month: "long",
-              year: "numeric",
-            })}
+      {monthsBetween(start, end).map(({ year, month }) => {
+        const mt = monthTotal(dayStats, year, month, start, end);
+        return (
+          <div className="panel" key={`${year}-${month}`} style={{ marginBottom: 12 }}>
+            <div
+              className="section-cap"
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}
+            >
+              <span>
+                {new Date(year, month - 1, 1).toLocaleString("en-US", {
+                  month: "long",
+                  year: "numeric",
+                })}
+              </span>
+              {mt.trades > 0 && (
+                <span>
+                  net{" "}
+                  <span className={mt.net >= 0 ? "pos" : "neg"} style={{ fontWeight: 700 }}>
+                    {fmt(mt.net)}
+                  </span>{" "}
+                  · {mt.trades} trd
+                </span>
+              )}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
+              {WEEKDAYS.map((w) => (
+                <div
+                  key={w}
+                  className="muted"
+                  style={{ textAlign: "center", fontSize: 11, padding: 4 }}
+                >
+                  {w}
+                </div>
+              ))}
+              {buildWeeks(year, month).flatMap((week, wi) =>
+                week.map((day, di) => {
+                  if (day === 0) return <div key={`${wi}-${di}`} />;
+                  const date = iso(year, month, day);
+                  const reg = byDate.get(date);
+                  const s = dayStats.get(date);
+                  const inWindow = date >= start && date <= end;
+                  const fill = reg ? regimePalette.klass[reg.class] : "transparent";
+                  return (
+                    <div
+                      key={`${wi}-${di}`}
+                      onClick={reg ? () => onPick(date) : undefined}
+                      title={
+                        reg
+                          ? `${date} — ${CLASS_LABEL[reg.class]}${reg.partial ? " (no overnight)" : ""}`
+                          : inWindow && skipped.has(date)
+                            ? `${date} — no cached ticks`
+                            : undefined
+                      }
+                      style={{
+                        minHeight: 62,
+                        borderRadius: 8,
+                        padding: "6px 8px",
+                        background: fill,
+                        // Hatch marks the days whose regime is only half-measured —
+                        // the eye must not read them as a confident call.
+                        backgroundImage: reg?.partial
+                          ? "repeating-linear-gradient(45deg, rgba(255,255,255,0.10) 0 4px, transparent 4px 8px)"
+                          : undefined,
+                        border: `1px solid ${date === activeDay ? palette.accent : palette.cardBorder}`,
+                        opacity: inWindow ? 1 : 0.35,
+                        cursor: reg ? "pointer" : "default",
+                      }}
+                    >
+                      <div style={{ fontWeight: 700, fontSize: 12 }}>{day}</div>
+                      {reg && (
+                        <div
+                          className={s ? (s.net >= 0 ? "pos" : "neg") : "muted"}
+                          style={{ fontSize: 12, fontWeight: 600 }}
+                        >
+                          {s ? fmt(s.net) : "—"}
+                        </div>
+                      )}
+                      {reg && s && (
+                        <div className="muted" style={{ fontSize: 11 }}>
+                          {s.n} trd
+                        </div>
+                      )}
+                    </div>
+                  );
+                }),
+              )}
+            </div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
-            {WEEKDAYS.map((w) => (
-              <div
-                key={w}
-                className="muted"
-                style={{ textAlign: "center", fontSize: 11, padding: 4 }}
-              >
-                {w}
-              </div>
-            ))}
-            {buildWeeks(year, month).flatMap((week, wi) =>
-              week.map((day, di) => {
-                if (day === 0) return <div key={`${wi}-${di}`} />;
-                const date = iso(year, month, day);
-                const reg = byDate.get(date);
-                const s = dayStats.get(date);
-                const inWindow = date >= start && date <= end;
-                const fill = reg ? regimePalette.klass[reg.class] : "transparent";
-                return (
-                  <div
-                    key={`${wi}-${di}`}
-                    onClick={reg ? () => onPick(date) : undefined}
-                    title={
-                      reg
-                        ? `${date} — ${CLASS_LABEL[reg.class]}${reg.partial ? " (no overnight)" : ""}`
-                        : inWindow && skipped.has(date)
-                          ? `${date} — no cached ticks`
-                          : undefined
-                    }
-                    style={{
-                      minHeight: 62,
-                      borderRadius: 8,
-                      padding: "6px 8px",
-                      background: fill,
-                      // Hatch marks the days whose regime is only half-measured —
-                      // the eye must not read them as a confident call.
-                      backgroundImage: reg?.partial
-                        ? "repeating-linear-gradient(45deg, rgba(255,255,255,0.10) 0 4px, transparent 4px 8px)"
-                        : undefined,
-                      border: `1px solid ${date === activeDay ? palette.accent : palette.cardBorder}`,
-                      opacity: inWindow ? 1 : 0.35,
-                      cursor: reg ? "pointer" : "default",
-                    }}
-                  >
-                    <div style={{ fontWeight: 700, fontSize: 12 }}>{day}</div>
-                    {reg && (
-                      <div
-                        className={s ? (s.net >= 0 ? "pos" : "neg") : "muted"}
-                        style={{ fontSize: 12, fontWeight: 600 }}
-                      >
-                        {s ? fmt(s.net) : "—"}
-                      </div>
-                    )}
-                    {reg && s && (
-                      <div className="muted" style={{ fontSize: 11 }}>
-                        {s.n} trd
-                      </div>
-                    )}
-                  </div>
-                );
-              }),
-            )}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

@@ -50,6 +50,7 @@ export const regimePalette = {
     trend_up: "rgba(33,192,122,0.5)",
     trend_down: "rgba(245,69,95,0.5)",
     balance: "rgba(59,130,246,0.45)",
+    parked: "rgba(144,133,233,0.5)", // one-sided but went nowhere: gap-and-flat
     mixed: "rgba(224,165,42,0.45)",
     unknown: "rgba(138,143,156,0.25)",
   },

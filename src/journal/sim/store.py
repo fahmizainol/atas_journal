@@ -43,7 +43,7 @@ from .rules import SimConfig
 SIMS_DIR = DATA_DIR / "sims"
 
 
-def run_id(cfg: SimConfig, version: str) -> str:
+def run_id(cfg, version: str) -> str:
     """Stable id for (config, engine version). Same rules on the same code
     always land on the same folder; either changing gives a fresh one."""
     blob = json.dumps({"config": cfg.to_json(), "version": version}, sort_keys=True)
@@ -71,7 +71,7 @@ def _read(path) -> dict | None:
 
 # --- run lifecycle ----------------------------------------------------------
 
-def init_run(slug: str, cfg: SimConfig, version: str, sessions_total: int) -> str:
+def init_run(slug: str, cfg, version: str, sessions_total: int) -> str:
     """Create the run folder in 'running' state. The id is known before a single
     tick is simulated, so the UI can poll it from the moment the POST returns."""
     rid = run_id(cfg, version)
@@ -245,9 +245,11 @@ def maybe_autopin_baseline(slug: str, rid: str) -> None:
 
 # --- config (de)serialization ------------------------------------------------
 
-def config_from_json(d: dict) -> SimConfig:
-    """The only door into a SimConfig from JSON — for posted configs and for
-    stored config.json alike.
+def config_from_json(d: dict, config_cls: type = SimConfig):
+    """The only door into a config from JSON — for posted configs and for
+    stored config.json alike. ``config_cls`` comes from the strategy's registry
+    entry; the default keeps every SimConfig caller (and the legacy migration)
+    reading as before.
 
     It goes through schema.parse, which coerces every value to its declared type
     before anything hashes it. That matters more than it looks: run_id() sha1s the
@@ -255,7 +257,7 @@ def config_from_json(d: dict) -> SimConfig:
     of identical rules. Missing keys take their default, which is what lets an
     artifact written before a knob existed still load.
     """
-    return schema.parse(d)
+    return schema.parse(d, config_cls)
 
 
 # --- legacy migration ---------------------------------------------------------

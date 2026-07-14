@@ -48,10 +48,18 @@ class SessionCtx:
     # engine judged the trade against is the only one they may judge the entry on.
     value_edge_at_tick: pd.Series | None
     profile: DevelopingProfile | None
-    # "long" | "short" — the direction the strategy reads the setup in. A gate
-    # must sign its comparisons by this: "beyond value" is above VAH on a long
-    # and below VAL on a short.
+    # "long" | "short" — the direction the strategy trades the setup in.
     side: str = "long"
+    # "upper" | "lower" — which side of the market the setup lives on, and so
+    # which value edge and which band a gate must compare against. Distinct from
+    # ``side`` because the two only coincide on the bounce (a long bounce reads
+    # the upper bands): the fade trades AGAINST its band, so a short fade lives
+    # on the upper side. None derives it from ``side`` the bounce's way, which
+    # keeps every pre-fade construction meaning what it always did.
+    band: str | None = None
+
+    def band_side(self) -> str:
+        return self.band or ("upper" if self.side == "long" else "lower")
 
 
 class Gate(Protocol):
@@ -115,10 +123,12 @@ def build_gates(cfg: SimConfig) -> list[Gate]:
     return gates
 
 
-def needs_profile(cfg: SimConfig) -> bool:
+def needs_profile(cfg) -> bool:
     """Would anything read the developing profile this run? Building it costs a
-    value-area scan per bar, so the engine asks before paying."""
-    if cfg.exit_below_vah_bars:
+    value-area scan per bar, so the engine asks before paying. getattr because
+    only the bounce's config has the value-area exit; on any other class the
+    gates alone decide."""
+    if getattr(cfg, "exit_below_vah_bars", 0):
         return True
     return any(getattr(g, "needs_profile", False) for g in build_gates(cfg))
 
@@ -127,11 +137,18 @@ def needs_profile(cfg: SimConfig) -> bool:
 # above without a cycle. Every entry point that resolves a config goes through
 # this module, so importing it is what makes the gates exist.
 from .gates import (  # noqa: E402
-    GxFloorGate, GxRescueGate, RegimeGate, VolumeProfileGate, VwapSlopeGate,
+    GxFloorGate, GxRescueCapGate, GxRescueGate, RegimeGate, UpperOccupancyCapGate,
+    UpperOccupancyGate, VolumeProfileGate, VwapCrossGate, VwapSlopeCapGate,
+    VwapSlopeGate,
 )
 
 GATE_FACTORIES[VolumeProfileGate.name] = VolumeProfileGate
 GATE_FACTORIES[RegimeGate.name] = RegimeGate
 GATE_FACTORIES[VwapSlopeGate.name] = VwapSlopeGate
+GATE_FACTORIES[VwapSlopeCapGate.name] = VwapSlopeCapGate
+GATE_FACTORIES[VwapCrossGate.name] = VwapCrossGate
+GATE_FACTORIES[UpperOccupancyGate.name] = UpperOccupancyGate
+GATE_FACTORIES[UpperOccupancyCapGate.name] = UpperOccupancyCapGate
 GATE_FACTORIES[GxRescueGate.name] = GxRescueGate
+GATE_FACTORIES[GxRescueCapGate.name] = GxRescueCapGate
 GATE_FACTORIES[GxFloorGate.name] = GxFloorGate

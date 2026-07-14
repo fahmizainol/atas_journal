@@ -3,6 +3,11 @@
 // version) artifact. Not the manual "Models" feature and not the `backtest`
 // session mode (a manually replayed ATAS session). See src/journal/sim/.
 
+/** The wire shape of a run's config. One strategy family, one config class on
+ * the server (rules.SimConfig for the bounces, rules.FadeConfig for the fades)
+ * — this type is their union, so every family-specific knob is optional and
+ * only the knobs every family shares are required. The run form never reads
+ * these fields by name anyway: it renders from config_schema. */
 export interface SimConfig {
   instrument: string;
   contract: string;
@@ -12,20 +17,38 @@ export interface SimConfig {
   entry_open: string;
   entry_close: string;
   flat_by: string;
-  acceptance_min_ticks: number;
-  acceptance_require_green: boolean;
-  acceptance_cap_at_dev2: boolean;
+  // --- bounce only: the acceptance candle arms the setup ---
+  acceptance_min_ticks?: number;
+  acceptance_require_green?: boolean;
+  acceptance_cap_at_dev2?: boolean;
+  // --- fade only: the stretch past dev1 arms the setup ---
+  /** Which side of dev1 the arming stretch runs to. "beyond": the overextension
+   * out of the channel, sold on the return to the band. "inside": the band
+   * broken back into the channel, sold on the retest of it. Only the stretch
+   * flips — the trade is a fade at dev1 toward the mid either way. */
+  arm_stretch_side?: "beyond" | "inside";
+  /** Arms on a print more than this far past dev1 (on arm_stretch_side of it);
+   * edge-triggered, so a re-arm needs price back within this distance of the
+   * band first. */
+  arm_extension_ticks?: number;
+  /** Only arm a stretch whose approach printed at/past the VWAP mid since the
+   * last fill. */
+  arm_require_mid_cross?: boolean;
+  /** A bar close beyond dev2 disarms the armed, unfilled setup. */
+  arm_cap_at_dev2?: boolean;
   entry_variant: "A" | "B";
   entry_stop_offset_ticks: number;
-  /** Variant A: rest the limit this many ticks in front of dev1 (above it on a long,
-   * below it on a short) so the pullback fills before it reaches the band. 0 = on dev1.
-   * The server rejects a value above acceptance_min_ticks. */
+  /** Variant A: rest the limit this many ticks in front of dev1 so the return
+   * fills before it reaches the band. 0 = on dev1. The server rejects a value
+   * above acceptance_min_ticks (bounce) / arm_extension_ticks (fade). */
   entry_limit_offset_ticks: number;
   stop_ticks: number;
   target: string;
   target_rr: number | null;
-  /** N consecutive bar closes back below the developing VAH exit at market. 0 = off. */
-  exit_below_vah_bars: number;
+  /** Bounce: N consecutive bar closes back below the developing VAH exit at market. 0 = off. */
+  exit_below_vah_bars?: number;
+  /** Fade: N consecutive closes re-accepted back beyond dev1 exit at market. 0 = off. */
+  invalidate_beyond_dev1_bars?: number;
   /** How far behind the best price seen the stop follows, and the trail's master
    * switch. 0 = off (fixed stop). The first ratchet lands on breakeven. */
   trail_stop_ticks: number;
@@ -39,8 +62,11 @@ export interface SimConfig {
    * then irrelevant. */
   trail_breakeven_only: boolean;
   min_band_width_ticks: number;
-  invalidate_below_mid_bars: number;
+  /** Bounce: N consecutive closes past the VWAP mid disarm the setup. */
+  invalidate_below_mid_bars?: number;
   rearm_after_exit: boolean;
+  /** Stand down for the session once realized net P&L is this far in the red. 0 = off. */
+  daily_loss_stop?: number;
   contracts: number;
   commission_per_side: number;
   confluences: Confluences;
@@ -138,8 +164,9 @@ export interface SimTrade {
   final_stop_price?: number;
   target_price: number;
   /** "vah" = price was re-accepted back inside the value area (exit_below_vah_bars).
+   * "dev1" = the fade's mirror: re-accepted back beyond dev1 (invalidate_beyond_dev1_bars).
    * "trail" = stopped out on a ratcheted stop (breakeven or better), not the initial one. */
-  exit_reason: "target" | "stop" | "time" | "vah" | "trail";
+  exit_reason: "target" | "stop" | "time" | "vah" | "dev1" | "trail";
   points: number;
   r_multiple: number;
   band_width_ticks: number;

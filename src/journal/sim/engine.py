@@ -63,7 +63,10 @@ class _Pos:
     # for a short) *since this position opened* — the streak is a property of the
     # trade, not the session, so a ghost counts its own.
     inside_value: int = 0
-    # That streak hit its limit: exit at market on the next tick.
+    # The fade's mirror streak: consecutive closes re-accepted back beyond dev1
+    # against the position (invalidate_beyond_dev1_bars). Unused by the bounce.
+    beyond_band: int = 0
+    # A streak hit its limit: exit at market on the next tick.
     exit_on_next_tick: bool = False
 
 
@@ -493,6 +496,365 @@ def run_session_globex_short(
 ) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
     """Registry entry point: the lower-band bounce off a Globex-anchored VWAP."""
     return run_session(cfg, day, overnight=True, side="short")
+
+
+def run_session_fade(
+    cfg, day: date, side: str = "short"
+) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
+    """Simulate one session of the band FADE (cfg is a rules.FadeConfig).
+
+    The bounce's counter-trade: where the bounce buys the pullback to dev1
+    expecting continuation to dev2, the fade sells the *return* to dev1 after
+    price overextended beyond it, expecting reversion toward the mid. A "short"
+    fade therefore lives on the UPPER bands — the opposite pairing from the
+    bounce, which is why this loop signs band comparisons with ``u`` (the band's
+    side of the market) and trade arithmetic with ``s`` (the direction), where
+    the bounce's single ``s`` did both jobs.
+
+    Its own loop rather than a mode of ``run_session`` because the two ideas
+    share almost no rules — and because the bounce's loop is the replay
+    authority for every stored bounce run, which a shared code path would put at
+    risk with every fade change. The exit helpers are deliberately the same
+    shape (stop through the traded price, resting target limit at its own
+    level, the trail's tick-grid ratchet) so a fade trade and a bounce trade
+    mean the same thing in every downstream table.
+
+    The state machine (all tick-level except where a bar close is named):
+
+      quiet --stretch past dev1 by > arm_extension_ticks-----> ARMED
+      ARMED --variant A: crossing back to dev1 (+offset)-----> IN_TRADE
+      ARMED --variant B: bar close back across dev1 away from
+              the stretch, then the continuation through
+              dev1 - entry_stop_offset----------------------> IN_TRADE
+      ARMED --arm_cap_at_dev2: bar close beyond dev2---------> quiet
+      IN_TRADE --stop / target / trail / time / dev1---------> quiet (rearm_after_exit)
+
+    ``arm_stretch_side`` picks which way the arming stretch runs, and is the only
+    thing in the loop it moves. "beyond" is the overextension the fade was built
+    on: the stretch runs OUT of the channel (above dev1 on the short) and the
+    trade sells the return down to the band. "inside" arms on the mirror — the
+    stretch rips back INTO the channel (below dev1 on the short) — and the trade
+    sells the retest back up to the band: the broken band, resold from
+    underneath. Both are still a short at dev1 reverting to the mid, so the stop,
+    the targets, the dev2 cap and the dev1 re-acceptance exit are untouched by
+    the flip. Only the three rules read off the stretch itself move with it: the
+    arming edge, variant A's limit offset ("in front of dev1" = toward the
+    stretch), and variant B's confirming close (on the far side of dev1 from the
+    stretch).
+
+    Arming is edge-triggered: the transition into "stretched", not the standing
+    state. A disarm (the dev2 cap, an exit with the price still out there) would
+    otherwise be undone by the very next print of the same stretch. Re-arming
+    requires price to come back within the arming distance of dev1 and push out
+    again — a new stretch, not the old one still standing.
+
+    ``arm_require_mid_cross`` remembers whether price has printed at or past the
+    VWAP mid (on the channel side away from the band) since the last fill, so an
+    armed stretch is one whose approach demonstrably started at the mid. The
+    memory resets when a position opens: the next setup must build its own
+    approach. It is read at the arming edge only — a mid touch after the stretch
+    began cannot retroactively bless it.
+
+    The targets ("mid", "opp_dev1") are tracked live like the bounce's dev2: the
+    level in force at the exit is the level that fills. ``rr`` is fixed at entry.
+
+    ``invalidate_beyond_dev1_bars`` closes re-accepted beyond dev1 against the
+    position exit it at market on the next tick (reason "dev1") — re-acceptance
+    out there is the bounce's entry premise, and so this trade's obituary. The
+    fixed stop remains in force behind it as the hard backstop.
+    """
+    if side not in ("long", "short"):
+        raise ValueError(f"side must be 'long' or 'short', got {side!r}")
+    # Three signs, one frame: ``s`` is the trade's direction (P&L, stops,
+    # targets); ``u`` is the band's side of the market (which dev1/dev2, what
+    # "beyond" means); ``a`` is the side the arming stretch runs to. The fade
+    # trades against its band, so u = -s: the short fades the upper stretch, the
+    # long mirror fades the lower one. And a = u for the overextension the fade
+    # was built on, a = -u when it arms on the break back through the band
+    # instead — the retest of dev1 from the channel side.
+    s = 1.0 if side == "long" else -1.0
+    u = -s
+    a = u if cfg.arm_stretch_side == "beyond" else -u
+
+    t = tickmod.get_day_ticks(tickmod.contract_for(cfg.contract, day), day)
+    if t is None or t.empty:
+        return [], [], pd.DataFrame(), pd.DataFrame()
+    b = barmod.tick_bars(t, cfg.ticks_per_bar)
+    w = vwapmod.vwap_bands(t)
+    if b.empty:
+        return [], [], b, pd.DataFrame()
+
+    tick = tick_size(cfg.instrument)
+
+    # The value edge on the setup's side: VAH above, VAL below — the fade-short
+    # sits above value like the bounce-long does.
+    band = "upper" if u > 0 else "lower"
+    edge = "vah" if band == "upper" else "val"
+    prof = edge_tick = None
+    if confmod.needs_profile(cfg):
+        prof = profmod.developing_profile(t, b, tick)
+        edge_tick = profmod.levels_in_force(prof, b, len(t), edge=edge)
+
+    gates = confmod.build_gates(cfg)
+    if gates:
+        ctx = confmod.SessionCtx(
+            cfg=cfg, day=day, ticks=t, bars=b, value_edge_at_tick=edge_tick,
+            profile=prof, side=side, band=band,
+        )
+        for g in gates:
+            g.prepare(ctx)
+
+    pv = point_value(cfg.instrument)
+    risk_pts = cfg.stop_ticks * tick
+    ext_pts = cfg.arm_extension_ticks * tick
+    entry_off = cfg.entry_stop_offset_ticks * tick
+    limit_off = cfg.entry_limit_offset_ticks * tick
+    trail_dist_t = cfg.trail_stop_ticks
+    trail_step_t = cfg.trail_step_ticks or trail_dist_t
+    trail_be_t = cfg.trail_breakeven_ticks
+    trail_be_only = cfg.trail_breakeven_only
+
+    price = t["price"].to_numpy(dtype="float64").tolist()
+    ts = t["ts_utc"]
+    # The faded band and its outer sibling, plus the far dev1 the "opp_dev1"
+    # target runs to. Everything downstream reads these names only.
+    d1 = w["upper1" if band == "upper" else "lower1"].to_numpy().tolist()
+    d2 = w["upper2" if band == "upper" else "lower2"].to_numpy().tolist()
+    opp = w["lower1" if band == "upper" else "upper1"].to_numpy().tolist()
+    md = w["mid"].to_numpy().tolist()
+
+    n = len(price)
+    mins = _minutes_et(ts)
+    open_m = cfg.entry_open.hour * 60 + cfg.entry_open.minute
+    close_m = cfg.entry_close.hour * 60 + cfg.entry_close.minute
+    flat_m = cfg.flat_by.hour * 60 + cfg.flat_by.minute
+
+    holdable = np.flatnonzero(mins < flat_m)
+    force_i = int(holdable[-1]) if len(holdable) else n - 1
+
+    bar_end_of = np.full(n, -1, dtype="int64")
+    bar_end_of[b["end_idx"].to_numpy()] = np.arange(len(b))
+    bar_end_of = bar_end_of.tolist()
+    b_close = b["close"].to_numpy().tolist()
+
+    armed = False
+    awaiting_reclaim = False  # variant B: a bar has closed back inside dev1
+    beyond = False            # variant A: price is still on the far side of the limit
+    stretched = False         # the standing "beyond dev1 + extension" state
+    seen_mid = False          # a print at/past the mid since the last fill
+    arm_ts: pd.Timestamp | None = None
+    pos: _Pos | None = None
+    ghosts: list[tuple[str, _Pos]] = []
+    trades: list[dict] = []
+    vetoed: list[dict] = []
+    day_net = 0.0
+    halted = False
+
+    def _live_target(i: int) -> float:
+        # The tracked target level in force at tick i; only called when
+        # target_price is None, i.e. cfg.target is "mid" or "opp_dev1".
+        return md[i] if cfg.target == "mid" else opp[i]
+
+    def _row(p_: _Pos, reason: str, i: int, exit_price: float) -> dict:
+        pts = s * (exit_price - p_.entry_price)
+        gross = pts * pv * cfg.contracts
+        comm = 2 * cfg.commission_per_side * cfg.contracts
+        return {
+            "session": day,
+            "direction": "Long" if side == "long" else "Short",
+            "entry_ts_utc": ts.iloc[p_.entry_i],
+            "exit_ts_utc": ts.iloc[i],
+            "entry_idx": p_.entry_i,
+            "exit_idx": i,
+            "avg_entry": p_.entry_price,
+            "avg_exit": exit_price,
+            "stop_price": p_.init_stop,
+            "final_stop_price": p_.stop_price,
+            "target_price": (p_.target_price if p_.target_price is not None
+                             else _live_target(i)),
+            "exit_reason": reason,
+            "points": pts,
+            "r_multiple": pts / risk_pts,
+            "band_width_ticks": p_.band_width_ticks,
+            # The arming stretch's stamp rides in the acceptance slot: both name
+            # the event that made the setup live, and every consumer (charts,
+            # tables) already reads this column.
+            "acceptance_ts": p_.acceptance_ts,
+            "max_contracts": cfg.contracts,
+            "gross_pnl": gross,
+            "commission": comm,
+            "net_pnl": gross - comm,
+        }
+
+    def _close(reason: str, i: int, exit_price: float) -> None:
+        nonlocal pos, armed, awaiting_reclaim, day_net, halted
+        assert pos is not None
+        trades.append(_row(pos, reason, i, exit_price))
+        day_net += trades[-1]["net_pnl"]
+        if cfg.daily_loss_stop and day_net <= -cfg.daily_loss_stop:
+            halted = True
+        pos = None
+        if cfg.rearm_after_exit:
+            armed = False
+            awaiting_reclaim = False
+
+    def _exit(p_: _Pos, i: int, p: float) -> tuple[str, float] | None:
+        """(reason, fill) if this position is out at tick i, else None. Shared
+        by real and ghost positions, exactly as in the bounce."""
+        if p_.exit_on_next_tick:
+            # The dev1 re-acceptance exit: a market order sent on the previous
+            # bar's close, filled at the next print whatever it is.
+            return ("dev1", p)
+        tgt = p_.target_price if p_.target_price is not None else _live_target(i)
+        if s * (p - p_.stop_price) <= 0:
+            moved = p_.stop_price != p_.init_stop
+            return ("trail" if moved else "stop", p)
+        if s * (p - tgt) >= 0:
+            return ("target", tgt)
+        if i >= force_i:
+            return ("time", p)
+        return None
+
+    def _trail(p_: _Pos, p: float) -> None:
+        # The bounce's ratchet, verbatim — see run_session._trail for why it is
+        # read off the print, floored at its grid level, and run after the exit
+        # check.
+        if not trail_dist_t:
+            return
+        fav_t = round(s * (p - p_.entry_price) / tick)
+        if fav_t < trail_dist_t + trail_be_t:
+            return
+        steps = 0 if trail_be_only else (fav_t - trail_dist_t - trail_be_t) // trail_step_t
+        lvl = p_.entry_price + s * (trail_be_t + steps * trail_step_t) * tick
+        if s * (lvl - p_.stop_price) > 0:
+            p_.stop_price = lvl
+
+    for i in range(n):
+        p = price[i]
+
+        for gname, gp in ghosts[:]:
+            hit = _exit(gp, i, p)
+            if hit:
+                vetoed.append({**_row(gp, hit[0], i, hit[1]), "gate": gname})
+                ghosts.remove((gname, gp))
+            else:
+                _trail(gp, p)
+
+        if pos is not None:
+            hit = _exit(pos, i, p)
+            if hit:
+                _close(hit[0], i, hit[1])
+            else:
+                _trail(pos, p)
+
+        elif armed:
+            # Variant A's limit: dev1, or entry_limit_offset_ticks in FRONT of it
+            # — toward the stretch, so the return fills before the band. The
+            # offset is capped at the arming stretch (schema), so the level is
+            # always behind the market at the moment the setup arms, and the
+            # same crossing discipline as the bounce applies: the fill is the
+            # transition beyond -> at-or-through, never the standing inequality.
+            # Signed with ``a``: the limit sits on the stretch's side of dev1 and
+            # the return that fills it comes from there — down to the band on a
+            # "beyond" arming, back up to it on an "inside" one.
+            lvl = d1[i] + a * limit_off
+            at_limit = a * (p - lvl) <= 0
+            touched = beyond and at_limit
+            beyond = not at_limit
+            if not halted and open_m <= mins[i] < close_m and i < force_i:
+                band_w = u * (d2[i] - d1[i]) / tick
+                fill = None
+                if band_w < cfg.min_band_width_ticks:
+                    pass  # the touch is missed, not deferred
+                elif cfg.entry_variant == "A":
+                    if touched:
+                        fill = lvl
+                elif cfg.entry_variant == "B" and awaiting_reclaim:
+                    # Stop into the continuation: past dev1, on into the channel.
+                    level = d1[i] - u * entry_off
+                    if u * (p - level) <= 0:
+                        fill = p
+                if fill is not None:
+                    tp = None
+                    if cfg.target == "rr" and cfg.target_rr:
+                        tp = fill + s * cfg.target_rr * risk_pts
+                    stop = fill - s * risk_pts
+                    new_pos = _Pos(
+                        entry_i=i, entry_price=fill,
+                        stop_price=stop, init_stop=stop, target_price=tp,
+                        band_width_ticks=band_w, acceptance_ts=arm_ts,
+                    )
+                    veto = next((g.name for g in gates if not g.allows(i, fill)), None)
+                    if veto is None:
+                        pos = new_pos
+                        # The next setup must build its own approach from the mid.
+                        seen_mid = False
+                    else:
+                        ghosts.append((veto, new_pos))
+                        armed = False
+                        awaiting_reclaim = False
+
+        bi = bar_end_of[i]
+        if bi >= 0:
+            c = b_close[bi]
+
+            # Re-acceptance beyond dev1, against the trade. Ghosts count their
+            # own streaks, same as the bounce's value-area exit.
+            if cfg.invalidate_beyond_dev1_bars:
+                outside = u * (c - d1[i]) > 0
+                for p_ in ([pos] if pos is not None else []) + [g for _, g in ghosts]:
+                    p_.beyond_band = p_.beyond_band + 1 if outside else 0
+                    if p_.beyond_band >= cfg.invalidate_beyond_dev1_bars:
+                        p_.exit_on_next_tick = True
+
+            # The dev2 cap: an armed, unfilled setup dies on a close beyond the
+            # outer band. `stretched` stays true, so re-arming needs the price
+            # to come back within the arming distance and push out afresh.
+            if cfg.arm_cap_at_dev2 and armed and pos is None and u * (c - d2[i]) > 0:
+                armed = False
+                awaiting_reclaim = False
+
+            # Variant B's confirmation: a close back across dev1, on the far side
+            # from the stretch, arms its stop — inside the band when the stretch
+            # came from outside, back outside it when the stretch came from
+            # within (the retest, closed above the band, is then sold on its
+            # failure back down through it). The stop itself does not flip: it is
+            # always entry_stop_offset_ticks into the channel, the way the trade
+            # is going.
+            if armed and cfg.entry_variant == "B" and a * (c - d1[i]) < 0:
+                awaiting_reclaim = True
+
+        # --- arming: a tick-level edge, evaluated last so a fresh stretch can
+        # only act from the next tick onward, like any bar-close signal.
+        if u * (p - md[i]) <= 0:
+            seen_mid = True
+        is_stretched = a * (p - d1[i]) > ext_pts
+        if (is_stretched and not stretched and pos is None
+                and (not cfg.arm_require_mid_cross or seen_mid)):
+            armed = True
+            awaiting_reclaim = False
+            # Born beyond its own limit level (the offset is capped at the
+            # stretch), so the first return to it is a genuine touch.
+            beyond = True
+            arm_ts = ts.iloc[i]
+        stretched = is_stretched
+
+    bands = w.iloc[b["end_idx"].to_numpy()].reset_index(drop=True)
+    return trades, vetoed, b, bands
+
+
+def run_session_fade_short(
+    cfg, day: date
+) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
+    """Registry entry point: fade the upper-band stretch from above, short."""
+    return run_session_fade(cfg, day, side="short")
+
+
+def run_session_fade_long(
+    cfg, day: date
+) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
+    """Registry entry point: fade the lower-band stretch from below, long."""
+    return run_session_fade(cfg, day, side="long")
 
 
 def finalize(rows: list[dict], cfg: SimConfig) -> pd.DataFrame:

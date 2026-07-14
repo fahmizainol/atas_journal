@@ -34,6 +34,9 @@ SYMBOL = "NQZ5"
 UP = lambda p: 20020 + 100 * p  # noqa: E731 — a clean one-way session
 ON_UP = lambda p: 20000 + 20 * p  # noqa: E731 — a quiet drifting night
 OSC = lambda p: 20000 + 30 * math.sin(p * 26 * math.pi)  # noqa: E731 — ~13 cycles
+# Up 80 and all the way back: the closes sit above the (lagging) VWAPs for most
+# of the session, yet close − open is a sliver of the range. A gap-and-fade day.
+ROUND_TRIP = lambda p: 20000 + 80 * math.sin(p * math.pi)  # noqa: E731
 
 
 def _seg(d0: date, t0: time, d1: date, t1: time, fn) -> pd.DataFrame:
@@ -84,7 +87,11 @@ def test_up_drift_day_is_a_trend():
     # Price is above both anchors all session and never leaves that quadrant.
     assert eod["abr"] > 0.9, eod["abr"]
     assert eod["bbr"] == 0.0
+    assert eod["net_conviction"] > 0.9
     assert eod["quadrant_transitions_rate"] < 1
+    # It never changes sides, and a one-way ramp closes at its extreme.
+    assert eod["deep_flip_rate"] == 0.0
+    assert eod["net_travel"] > 0.9, eod["net_travel"]
     assert eod["longest_hold_min"] > 300
     assert r["class"] == "trend_up"
     # The ribbon spans the whole session, one state per minute.
@@ -100,9 +107,24 @@ def test_oscillating_day_is_balance():
 
     # Price keeps returning through its own VWAP — that is what a churn day is,
     # and it must not be able to read as a trend.
-    assert eod["abr"] < 0.6 and eod["bbr"] < 0.6
+    assert abs(eod["net_conviction"]) < 0.3, eod["net_conviction"]
     assert eod["ny_vwap_cross_rate"] >= 2, eod["ny_vwap_cross_rate"]
     assert r["class"] == "balance"
+
+
+def test_round_trip_day_is_parked():
+    with cache(_rth(ROUND_TRIP), _overnight(ON_UP)):
+        r = regmod.compute_regime(SYMBOL, DAY)
+    eod = r["checkpoints"]["eod"]
+
+    # The lagging VWAPs keep the closes one-sided — under v5 this day could only
+    # read as a trend or be dumped into mixed. But it went nowhere: the whole
+    # point of the class is that "held above both anchors" and "trended" are
+    # different facts.
+    assert eod["net_conviction"] >= 0.5, eod["net_conviction"]
+    assert abs(eod["net_travel"]) < 0.3, eod["net_travel"]
+    assert eod["deep_flip_rate"] <= 1.5, eod["deep_flip_rate"]
+    assert r["class"] == "parked"
 
 
 def test_checkpoints_only_see_their_own_past():
@@ -116,6 +138,10 @@ def test_checkpoints_only_see_their_own_past():
     assert cps["09:30"]["bars"] == 0
     assert cps["09:30"]["abr"] is None
     assert cps["09:30"]["on_abr"] is not None
+    # Every checkpoint carries the class its own KPIs support: nothing is
+    # classifiable at the bell, and only eod's label is the day's verdict.
+    assert cps["09:30"]["class"] == "unknown"
+    assert cps["eod"]["class"] == "trend_up"
     # Bars accumulate monotonically and the cutoffs land where they say they do.
     assert [cps[k]["bars"] for k in ("09:30", "09:45", "10:30", "12:00", "eod")] == [
         0, 15, 60, 150, 390
@@ -215,6 +241,67 @@ def test_band_metrics_are_well_formed():
     assert 0.0 <= eod["ny_upper_channel_occupancy"] <= 1.0
     assert eod["ny_band_cross_rate"] >= 0
     assert eod["longest_hold_min"] <= eod["bars"]
+
+
+def test_gx_rescue_counts_the_catch_on_either_band():
+    """The rescue event, pinned on both branches and both sides.
+
+    _gx_rescue reads a signed frame (u = +1 upper, −1 lower) so one function
+    serves the fade-short's floor and the fade-long's ceiling. Reflecting every
+    price about zero and flipping u must reproduce the ratio exactly — the one
+    check a sign error cannot survive.
+    """
+    import numpy as np
+
+    ny = np.array([100.0, 100.0, 100.0])
+    gx = np.array([95.0, 95.0, 95.0])          # the Globex floor, just underneath
+    close = np.array([101.0, 99.0, 102.0])     # poked above, broke, closed back above
+
+    # The catch: the dip held above the Globex line, and price reclaimed the
+    # session band within the window.
+    held = np.array([100.0, 96.0, 100.0])      # bar lows
+    assert regmod._gx_rescue(close, held, ny, gx, u=1.0) == 1.0
+
+    # The failure: the dip sliced the Globex line too — both bands gone, no rescue.
+    sliced = np.array([100.0, 90.0, 100.0])
+    assert regmod._gx_rescue(close, sliced, ny, gx, u=1.0) == 0.0
+
+    # No break at all is no event, and no event is None — not zero. "It never
+    # happened" must not read as "it happened and failed".
+    assert regmod._gx_rescue(np.array([101.0, 102.0, 103.0]), held, ny, gx, u=1.0) is None
+
+    # A Globex line on the NEAR side of the session band is no floor: the geometry
+    # the event is defined on isn't there, so there is nothing to be rescued by.
+    assert regmod._gx_rescue(close, held, ny, np.array([105.0] * 3), u=1.0) is None
+
+    # And the mirror: negate everything (lows become highs), flip u, same answers.
+    for pierce, expect in ((held, 1.0), (sliced, 0.0)):
+        assert regmod._gx_rescue(-close, -pierce, -ny, -gx, u=-1.0) == expect
+
+
+def test_dual_kpis_mirror_under_reflection():
+    """Reflect the tape about a constant and every upper-band KPI must come back
+    as its lower-band twin. This is what makes the fade-long's caps trustworthy:
+    they read the lower keys, and the lower keys are the upper ones seen in a
+    mirror — not a second, subtly different definition."""
+    C = 20000.0
+    session = lambda p: C + 45 * math.sin(p * 12 * math.pi)  # noqa: E731
+    night = lambda p: C + 20 * math.sin(p * 4 * math.pi)     # noqa: E731
+
+    with cache(_rth(session), _overnight(night)):
+        up = regmod.compute_regime(SYMBOL, DAY)["checkpoints"]["eod"]
+    with cache(_rth(lambda p: 2 * C - session(p)),
+               _overnight(lambda p: 2 * C - night(p))):
+        down = regmod.compute_regime(SYMBOL, DAY)["checkpoints"]["eod"]
+
+    for upper, lower in (("upper_wrap_occupancy", "lower_wrap_occupancy"),
+                         ("upper_dev1_gap_sigma", "lower_dev1_gap_sigma"),
+                         ("gx_upper_rescue_ratio", "gx_lower_rescue_ratio")):
+        assert up[upper] == down[lower], f"{upper} did not mirror into {lower}"
+        assert up[lower] == down[upper], f"{lower} did not mirror into {upper}"
+
+    # The tape has to actually be asymmetric, or the assertions above are vacuous.
+    assert up["upper_wrap_occupancy"] != up["lower_wrap_occupancy"]
 
 
 if __name__ == "__main__":

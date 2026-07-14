@@ -8,8 +8,11 @@
 export const CHECKPOINTS = ["09:30", "09:45", "10:30", "12:00", "eod"] as const;
 export type Checkpoint = (typeof CHECKPOINTS)[number];
 
-/** Provisional — thresholds in regime.classify are a first guess, not a fit. */
-export type RegimeClass = "trend_up" | "trend_down" | "balance" | "mixed" | "unknown";
+/** Provisional — thresholds in regime.classify are calibrated on the collected
+ * sessions, not fitted against P&L. `parked` is a one-sided day that never
+ * travelled: price held above (or below) both anchors, but close − open was a
+ * small fraction of the range — a gap that spent the session flat, not a trend. */
+export type RegimeClass = "trend_up" | "trend_down" | "balance" | "parked" | "mixed" | "unknown";
 
 /** Where a close sits relative to the anchors. The `on_*` states are pre-RTH,
  * where only the Globex anchor exists. */
@@ -70,9 +73,17 @@ export interface RegimeKpis {
   // Dual-VWAP: the user's own read — the model works when price holds above both.
   abr: number | null;
   bbr: number | null;
+  /** ABR − BBR: whose day it was, in one signed number. What classify() reads. */
+  net_conviction: number | null;
   longest_hold_min: number | null;
   longest_hold_below_min: number | null;
   quadrant_transitions_rate: number | null;
+  /** Side changes per hour — above-both → below-both, however long the churn
+   * zone held in between. The churn gate classify() uses; shallow flips (a dip
+   * into a single-anchor state and back) are counted separately because a trend
+   * day produces them freely whenever the two anchors run close together. */
+  deep_flip_rate: number | null;
+  shallow_flip_rate: number | null;
   norm_spread: number | null;
   spread_slope: number | null;
   /** Share of RTH where the Globex upper channel contains the session's — the
@@ -87,11 +98,36 @@ export interface RegimeKpis {
    * "bounced at Globex's dev1 instead of the session's" event. */
   gx_upper_rescue_ratio: number | null;
 
+  /** The three above, mirrored onto the lower bands — what the dev1 fade LONG
+   * reads, where the short reads the upper ones. The Globex −1σ standing ABOVE
+   * the session −1σ is a ceiling over a broken band, not a floor under it. */
+  lower_wrap_occupancy: number | null;
+  /** Mean (Globex −1σ − session −1σ) in session-σ units. Positive = the Globex
+   * line runs above the session's, a second ceiling over the band. */
+  lower_dev1_gap_sigma: number | null;
+  /** Of closes that broke the session −1σ while the Globex −1σ sat above it,
+   * the share where the highs held under the Globex line and price recovered. */
+  gx_lower_rescue_ratio: number | null;
+
+  /** (close − open) ÷ range of 1-minute closes so far. Scale-free "did the day
+   * go anywhere": a trend closes near an extreme (→ ±1), a gapped-and-parked
+   * day never travels (→ 0). Anchor-free, so it exists on partial days too. */
+  net_travel: number | null;
+
   /** Minutes of RTH the snapshot covers. 0 at the bell. */
   bars: number;
 }
 
-export type RegimeCheckpoints = Record<Checkpoint, RegimeKpis>;
+/** A checkpoint is its KPIs plus the class they support — what the day looked
+ * like at that clock time. The class lives outside RegimeKpis because it is a
+ * label, not a scoreable number: everything a KpiSpec can point at stays
+ * `number | null`. Only `eod`'s class is hindsight; it is mirrored as the
+ * day's top-level class. */
+export interface RegimeCheckpoint extends RegimeKpis {
+  class: RegimeClass;
+}
+
+export type RegimeCheckpoints = Record<Checkpoint, RegimeCheckpoint>;
 
 /** One day, without its ribbon — what the range endpoint serves. */
 export interface RegimeDaySummary {
@@ -220,6 +256,7 @@ export const CLASS_LABEL: Record<RegimeClass, string> = {
   trend_up: "Trend up",
   trend_down: "Trend down",
   balance: "Balance",
+  parked: "Parked",
   mixed: "Mixed",
   unknown: "Unknown",
 };

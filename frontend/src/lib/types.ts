@@ -277,6 +277,53 @@ export interface Edges {
   by_hour_et: EdgeRow[];
 }
 
+// The same cuts over one simulated run — with the two things the real book can't
+// have: avg_r (a fixed-stop engine measures every trade in units of its own risk)
+// and the cuts only the engine knows (which rule closed the trade, how wide the
+// band was, which gate vetoed it).
+export interface RunEdgeRow extends EdgeRow {
+  avg_r: number;
+}
+
+export interface RunCut {
+  name: string;
+  label: string;
+  // Was the bucket knowable at entry? A session block was; an exit reason was not.
+  // Only a knowable cut is a filter you could have traded, so only a knowable cut
+  // is scored — an outcome cut separates P&L perfectly by construction.
+  knowable: boolean;
+  // How often shuffled P&L separates the buckets this well. null = not scored.
+  luck: number | null;
+  holds: boolean;
+  rows: RunEdgeRow[];
+}
+
+export interface RunEdgeScope {
+  trades: number;
+  net_pnl: number;
+  cuts: RunCut[];
+}
+
+// traded = what the run took; vetoed = the ghost trades its gates cut; all = the
+// run the gates were never in. null when that book is empty.
+export type RunEdgeScopeName = "traded" | "vetoed" | "all";
+
+export interface RunEdges {
+  run_id: string;
+  permutations: number;
+  luck_bar: number;
+  scopes: Record<RunEdgeScopeName, RunEdgeScope | null>;
+  reference: {
+    run_id: string;
+    label: string;
+    is_baseline: boolean;
+    start: string;
+    end: string;
+    same_window: boolean;
+    scopes: Record<RunEdgeScopeName, RunEdgeScope | null>;
+  } | null;
+}
+
 export interface Note {
   note: string;
   tags: string[];

@@ -11,17 +11,28 @@ from __future__ import annotations
 
 from datetime import date
 
+import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 
+from journal import edges
 from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS
 from journal.sim import regime_pnl, registry, runner, schema, store
 from journal.sim import ticks as tickmod
-from journal.sim.rules import SimConfig
 
 from .. import sim_charts
+from ..serialize import records
 
 router = APIRouter()
+
+EDGE_COLS = ["bucket", "trades", "net_pnl", "win_rate", "expectancy", "avg_r"]
+
+# The cuts a run is served in. Order is the order they are rendered in, and the
+# count is the family the luck bar corrects for — adding a seventh cut here makes
+# the bar for all of them stricter, which is the point of a Bonferroni.
+TRADED_CUTS = ("by_hour_et", "by_weekday", "by_hold_time", "by_direction",
+               "by_exit_reason", "by_band_width")
+VETOED_CUTS = TRADED_CUTS + ("by_gate",)
 
 TRADE_COLS = [
     "trade_no", "session", "direction", "entry_ts_local", "exit_ts_local",
@@ -43,8 +54,8 @@ def _strategy(slug: str) -> registry.Strategy:
         raise HTTPException(404, str(exc)) from exc
 
 
-def _parse_config(strat: registry.Strategy, config: dict) -> SimConfig:
-    """User JSON -> a canonical, validated SimConfig, or a 400.
+def _parse_config(strat: registry.Strategy, config: dict):
+    """User JSON -> a canonical, validated config of the strategy's class, or a 400.
 
     Absent keys take their defaults; unknown keys, out-of-range values and unknown
     confluences are hard errors. Every one of those is a config the engine would
@@ -54,7 +65,7 @@ def _parse_config(strat: registry.Strategy, config: dict) -> SimConfig:
     request. The rules live in journal.sim.schema, next to the knobs themselves.
     """
     try:
-        cfg = store.config_from_json(config)
+        cfg = store.config_from_json(config, strat.config_cls)
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, f"bad config: {exc}") from exc
     try:
@@ -100,18 +111,18 @@ def strategy_detail(slug: str) -> dict:
     strat = _strategy(slug)
     return {
         **_strategy_summary(strat),
-        "default_config": SimConfig().to_json(),
+        "default_config": strat.config_cls().to_json(),
         # The run form renders itself from this — groups, widgets, bounds, and the
         # gate sections this strategy supports. Served rather than hard-coded in
         # the browser so a new knob can't reach the engine without reaching the UI.
-        "config_schema": schema.config_schema(strat.confluences),
+        "config_schema": schema.config_schema(strat.confluences, strat.config_cls),
         "runs": store.list_runs(slug),
     }
 
 
 @router.get("/strategies/{slug}/runs/{run_id}")
 def run_detail(slug: str, run_id: str) -> dict:
-    _strategy(slug)
+    strat = _strategy(slug)
     state = store.read_state(slug, run_id)
     if state is None:
         raise HTTPException(404, f"No run {run_id}")
@@ -124,7 +135,7 @@ def run_detail(slug: str, run_id: str) -> dict:
     vetoed_rows = vetoed[[c for c in VETOED_COLS if c in vetoed.columns]].to_dict("records")
     # Trading days from the config window (not from the trades), so a day with
     # zero trades still gets a tab in the by-day view.
-    c = store.config_from_json(cfg)
+    c = store.config_from_json(cfg, strat.config_cls)
     days = [d.isoformat() for d in tickmod.session_dates(c.start_date, c.end_date)]
     return {"run_id": run_id, "config": cfg, "metrics": m, "trades": rows,
             "vetoed_trades": vetoed_rows, "session_days": days,
@@ -237,7 +248,7 @@ def rerun_baseline(slug: str, background: BackgroundTasks) -> dict:
     r = store.read_run(slug, base_id)
     if r is None:
         raise HTTPException(409, "baseline run is not readable")
-    cfg = store.config_from_json(r[0])
+    cfg = store.config_from_json(r[0], strat.config_cls)
     return create_run(slug, ConfigIn(config=cfg.to_json()), background)
 
 
@@ -255,7 +266,7 @@ def regime_pnl_study(slug: str, run_id: str, refresh: bool = Query(False)) -> di
     ticks on disk is reported as skipped, never fetched. A GET must not spend
     money at Databento.
     """
-    _strategy(slug)
+    strat = _strategy(slug)
     if not refresh and (cached := store.read_regime_pnl(slug, run_id)) is not None:
         return cached
 
@@ -263,10 +274,107 @@ def regime_pnl_study(slug: str, run_id: str, refresh: bool = Query(False)) -> di
     if r is None:
         raise HTTPException(404, f"No completed run {run_id}")
     cfg, trades, _ = r
-    c = store.config_from_json(cfg)
+    c = store.config_from_json(cfg, strat.config_cls)
     study = regime_pnl.study(c.contract, c.start_date, c.end_date, trades)
     store.write_regime_pnl(slug, run_id, study)
     return study
+
+
+@router.get("/strategies/{slug}/runs/{run_id}/edges")
+def run_edges(slug: str, run_id: str, compare: str | None = Query(None)) -> dict:
+    """The behavioral-edge cuts (/edges) run over one simulation's trades.
+
+    The same breakdowns the journal's Edges tab computes over the real book —
+    and computed by the same functions, because the engine's trade frame already
+    carries the columns they read (entry_ts_utc/_local, duration_s, direction,
+    net_pnl). No display-tz cut here: a sim's ``entry_ts_local`` is always ET, so
+    the by-hour table would only repeat the session blocks in a coarser grid.
+
+    Three books, not one. The trades the run took are the obvious cut; the ones
+    its gates *vetoed* are the counterfactual, and they are the only way to ask
+    whether a gate cut the right bucket or merely cut trades and got lucky on the
+    total. ``all`` is the run the gates were never in.
+
+    ``compare`` names another run to read the same cuts off, so each bucket can
+    print what the knob change did *to that bucket* rather than only to the total.
+    Defaults to the strategy's pinned baseline; pass an empty string for none.
+    """
+    strat = _strategy(slug)
+    r = store.read_run(slug, run_id)
+    if r is None:
+        raise HTTPException(404, f"No completed run {run_id}")
+    traded = r[1]
+    vetoed = store.read_vetoed(slug, run_id)
+
+    ref_id = store.baseline(slug) if compare is None else (compare or None)
+    reference = None
+    if ref_id and ref_id != run_id and (ref := store.read_run(slug, ref_id)) is not None:
+        cfg, ref_cfg = (store.config_from_json(r[0], strat.config_cls),
+                        store.config_from_json(ref[0], strat.config_cls))
+        reference = {
+            "run_id": ref_id,
+            "label": store.read_meta(slug, ref_id).get("label") or "",
+            "is_baseline": ref_id == store.baseline(slug),
+            "start": ref_cfg.start_date.isoformat(),
+            "end": ref_cfg.end_date.isoformat(),
+            # Whether the two runs even saw the same sessions. If they didn't, a
+            # bucket's Δ net is mostly a count of days the reference had and this
+            # run didn't — the per-trade columns (avg R, win rate, expectancy) are
+            # the ones that still mean something, and the panel says so rather than
+            # printing an impressive number that is really a longer window.
+            "same_window": (ref_cfg.start_date == cfg.start_date
+                            and ref_cfg.end_date == cfg.end_date),
+            # No luck column on the reference: it is a yardstick, not a claim. The
+            # permutation test it would carry is about *its* trades, and printing
+            # it next to this run's would invite reading a delta as significant
+            # because both halves happened to be.
+            "scopes": _edge_scopes(ref[1], store.read_vetoed(slug, ref_id), with_luck=False),
+        }
+
+    return {
+        "run_id": run_id,
+        "permutations": edges.PERMUTATIONS,
+        "luck_bar": edges.luck_bar(TRADED_CUTS),
+        "scopes": _edge_scopes(traded, vetoed, with_luck=True),
+        "reference": reference,
+    }
+
+
+def _edge_scopes(traded, vetoed, with_luck: bool) -> dict:
+    """The cuts of one run's three books, wire-shaped.
+
+    A scope with no trades in it is served as null rather than as a table of
+    zeros: "this run vetoed nothing" and "every vetoed bucket is empty" are
+    different facts, and only the first one is true.
+    """
+    books = {"traded": (traded, TRADED_CUTS), "vetoed": (vetoed, VETOED_CUTS)}
+    if vetoed is not None and not vetoed.empty and not traded.empty:
+        # The run the gates were never in. Concatenated, not summed: a bucket's win
+        # rate is a property of its trades, and averaging two of them is not one.
+        books["all"] = (pd.concat([traded, vetoed], ignore_index=True), TRADED_CUTS)
+
+    out: dict = {}
+    for scope, (book, names) in books.items():
+        if book is None or book.empty:
+            out[scope] = None
+            continue
+        cuts = edges.cuts(book, names, with_luck=with_luck)
+        out[scope] = {
+            "trades": int(len(book)),
+            "net_pnl": float(book["net_pnl"].sum()),
+            "cuts": [
+                {
+                    "name": c["name"],
+                    "label": c["label"],
+                    "knowable": c["knowable"],
+                    "luck": c["luck"],
+                    "holds": c["holds"],
+                    "rows": records(c["frame"], EDGE_COLS),
+                }
+                for c in cuts.values()
+            ],
+        }
+    return out
 
 
 @router.get("/strategies/{slug}/runs/{run_id}/trade-chart/{trade_no}")
