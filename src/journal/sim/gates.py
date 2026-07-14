@@ -11,9 +11,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 
 from ..config import ET_TZ, tick_size
 from . import regime as regmod
+from . import ticks as tickmod
+from . import vwap as vwapmod
 from .schema import Field
 
 if TYPE_CHECKING:
@@ -184,6 +187,182 @@ class VwapSlopeGate:
 
     def allows(self, i: int, fill: float) -> bool:
         return self._blocked is None or not self._blocked[i]
+
+
+class GxRescueGate:
+    """Veto every entry after 09:45 ET on a day whose broken session bands are
+    not being caught by the Globex band underneath.
+
+    The idea it enforces: the user's own read — on some days the Globex upper
+    channel wraps the session's, and a pullback that breaks the session +1σ
+    bounces at the Globex +1σ instead. The regime artifact counts exactly that
+    event (``gx_upper_rescue_ratio``: of closes that broke the session +1σ with
+    the Globex +1σ below it, the share where the lows held the Globex line and
+    price recovered). Across Aug 2025 – Jan 2026 its 09:45 reading was the
+    strongest early correlate of this strategy's net found so far (ρ ≈ +0.56
+    over the 40 days it was defined on, past the Bonferroni bar): days at 0
+    averaged −$445 and −$309 by tercile, days at ≥1/3 averaged +$1,114.
+
+    Honesty clause: 09:45 is 14 minutes into the entry window, so unlike the
+    slope gate's 10:30 read almost all of the P&L it correlates with comes
+    *after* the reading — but ghost-ledger arithmetic has over-promised before
+    (entries interact through rearm), so the setting still has to earn its keep
+    on an actual A/B run, not on this docstring.
+
+    Three distinct silences, treated differently:
+
+    - No artifact, or a ``partial`` day (no overnight, so no Globex anchor and
+      no wrap to read) — blind. Vetoes after 09:45: "no data" must not read as
+      "confirmed".
+    - Artifact present, ratio ``None`` — the session's +1σ simply hasn't been
+      broken with the wrap present yet. That is the *absence of the event*, not
+      blindness; the gate stays inert rather than punishing a day for not
+      having pulled back yet.
+    - Ratio present but below the threshold — stood down for the rest of the
+      session.
+
+    Config section::
+
+        {"gx_rescue": {"enabled": true, "rescue_min": 0.33}}
+    """
+
+    name = "gx_rescue"
+    needs_profile = False
+
+    _CHECKPOINT = "09:45"
+    _CHECKPOINT_MIN = 9 * 60 + 45
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Stand down when Globex isn't catching",
+              default=False,
+              help="After 09:45 ET, vetoes every entry on a day whose broken "
+                   "session +1σ pullbacks are not being rescued by the Globex "
+                   "+1σ underneath. Days with no such break yet pass untouched."),
+        Field("rescue_min", "float", name, "Min rescue ratio at 09:45",
+              min=0.0, max=1.0, default=0.33, depends_on=("enabled", True),
+              help="Share of session-+1σ breaks the Globex +1σ must have caught "
+                   "by 09:45. Below it, the rest of the session is stood down. "
+                   "The 0.33 default is the top-tercile boundary of the Aug'25–"
+                   "Jan'26 sample."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown gx_rescue knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        v = section.get("rescue_min", 0.33)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
+            raise ValueError(f"rescue_min must be a number in [0, 1], got {v!r}")
+        self.rescue_min = float(v)
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        if art is not None and not art.get("partial"):
+            ratio = (art.get("checkpoints", {}).get(self._CHECKPOINT)
+                     or {}).get("gx_upper_rescue_ratio")
+            if ratio is None or ratio >= self.rescue_min:
+                # No break to read yet, or the rescues are there: inert today.
+                self._blocked = None
+                return
+        et = ctx.ticks["ts_utc"].dt.tz_convert(ET_TZ)
+        mins = (et.dt.hour * 60 + et.dt.minute).to_numpy()
+        self._blocked = mins >= self._CHECKPOINT_MIN
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class GxFloorGate:
+    """Veto any entry without the Globex +1σ as a second floor just beneath it.
+
+    The per-trade version of the wrap read: a bounce entry at the session band
+    is better protected when the Globex band runs a little below the fill — a
+    pullback that breaks the session +1σ can still be caught before it travels
+    stop-distance. The gate requires the Globex dev1 (on the traded side) to sit
+    between the fill and ``max_ticks_below`` ticks beyond it: a line above the
+    fill is no floor, and one further away than the stop would rescue nobody.
+
+    Honesty clause: the day-level cousin of this number (the mean dev1 gap)
+    never cleared the study's luck bar; what did was the *event* ratio the
+    gx_rescue gate reads. This gate exists to A/B the per-entry microstructure
+    version of the same idea off the ghost ledger, not because a profitable
+    setting is already known.
+
+    The engine never builds the Globex bands for an RTH strategy, so the gate
+    builds them itself in prepare() — from the *cached* overnight ticks spliced
+    onto the engine's own tick frame, so the per-tick line is positionally
+    aligned with every index ``allows`` will ever be asked about. Cache-only by
+    doctrine (a gate must never spend at Databento); a day with no cached
+    overnight has no Globex anchor, and the gate vetoes it wholesale — "no
+    data" must not read as "confirmed".
+
+    Config section::
+
+        {"gx_floor": {"enabled": true, "max_ticks_below": 80}}
+    """
+
+    name = "gx_floor"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Require a Globex second floor",
+              default=False,
+              help="Vetoes any entry whose fill does not have the Globex +1σ "
+                   "(−1σ on a short) within reach beneath it — the second floor "
+                   "that catches a broken session band."),
+        Field("max_ticks_below", "int", name, "Max distance to the Globex line",
+              unit="ticks", min=0, default=80, depends_on=("enabled", True),
+              help="How far beyond the fill (below on a long, above on a short) "
+                   "the Globex dev1 may sit and still count as a floor. Beyond "
+                   "stop distance it would rescue nobody; 0 demands the lines "
+                   "touch."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown gx_floor knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        n = section.get("max_ticks_below", 80)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"max_ticks_below must be a non-negative int, got {n!r}")
+        self.max_ticks_below = n
+        self._line: np.ndarray | None = None
+        self._max_pts = 0.0
+        self._side = 1.0
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._max_pts = self.max_ticks_below * tick_size(ctx.cfg.instrument)
+        self._side = 1.0 if ctx.side == "long" else -1.0
+        self._line = None
+        contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
+        on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
+        if on is None or on.empty:
+            return  # blind: no overnight, no Globex anchor — veto everything
+        w = vwapmod.vwap_bands(pd.concat([on, ctx.ticks], ignore_index=True))
+        col = "upper1" if ctx.side == "long" else "lower1"
+        self._line = w[col].to_numpy(dtype="float64")[len(on):]
+
+    def allows(self, i: int, fill: float) -> bool:
+        if self._line is None:
+            return False
+        line = self._line[i]
+        if np.isnan(line):
+            return False
+        # The line on the traded side of the fill, within reach: below a long's
+        # fill, above a short's, by at most the configured distance.
+        gap = self._side * (fill - line)
+        return 0.0 <= gap <= self._max_pts + 1e-9
 
 
 class RegimeGate:

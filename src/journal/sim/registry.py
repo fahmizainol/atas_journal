@@ -60,7 +60,11 @@ STRATEGIES: dict[str, Strategy] = {
                 "stop into a step ratchet: N steps in favour put the stop at "
                 "entry + (N-1) steps, so the first step buys breakeven. The "
                 "regime confluence stands the strategy down after 10:30 ET on "
-                "days whose first RTH hour lived below both anchored VWAPs."
+                "days whose first RTH hour lived below both anchored VWAPs. "
+                "gx_rescue stands it down after 09:45 when broken session bands "
+                "are not being caught by the Globex band beneath; gx_floor "
+                "requires each fill to have the Globex dev1 within reach below "
+                "it as a second floor."
             ),
             # v2: added the developing-value-area exit (exit_below_vah_bars) and
             # the volume_profile gate. Both are off by default and a config that
@@ -83,7 +87,8 @@ STRATEGIES: dict[str, Strategy] = {
             # simulates identically to v5, but it moves the fill price on the base
             # rule path, so v5 runs are quarantined rather than trusted.
             version="6",
-            confluences=("volume_profile", "regime", "vwap_slope"),
+            confluences=("volume_profile", "regime", "vwap_slope",
+                         "gx_rescue", "gx_floor"),
         ),
         Strategy(
             slug="vwap-globex-bounce",

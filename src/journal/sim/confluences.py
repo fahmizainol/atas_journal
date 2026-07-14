@@ -126,8 +126,12 @@ def needs_profile(cfg: SimConfig) -> bool:
 # Registered at the bottom so the concrete gates can import the Gate contract
 # above without a cycle. Every entry point that resolves a config goes through
 # this module, so importing it is what makes the gates exist.
-from .gates import RegimeGate, VolumeProfileGate, VwapSlopeGate  # noqa: E402
+from .gates import (  # noqa: E402
+    GxFloorGate, GxRescueGate, RegimeGate, VolumeProfileGate, VwapSlopeGate,
+)
 
 GATE_FACTORIES[VolumeProfileGate.name] = VolumeProfileGate
 GATE_FACTORIES[RegimeGate.name] = RegimeGate
 GATE_FACTORIES[VwapSlopeGate.name] = VwapSlopeGate
+GATE_FACTORIES[GxRescueGate.name] = GxRescueGate
+GATE_FACTORIES[GxFloorGate.name] = GxFloorGate

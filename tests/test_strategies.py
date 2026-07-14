@@ -292,6 +292,112 @@ def test_vwap_slope_gate_stands_down_after_1030_without_upward_grade():
             pass
 
 
+def test_gx_rescue_gate_reads_the_0945_ratio_and_knows_its_three_silences():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    art = {"partial": False,
+           "checkpoints": {"09:45": {"gx_upper_rescue_ratio": 0.0}}}
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+        g = gatesmod.GxRescueGate({"enabled": True, "rescue_min": 0.33})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
+
+        # Rescues at or above the threshold leave the gate inert.
+        art = {"partial": False,
+               "checkpoints": {"09:45": {"gx_upper_rescue_ratio": 0.5}}}
+        g = gatesmod.GxRescueGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # A described day whose band simply hasn't broken yet is NOT blind:
+        # the absence of the event must not stand the day down.
+        art = {"partial": False,
+               "checkpoints": {"09:45": {"gx_upper_rescue_ratio": None}}}
+        g = gatesmod.GxRescueGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4))
+
+        # Blind — no artifact, or no Globex anchor — must not read as confirmed.
+        for blind in (None,
+                      {"partial": True,
+                       "checkpoints": {"09:45": {"gx_upper_rescue_ratio": None}}}):
+            art = blind
+            g = gatesmod.GxRescueGate({"enabled": True})
+            g.prepare(_regime_ctx())
+            assert g.allows(0, 0.0) and not g.allows(1, 0.0), f"blind case {blind!r}"
+    finally:
+        gatesmod.regmod.get_regime = real
+
+    for bad in ({"enabled": True, "rescue": 0.3}, {"enabled": True, "rescue_min": 1.5},
+                {"enabled": True, "rescue_min": True}):
+        try:
+            gatesmod.GxRescueGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_gx_floor_gate_wants_the_globex_line_just_beneath_the_fill():
+    from journal.sim import gates as gatesmod
+
+    ctx = _regime_ctx()
+    n_on, n_rth = 3, len(ctx.ticks)
+    on = pd.DataFrame({"ts_utc": pd.to_datetime(["2025-10-13 09:00"] * n_on, utc=True),
+                       "price": [100.0] * n_on, "size": [1] * n_on})
+    # upper1 per tick, overnight rows first: the RTH segment the gate slices off
+    # is [100, 105, nan, 100]; lower1 mirrors it above for the short case.
+    bands = pd.DataFrame({
+        "upper1": [0.0] * n_on + [100.0, 105.0, float("nan"), 100.0],
+        "lower1": [0.0] * n_on + [100.0, 95.0, float("nan"), 100.0],
+    })
+
+    real_contract = gatesmod.tickmod.contract_for_cached
+    real_on = gatesmod.tickmod.cached_overnight
+    real_bands = gatesmod.vwapmod.vwap_bands
+    try:
+        gatesmod.tickmod.contract_for_cached = lambda symbol, day: "NQZ5"
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on
+        gatesmod.vwapmod.vwap_bands = lambda t: bands
+
+        g = gatesmod.GxFloorGate({"enabled": True, "max_ticks_below": 80})  # 20 pts on NQ
+        g.prepare(ctx)
+        assert g.allows(0, 100.0), "line exactly at the fill is a floor"
+        assert g.allows(0, 110.0), "line 10 pts below the fill is within reach"
+        assert not g.allows(0, 125.0), "line 25 pts below is past the 20-pt reach"
+        assert not g.allows(1, 100.0), "line above the fill is no floor"
+        assert not g.allows(2, 100.0), "a NaN line must not read as confirmed"
+
+        # The short mirror: the floor becomes a ceiling within reach ABOVE.
+        sctx = confmod.SessionCtx(cfg=ctx.cfg, day=ctx.day, ticks=ctx.ticks,
+                                  bars=ctx.bars, value_edge_at_tick=None,
+                                  profile=None, side="short")
+        g = gatesmod.GxFloorGate({"enabled": True, "max_ticks_below": 80})
+        g.prepare(sctx)
+        assert g.allows(1, 90.0), "line 5 pts above a short's fill is a ceiling"
+        assert not g.allows(1, 100.0), "line below a short's fill is no ceiling"
+
+        # Blind — no cached overnight — vetoes wholesale.
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: None
+        g = gatesmod.GxFloorGate({"enabled": True})
+        g.prepare(ctx)
+        assert not any(g.allows(i, 100.0) for i in range(4))
+    finally:
+        gatesmod.tickmod.contract_for_cached = real_contract
+        gatesmod.tickmod.cached_overnight = real_on
+        gatesmod.vwapmod.vwap_bands = real_bands
+
+    for bad in ({"enabled": True, "max_ticks": 10}, {"enabled": True, "max_ticks_below": -1},
+                {"enabled": True, "max_ticks_below": True}):
+        try:
+            gatesmod.GxFloorGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
 # --- preflight spend guard ------------------------------------------------------
 
 def test_preflight_globex_needs_the_overnight_segment_too():
