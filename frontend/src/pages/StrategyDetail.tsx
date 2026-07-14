@@ -840,12 +840,9 @@ function RunView({
         </div>
       )}
 
-      <RegimePnlPanel
-        symbol={cfg.contract}
-        trades={detail?.trades ?? []}
-        start={cfg.start_date}
-        end={cfg.end_date}
-      />
+      {/* Scores nothing itself: the study is computed server-side and read back
+          from the run's own snapshot, so the panel only needs to say which run. */}
+      <RegimePnlPanel slug={slug} runId={run.run_id} />
 
       <div className="tabs" style={{ marginTop: 20 }}>
         <button

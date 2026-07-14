@@ -95,30 +95,105 @@ export interface RegimeRange {
   skipped: string[];
 }
 
-/** The KPIs worth plotting against P&L, in the order the picker offers them. */
-export const KPI_OPTIONS: { key: keyof RegimeKpis; label: string; pct?: boolean }[] = [
-  { key: "abr", label: "Above both VWAPs (ABR)", pct: true },
-  { key: "bbr", label: "Below both VWAPs (BBR)", pct: true },
-  { key: "quadrant_transitions_rate", label: "Quadrant transitions / hr" },
-  { key: "ny_touch_hold_ratio", label: "NY +1σ touch → hold", pct: true },
-  { key: "gx_touch_hold_ratio", label: "Globex +1σ touch → hold", pct: true },
-  { key: "ny_upper_channel_occupancy", label: "NY upper-channel occupancy", pct: true },
-  { key: "gx_upper_channel_occupancy", label: "Globex upper-channel occupancy", pct: true },
-  { key: "ny_band_cross_rate", label: "NY +1σ crossings / hr" },
-  { key: "ny_vwap_cross_rate", label: "NY VWAP crossings / hr" },
-  { key: "longest_hold_min", label: "Longest hold above both (min)" },
-  { key: "norm_spread", label: "VWAP spread (σ)" },
-  { key: "spread_slope", label: "VWAP spread slope (30m)" },
-  { key: "ny_vwap_slope_ppm", label: "NY VWAP slope (pts/min, 30m)" },
-  { key: "ny_vwap_slope_deg", label: "NY VWAP slope (°, ATR-norm)" },
-  { key: "gx_vwap_slope_ppm", label: "Globex VWAP slope (pts/min, 30m)" },
-  { key: "gx_vwap_slope_deg", label: "Globex VWAP slope (°, ATR-norm)" },
-  { key: "on_abr", label: "Overnight above Globex VWAP", pct: true },
-  { key: "on_vwap_slope_ppm", label: "Overnight VWAP slope (pts/min, 30m)" },
-  { key: "on_vwap_slope_deg", label: "Overnight VWAP slope (°, ATR-norm)" },
-  { key: "on_range_pts", label: "Overnight range (pts)" },
-  { key: "open_z", label: "Open in Globex σ-terms" },
-];
+// --- the regime-vs-P&L study ------------------------------------------------
+//
+// All of it is computed server-side (journal.sim.regime_pnl) and snapshotted to
+// <run>/regime_pnl.json. The browser used to score this itself, which meant the
+// only way to read the answer was to mount the panel — no API, no file, nothing
+// an LLM could see. It renders the numbers now; it does not produce them.
+//
+// Which KPIs exist, and how to print them, arrives in the payload for the same
+// reason: a picker with its own copy of the list can offer a KPI the scores were
+// never computed for.
+
+/** A day's KPI value and what the run made that day, as the picker labels it. */
+export interface KpiSpec {
+  key: keyof RegimeKpis;
+  label: string;
+  pct?: boolean;
+}
+
+/** One third of the traded days, by KPI value. No member list — recover it from
+ * `days` and this band's [lo, hi]; see regime_pnl._band. */
+export interface RegimeBand {
+  band: "low" | "mid" | "high";
+  days: number;
+  net: number;
+  avg_net: number | null;
+  trades: number;
+  win_rate: number | null;
+  lo: number | null;
+  hi: number | null;
+}
+
+/** One KPI, scored against the run's daily P&L at one checkpoint. */
+export interface BoardRow extends KpiSpec {
+  /** Spearman ρ against the day's net. */
+  rho: number;
+  /** Avg net of a day in the top third minus one in the bottom third — the money
+   * answer: "what does a day in the good band pay over a day in the bad one". */
+  edge: number;
+  /** Win-rate points, top third minus bottom third. */
+  win_edge: number;
+  /** Share of shuffled P&Ls that beat this |ρ|. Low = hard to get by luck. */
+  luck: number;
+  /** Clears the multiple-testing bar. NOT "is true". */
+  holds: boolean;
+  days: number;
+  bands: RegimeBand[];
+}
+
+export interface Board {
+  /** The Bonferroni line for a family this size — blunt, but it errs the safe way. */
+  luck_bar: number;
+  /** Roughly how many rows should clear a plain 5% bar by chance alone. */
+  expected_false_positives: number;
+  holds: number;
+  /** Ranked by |edge|. */
+  rows: BoardRow[];
+}
+
+export interface ClassBucket {
+  class: RegimeClass;
+  label: string;
+  days: number;
+  net: number;
+  avg_net: number;
+  trades: number;
+  win_rate: number | null;
+  dates: string[];
+}
+
+/** One traded session: the day's regime, and what the run made in it. */
+export interface StudyDay {
+  date: string;
+  class: RegimeClass;
+  partial: boolean;
+  net: number;
+  trades: number;
+  wins: number;
+}
+
+export interface RegimeStudy {
+  stats_version: number;
+  regime_version: number;
+  permutations: number;
+  symbol: string;
+  start: string;
+  end: string;
+  checkpoints: Checkpoint[];
+  kpis: KpiSpec[];
+  sessions_in_range: number;
+  /** Sessions the run covered but never traded. Left out of every score: a zero
+   * from "no setup armed" is not a zero from "traded flat". */
+  untraded_days: number;
+  traded_days: number;
+  /** Sessions with no cached ticks, and so no regime at all. */
+  skipped: string[];
+  days: StudyDay[];
+  class_buckets: ClassBucket[];
+  boards: Record<Checkpoint, Board>;
+}
 
 export const CLASS_LABEL: Record<RegimeClass, string> = {
   trend_up: "Trend up",

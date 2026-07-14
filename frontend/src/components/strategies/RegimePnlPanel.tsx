@@ -11,62 +11,38 @@ import {
   YAxis,
   ZAxis,
 } from "recharts";
-import { useRegimeRange } from "../../hooks/useRegime";
+import { useRegimePnl, useRegimeRange } from "../../hooks/useRegime";
 import { axisProps, gridProps, tooltipStyle } from "../charts/chartTheme";
 import { fmt, fmtPct } from "../../lib/format";
 import { palette, regimePalette } from "../../theme";
 import {
-  CHECKPOINTS,
   CLASS_LABEL,
-  KPI_OPTIONS,
+  type Board,
+  type BoardRow,
   type Checkpoint,
+  type KpiSpec,
   type RegimeClass,
   type RegimeKpis,
+  type RegimeStudy,
 } from "../../lib/regimeTypes";
-import {
-  expectedFalsePositives,
-  luckThreshold,
-  rankCorr,
-  score,
-  type DayPoint,
-  type Score,
-} from "../../lib/regimeStats";
-import type { SimTrade } from "../../lib/strategyTypes";
 
-interface Point extends DayPoint {
-  klass: RegimeClass;
-  partial: boolean;
-}
-
-interface Bucket {
-  label: string;
-  color?: string;
-  days: Point[];
-}
-
-const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 const tone = (n: number) => (n >= 0 ? "pos" : "neg");
 const th = { cursor: "default" as const };
+const sign = (n: number, digits = 0) => `${n >= 0 ? "+" : ""}${n.toFixed(digits)}`;
 
-/** Split into thirds by KPI value. Terciles rather than fixed cutoffs: the KPIs
- * are on incompatible scales (a ratio, a rate, a σ), so a threshold that means
- * something for ABR means nothing for the spread — and ranking can't manufacture
- * a band that isn't in the data. */
-function terciles(points: Point[], fmtX: (v: number) => string): Bucket[] {
-  const sorted = [...points].sort((a, b) => a.x - b.x);
-  const n = sorted.length;
-  if (n < 6) return [{ label: "all days", days: sorted }];
-  const cuts = [0, Math.floor(n / 3), Math.floor((2 * n) / 3), n];
-  return ["low", "mid", "high"].map((name, i) => {
-    const days = sorted.slice(cuts[i], cuts[i + 1]);
-    return {
-      label: `${name} · ${fmtX(days[0].x)} – ${fmtX(days[days.length - 1].x)}`,
-      days,
-    };
-  });
+/** A row of the two summary tables. Both are computed server-side; this is only
+ * how they are printed. */
+interface Row {
+  label: string;
+  color?: string;
+  days: number;
+  net: number;
+  avgNet: number | null;
+  trades: number;
+  winRate: number | null;
 }
 
-function BucketTable({ buckets, head }: { buckets: Bucket[]; head: string }) {
+function SummaryTable({ rows, head }: { rows: Row[]; head: string }) {
   return (
     <table className="data-table">
       <thead>
@@ -80,38 +56,33 @@ function BucketTable({ buckets, head }: { buckets: Bucket[]; head: string }) {
         </tr>
       </thead>
       <tbody>
-        {buckets.map((b) => {
-          const net = sum(b.days.map((d) => d.net));
-          const trades = sum(b.days.map((d) => d.trades));
-          const wins = sum(b.days.map((d) => d.wins));
-          return (
-            <tr key={b.label}>
-              <td>
-                <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  {b.color && (
-                    <span
-                      style={{
-                        width: 10,
-                        height: 10,
-                        borderRadius: 3,
-                        background: b.color,
-                        flex: "0 0 auto",
-                      }}
-                    />
-                  )}
-                  {b.label}
-                </span>
-              </td>
-              <td>{b.days.length}</td>
-              <td className={tone(net)} style={{ fontWeight: 600 }}>
-                {fmt(net)}
-              </td>
-              <td className={tone(net)}>{b.days.length ? fmt(net / b.days.length) : "—"}</td>
-              <td>{trades}</td>
-              <td>{trades ? fmtPct((wins / trades) * 100, 0) : "—"}</td>
-            </tr>
-          );
-        })}
+        {rows.map((r) => (
+          <tr key={r.label}>
+            <td>
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                {r.color && (
+                  <span
+                    style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: 3,
+                      background: r.color,
+                      flex: "0 0 auto",
+                    }}
+                  />
+                )}
+                {r.label}
+              </span>
+            </td>
+            <td>{r.days}</td>
+            <td className={tone(r.net)} style={{ fontWeight: 600 }}>
+              {fmt(r.net)}
+            </td>
+            <td className={tone(r.net)}>{r.avgNet == null ? "—" : fmt(r.avgNet)}</td>
+            <td>{r.trades}</td>
+            <td>{r.winRate == null ? "—" : fmtPct(r.winRate, 0)}</td>
+          </tr>
+        ))}
       </tbody>
     </table>
   );
@@ -120,25 +91,23 @@ function BucketTable({ buckets, head }: { buckets: Bucket[]; head: string }) {
 // Which regime KPIs track this run's P&L — every KPI at one checkpoint, ranked by
 // how much a day in its top third pays over a day in its bottom third.
 //
-// The `luck` column is the point of this table, not the ranking. With fifteen KPIs
-// on the board, the best-looking one is worth nothing on its own: something always
+// The `luck` column is the point of this table, not the ranking. With ~20 KPIs on
+// the board the best-looking one is worth nothing on its own: something always
 // wins. So each row is scored against the same statistic computed on shuffled P&L,
-// and the ones that a coin-flip would have produced this often get called out as
-// noise rather than quietly sorted to the top and believed.
+// and the ones a coin-flip would have produced this often are called out as noise
+// rather than quietly sorted to the top and believed.
 function Leaderboard({
-  rows,
+  board,
   cp,
   selected,
   onPick,
 }: {
-  rows: { key: keyof RegimeKpis; label: string; s: Score }[];
+  board: Board;
   cp: Checkpoint;
   selected: keyof RegimeKpis;
   onPick: (k: keyof RegimeKpis) => void;
 }) {
-  const bar = luckThreshold(rows.length);
-  const survivors = rows.filter((r) => r.s.luck <= bar).length;
-  const expected = expectedFalsePositives(rows.length);
+  const { rows, luck_bar: bar, holds: survivors, expected_false_positives: expected } = board;
 
   return (
     <>
@@ -162,53 +131,45 @@ function Leaderboard({
           </tr>
         </thead>
         <tbody>
-          {rows.map(({ key, label, s }) => {
-            const solid = s.luck <= bar;
-            return (
-              <tr
-                key={key}
-                onClick={() => onPick(key)}
-                className={key === selected ? "selected" : undefined}
-                style={{ cursor: "pointer", opacity: solid ? 1 : 0.55 }}
-                title="Show this KPI's bands below"
-              >
-                <td>{label}</td>
-                <td>{s.days}</td>
-                <td className={tone(s.rho)}>
-                  {s.rho >= 0 ? "+" : ""}
-                  {s.rho.toFixed(2)}
-                </td>
-                <td className={tone(s.edge)} style={{ fontWeight: 600 }}>
-                  {s.edge >= 0 ? "+" : ""}
-                  {fmt(s.edge)}
-                </td>
-                <td className={tone(s.winEdge)}>
-                  {s.winEdge >= 0 ? "+" : ""}
-                  {s.winEdge.toFixed(0)} pts
-                </td>
-                <td>
-                  {solid ? (
-                    <span className="badge badge-sm" title="Survives the multiple-testing bar">
-                      holds
-                    </span>
-                  ) : (
-                    <span className="muted" title="Shuffled P&L produces this often — treat as noise">
-                      {s.luck < 0.01 ? "<1%" : `${Math.round(s.luck * 100)}%`}
-                    </span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
+          {rows.map((r) => (
+            <tr
+              key={r.key}
+              onClick={() => onPick(r.key)}
+              className={r.key === selected ? "selected" : undefined}
+              style={{ cursor: "pointer", opacity: r.holds ? 1 : 0.55 }}
+              title="Show this KPI's bands below"
+            >
+              <td>{r.label}</td>
+              <td>{r.days}</td>
+              <td className={tone(r.rho)}>{sign(r.rho, 2)}</td>
+              <td className={tone(r.edge)} style={{ fontWeight: 600 }}>
+                {r.edge >= 0 ? "+" : ""}
+                {fmt(r.edge)}
+              </td>
+              <td className={tone(r.win_edge)}>{sign(r.win_edge)} pts</td>
+              <td>
+                {r.holds ? (
+                  <span className="badge badge-sm" title="Survives the multiple-testing bar">
+                    holds
+                  </span>
+                ) : (
+                  <span className="muted" title="Shuffled P&L produces this often — treat as noise">
+                    {r.luck < 0.01 ? "<1%" : `${Math.round(r.luck * 100)}%`}
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
       <div className="section-cap" style={{ marginTop: 6 }}>
         Ranked by what a day in the KPI's top third pays over one in its bottom third — click a row
         to see its bands. <strong>“Luck”</strong> is how often shuffled P&amp;L produces a
         correlation this strong: with {rows.length} KPIs on the board, roughly{" "}
-        {expected.toFixed(1)} of them should clear a plain 1-in-20 bar{" "}
-        <em>by chance alone</em>, so the “holds” badge uses a stricter bar ({(bar * 100).toFixed(1)}
-        %) that accounts for how many were tried. {survivors === 0
+        {expected.toFixed(1)} of them should clear a plain 1-in-20 bar <em>by chance alone</em>, so
+        the “holds” badge uses a stricter bar ({(bar * 100).toFixed(1)}%) that accounts for how many
+        were tried.{" "}
+        {survivors === 0
           ? "Nothing clears it here — which means every ordering below is within what noise produces, and none of it should be traded on yet."
           : `${survivors} clear${survivors === 1 ? "s" : ""} it. Dimmed rows are the ones that don't.`}
       </div>
@@ -249,9 +210,101 @@ function Header({
   );
 }
 
+// The scatter's one job is to show the shape the tables summarise, so it needs a
+// point per day — which the study payload deliberately does not carry: 21 KPIs x 5
+// checkpoints x every session would duplicate the whole regime cache into every
+// run's snapshot. It comes from the shared /regime range query instead (already
+// cached, keyed by symbol and window rather than by run), joined to the day's net
+// from the study. A join for *plotting*; every number is still the server's.
+function Chart({
+  study,
+  spec,
+  cp,
+}: {
+  study: RegimeStudy;
+  spec: KpiSpec;
+  cp: Checkpoint;
+}) {
+  const { data } = useRegimeRange(study.symbol, study.start, study.end);
+
+  const points = useMemo(() => {
+    const byDate = new Map(study.days.map((d) => [d.date, d]));
+    const out = [];
+    for (const r of data?.days ?? []) {
+      const v = r.checkpoints[cp]?.[spec.key];
+      const d = byDate.get(r.date);
+      if (v == null || !d) continue;
+      out.push({ ...d, x: spec.pct ? v * 100 : v, raw: v });
+    }
+    return out;
+  }, [data, study.days, spec, cp]);
+
+  if (!data) return <div className="notice">Loading the day-by-day values…</div>;
+
+  return (
+    <ResponsiveContainer width="100%" height={300}>
+      <ScatterChart margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+        <CartesianGrid {...gridProps} />
+        <XAxis
+          type="number"
+          dataKey="x"
+          name={spec.label}
+          {...axisProps}
+          tickFormatter={(v: number) => (spec.pct ? `${v.toFixed(0)}%` : v.toFixed(2))}
+        />
+        <YAxis
+          type="number"
+          dataKey="net"
+          name="Net"
+          {...axisProps}
+          width={64}
+          tickFormatter={(v: number) => fmt(v)}
+        />
+        <ZAxis range={[70, 70]} />
+        {/* Breakeven: dots above it are the days the model worked. */}
+        <ReferenceLine y={0} stroke={palette.muted} strokeDasharray="3 3" />
+        <Tooltip
+          {...tooltipStyle}
+          cursor={{ strokeDasharray: "3 3" }}
+          content={({ active, payload }) => {
+            if (!active || !payload?.length) return null;
+            const p = payload[0].payload as (typeof points)[number];
+            return (
+              <div style={tooltipStyle.contentStyle}>
+                <div style={{ padding: "6px 10px" }}>
+                  <div>
+                    <b>{p.date}</b> · {CLASS_LABEL[p.class]}
+                    {p.partial && " · partial"}
+                  </div>
+                  <div style={{ color: palette.muted }}>
+                    {spec.label}: {spec.pct ? `${p.x.toFixed(0)}%` : p.raw.toFixed(2)} @ {cp}
+                  </div>
+                  <div style={{ color: p.net >= 0 ? palette.green : palette.red }}>
+                    {fmt(p.net)} · {p.trades} trade{p.trades === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </div>
+            );
+          }}
+        />
+        <Scatter data={points} isAnimationActive={false}>
+          {points.map((p) => (
+            <Cell key={p.date} fill={p.net >= 0 ? palette.green : palette.red} />
+          ))}
+        </Scatter>
+      </ScatterChart>
+    </ResponsiveContainer>
+  );
+}
+
 // Does the day's regime explain the day's P&L?
 //
-// Tables, not a plot, by default: at ~30 sessions a scatter is a cloud you squint
+// Every number here is computed server-side (journal.sim.regime_pnl) and read back
+// from <run>/regime_pnl.json — the browser scores nothing. That is deliberate: the
+// study used to exist only for as long as this component was mounted, which meant
+// the one thing that could ever read the answer was a human looking at this table.
+//
+// Tables, not a plot, by default: at ~100 sessions a scatter is a cloud you squint
 // at, while "these ten days made 13k and those twenty-one lost 4k" is the sentence
 // you want out of it. The scatter is a click away — it's the better tool once
 // there are enough days for a shape to exist.
@@ -260,109 +313,48 @@ function Header({
 // correlating with the day's P&L proves nothing tradeable — both are computed from
 // the same session. A KPI read at 09:45 that still separates the winners is a
 // signal you could have acted on, because it was knowable before the day resolved.
-function Body({
-  symbol,
-  trades,
-  start,
-  end,
-  onHide,
-}: {
-  symbol: string;
-  trades: SimTrade[];
-  start: string;
-  end: string;
-  onHide: () => void;
-}) {
+function Body({ slug, runId, onHide }: { slug: string; runId: string; onHide: () => void }) {
   const [kpi, setKpi] = useState<keyof RegimeKpis>("abr");
   const [cp, setCp] = useState<Checkpoint>("10:30");
   const [chart, setChart] = useState(false);
-  const { data, isLoading } = useRegimeRange(symbol, start, end);
+  const { data: study, isLoading, error } = useRegimePnl(slug, runId);
 
-  const spec = KPI_OPTIONS.find((k) => k.key === kpi)!;
-  const fmtX = (v: number) => (spec.pct ? `${(v * 100).toFixed(0)}%` : v.toFixed(2));
-
-  // Same bucketing as the by-day view's dayStats: a trade belongs to the session
-  // it entered in.
-  const netByDay = useMemo(() => {
-    const by = new Map<string, { net: number; n: number; wins: number }>();
-    for (const t of trades) {
-      const d = t.session.slice(0, 10);
-      const s = by.get(d) ?? { net: 0, n: 0, wins: 0 };
-      s.net += t.net_pnl;
-      s.n += 1;
-      if (t.net_pnl > 0) s.wins += 1;
-      by.set(d, s);
-    }
-    return by;
-  }, [trades]);
-
-  // Days the run covered but never traded are deliberately left out: a zero from
-  // "no setup armed" and a zero from "traded flat" are different facts, and folding
-  // both into a band would dilute whichever regime produces the fewest signals —
-  // which is exactly the regime you are trying to detect.
-  const pointsFor = useMemo(
-    () =>
-      (key: keyof RegimeKpis, at: Checkpoint): Point[] => {
-        const out: Point[] = [];
-        for (const d of data?.days ?? []) {
-          const v = d.checkpoints[at]?.[key];
-          const s = netByDay.get(d.date);
-          if (v == null || !s) continue;
-          out.push({
-            date: d.date,
-            x: v,
-            net: s.net,
-            trades: s.n,
-            wins: s.wins,
-            klass: d.class,
-            partial: d.partial,
-          });
-        }
-        return out;
-      },
-    [data, netByDay],
-  );
-
-  // Every KPI scored at once — this is the answer to "which of these fifteen do I
-  // even bother looking at". Permutation-scored, so it's ~500 shuffles x 15 KPIs
-  // over ~30 days: cheap enough to just do, and memoized on the checkpoint anyway.
-  const board = useMemo(() => {
-    const rows = KPI_OPTIONS.map((o) => ({
-      key: o.key,
-      label: o.label,
-      s: score(pointsFor(o.key, cp)),
-    })).filter((r): r is { key: keyof RegimeKpis; label: string; s: Score } => r.s != null);
-    return rows.sort((a, b) => Math.abs(b.s.edge) - Math.abs(a.s.edge));
-  }, [pointsFor, cp]);
-
-  const points = useMemo(() => pointsFor(kpi, cp), [pointsFor, kpi, cp]);
-
-  const classBuckets = useMemo<Bucket[]>(() => {
-    const by = new Map<RegimeClass, Point[]>();
-    for (const p of points) by.set(p.klass, [...(by.get(p.klass) ?? []), p]);
-    return [...by.entries()]
-      .map(([k, days]) => ({ label: CLASS_LABEL[k], color: regimePalette.klass[k], days }))
-      .sort((a, b) => sum(b.days.map((d) => d.net)) - sum(a.days.map((d) => d.net)));
-  }, [points]);
-
-  const kpiBuckets = useMemo(() => terciles(points, fmtX), [points, fmtX]);
-  const rho = useMemo(
-    () => (points.length >= 4 ? rankCorr(points.map((p) => p.x), points.map((p) => p.net)) : null),
-    [points],
-  );
-
-  if (isLoading || !data)
+  if (isLoading || !study)
     return (
       <div className="panel" style={{ marginTop: 16 }}>
         <Header open onToggle={onHide} />
         <div className="notice" style={{ marginTop: 12 }}>
-          {isLoading ? "Loading regime…" : "No regime for this window."}
+          {isLoading ? "Scoring the regime study…" : error ? "No regime study for this run." : ""}
         </div>
       </div>
     );
 
-  const untraded = data.days.length - new Set(points.map((p) => p.date)).size;
-  const scatter = points.map((p) => ({ ...p, x: spec.pct ? p.x * 100 : p.x }));
+  const board = study.boards[cp];
+  const rows: BoardRow[] = board?.rows ?? [];
+  // The picker can only offer a KPI the board actually scored — and at 09:30 only
+  // the overnight priors exist, so most of them aren't there.
+  const row = rows.find((r) => r.key === kpi) ?? rows[0];
+  const fmtX = (v: number | null) =>
+    v == null ? "—" : row.pct ? `${(v * 100).toFixed(0)}%` : v.toFixed(2);
+
+  const bandRows: Row[] = (row?.bands ?? []).map((b) => ({
+    label: `${b.band} · ${fmtX(b.lo)} – ${fmtX(b.hi)}`,
+    days: b.days,
+    net: b.net,
+    avgNet: b.avg_net,
+    trades: b.trades,
+    winRate: b.win_rate,
+  }));
+
+  const classRows: Row[] = study.class_buckets.map((b) => ({
+    label: b.label,
+    color: regimePalette.klass[b.class as RegimeClass],
+    days: b.days,
+    net: b.net,
+    avgNet: b.avg_net,
+    trades: b.trades,
+    winRate: b.win_rate,
+  }));
 
   return (
     <div className="panel" style={{ marginTop: 16 }}>
@@ -371,7 +363,7 @@ function Body({
           knowable at
         </span>
         <span style={{ display: "flex", gap: 2 }}>
-          {CHECKPOINTS.map((c) => (
+          {study.checkpoints.map((c) => (
             <button
               key={c}
               type="button"
@@ -397,86 +389,30 @@ function Body({
         </button>
       </Header>
 
-      {board.length === 0 ? (
+      {rows.length === 0 ? (
         <div className="notice">
           Not enough traded sessions with a regime at {cp} to rank anything
           {cp === "09:30" && " — at the bell only the overnight priors exist"}.
         </div>
       ) : (
         <>
-          <Leaderboard rows={board} cp={cp} selected={kpi} onPick={setKpi} />
+          <Leaderboard board={board} cp={cp} selected={row.key} onPick={setKpi} />
 
           <div style={{ display: "grid", gap: 18, marginTop: 20 }}>
             <div>
               <div className="section-cap" style={{ marginBottom: 4 }}>
-                {spec.label} @ {cp} — days split into thirds, weakest first
+                {row.label} @ {cp} — days split into thirds, weakest first
               </div>
               {chart ? (
-                <ResponsiveContainer width="100%" height={300}>
-                  <ScatterChart margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                    <CartesianGrid {...gridProps} />
-                    <XAxis
-                      type="number"
-                      dataKey="x"
-                      name={spec.label}
-                      {...axisProps}
-                      tickFormatter={(v: number) => (spec.pct ? `${v.toFixed(0)}%` : v.toFixed(2))}
-                    />
-                    <YAxis
-                      type="number"
-                      dataKey="net"
-                      name="Net"
-                      {...axisProps}
-                      width={64}
-                      tickFormatter={(v: number) => fmt(v)}
-                    />
-                    <ZAxis range={[70, 70]} />
-                    {/* Breakeven: dots above it are the days the model worked. */}
-                    <ReferenceLine y={0} stroke={palette.muted} strokeDasharray="3 3" />
-                    <Tooltip
-                      {...tooltipStyle}
-                      cursor={{ strokeDasharray: "3 3" }}
-                      content={({ active, payload }) => {
-                        if (!active || !payload?.length) return null;
-                        const p = payload[0].payload as Point;
-                        return (
-                          <div style={tooltipStyle.contentStyle}>
-                            <div style={{ padding: "6px 10px" }}>
-                              <div>
-                                <b>{p.date}</b> · {CLASS_LABEL[p.klass]}
-                                {p.partial && " · partial"}
-                              </div>
-                              <div style={{ color: palette.muted }}>
-                                {spec.label}: {spec.pct ? `${p.x.toFixed(0)}%` : p.x.toFixed(2)} @{" "}
-                                {cp}
-                              </div>
-                              <div style={{ color: p.net >= 0 ? palette.green : palette.red }}>
-                                {fmt(p.net)} · {p.trades} trade{p.trades === 1 ? "" : "s"}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      }}
-                    />
-                    <Scatter data={scatter} isAnimationActive={false}>
-                      {scatter.map((p) => (
-                        <Cell key={p.date} fill={p.net >= 0 ? palette.green : palette.red} />
-                      ))}
-                    </Scatter>
-                  </ScatterChart>
-                </ResponsiveContainer>
+                <Chart study={study} spec={row} cp={cp} />
               ) : (
-                <BucketTable buckets={kpiBuckets} head={`${spec.label} band`} />
+                <SummaryTable rows={bandRows} head={`${row.label} band`} />
               )}
-              {rho != null && !chart && (
+              {!chart && (
                 <div className="section-cap" style={{ marginTop: 6 }}>
-                  Rank correlation with the day's net:{" "}
-                  <strong>
-                    {rho >= 0 ? "+" : ""}
-                    {rho.toFixed(2)}
-                  </strong>{" "}
-                  over {points.length} traded days. Read the spread between the bands, not this
-                  number — at this sample size it moves a lot on one big day.
+                  Rank correlation with the day's net: <strong>{sign(row.rho, 2)}</strong> over{" "}
+                  {row.days} traded days. Read the spread between the bands, not this number — at
+                  this sample size it moves a lot on one big day.
                 </div>
               )}
             </div>
@@ -485,7 +421,7 @@ function Body({
               <div className="section-cap" style={{ marginBottom: 4 }}>
                 By regime class — always the end-of-day call, whatever checkpoint is picked above
               </div>
-              <BucketTable buckets={classBuckets} head="Regime" />
+              <SummaryTable rows={classRows} head="Regime" />
             </div>
           </div>
         </>
@@ -505,25 +441,21 @@ function Body({
             here is one you could have traded on.
           </>
         )}{" "}
-        {untraded > 0 &&
-          `${untraded} session${untraded === 1 ? "" : "s"} in range never traded and ${untraded === 1 ? "is" : "are"} left out — a day with no setup is not a flat day. `}
-        {data.skipped.length > 0 &&
-          `${data.skipped.length} session${data.skipped.length === 1 ? " has" : "s have"} no cached ticks and no regime at all.`}
+        {study.untraded_days > 0 &&
+          `${study.untraded_days} session${study.untraded_days === 1 ? "" : "s"} in range never traded and ${study.untraded_days === 1 ? "is" : "are"} left out — a day with no setup is not a flat day. `}
+        {study.skipped.length > 0 &&
+          `${study.skipped.length} session${study.skipped.length === 1 ? " has" : "s have"} no cached ticks and no regime at all.`}
       </div>
     </div>
   );
 }
 
-// Closed by default, and the body is *unmounted* rather than hidden — the regime
-// range is a per-session fetch (and ~500 shuffles x 15 KPIs of scoring on top), and
-// a study nobody opened should not pay for either. Mounting Body is what asks for
-// the data, so opening the panel is what buys it.
-export function RegimePnlPanel(props: {
-  symbol: string;
-  trades: SimTrade[];
-  start: string;
-  end: string;
-}) {
+// Closed by default, and the body is *unmounted* rather than hidden — opening the
+// panel is what asks for the study, and a run whose snapshot predates a version
+// bump pays a couple of seconds to rescore on that first open. A study nobody
+// opened should not pay for it. (Unlike before, the second open is free: the
+// answer is a file now, not a computation.)
+export function RegimePnlPanel({ slug, runId }: { slug: string; runId: string }) {
   const [open, setOpen] = useState(false);
 
   if (!open)
@@ -537,5 +469,5 @@ export function RegimePnlPanel(props: {
       </div>
     );
 
-  return <Body {...props} onHide={() => setOpen(false)} />;
+  return <Body slug={slug} runId={runId} onHide={() => setOpen(false)} />;
 }
