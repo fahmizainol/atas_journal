@@ -15,7 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 
 from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS
-from journal.sim import registry, runner, schema, store
+from journal.sim import regime_pnl, registry, runner, schema, store
 from journal.sim import ticks as tickmod
 from journal.sim.rules import SimConfig
 
@@ -239,6 +239,34 @@ def rerun_baseline(slug: str, background: BackgroundTasks) -> dict:
         raise HTTPException(409, "baseline run is not readable")
     cfg = store.config_from_json(r[0])
     return create_run(slug, ConfigIn(config=cfg.to_json()), background)
+
+
+@router.get("/strategies/{slug}/runs/{run_id}/regime-pnl")
+def regime_pnl_study(slug: str, run_id: str, refresh: bool = Query(False)) -> dict:
+    """Which regime KPIs track this run's P&L, and which only look like they do.
+
+    Served from the snapshot the run wrote at completion; recomputed (and
+    re-snapshotted) when there isn't one, when it was written under older
+    definitions, or on ``?refresh=1`` — the artifact joins against the *regime*
+    cache, so a day whose ticks were bought after the run finished is a day the
+    snapshot has never seen.
+
+    Reads the tick cache only, like every other regime read: a session with no
+    ticks on disk is reported as skipped, never fetched. A GET must not spend
+    money at Databento.
+    """
+    _strategy(slug)
+    if not refresh and (cached := store.read_regime_pnl(slug, run_id)) is not None:
+        return cached
+
+    r = store.read_run(slug, run_id)
+    if r is None:
+        raise HTTPException(404, f"No completed run {run_id}")
+    cfg, trades, _ = r
+    c = store.config_from_json(cfg)
+    study = regime_pnl.study(c.contract, c.start_date, c.end_date, trades)
+    store.write_regime_pnl(slug, run_id, study)
+    return study
 
 
 @router.get("/strategies/{slug}/runs/{run_id}/trade-chart/{trade_no}")

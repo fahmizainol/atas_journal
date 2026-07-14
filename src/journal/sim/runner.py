@@ -15,7 +15,7 @@ import pandas as pd
 
 from .. import metrics as metricsmod
 from . import confluences as confmod
-from . import store
+from . import regime_pnl, store
 from . import ticks as tickmod
 from .registry import Strategy
 from .rules import SimConfig
@@ -167,8 +167,28 @@ def run_to_completion(strategy: Strategy, cfg: SimConfig, rid: str,
             }
         store.finish_run(strategy.slug, rid, trades, vetoed, m)
         store.maybe_autopin_baseline(strategy.slug, rid)
+        _snapshot_regime_pnl(strategy.slug, rid, cfg, trades)
     except Exception as exc:  # noqa: BLE001 — the state file IS the error channel
         store.fail_run(strategy.slug, rid, f"{type(exc).__name__}: {exc}")
+
+
+def _snapshot_regime_pnl(slug: str, rid: str, cfg: SimConfig, trades: pd.DataFrame) -> None:
+    """Write the regime-vs-P&L study next to the metrics, so it exists for anything
+    that isn't the browser — a file an LLM can read beats a table only a mounted
+    React component has ever computed.
+
+    Strictly after finish_run, and strictly non-fatal: this is derived from the
+    run, not part of it. A run that produced trades and metrics has succeeded, and
+    a regime cache that can't answer (a window whose ticks were bought under a
+    different contract, say) must not turn that into a failed run. The endpoint
+    recomputes on demand anyway, so the cost of skipping here is a slow first open,
+    not a missing study.
+    """
+    try:
+        store.write_regime_pnl(
+            slug, rid, regime_pnl.study(cfg.contract, cfg.start_date, cfg.end_date, trades))
+    except Exception:  # noqa: BLE001 — derived artifact; never fails the run
+        pass
 
 
 def execute(strategy: Strategy, cfg: SimConfig,

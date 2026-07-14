@@ -13,6 +13,13 @@ A sim run is a disposable artifact — delete the folder and it is gone.
             trades.parquet            # written when the run completes
             vetoed.parquet            # entries confluence gates rejected (if any)
             metrics.json
+            regime_pnl.json           # derived: the regime-vs-P&L study (journal.sim.regime_pnl)
+
+Every file above except regime_pnl.json is *primary* — it records what the engine
+did. regime_pnl.json is derived, and carries the versions of the definitions it
+was computed under so a stale one is recomputed rather than served. It is written
+anyway (rather than left to the browser to recompute on each mount) because a
+study nobody can read from outside the UI is one an LLM cannot read at all.
 
 Runs are immutable: run_id hashes the config *and* the strategy's engine
 version, so re-running an old config on newer code is a new artifact, never an
@@ -30,7 +37,7 @@ from datetime import date, datetime, timezone
 import pandas as pd
 
 from ..config import DATA_DIR
-from . import registry, schema
+from . import regime, regime_pnl, registry, schema
 from .rules import SimConfig
 
 SIMS_DIR = DATA_DIR / "sims"
@@ -139,6 +146,27 @@ def read_run(slug: str, rid: str) -> tuple[dict, pd.DataFrame, dict] | None:
 def read_vetoed(slug: str, rid: str) -> pd.DataFrame:
     vp = _dir(slug, rid) / "vetoed.parquet"
     return pd.read_parquet(vp) if vp.exists() else pd.DataFrame()
+
+
+def write_regime_pnl(slug: str, rid: str, study: dict) -> None:
+    _write(_dir(slug, rid) / "regime_pnl.json", study)
+
+
+def read_regime_pnl(slug: str, rid: str) -> dict | None:
+    """The regime-vs-P&L study, if one was snapshotted under the *current*
+    definitions.
+
+    A snapshot written before a bump to either version is a miss, not a fallback:
+    it is a table of numbers that mean something else now, and serving it would be
+    worse than recomputing — the numbers would look fine.
+    """
+    d = _read(_dir(slug, rid) / "regime_pnl.json")
+    if d is None:
+        return None
+    if (d.get("stats_version") != regime_pnl.STATS_VERSION
+            or d.get("regime_version") != regime.REGIME_VERSION):
+        return None
+    return d
 
 
 def read_meta(slug: str, rid: str) -> dict:
