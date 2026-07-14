@@ -11,12 +11,56 @@ import math
 import pandas as pd
 
 
+# Trading days in a year: the constant that turns a daily ratio into the annual
+# one everybody quotes.
+TRADING_DAYS = 252
+
+
 def _max_consecutive(mask: pd.Series) -> int:
     best = run = 0
     for v in mask:
         run = run + 1 if v else 0
         best = max(best, run)
     return best
+
+
+def _daily_ratios(daily: pd.Series) -> tuple[float, float]:
+    """(Sharpe, Sortino) on DAILY P&L, annualized — not per trade.
+
+    Per trade, the two ratios are blind to how often you trade: a setup that fires
+    63 times and one that fires 527 times to earn the same money per unit of
+    per-trade noise score the same, when the second is plainly the better business.
+    Daily P&L is the series that actually accrues to an account, so that is the one
+    to measure, and *252 sqrt-days is what makes the number comparable to a Sharpe
+    quoted anywhere else.
+
+    Flat days count, and they are the reason this is not just a rescaling: a day
+    the strategy sat out earned 0, and dropping those days would flatter a rare
+    setup by pretending its idle weeks never happened. So the series is reindexed
+    over every WEEKDAY from the first trading day to the last — the span the
+    strategy was actually exposed for — with the untraded ones filled with 0.
+    (Exchange holidays land in that span as flat days too. They dilute every
+    config by the same handful of days, which is a rounding error next to the
+    distortion that dropping real flat days would introduce.)
+
+    Sortino divides by the deviation of the LOSING days only: upside volatility is
+    not risk, and a strategy whose good days are wildly good should not be punished
+    for it.
+    """
+    if daily.empty:
+        return 0.0, 0.0
+    idx = pd.bdate_range(min(daily.index), max(daily.index))
+    d = daily.reindex(idx.date, fill_value=0.0).astype(float)
+    if len(d) < 2:
+        return 0.0, 0.0
+
+    ann = math.sqrt(TRADING_DAYS)
+    std = float(d.std(ddof=1))
+    sharpe = float(d.mean() / std) * ann if std > 0 else 0.0
+    down = d[d < 0]
+    dstd = float(down.std(ddof=1)) if len(down) > 1 else 0.0
+    sortino = float(d.mean() / dstd) * ann if dstd > 0 else 0.0
+    return sharpe, sortino
 
 
 def compute_metrics(trades: pd.DataFrame) -> dict:
@@ -48,15 +92,10 @@ def compute_metrics(trades: pd.DataFrame) -> dict:
     max_dd = float(drawdown.min()) if n else 0.0
     recovery = (net / abs(max_dd)) if max_dd != 0 else math.inf
 
-    std = float(pnl.std(ddof=1)) if n > 1 else 0.0
-    sharpe = float(pnl.mean() / std) if std > 0 else 0.0
-    downside = pnl[pnl < 0]
-    dstd = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
-    sortino = float(pnl.mean() / dstd) if dstd > 0 else 0.0
-
     # day-level
     day = t["entry_ts_local"].dt.date
     daily = pnl.groupby(day).sum()
+    sharpe, sortino = _daily_ratios(daily)
     profit_days = int((daily > 0).sum())
     loss_days = int((daily < 0).sum())
     total_days = int(daily.size)

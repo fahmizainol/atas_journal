@@ -68,9 +68,9 @@ function kpiCards(m: SimMetrics): Card[] {
     { label: "Max drawdown", value: fmt(m.max_drawdown), tone: "neg" },
     { label: "Mean R", value: fmt(m.r_mean, false), tone: tone(m.r_mean ?? 0) },
     { label: "Best R", value: fmt(m.r_best, false), tone: "pos" },
-    // Per trade, not annualized — see SimMetrics.sharpe.
-    { label: "Sharpe / trade", value: fmt(m.sharpe, false), tone: tone(m.sharpe ?? 0) },
-    { label: "Sortino / trade", value: fmt(m.sortino, false), tone: tone(m.sortino ?? 0) },
+    // Daily and annualized — see SimMetrics.sharpe.
+    { label: "Sharpe", value: fmt(m.sharpe, false), tone: tone(m.sharpe ?? 0) },
+    { label: "Sortino", value: fmt(m.sortino, false), tone: tone(m.sortino ?? 0) },
   ];
 }
 
@@ -1160,8 +1160,9 @@ export function StrategyDetail() {
       {
         id: "sharpe",
         header: "Sharpe",
-        // Per trade — a run that trades twice as often to reach the same Sharpe is
-        // not the same run. Sort on it, don't rank a sweep by it alone.
+        // Daily, annualized. Unlike net P&L it already accounts for how often a
+        // config trades and how lumpy its days were, which is what makes it the
+        // right column to rank a sweep by.
         accessorFn: (r) => r.metrics.sharpe ?? 0,
         cell: (c) => {
           const r = c.row.original;

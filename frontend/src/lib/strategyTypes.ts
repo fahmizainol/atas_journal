@@ -109,12 +109,11 @@ export interface SimMetrics {
   r_mean?: number;
   r_median?: number;
   r_best?: number;
-  /** Per TRADE, not annualized: mean net P&L over its standard deviation. It says
-   * how cleanly the edge repeats from trade to trade, and says nothing about how
-   * often the strategy trades — two runs with the same Sharpe are not the same
-   * business if one of them takes twice as many trades to get there. */
+  /** DAILY P&L, annualized (x sqrt(252)) — not per trade. Flat weekdays inside the
+   * strategy's span count as 0, so a rare setup cannot flatter itself by hiding its
+   * idle weeks. This is the Sharpe you can compare to one quoted anywhere else. */
   sharpe?: number;
-  /** Sharpe with only losing trades in the denominator: upside volatility is not
+  /** Sharpe with only losing DAYS in the denominator: upside volatility is not
    * risk. Reads higher than Sharpe by construction. */
   sortino?: number;
   recovery_factor?: number | "inf";
