@@ -161,6 +161,16 @@ function regimeCards(r: RegimeDay): Card[] {
       value: k.ny_band_cross_rate == null ? "—" : `${num(k.ny_band_cross_rate)}/hr`,
     },
     { label: "Upper-channel occupancy", value: pct(k.ny_upper_channel_occupancy) },
+    {
+      label: "Middle-band occupancy",
+      value: pct(k.ny_middle_band_occupancy),
+      sub: `Globex ${pct(k.gx_middle_band_occupancy)} — time inside ±1σ`,
+    },
+    {
+      label: "Globex band wrap",
+      value: pct(k.upper_wrap_occupancy),
+      sub: `rescues broken NY +1σ ${pct(k.gx_upper_rescue_ratio)}`,
+    },
     { label: "VWAP spread", value: k.norm_spread == null ? "—" : `${num(k.norm_spread, 2)}σ` },
   ];
 }

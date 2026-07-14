@@ -40,6 +40,12 @@ export interface RegimeKpis {
   // Band behaviour per anchor: does price respect the σ envelope, or slice it?
   ny_band_cross_rate: number | null;
   ny_upper_channel_occupancy: number | null;
+  /** With the channel occupancies these partition the session: above +2σ,
+   * +1σ..+2σ, ±1σ, -2σ..-1σ, below -2σ — each close is in exactly one. */
+  ny_above_dev2_occupancy: number | null;
+  ny_middle_band_occupancy: number | null;
+  ny_lower_channel_occupancy: number | null;
+  ny_below_dev2_occupancy: number | null;
   ny_touch_hold_ratio: number | null;
   ny_lower_touch_hold_ratio: number | null;
   ny_vwap_cross_rate: number | null;
@@ -51,6 +57,10 @@ export interface RegimeKpis {
   ny_vwap_slope_deg: number | null;
   gx_band_cross_rate: number | null;
   gx_upper_channel_occupancy: number | null;
+  gx_above_dev2_occupancy: number | null;
+  gx_middle_band_occupancy: number | null;
+  gx_lower_channel_occupancy: number | null;
+  gx_below_dev2_occupancy: number | null;
   gx_touch_hold_ratio: number | null;
   gx_lower_touch_hold_ratio: number | null;
   gx_vwap_cross_rate: number | null;
@@ -65,6 +75,17 @@ export interface RegimeKpis {
   quadrant_transitions_rate: number | null;
   norm_spread: number | null;
   spread_slope: number | null;
+  /** Share of RTH where the Globex upper channel contains the session's — the
+   * wrap geometry where a pullback through the session +1σ still has the Globex
+   * +1σ underneath it. */
+  upper_wrap_occupancy: number | null;
+  /** Mean (session +1σ − Globex +1σ) in session-σ units. Positive = the Globex
+   * line runs below the session's, a second floor under the band. */
+  upper_dev1_gap_sigma: number | null;
+  /** Of closes that broke the session +1σ while the Globex +1σ sat below it,
+   * the share where the lows held the Globex line and price recovered — the
+   * "bounced at Globex's dev1 instead of the session's" event. */
+  gx_upper_rescue_ratio: number | null;
 
   /** Minutes of RTH the snapshot covers. 0 at the bell. */
   bars: number;

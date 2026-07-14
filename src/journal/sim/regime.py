@@ -39,7 +39,7 @@ REGIME_DIR = CACHE_DIR / "regime"
 
 # Bump when a KPI's definition changes. Old files are then simply ignored and
 # recomputed — never migrated, never silently reinterpreted under a new meaning.
-REGIME_VERSION = 3
+REGIME_VERSION = 5
 
 # What "knowable at time T" means. The intraday checkpoints are where a model
 # would actually have to choose; "eod" is the hindsight snapshot.
@@ -172,6 +172,8 @@ def _band_kpis(b: pd.DataFrame, w: pd.DataFrame) -> dict:
     n = len(b)
     if n < 2:
         return {"band_cross_rate": None, "upper_channel_occupancy": None,
+                "above_dev2_occupancy": None, "middle_band_occupancy": None,
+                "lower_channel_occupancy": None, "below_dev2_occupancy": None,
                 "touch_hold_ratio": None, "lower_touch_hold_ratio": None,
                 "vwap_cross_rate": None, "vwap_slope_ppm": None,
                 "vwap_slope_deg": None}
@@ -189,17 +191,56 @@ def _band_kpis(b: pd.DataFrame, w: pd.DataFrame) -> dict:
 
     in_upper = (z >= 1) & (z <= 2)
     in_lower = (z <= -1) & (z >= -2)
+    # The remaining zones, so the five occupancies partition the session: a close
+    # is in exactly one of them (band edges count toward the channels, matching
+    # in_upper/in_lower above).
+    above2 = z > 2
+    below2 = z < -2
+    middle = (z > -1) & (z < 1)
     slope_ppm, slope_deg = _vwap_slope(mid, high, low, close)
 
     return {
         "band_cross_rate": _per_hour(_crossings(close, up1), n),
         "upper_channel_occupancy": _f(np.nanmean(in_upper.astype("float64"))),
+        "above_dev2_occupancy": _f(np.nanmean(above2.astype("float64"))),
+        "middle_band_occupancy": _f(np.nanmean(middle.astype("float64"))),
+        "lower_channel_occupancy": _f(np.nanmean(in_lower.astype("float64"))),
+        "below_dev2_occupancy": _f(np.nanmean(below2.astype("float64"))),
         "touch_hold_ratio": _touch_hold(close, low, up1, in_upper, upper=True),
         "lower_touch_hold_ratio": _touch_hold(close, high, lo1, in_lower, upper=False),
         "vwap_cross_rate": _per_hour(_crossings(close, mid), n),
         "vwap_slope_ppm": slope_ppm,
         "vwap_slope_deg": slope_deg,
     }
+
+
+def _gx_rescue(close: np.ndarray, low: np.ndarray, ny_up1: np.ndarray,
+               gx_up1: np.ndarray, within: int = 5) -> float | None:
+    """Of the pullbacks that *broke* the session +1σ on a closing basis while the
+    Globex +1σ ran below it, the fraction where the lows held at or above the
+    Globex line and price closed back above the session line within *within* bars.
+
+    This is the "bounced at Globex's dev1 instead of the session's" event: the
+    session band failed, but the deeper band the overnight anchor put underneath
+    it caught the pullback anyway. Only computable when the wrap geometry is
+    actually present at the break (gx_up1 < ny_up1) — a break with the Globex
+    line *above* the session line has no second floor to be rescued by.
+    """
+    n = len(close)
+    events = rescues = 0
+    for i in range(1, n):
+        broke = close[i - 1] > ny_up1[i - 1] and close[i] <= ny_up1[i]
+        if not broke or not gx_up1[i] < ny_up1[i]:
+            continue
+        events += 1
+        j1 = min(i + within, n - 1)
+        for j in range(i, j1 + 1):
+            if low[j] < gx_up1[j]:
+                break  # sliced the Globex line too: both bands failed
+            if close[j] > ny_up1[j]:
+                rescues += 1
+                break
+    return None if events == 0 else _f(rescues / events)
 
 
 def _quadrant(close: np.ndarray, mid_g: np.ndarray, mid_n: np.ndarray) -> np.ndarray:
@@ -219,14 +260,22 @@ def _dual_kpis(b: pd.DataFrame, wg: pd.DataFrame, wn: pd.DataFrame) -> dict:
     n = len(b)
     empty = {"abr": None, "bbr": None, "longest_hold_min": None,
              "longest_hold_below_min": None, "quadrant_transitions_rate": None,
-             "norm_spread": None, "spread_slope": None}
+             "norm_spread": None, "spread_slope": None,
+             "upper_wrap_occupancy": None, "upper_dev1_gap_sigma": None,
+             "gx_upper_rescue_ratio": None}
     if n < 2:
         return empty
 
     close = b["close"].to_numpy(dtype="float64")
+    low = b["low"].to_numpy(dtype="float64")
     mid_g = wg["mid"].to_numpy(dtype="float64")
     mid_n = wn["mid"].to_numpy(dtype="float64")
     std_g = wg["std"].to_numpy(dtype="float64")
+    std_n = wn["std"].to_numpy(dtype="float64")
+    gx_up1 = wg["upper1"].to_numpy(dtype="float64")
+    gx_up2 = wg["upper2"].to_numpy(dtype="float64")
+    ny_up1 = wn["upper1"].to_numpy(dtype="float64")
+    ny_up2 = wn["upper2"].to_numpy(dtype="float64")
 
     above_both = (close > mid_g) & (close > mid_n)
     below_both = (close < mid_g) & (close < mid_n)
@@ -237,7 +286,16 @@ def _dual_kpis(b: pd.DataFrame, wg: pd.DataFrame, wn: pd.DataFrame) -> dict:
         spread = np.where(std_g > 0, (mid_n - mid_g) / std_g, np.nan)
     k = min(SPREAD_SLOPE_MIN, n - 1)  # bars are minutes, so k bars back is k minutes back
 
+    # The wrap geometry: the Globex upper channel containing the session's, so a
+    # pullback through the session +1σ still has the Globex +1σ underneath it.
+    wrapped = (gx_up1 <= ny_up1) & (gx_up2 >= ny_up2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dev1_gap = np.where(std_n > 0, (ny_up1 - gx_up1) / std_n, np.nan)
+
     return {
+        "upper_wrap_occupancy": _f(wrapped.mean()),
+        "upper_dev1_gap_sigma": _f(np.nanmean(dev1_gap)),
+        "gx_upper_rescue_ratio": _gx_rescue(close, low, ny_up1, gx_up1),
         "abr": _f(above_both.mean()),
         "bbr": _f(below_both.mean()),
         "longest_hold_min": _longest_run(above_both),
@@ -387,10 +445,8 @@ def compute_regime(symbol: str, day: date) -> dict | None:
         kp: dict = dict(on_kpis)
         kp.update({f"ny_{k}": v for k, v in _band_kpis(rb, ny).items()})
         if gx is None:
-            kp.update({f"gx_{k}": None for k in
-                       ("band_cross_rate", "upper_channel_occupancy", "touch_hold_ratio",
-                        "lower_touch_hold_ratio", "vwap_cross_rate", "vwap_slope_ppm",
-                        "vwap_slope_deg")})
+            # _band_kpis on an empty slice is the all-None dict — the one key list.
+            kp.update({f"gx_{k}": v for k, v in _band_kpis(rb.iloc[:0], ny.iloc[:0]).items()})
             kp.update(_dual_kpis(rb.iloc[:0], rb.iloc[:0], rb.iloc[:0]))
         else:
             kp.update({f"gx_{k}": v for k, v in _band_kpis(rb, gx).items()})
