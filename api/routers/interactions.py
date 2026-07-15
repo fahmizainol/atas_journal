@@ -49,3 +49,20 @@ def interactions_coverage(
     end: str = Query(...),
 ) -> dict:
     return inter.coverage(symbol, date.fromisoformat(start), date.fromisoformat(end))
+
+
+@router.get("/interactions/day-chart/{day}")
+def interactions_day_chart(
+    day: str,
+    symbol: str = Query(...),
+    bin_size: float | None = Query(None),
+    va_pct: float = Query(inter.profmod.VALUE_AREA_PCT),
+    sources: str = Query("ny,globex"),
+) -> dict:
+    return inter.day_chart(
+        symbol,
+        date.fromisoformat(day),
+        bin_size=bin_size,
+        va_pct=va_pct,
+        sources=tuple(s for s in sources.split(",") if s) or ("ny", "globex"),
+    )

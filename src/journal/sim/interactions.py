@@ -43,7 +43,7 @@ from datetime import date, time
 import numpy as np
 import pandas as pd
 
-from ..config import CACHE_DIR, ET_TZ, root_symbol, tick_size
+from ..config import CACHE_DIR, ET_TZ, point_value, root_symbol, tick_size
 from . import profile as profmod
 from . import ticks as tickmod
 from . import vwap as vwapmod
@@ -585,6 +585,93 @@ def get(cfg: InteractionConfig, refresh: bool = False) -> dict:
         return cached
     result = study(cfg)
     write(cfg, result)
+    return result
+
+
+def _finite(x) -> bool:
+    return bool(np.isfinite(x))
+
+
+def day_chart(
+    symbol: str,
+    day: date,
+    bin_size: float | None = None,
+    va_pct: float = profmod.VALUE_AREA_PCT,
+    sources: tuple[str, ...] = ("ny", "globex"),
+) -> dict:
+    """A day's candles + both anchored VWAPs + both developing profiles, built
+    from the *same tick engine* as the interaction events — so the overlay dots
+    sit on exactly the levels they were computed against. GET-safe (cache only),
+    trade-independent: works for any cached session, traded or not.
+    """
+    contract = tickmod.contract_for_cached(symbol, day)
+    if contract is None:
+        return {"available": False}
+    rth = tickmod.cached_rth(contract, day)
+    if rth is None or rth.empty:
+        return {"available": False}
+    binsz = bin_size if bin_size is not None else tick_size(symbol)
+
+    bars_ny = minute_bars(rth)
+    if bars_ny.empty:
+        return {"available": True, "instrument": contract, "bars": []}
+    t_ny = (bars_ny["ts_utc"].astype("int64") // 1_000_000_000).to_numpy()
+
+    bars = [
+        {"time": int(t), "open": float(o), "high": float(h), "low": float(lo),
+         "close": float(c), "volume": float(v)}
+        for t, o, h, lo, c, v in zip(
+            t_ny, bars_ny["open"], bars_ny["high"], bars_ny["low"],
+            bars_ny["close"], bars_ny["volume"])
+    ]
+
+    def vwap_rows(band_df, times):
+        out = []
+        for t, r in zip(times, band_df.itertuples(index=False)):
+            if not _finite(r.mid):
+                continue
+            out.append({"time": int(t), "middle": round(float(r.mid), 2),
+                        "upper1": round(float(r.upper1), 2), "lower1": round(float(r.lower1), 2),
+                        "upper2": round(float(r.upper2), 2), "lower2": round(float(r.lower2), 2)})
+        return out
+
+    def prof_rows(prof, times):
+        out = []
+        for t, poc, vah, val in zip(times, prof.poc, prof.vah, prof.val):
+            if not _finite(poc):
+                continue
+            out.append({"time": int(t), "poc": round(float(poc), 2),
+                        "vah": round(float(vah), 2), "val": round(float(val), 2)})
+        return out
+
+    result = {
+        "available": True,
+        "instrument": contract,
+        "bars": bars,
+        "vwap_ny": vwap_rows(_sample_bands(vwapmod.vwap_bands(rth), bars_ny), t_ny)
+        if "ny" in sources else [],
+        "profile_ny": prof_rows(profmod.developing_profile(rth, bars_ny, binsz, va_pct), t_ny)
+        if "ny" in sources else [],
+        "vwap_globex": [],
+        "profile_globex": [],
+        "tick_size": tick_size(symbol),
+        "point_value": point_value(symbol),
+    }
+
+    on = tickmod.cached_overnight(contract, day)
+    if "globex" in sources and on is not None:
+        glob = pd.concat([on, rth], ignore_index=True)
+        bars_gx = minute_bars(glob)
+        t_gx = (bars_gx["ts_utc"].astype("int64") // 1_000_000_000).to_numpy()
+        # keep only the Globex rows that fall on the RTH minutes we drew candles for
+        keep = np.isin(t_gx, t_ny)
+        prof_gx = profmod.developing_profile(glob, bars_gx, binsz, va_pct)
+        vwap_gx = _sample_bands(vwapmod.vwap_bands(glob), bars_gx)
+        result["vwap_globex"] = vwap_rows(vwap_gx[keep].reset_index(drop=True), t_gx[keep])
+        result["profile_globex"] = prof_rows(
+            profmod.DevelopingProfile(prof_gx.poc[keep], prof_gx.vah[keep], prof_gx.val[keep]),
+            t_gx[keep],
+        )
     return result
 
 

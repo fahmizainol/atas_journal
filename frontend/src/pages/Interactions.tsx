@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import { type ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "../components/DataTable";
+import { CandlestickChart } from "../components/charts/CandlestickChart";
 import {
   useInteractions,
   useInteractionCoverage,
+  useInteractionDayChart,
 } from "../hooks/useInteractions";
 import type {
   AggRow,
@@ -13,6 +15,43 @@ import type {
   VaSnapAggRow,
 } from "../lib/interactionTypes";
 import { fmt, fmtInt, fmtPct } from "../lib/format";
+
+// One session's candles with the developing NY + Globex levels and the touch /
+// VA-snap overlay, built from the same tick engine as the events.
+function DayChart({
+  symbol,
+  day,
+  binSize,
+  sources,
+  touches,
+  vaSnaps,
+}: {
+  symbol: string;
+  day: string;
+  binSize?: number;
+  sources?: string[];
+  touches: Touch[];
+  vaSnaps: VaSnap[];
+}) {
+  const { data, isLoading } = useInteractionDayChart(symbol, day, binSize, sources);
+  if (isLoading) return <div className="notice">Loading session…</div>;
+  if (!data || !data.available) return <div className="notice">No cached ticks for this session.</div>;
+  if (!data.bars || data.bars.length === 0) return <div className="notice">No bars for this session.</div>;
+  return (
+    <CandlestickChart
+      bars={data.bars}
+      vwapGlobex={data.vwap_globex}
+      vwapNy={data.vwap_ny}
+      profileGlobex={data.profile_globex}
+      profileNy={data.profile_ny}
+      touches={touches}
+      vaSnaps={vaSnaps}
+      tickSize={data.tick_size}
+      pointValue={data.point_value}
+      height={560}
+    />
+  );
+}
 
 // The Interactions Lab — a research bench over the cached tick sessions,
 // deliberately separate from the Edges tab (which is trade-derived / live). Here
@@ -249,7 +288,20 @@ export function Interactions() {
 
           {selectedDay && (
             <>
-              {/* Phase 6 mounts the DaySessionChart + InteractionPrimitive overlay here. */}
+              <div className="panel">
+                <div className="section-cap">
+                  {selectedDay} — session · green/red dots = touch reject/accept (ringed = 2+
+                  sources stacked), triangles = VA-snaps
+                </div>
+                <DayChart
+                  symbol={data.symbol}
+                  day={selectedDay}
+                  binSize={committed?.bin_size}
+                  sources={committed?.sources}
+                  touches={dayTouches}
+                  vaSnaps={daySnaps}
+                />
+              </div>
               <div className="panel">
                 <div className="section-cap">{selectedDay} — VA-snaps</div>
                 {daySnaps.length > 0 ? (

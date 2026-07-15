@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../lib/api";
+import type { DayChartData } from "../lib/chartTypes";
 import type {
   Coverage,
   InteractionParams,
@@ -33,5 +34,27 @@ export function useInteractionCoverage(
     queryKey: ["interactions", "coverage", symbol, start, end],
     queryFn: () => apiGet<Coverage>("/interactions/coverage", { symbol, start, end }),
     enabled: !!symbol && !!start && !!end,
+  });
+}
+
+// A single session's candles + both anchored VWAPs + both developing profiles,
+// built from the same tick engine as the events so the overlay lines up. Keyed by
+// (symbol, day, bin, sources) to match the run the touches came from.
+export function useInteractionDayChart(
+  symbol: string | null,
+  day: string | null,
+  binSize?: number,
+  sources?: string[],
+) {
+  return useQuery({
+    queryKey: ["interactions", "day-chart", symbol, day, binSize ?? null, sources],
+    queryFn: () =>
+      apiGet<DayChartData>(`/interactions/day-chart/${day}`, {
+        symbol,
+        bin_size: binSize,
+        sources,
+      }),
+    enabled: !!symbol && !!day,
+    retry: false,
   });
 }
