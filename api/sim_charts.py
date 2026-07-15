@@ -140,6 +140,27 @@ def _vwap_rows(w: pd.DataFrame, pos: np.ndarray, times: np.ndarray) -> list[dict
     return rows
 
 
+def _profile_rows(prof: profmod.DevelopingProfile, times: np.ndarray) -> list[dict]:
+    """Per-bar developing POC/VAH/VAL, positionally aligned to ``times`` (one entry
+    per drawn bar). A bar with no value area yet — before its anchor started, or a
+    whole bar of zero-size prints — comes back NaN and is dropped, so the line
+    simply begins where the profile first exists rather than at a made-up level."""
+    return [
+        {"time": int(times[k]), "poc": float(poc),
+         "vah": float(vah), "val": float(val)}
+        for k, (poc, vah, val) in enumerate(zip(prof.poc, prof.vah, prof.val))
+        if not np.isnan(vah)
+    ]
+
+
+def _profile_slots(gx_rows: list[dict], ny_rows: list[dict]) -> dict:
+    """Both developing value areas, each in the slot that names it — the frontend
+    colours from the slot (``profile_globex`` silver, ``profile_ny`` fuchsia) and
+    gives each its own legend toggle. Mirrors ``_vwap_slots``: both anchors are
+    always drawn, and which the engine traded is already said by ``vwap_anchor``."""
+    return {"profile_globex": gx_rows, "profile_ny": ny_rows}
+
+
 def _lead_bars(on: pd.DataFrame, n: int) -> pd.DataFrame:
     """Overnight context candles, chunked **backwards** from the bell.
 
@@ -162,11 +183,11 @@ def _lead_bars(on: pd.DataFrame, n: int) -> pd.DataFrame:
 def _session_frame(cfg, day, tz, overnight: bool = False):
     """One session's bars + both anchored VWAPs + display times, shared by the
     per-trade and full-day payloads. Returns
-    (ticks, bars_rows, vwap_gx_rows, vwap_ny_rows, profile_rows, bar_time,
-    footprint), or None if no data.
+    (ticks, bars_rows, vwap_gx_rows, vwap_ny_rows, profile_gx_rows,
+    profile_ny_rows, bar_time, footprint), or None if no data.
 
     Every strategy's chart shows the same thing: the overnight candles from 18:00
-    ET, the RTH session, both anchored VWAPs, and the developing profile. What
+    ET, the RTH session, both anchored VWAPs, and both developing profiles. What
     differs between strategies is only which of those the *engine* read, and the
     payload says so (``vwap_anchor``) rather than hiding a layer.
 
@@ -185,14 +206,14 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
     could land on a candle that never satisfied acceptance. Hence a session
     strategy's candles simply do not straddle 09:30 — neither did its engine's.
 
-    Same discipline for the profile: it is anchored where the engine anchored it,
-    so a session strategy's value area starts developing at the bell, not at
-    18:00. Drawing an overnight-anchored profile for a run whose gate read an
-    RTH-anchored one would show levels nothing traded against.
+    The two developing profiles follow the two VWAP anchors exactly: the NY one
+    starts developing at the bell, the Globex one at 18:00, and both are drawn on
+    every chart so a level is always readable whichever anchor a rule consulted —
+    ``vwap_anchor`` still says which the engine traded.
 
-    The Globex VWAP needs the night on disk; when it isn't (a window whose
-    overnight was never bought) that leg is simply absent rather than fetched —
-    see ticks.cached_overnight.
+    The Globex anchor needs the night on disk; when it isn't (a window whose
+    overnight was never bought) both the Globex VWAP and the Globex profile are
+    simply absent rather than fetched — see ticks.cached_overnight.
     """
     sym = tickmod.contract_for(cfg.contract, day)
     t = tickmod.get_day_ticks(sym, day, include_overnight=overnight)
@@ -204,24 +225,22 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
 
     # `full` is the tick frame the anchors are measured from and the footprint is
     # binned over; `rth_i0` is where RTH starts inside it; `b_all` is every drawn
-    # candle with end_idx positions into `full`; `eng0` is the row where the
-    # engine's own bars begin (everything before it is overnight context).
+    # candle with end_idx positions into `full`.
     if overnight:
         # The engine already read the night: its ticks and bars are the whole chart.
         full = t
         rth_i0 = int(t["ts_utc"].searchsorted(tickmod.session_bounds_utc(day)[0], side="left"))
-        b_all, eng0 = b, 0
+        b_all = b
     else:
         on = tickmod.cached_overnight(sym, day)
         if on is None or on.empty:
-            full, rth_i0, b_all, eng0 = t, 0, b, 0
+            full, rth_i0, b_all = t, 0, b
         else:
             full = pd.concat([on, t], ignore_index=True)
             rth_i0 = len(on)
             lead = _lead_bars(on, cfg.ticks_per_bar)
             eng = b.assign(start_idx=b["start_idx"] + rth_i0, end_idx=b["end_idx"] + rth_i0)
             b_all = pd.concat([lead, eng], ignore_index=True)
-            eng0 = len(lead)
 
     bar_pos = b_all["end_idx"].to_numpy()
 
@@ -247,18 +266,24 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
     # so its position is negative and _vwap_rows drops it.
     vwap_ny_rows = _vwap_rows(w_ny, bar_pos - rth_i0, times)
 
-    # Anchored at the engine's session start, and aligned to the engine's bars —
-    # hence indexed from eng0, leaving the overnight candles without a value area
-    # on a session strategy's chart. Computed for every run, not only the ones
-    # that read it: the layer is the same on every chart, and the run's config
-    # (not the picture) is what says whether a rule was looking at it.
-    prof = profmod.developing_profile(t, b, tick_size(cfg.instrument))
-    profile_rows = [
-        {"time": int(times[eng0 + k]), "poc": float(poc),
-         "vah": float(vah), "val": float(val)}
-        for k, (poc, vah, val) in enumerate(zip(prof.poc, prof.vah, prof.val))
-        if not np.isnan(vah)
-    ]
+    # Two developing value areas, anchored exactly where the two VWAPs are and
+    # drawn together: the Globex one accumulates from the 18:00 open, the NY one
+    # restarts at the bell. Both are computed for every run — the layer is the same
+    # on every chart, and the run's config (not the picture) says which anchor a
+    # rule read. Each result indexes straight into `b_all`/`times`, so a bar with
+    # no value area yet is dropped by the NaN filter rather than mis-drawn: the
+    # overnight candles on the NY anchor (their shifted end is negative, so nothing
+    # accumulates), and — when the night is absent — the Globex anchor entirely.
+    tsz = tick_size(cfg.instrument)
+    profile_gx_rows = (
+        _profile_rows(profmod.developing_profile(full, b_all, tsz), times)
+        if rth_i0 > 0 else []
+    )
+    ny_bars = b_all.assign(end_idx=b_all["end_idx"] - rth_i0)
+    profile_ny_rows = _profile_rows(
+        profmod.developing_profile(full.iloc[rth_i0:].reset_index(drop=True), ny_bars, tsz),
+        times,
+    )
 
     # Snap trade instants (tick times) onto the bar grid: the frontend's
     # nearestBar would do this anyway, but doing it here keeps the marker on the
@@ -270,7 +295,8 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
         i = int(np.searchsorted(bar_ns, _utc(ts).value, side="left"))
         return int(times[min(i, len(times) - 1)])
 
-    return (full, bars_rows, vwap_gx_rows, vwap_ny_rows, profile_rows, bar_time,
+    return (full, bars_rows, vwap_gx_rows, vwap_ny_rows, profile_gx_rows,
+            profile_ny_rows, bar_time,
             _footprint(full, b_all, tick_size(cfg.contract)))
 
 
@@ -294,7 +320,7 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
     frame = _session_frame(cfg, day, tz, overnight=globex)
     if frame is None:
         return {"available": False}
-    t, bars_rows, vwap_gx, vwap_ny, profile_rows, bar_time, footprint = frame
+    t, bars_rows, vwap_gx, vwap_ny, profile_gx, profile_ny, bar_time, footprint = frame
 
     entry_t, exit_t = bar_time(entry_ts), bar_time(exit_ts)
 
@@ -344,7 +370,7 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
         "available": True,
         "bars": bars_rows,
         **_vwap_slots(vwap_gx, vwap_ny, globex),
-        "profile": profile_rows,
+        **_profile_slots(profile_gx, profile_ny),
         "atr_points": [],
         "markers": markers,
         "price_lines": price_lines,
@@ -406,7 +432,7 @@ def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
     frame = _session_frame(cfg, day, tz, overnight=globex)
     if frame is None:
         return {"available": False}
-    _, bars_rows, vwap_gx, vwap_ny, profile_rows, bar_time, footprint = frame
+    _, bars_rows, vwap_gx, vwap_ny, profile_gx, profile_ny, bar_time, footprint = frame
 
     day_trades = trades
     if not trades.empty:
@@ -427,7 +453,7 @@ def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
         "instrument": tickmod.contract_for(cfg.contract, day),
         "bars": bars_rows,
         **_vwap_slots(vwap_gx, vwap_ny, globex),
-        "profile": profile_rows,
+        **_profile_slots(profile_gx, profile_ny),
         "atr_points": [],
         "markers": markers,
         "levels": [],

@@ -24,12 +24,16 @@ export const vwapPalette = {
   ny: { middle: "#c4b5fd", band1: "#8b5cf6", band2: "#5b3fb8", fill: "139, 92, 246" },
 } as const;
 
-// Developing value area. Teal, chosen to sit clear of the VWAP purples: on this
-// setup the value-area high and the VWAP +1σ line are often inches apart, and
-// two levels that decide a trade must never be mistaken for each other.
+// Developing value areas — one per VWAP anchor, drawn together. Each borrows its
+// anchor's VWAP family but sits a distinct shade off it, because the value-area
+// edge and the VWAP band it belongs to often land inches apart and two levels that
+// decide a trade must never be mistaken for each other: the NY area on the magenta
+// / fuchsia side of the NY indigo-violet, the Globex area a cool icy-cyan off the
+// Globex white / grey. `edge` = VAH / VAL (the levels the rules test, solid);
+// `poc` = the point of control (dashed, dimmer, but bright enough to read).
 export const profilePalette = {
-  edge: "#2dd4bf", // VAH / VAL — the levels the rules actually test
-  poc: "#0f766e", // POC — context, drawn dashed and dimmer
+  ny: { edge: "#e879f9", poc: "#d946ef" },
+  globex: { edge: "#7dd3fc", poc: "#38bdf8" },
 } as const;
 
 // Session regime. The ribbon (a per-minute quadrant strip under the candles) and

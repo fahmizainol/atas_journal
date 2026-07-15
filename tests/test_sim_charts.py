@@ -161,7 +161,7 @@ def test_session_chart_draws_the_night_without_moving_the_engines_candles():
     with _cache(n_on=1100, n_rth=2000) as cfg:
         t = tickmod.get_day_ticks(cfg.contract, DAY)   # the engine's own ticks
         eng = barmod.tick_bars(t, PER_BAR)             # the engine's own bars
-        full, bars, gx, ny, prof, _, fp = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+        full, bars, gx, ny, prof_gx, prof_ny, _, fp = _session_frame(cfg, DAY, ET_TZ, overnight=False)
 
     lead = len(bars) - len(eng)
     assert lead == 2 and len(eng) == 4, (lead, len(eng))
@@ -174,8 +174,10 @@ def test_session_chart_draws_the_night_without_moving_the_engines_candles():
     # Both anchors, each starting where it is anchored.
     assert len(gx) == len(bars), "the Globex VWAP must span the night too"
     assert len(ny) == len(eng), "the NY VWAP cannot start before the bell"
-    # Anchored at the engine's session, so the night has no value area yet.
-    assert len(prof) == len(eng)
+    # Two developing value areas, mirroring the two VWAP anchors: the Globex one
+    # spans the night, the NY one cannot start before the bell.
+    assert len(prof_gx) == len(bars), "the Globex value area must span the night too"
+    assert len(prof_ny) == len(eng), "the NY value area cannot start before the bell"
     # The footprint is binned over every drawn candle, night included.
     assert len(fp) == len(bars)
 
@@ -185,8 +187,8 @@ def test_profile_is_drawn_even_when_no_rule_read_it():
     looking at it is the run's config, not the picture."""
     with _cache(n_on=1000, n_rth=2000) as cfg:
         assert not confmod.needs_profile(cfg), "the fixture must be a run that ignores the profile"
-        _, _, _, _, prof, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
-    assert prof, "the profile was withheld from a run that did not read it"
+        _, _, _, _, prof_gx, prof_ny, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+    assert prof_gx and prof_ny, "a value area was withheld from a run that did not read it"
 
 
 def test_session_chart_survives_a_missing_night():
@@ -197,11 +199,13 @@ def test_session_chart_survives_a_missing_night():
         tickmod._read_day_parquet.cache_clear()
         t = tickmod.get_day_ticks(cfg.contract, DAY)
         eng = barmod.tick_bars(t, PER_BAR)
-        _, bars, gx, ny, _, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+        _, bars, gx, ny, prof_gx, prof_ny, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
 
     assert len(bars) == len(eng)
     assert gx == [], "no night on disk, so there is no Globex anchor to draw"
+    assert prof_gx == [], "no night on disk, so there is no Globex value area either"
     assert len(ny) == len(eng)
+    assert len(prof_ny) == len(eng)
 
 
 if __name__ == "__main__":

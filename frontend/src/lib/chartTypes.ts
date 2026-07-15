@@ -24,8 +24,9 @@ export interface ATRPoint {
 }
 
 // Developing volume profile: the value area as it stood at each bar's close,
-// accumulated from the session open. Emitted only by the sim (api/sim_charts),
-// and only for runs whose config actually read it — see src/journal/sim/profile.py.
+// accumulated from an anchor. Emitted only by the sim (api/sim_charts), as two
+// series — one anchored at the Globex open (18:00 ET), one at the NY open (09:30
+// ET) — mirroring the two anchored VWAPs; see src/journal/sim/profile.py.
 // Distinct from the chart's own volume-profile overlay, which is a *whole-range*
 // profile drawn as a histogram; this one is a time series you can watch move.
 export interface ProfilePoint {
@@ -99,7 +100,8 @@ export interface TradeChartData {
   /** Which anchor the engine actually traded; the other is drawn as context.
    * Only the sim's charts set it — the journal's draw both as reference. */
   vwap_anchor?: "globex" | "ny";
-  profile?: ProfilePoint[];
+  profile_globex?: ProfilePoint[];
+  profile_ny?: ProfilePoint[];
   atr_points?: ATRPoint[];
   markers?: ChartMarker[];
   price_lines?: PriceLineSpec[];
@@ -121,7 +123,8 @@ export interface DayChartData {
   /** Which anchor the engine actually traded; the other is drawn as context.
    * Only the sim's charts set it — the journal's draw both as reference. */
   vwap_anchor?: "globex" | "ny";
-  profile?: ProfilePoint[];
+  profile_globex?: ProfilePoint[];
+  profile_ny?: ProfilePoint[];
   atr_points?: ATRPoint[];
   markers?: ChartMarker[];
   levels?: PriceLineSpec[];

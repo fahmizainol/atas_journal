@@ -103,7 +103,8 @@ function RunTradeChart({ slug, runId, tradeNo }: { slug: string; runId: string; 
         bars={data.bars}
         vwapGlobex={data.vwap_globex}
         vwapNy={data.vwap_ny}
-        profile={data.profile}
+        profileGlobex={data.profile_globex}
+        profileNy={data.profile_ny}
         atrPoints={[]}
         markers={data.markers}
         priceLines={data.price_lines}
@@ -119,12 +120,12 @@ function RunTradeChart({ slug, runId, tradeNo }: { slug: string; runId: string; 
         acceptance candle on a bounce, the overextension print on a fade). Blue arrow = entry.
         Orange arrow = exit. Dashed lines = entry / exit / stop. Hover
         the shaded rectangle for the trade's stats.
-        {data.profile && data.profile.length > 0 && (
+        {((data.profile_ny?.length ?? 0) > 0 || (data.profile_globex?.length ?? 0) > 0) && (
           <>
             {" "}
-            Teal = the developing value area (VAH / VAL solid, POC dashed) as of each bar's close,
-            anchored where this run's engine anchored it. Drawn on every chart — whether a rule
-            actually read it is the run's config, not the picture.
+            The developing value areas (VAH / VAL solid, POC dashed) show each bar's close-of-bar
+            value area: fuchsia anchored at the NY open, icy-cyan at the Globex open. Both are drawn
+            on every chart — whether a rule actually read one is the run's config, not the picture.
           </>
         )}
       </div>
@@ -226,7 +227,8 @@ function RunDayChart({
           bars={data.bars}
           vwapGlobex={data.vwap_globex}
           vwapNy={data.vwap_ny}
-          profile={data.profile}
+          profileGlobex={data.profile_globex}
+          profileNy={data.profile_ny}
           atrPoints={[]}
           markers={data.markers}
           priceLines={[]}
