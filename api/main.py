@@ -30,6 +30,7 @@ from .routers import (  # noqa: E402
     edges,
     filters,
     imports,
+    interactions,
     meta,
     models,
     notes,
@@ -86,6 +87,7 @@ app.include_router(imports.router, prefix="/api")
 app.include_router(videos.router, prefix="/api")
 app.include_router(strategies.router, prefix="/api")
 app.include_router(regime.router, prefix="/api")
+app.include_router(interactions.router, prefix="/api")
 
 
 # --- Prod static frontend (mounted last; only if a build exists) ---------
