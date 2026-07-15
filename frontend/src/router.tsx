@@ -7,6 +7,9 @@ import { Layout } from "./pages/Layout";
 const Overview = lazy(() => import("./pages/Overview").then((m) => ({ default: m.Overview })));
 const Calendar = lazy(() => import("./pages/Calendar").then((m) => ({ default: m.Calendar })));
 const Edges = lazy(() => import("./pages/Edges").then((m) => ({ default: m.Edges })));
+const Interactions = lazy(() =>
+  import("./pages/Interactions").then((m) => ({ default: m.Interactions })),
+);
 const Trades = lazy(() => import("./pages/Trades").then((m) => ({ default: m.Trades })));
 const Models = lazy(() => import("./pages/Models").then((m) => ({ default: m.Models })));
 const Backtests = lazy(() => import("./pages/Backtests").then((m) => ({ default: m.Backtests })));
@@ -26,6 +29,7 @@ export const router = createBrowserRouter([
       { path: "calendar", element: <Calendar /> },
       { path: "calendar/:date", element: <Calendar /> },
       { path: "edges", element: <Edges /> },
+      { path: "interactions", element: <Interactions /> },
       { path: "trades", element: <Trades /> },
       { path: "trades/:tradeNo", element: <Trades /> },
       { path: "models", element: <Models /> },
