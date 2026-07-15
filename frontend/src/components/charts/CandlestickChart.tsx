@@ -18,6 +18,7 @@ import { MarkerPrimitive } from "./MarkerPrimitive";
 import { VwapBandPrimitive } from "./VwapBandPrimitive";
 import { VolumeProfilePrimitive } from "./VolumeProfilePrimitive";
 import { RangeProfilePrimitive } from "./RangeProfilePrimitive";
+import { InteractionPrimitive } from "./InteractionPrimitive";
 import { IndicatorLegend, type IndicatorKey, type LegendItem } from "./IndicatorLegend";
 import {
   loadIndicatorVisibility,
@@ -39,19 +40,28 @@ import type {
   TradeRect,
   VwapPoint,
 } from "../../lib/chartTypes";
+import type { Touch, VaSnap } from "../../lib/interactionTypes";
 
 interface Props {
   bars: Bar[];
   vwapGlobex?: VwapPoint[];
   vwapNy?: VwapPoint[];
   /**
-   * Developing value area (POC/VAH/VAL as of each bar's close). Supplied only by
-   * the sim, and only for runs that actually traded against it — so a line here
-   * is always a level the engine really consulted.
+   * Developing value areas (POC/VAH/VAL as of each bar's close), one per VWAP
+   * anchor: `profileGlobex` accumulates from the 18:00 open, `profileNy` from the
+   * 09:30 bell. Both are supplied by the sim on every chart and drawn together —
+   * which anchor a rule actually read is the run's config, not the picture.
    */
-  profile?: ProfilePoint[];
+  profileGlobex?: ProfilePoint[];
+  profileNy?: ProfilePoint[];
   atrPoints?: ATRPoint[];
   markers?: ChartMarker[];
+  /**
+   * Level-interaction overlay from the Interactions Lab: touch dots (coloured by
+   * outcome) and VA-snap markers. Optional — only the Interactions page sends them.
+   */
+  touches?: Touch[];
+  vaSnaps?: VaSnap[];
   priceLines?: PriceLineSpec[];
   levels?: PriceLineSpec[];
   tradeRects?: TradeRect[];
@@ -129,9 +139,12 @@ export function CandlestickChart({
   bars,
   vwapGlobex,
   vwapNy,
-  profile,
+  profileGlobex,
+  profileNy,
   atrPoints,
   markers,
+  touches,
+  vaSnaps,
   priceLines,
   levels,
   tradeRects,
@@ -465,18 +478,22 @@ export function CandlestickChart({
       vwapGlobex && vwapGlobex.length > 0 ? addVwap(vwapGlobex, vwapPalette.globex) : null;
     const ny = vwapNy && vwapNy.length > 0 ? addVwap(vwapNy, vwapPalette.ny) : null;
 
-    // Developing value area: VAH and VAL solid (they are the levels the rules
-    // actually test against), POC dashed between them. Deliberately not a shaded
-    // band — the VWAP envelope already owns that visual, and stacking two fills
-    // makes the one place they overlap, which is the whole setup, unreadable.
-    const profileSeries: ISeriesApi<"Line">[] = [];
-    if (profile && profile.length > 0) {
+    // Developing value areas, one per anchor: VAH and VAL solid (they are the
+    // levels the rules actually test against), POC dashed between them, each in its
+    // anchor's colour. Deliberately not shaded bands — the VWAP envelope already
+    // owns that visual, and stacking fills where the two areas overlap (the whole
+    // setup) would be unreadable.
+    const addProfile = (
+      pts: ProfilePoint[] | undefined,
+      pal: { edge: string; poc: string },
+    ): ISeriesApi<"Line">[] => {
+      if (!pts || pts.length === 0) return [];
       const lines = [
-        { key: "vah", color: profilePalette.edge, style: 0, width: 2 },
-        { key: "val", color: profilePalette.edge, style: 0, width: 2 },
-        { key: "poc", color: profilePalette.poc, style: 2, width: 1 },
+        { key: "vah", color: pal.edge, style: 0, width: 2 },
+        { key: "val", color: pal.edge, style: 0, width: 2 },
+        { key: "poc", color: pal.poc, style: 2, width: 2 },
       ] as const;
-      for (const l of lines) {
+      return lines.map((l) => {
         const s_ = chart.addSeries(LineSeries, {
           color: l.color,
           lineWidth: l.width as 1 | 2,
@@ -484,16 +501,23 @@ export function CandlestickChart({
           priceLineVisible: false,
           lastValueVisible: false,
         });
-        s_.setData(profile.map((v) => ({ time: v.time as Time, value: v[l.key] })));
-        profileSeries.push(s_);
-      }
-    }
+        s_.setData(pts.map((v) => ({ time: v.time as Time, value: v[l.key] })));
+        return s_;
+      });
+    };
+    const profileGlobexSeries = addProfile(profileGlobex, profilePalette.globex);
+    const profileNySeries = addProfile(profileNy, profilePalette.ny);
 
     if (markers && markers.length > 0) {
       const barMap = new Map(bars.map((b) => [b.time, b]));
       const snappedMarkers = markers.map((m) => ({ ...m, time: nearestBar(m.time) }));
       candle.attachPrimitive(new MarkerPrimitive(snappedMarkers, barMap) as any);
     }
+
+    // Interaction overlay (touch dots + VA-snap markers). Attached unconditionally
+    // so its toggles exist even before the arrays fill; empty arrays draw nothing.
+    const interactionPrim = new InteractionPrimitive(touches ?? [], vaSnaps ?? []);
+    candle.attachPrimitive(interactionPrim as any);
 
     for (const pl of priceLines ?? []) {
       candle.createPriceLine({
@@ -854,8 +878,10 @@ export function CandlestickChart({
       globex?.band.setVisible(v.vwapGlobex);
       for (const s of ny?.series ?? []) s.applyOptions({ visible: v.vwapNy });
       ny?.band.setVisible(v.vwapNy);
-      for (const s of profileSeries) s.applyOptions({ visible: v.developingProfile });
+      for (const s of profileGlobexSeries) s.applyOptions({ visible: v.developingProfileGlobex });
+      for (const s of profileNySeries) s.applyOptions({ visible: v.developingProfileNy });
       for (const l of levelLines) l.applyOptions({ lineVisible: v.levels, axisLabelVisible: v.levels });
+      interactionPrim.setVisibility(v.touches, v.va_snaps);
       if (atrPoints && atrPoints.length > 0) {
         if (v.atr && !atrSeries) addAtr();
         else if (!v.atr && atrSeries) {
@@ -976,9 +1002,12 @@ export function CandlestickChart({
     bars,
     vwapGlobex,
     vwapNy,
-    profile,
+    profileGlobex,
+    profileNy,
     atrPoints,
     markers,
+    touches,
+    vaSnaps,
     priceLines,
     levels,
     tradeRects,
@@ -1002,16 +1031,26 @@ export function CandlestickChart({
       label: "VWAP · NY ±1σ ±2σ",
       color: vwapPalette.ny.middle,
     });
-  if (profile && profile.length > 0)
+  if (profileGlobex && profileGlobex.length > 0)
     legendItems.push({
-      key: "developingProfile",
-      label: "Developing VA · VAH/POC/VAL",
-      color: profilePalette.edge,
+      key: "developingProfileGlobex",
+      label: "Developing VA · Globex VAH/POC/VAL",
+      color: profilePalette.globex.edge,
+    });
+  if (profileNy && profileNy.length > 0)
+    legendItems.push({
+      key: "developingProfileNy",
+      label: "Developing VA · NY VAH/POC/VAL",
+      color: profilePalette.ny.edge,
     });
   if (atrPoints && atrPoints.length > 0)
     legendItems.push({ key: "atr", label: "ATR 14", color: palette.gold });
   if (levels && levels.length > 0)
     legendItems.push({ key: "levels", label: "Session levels", color: palette.blue });
+  if (touches && touches.length > 0)
+    legendItems.push({ key: "touches", label: "Interactions · touches", color: palette.green });
+  if (vaSnaps && vaSnaps.length > 0)
+    legendItems.push({ key: "va_snaps", label: "Interactions · VA-snaps", color: palette.red });
   if (bars.length > 0)
     legendItems.push({
       key: "volumeProfile",

@@ -10,7 +10,10 @@ const DEFAULT_VISIBILITY: IndicatorVisibility = {
   atr: true,
   levels: true,
   volumeProfile: true,
-  developingProfile: true,
+  developingProfileGlobex: true,
+  developingProfileNy: true,
+  touches: true,
+  va_snaps: true,
 };
 
 // Indicator hide/show is a per-user chart preference, not per-trade state: a

@@ -4,7 +4,10 @@ export type IndicatorKey =
   | "atr"
   | "levels"
   | "volumeProfile"
-  | "developingProfile";
+  | "developingProfileGlobex"
+  | "developingProfileNy"
+  | "touches"
+  | "va_snaps";
 
 export interface LegendItem {
   key: IndicatorKey;
