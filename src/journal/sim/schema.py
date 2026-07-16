@@ -37,7 +37,7 @@ from dataclasses import dataclass, replace
 from datetime import date, time
 
 from ..config import CONTRACT_SPECS
-from .rules import FadeConfig, SimConfig
+from .rules import FadeConfig, GlobexBounceConfig, ProfilePullbackConfig, SimConfig
 
 
 @dataclass(frozen=True)
@@ -209,6 +209,40 @@ FIELDS: tuple[Field, ...] = (
 BY_NAME: dict[str, Field] = {f.name: f for f in FIELDS}
 
 
+# --- the Globex bounce's table ------------------------------------------------
+# GlobexBounceConfig is SimConfig plus one knob, `side`, so its form is the
+# bounce's with a Direction group bolted on the front. Every other descriptor is
+# reused outright.
+
+GLOBEX_GROUPS: tuple[dict, ...] = (
+    GROUPS[0],  # window stays first — it is the one that spends Databento money
+    {"key": "direction", "title": "Direction", "collapsed": False},
+    *GROUPS[1:],
+)
+
+GLOBEX_FIELDS: tuple[Field, ...] = (
+    Field("side", "enum", "direction", "Direction",
+          choices=(("long", "Long — buy the pullback"),
+                   ("short", "Short — sell the pullback")),
+          help="The trade direction. Which band it reads depends on Invert: by "
+               "default long bounces the upper band and short the lower. The "
+               "long-flavoured knob names (green acceptance candle, invalidation "
+               "past the mid, re-acceptance inside value) all mean their mirror on "
+               "a short, and the volume_profile confluence flips with it too."),
+    Field("invert", "bool", "direction", "Invert the band",
+          help="Off: the bounce — long reads the upper band, short the lower, "
+               "each running with the break out to dev2. On: long reads the LOWER "
+               "band (buy the pullback into support) and short the UPPER (sell the "
+               "rally into resistance) — same entry at dev1, opposite direction, "
+               "reverting toward the mid. dev2 then sits behind the trade, so an "
+               "inverted run must target an R-multiple and cannot cap acceptance "
+               "at dev2."),
+    *FIELDS,
+)
+
+GLOBEX_BY_NAME: dict[str, Field] = {f.name: f for f in GLOBEX_FIELDS}
+
+
 # --- the fade's table ---------------------------------------------------------
 # FadeConfig's descriptors. A knob whose name, meaning and bounds are the same
 # on both classes reuses the bounce's Field outright (the default the form shows
@@ -306,12 +340,124 @@ FADE_FIELDS: tuple[Field, ...] = (
 FADE_BY_NAME: dict[str, Field] = {f.name: f for f in FADE_FIELDS}
 
 
+# --- the profile pullback's table ----------------------------------------------
+# ProfilePullbackConfig's descriptors. No acceptance and no arming — the level
+# is the setup — so the setup group describes what makes a touch a trade.
+
+PULLBACK_GROUPS: tuple[dict, ...] = (
+    {"key": "window", "title": "Window", "collapsed": False},
+    {"key": "levels", "title": "Levels", "collapsed": False},
+    {"key": "setup", "title": "Setup", "collapsed": False},
+    {"key": "exit", "title": "Exit", "collapsed": False},
+    {"key": "filters", "title": "Filters & lifecycle", "collapsed": False},
+    {"key": "scope", "title": "Instrument", "collapsed": True},
+    {"key": "bars", "title": "Bars", "collapsed": True},
+    {"key": "session", "title": "Session times (ET)", "collapsed": True},
+    {"key": "size", "title": "Size & cost", "collapsed": True},
+)
+
+PULLBACK_FIELDS: tuple[Field, ...] = (
+    # --- window ---
+    BY_NAME["start_date"], BY_NAME["end_date"],
+
+    # --- levels (what a limit may rest on) ---
+    Field("use_ny_levels", "bool", "levels", "NY session profile levels",
+          help="The session's own developing profile, anchored at the bell. "
+               "Degenerate for the first minutes — see the warm-up."),
+    Field("use_globex_levels", "bool", "levels", "Globex profile levels",
+          help="The overnight developing profile, anchored at 18:00 ET the "
+               "previous evening — ~15 hours mature by the open."),
+    Field("trade_poc", "bool", "levels", "POC"),
+    Field("trade_vah", "bool", "levels", "VAH"),
+    Field("level_warmup_min", "int", "levels", "NY level warm-up",
+          unit="min", min=0,
+          help="An NY-anchored profile minutes old has POC=VAH=VAL on the open "
+               "print; its levels are not candidates until the anchor is this "
+               "old. Globex levels are never gated by this."),
+
+    # --- setup (what makes a touch a trade) ---
+    Field("require_upper_band", "bool", "setup",
+          "Level must sit inside NY VWAP +1σ..+2σ",
+          help="The cut's core condition. The same levels outside the channel "
+               "scored at the null baseline — switch this off only to measure "
+               "that."),
+    Field("rearm_ticks", "int", "setup", "Re-arm distance", unit="ticks", min=0,
+          help="Price must clear the level by this much before a new touch of "
+               "it can fill — a rotation sitting on the level is one touch, "
+               "not many."),
+    Field("min_arm_min", "int", "setup", "Minimum pullback age",
+          unit="min", min=1, zero_means_off=True, on_default=3,
+          help="A touch may only fill (or count) if price cleared the level at "
+               "least this long ago; a level that relocates under price "
+               "restarts the clock. Measured in-sample: even 1 minute inverted "
+               "the edge (the profitable fill is the fast pullback that "
+               "instantly rejects) — this exists to keep that measurable, not "
+               "as a recommendation."),
+    Field("max_touches_per_level", "int", "setup", "Touches per level",
+          unit="touches", min=1, zero_means_off=True, on_default=1,
+          help="Only the first N touches of each level series may fill; the "
+               "first touch was the study's strongest sub-cut. Off = every "
+               "touch may fill."),
+    Field("require_confluence_pts", "float", "setup", "Require a stacked level",
+          unit="pts", min=0.01, zero_means_off=True, on_default=10.0,
+          help="Another candidate level must sit within this many points of "
+               "the fill — the study's 2+ sources cut, whose median adverse "
+               "excursion was the tightest of any conditioner."),
+
+    # --- exit ---
+    BY_NAME["stop_ticks"],
+    Field("target", "enum", "exit", "Target",
+          choices=(("rr", "A fixed R multiple"),
+                   ("ticks", "A fixed distance"))),
+    BY_NAME["target_rr"],
+    Field("target_ticks", "int", "exit", "Target distance", unit="ticks", min=1,
+          depends_on=("target", "ticks"),
+          help="A fixed take-profit distance from the fill."),
+    BY_NAME["trail_stop_ticks"], BY_NAME["trail_step_ticks"],
+    BY_NAME["trail_breakeven_ticks"], BY_NAME["trail_breakeven_only"],
+
+    # --- filters / lifecycle ---
+    Field("min_band_width_ticks", "int", "filters", "Minimum upper band width",
+          unit="ticks", min=0, zero_means_off=True, on_default=20,
+          help="Skip the fill when the NY VWAP +1σ..+2σ channel the level sits "
+               "in (dev2−dev1) is tighter than this. A pinched upper band makes "
+               "the inside-the-channel condition trivial and leaves the pullback "
+               "no room to run."),
+    Field("min_level_stability_min", "int", "filters", "Minimum level stability",
+          unit="min", min=1, zero_means_off=True, on_default=2,
+          help="Skip the fill unless the level has sat within the re-arm "
+               "distance of its fill value for this long. A VAH that relocated "
+               "up under price moments before the touch is the profile chasing "
+               "the market, not a level anyone defended — measured in-sample, "
+               "fills on just-relocated levels lost while stable-level fills "
+               "carried the edge."),
+    BY_NAME["daily_loss_stop"],
+
+    # --- scope / bars / session / size ---
+    BY_NAME["instrument"], BY_NAME["contract"],
+    BY_NAME["ticks_per_bar"],
+    Field("entry_open", "time", "session", "Entry window opens",
+          help="No entries before this. The default matches the NY level "
+               "warm-up — an earlier touch is the open's impulse, not a level."),
+    Field("entry_close", "time", "session", "Entry window closes",
+          help="No new entries after this; open positions are left to run. The "
+               "default excludes the last hour, whose touches scored exactly "
+               "at the null baseline."),
+    BY_NAME["flat_by"],
+    BY_NAME["contracts"], BY_NAME["commission_per_side"],
+)
+
+PULLBACK_BY_NAME: dict[str, Field] = {f.name: f for f in PULLBACK_FIELDS}
+
+
 # config class -> (groups, fields, by-name index). The registry's config_cls is
 # the key, so parsing, validation and the served form blueprint all follow from
 # one declaration on the strategy.
 _TABLES: dict[type, tuple[tuple[dict, ...], tuple[Field, ...], dict[str, Field]]] = {
     SimConfig: (GROUPS, FIELDS, BY_NAME),
+    GlobexBounceConfig: (GLOBEX_GROUPS, GLOBEX_FIELDS, GLOBEX_BY_NAME),
     FadeConfig: (FADE_GROUPS, FADE_FIELDS, FADE_BY_NAME),
+    ProfilePullbackConfig: (PULLBACK_GROUPS, PULLBACK_FIELDS, PULLBACK_BY_NAME),
 }
 
 # `confluences` is the one field with no descriptor: it is an open-ended dict of
@@ -415,6 +561,32 @@ def _check_cross_field(cfg) -> None:
                 f"entry_limit_offset_ticks ({cfg.entry_limit_offset_ticks}) may not "
                 f"exceed acceptance_min_ticks ({cfg.acceptance_min_ticks}): the limit "
                 f"would sit beyond the acceptance close, on the far side of the market")
+    if isinstance(cfg, GlobexBounceConfig) and cfg.invert:
+        # Inverting reverts toward the mid, so dev2 sits BEHIND the entry — a
+        # dev2 target fills instantly at a loss, and an acceptance capped at dev2
+        # can never arm. Both would run green and silently trade nothing like
+        # what they say, so they are refused rather than quietly mis-simulated.
+        if cfg.target != "rr":
+            raise ValueError(
+                "invert needs target 'rr': dev2 sits behind an inverted trade "
+                "(it reverts toward the mid), so it cannot be the target")
+        if cfg.acceptance_cap_at_dev2:
+            raise ValueError(
+                "invert cannot use acceptance_cap_at_dev2: the acceptance close is "
+                "beyond dev1 toward the channel, never past the far dev2")
+    if isinstance(cfg, ProfilePullbackConfig):
+        if not (cfg.use_ny_levels or cfg.use_globex_levels):
+            raise ValueError("enable at least one level anchor (NY or Globex)")
+        if not (cfg.trade_poc or cfg.trade_vah):
+            raise ValueError("enable at least one level type (POC or VAH)")
+        if cfg.require_confluence_pts and sum(
+                [cfg.use_ny_levels, cfg.use_globex_levels]) * sum(
+                [cfg.trade_poc, cfg.trade_vah]) < 2:
+            # One candidate series can never have "another level" beside it: the
+            # engine would run green and take zero trades, forever, which reads
+            # as "the idea never sets up" rather than "this config is inert".
+            raise ValueError(
+                "require_confluence_pts needs at least two candidate level series")
     if isinstance(cfg, FadeConfig):
         if (cfg.entry_variant == "A"
                 and cfg.entry_limit_offset_ticks > cfg.arm_extension_ticks):

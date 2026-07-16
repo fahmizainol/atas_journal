@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import engine
-from .rules import FadeConfig, SimConfig
+from .rules import FadeConfig, GlobexBounceConfig, ProfilePullbackConfig, SimConfig
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,11 @@ STRATEGIES: dict[str, Strategy] = {
                 "gx_rescue stands it down after 09:45 when broken session bands "
                 "are not being caught by the Globex band beneath; gx_floor "
                 "requires each fill to have the Globex dev1 within reach below "
-                "it as a second floor."
+                "it as a second floor. on_high requires each fill to be within "
+                "reach of the overnight session high — beneath that wall, "
+                "rallies sell into the night's inventory — and gx_value "
+                "requires the fill beyond the developing GLOBEX value area "
+                "(above its VAH), not just the session's."
             ),
             # v2: added the developing-value-area exit (exit_below_vah_bars) and
             # the volume_profile gate. Both are off by default and a config that
@@ -93,22 +97,35 @@ STRATEGIES: dict[str, Strategy] = {
             # rule path, so v5 runs are quarantined rather than trusted.
             version="6",
             confluences=("volume_profile", "regime", "vwap_slope", "vwap_cross",
-                         "upper_occupancy", "gx_rescue", "gx_floor"),
+                         "upper_occupancy", "gx_rescue", "gx_floor", "on_high",
+                         "gx_value"),
         ),
         Strategy(
             slug="vwap-globex-bounce",
-            name="VWAP Globex Upper Band Bounce",
+            name="VWAP Globex Band Bounce",
             description=(
-                "The upper-band bounce read against a VWAP anchored at the Globex "
-                "open (18:00 ET the previous evening) instead of the 09:30 bell, so "
-                "the bands price the RTH session against the whole overnight "
-                "distribution. Rules are otherwise the session strategy's: acceptance "
-                "above dev1 arms, variant A rests a limit at dev1 (or "
-                "entry_limit_offset_ticks above it) and variant B "
-                "buy-stops the reclaim, target dev2 or an R-multiple, fixed-tick stop. "
-                "Overnight ticks feed the VWAP, the bars and the profile only — "
-                "acceptance and the invalidations are read from RTH bar closes alone, "
-                "and entries are confined to the entry window as usual."
+                "The band bounce read against a VWAP anchored at the Globex open "
+                "(18:00 ET the previous evening) instead of the 09:30 bell, so the "
+                "bands price the RTH session against the whole overnight "
+                "distribution. side picks the direction: 'long' bounces the upper "
+                "bands (acceptance above dev1 arms, buy the pullback to it, target "
+                "dev2), 'short' mirrors onto the lower bands (acceptance below dev1, "
+                "sell the pullback, target the lower dev2) — the engine reads every "
+                "comparison off a signed frame, so the long-flavoured knob names "
+                "(acceptance_require_green, invalidate_below_mid_bars, "
+                "exit_below_vah_bars) mean their mirror on a short. Rules are "
+                "otherwise the session strategy's: variant A rests a limit at dev1 "
+                "(or entry_limit_offset_ticks in front of it) and variant B stops "
+                "into the reclaim, fixed-tick stop. Overnight ticks feed the VWAP, "
+                "the bars and the profile only — acceptance and the invalidations "
+                "are read from RTH bar closes alone, and entries are confined to the "
+                "entry window as usual. The volume_profile confluence mirrors with "
+                "the band (VAH above, VAL below). invert flips the band each "
+                "direction reads: off is the bounce (long→upper, short→lower, "
+                "running out to dev2); on makes long buy the pullback into the "
+                "LOWER band and short sell the rally into the UPPER — same dev1 "
+                "entry, opposite direction, reverting toward the mid on an "
+                "R-multiple target."
             ),
             # v2: added the step trail (trail_step_ticks), which moves the stop
             # on the base rule path — v1 runs are quarantined rather than trusted.
@@ -118,7 +135,18 @@ STRATEGIES: dict[str, Strategy] = {
             # vwap-upper-band-bounce v5.
             # v5: added entry_limit_offset_ticks — variant A's limit may rest in
             # front of dev1 instead of on it. See vwap-upper-band-bounce v6.
-            version="5",
+            # v6: the direction is now a config knob (GlobexBounceConfig.side),
+            # absorbing the retired vwap-globex-lower-bounce. side="long" (the
+            # default) simulates identically to v5, but the knob rides the base
+            # rule path and is part of the config hash, so v5 runs are quarantined
+            # rather than trusted.
+            # v7: added invert (GlobexBounceConfig.invert) — long may read the
+            # lower band and short the upper, reverting toward the mid. invert=False
+            # (the default) reads the same band and simulates identically to v6, but
+            # the knob rides the base rule path and is part of the config hash, so
+            # v6 runs are quarantined rather than trusted.
+            version="7",
+            config_cls=GlobexBounceConfig,
             confluences=("volume_profile",),
             run_session=engine.run_session_globex,
             session="globex",
@@ -139,7 +167,10 @@ STRATEGIES: dict[str, Strategy] = {
                 "value. The config knobs keep their long-flavoured names and mean "
                 "the mirror here: acceptance_require_green demands a RED candle, "
                 "invalidate_below_mid_bars counts closes ABOVE the VWAP mid, and "
-                "exit_below_vah_bars counts closes ABOVE the VAL."
+                "exit_below_vah_bars counts closes ABOVE the VAL. The on_high and "
+                "gx_value confluences mirror onto this side too: the fill must be "
+                "within reach of the overnight LOW, and beyond (below) the "
+                "developing Globex VAL."
             ),
             # v2: added the step trail (trail_step_ticks), which moves the stop
             # on the base rule path — v1 runs are quarantined rather than trusted.
@@ -150,37 +181,12 @@ STRATEGIES: dict[str, Strategy] = {
             # v5: added entry_limit_offset_ticks — variant A's limit may rest in
             # front of dev1 instead of on it. See vwap-upper-band-bounce v6.
             version="5",
-            confluences=("volume_profile",),
+            confluences=("volume_profile", "on_high", "gx_value"),
             run_session=engine.run_session_short,
         ),
-        Strategy(
-            slug="vwap-globex-lower-bounce",
-            name="VWAP Globex Lower Band Bounce",
-            description=(
-                "The lower-band bounce read against a VWAP anchored at the Globex "
-                "open (18:00 ET the previous evening) instead of the 09:30 bell, so "
-                "the bands price the RTH session against the whole overnight "
-                "distribution. Rules are otherwise the session short's: acceptance "
-                "below dev1 arms, variant A rests a sell limit at dev1 (or "
-                "entry_limit_offset_ticks below it) and variant B "
-                "sell-stops the rejection, target dev2 or an R-multiple, fixed-tick "
-                "stop. Overnight ticks feed the VWAP, the bars and the profile only — "
-                "acceptance and the invalidations are read from RTH bar closes alone, "
-                "and entries are confined to the entry window as usual."
-            ),
-            # v2: added the step trail (trail_step_ticks), which moves the stop
-            # on the base rule path — v1 runs are quarantined rather than trusted.
-            # v3: variant A's dev1 limit fills on the crossing back to dev1, not on
-            # the standing inequality — see vwap-upper-band-bounce v4.
-            # v4: added the daily loss stop (daily_loss_stop) — see
-            # vwap-upper-band-bounce v5.
-            # v5: added entry_limit_offset_ticks — variant A's limit may rest in
-            # front of dev1 instead of on it. See vwap-upper-band-bounce v6.
-            version="5",
-            confluences=("volume_profile",),
-            run_session=engine.run_session_globex_short,
-            session="globex",
-        ),
+        # vwap-globex-lower-bounce retired: its short is now vwap-globex-bounce
+        # with side="short". Its run history stays on disk under the old slug but
+        # the strategy is no longer registered.
         Strategy(
             slug="vwap-dev1-fade-short",
             name="VWAP Dev1 Fade Short",
@@ -268,6 +274,65 @@ STRATEGIES: dict[str, Strategy] = {
             confluences=("volume_profile", "vwap_slope_cap",
                          "upper_occupancy_cap", "gx_rescue_cap"),
             run_session=engine.run_session_fade_long,
+        ),
+        Strategy(
+            slug="profile-pullback-long",
+            name="Profile Pullback Long",
+            description=(
+                "The Interactions Lab's upper-band cut, traded: long the "
+                "pullback-from-above onto a developing profile level — the NY "
+                "or Globex POC/VAH, per the config — while the level sits "
+                "inside the NY VWAP +1σ..+2σ channel. A limit rests on each "
+                "candidate level in force and fills on the crossing back down "
+                "to it; price must first have cleared the level by rearm_ticks, "
+                "and must clear it afresh after every touch and every exit, so "
+                "a rotation sitting on a level is one touch, not many. "
+                "max_touches_per_level restricts fills to each level's first N "
+                "touches (the study's strongest sub-cut), and "
+                "require_confluence_pts demands a second candidate level "
+                "stacked within reach of the fill, and "
+                "min_level_stability_min skips fills on a level that only "
+                "just relocated to its price — the profile chasing the "
+                "market, not a level anyone defended. NY levels are not "
+                "candidates until their profile is level_warmup_min old — "
+                "younger than that, POC/VAH/VAL all sit on the open print. "
+                "Exits are a fixed-tick stop and an R-multiple or fixed-tick "
+                "target, with the bounce's optional trail; there is no "
+                "structural invalidation — the research showed the stop IS the "
+                "rule (trend-down days run a median ~89 pts against this "
+                "entry). Entries default to 09:45–15:00 ET: the last hour's "
+                "touches scored exactly at the measured null baseline. No "
+                "day-type gate is offered on purpose — no pre-known feature "
+                "predicted the bounce."
+            ),
+            # v2: overnight crossings of a Globex level consume the arm but no
+            # longer count as touches — under v1 they spent the level's first
+            # touch before the bell, silently disabling every Globex level
+            # under max_touches_per_level. Touch counts are RTH-only, as in the
+            # study; v1 runs are quarantined rather than trusted.
+            # v3: a level that VA-snaps across price disarms instead of
+            # filling. Under v2 the crossing check was the standing inequality
+            # over the level's own motion, so a profile rebuilding its value
+            # area over the market booked a "fill" at a level the market sat
+            # below — a limit no real book would have filled. Fills now require
+            # the previous print above the current level (price did the
+            # crossing); v2 runs are quarantined rather than trusted.
+            # v4: the touch-gap rule in time. A crossing armed less than
+            # min_arm_min ago is the same rotation continuing — no fill, no
+            # touch counted — and a level that relocates upward under a
+            # standing arm voids it (into the approach zone: disarm; still
+            # clear: the dwell clock restarts). Under v3 a POC that node-
+            # flipped 150 pts to land under the market filled on the next
+            # downtick off a 22-minute-old arm certified against the old
+            # level, and a 10-second poke re-armed it. Both rules sit on the
+            # base path; v3 runs are quarantined rather than trusted.
+            version="4",
+            config_cls=ProfilePullbackConfig,
+            run_session=engine.run_session_profile_pullback,
+            # Globex session: the overnight segment feeds the Globex developing
+            # profile (and the charts); the NY bands and NY profile are still
+            # anchored at the bell, and trading lives in RTH only.
+            session="globex",
         ),
     ]
 }

@@ -76,7 +76,8 @@ def _minutes_et(ts: pd.Series) -> np.ndarray:
 
 
 def run_session(
-    cfg: SimConfig, day: date, overnight: bool = False, side: str = "long"
+    cfg: SimConfig, day: date, overnight: bool = False, side: str = "long",
+    invert: bool = False,
 ) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
     """Simulate one session. Returns (trades, vetoed, bars, per-bar bands).
 
@@ -85,6 +86,18 @@ def run_session(
     mirrors it exactly onto the lower bands (accept below dev1, sell the
     pullback, target dev2 beneath). See the module docstring for how the
     long-flavoured config knobs read on a short.
+
+    ``invert`` decouples the band from the trade direction. Normally a long reads
+    the upper band and a short the lower — the trade runs WITH the break, away
+    from the mid, to dev2. Inverted, a long reads the LOWER band (buy the pullback
+    into support) and a short the UPPER (sell the rally into resistance): the same
+    entry price at dev1, the opposite direction, reverting toward the mid. dev2
+    then sits behind the trade, so an inverted run must target an R-multiple, not
+    dev2 (the schema enforces it). Only the *band* moves; every trade comparison
+    (the stop, the R target, the entry crossing, the acceptance) keeps the trade's
+    own sign, while the channel-relative reads (band width, the value-area edge
+    and its exit, the mid invalidation) follow the band. With ``invert`` off the
+    two signs coincide and every read is exactly what it was.
 
     With ``overnight`` the Globex segment (18:00 ET the previous evening) is
     spliced in front of RTH, which moves the VWAP anchor to the Globex open —
@@ -113,6 +126,15 @@ def run_session(
     # "in the direction of the trade": s*(x - level) > 0 is "x is beyond level on
     # the side we are trading".
     s = 1.0 if side == "long" else -1.0
+    # Which band the setup reads, and its own sign. Coupled to s unless inverted:
+    # a long reads the upper band (bs = s = +1), a short the lower (bs = s = −1).
+    # Inverting flips the band without touching the trade sign, so a long reads
+    # the lower band (bs = −1, s = +1) and a short the upper (bs = +1, s = −1).
+    # `bs` is used for the reads that are about the channel, not the position:
+    # the band width, the value-area edge and its exit, and the mid invalidation.
+    # When invert is off, bs == s and each of those is byte-identical to before.
+    use_upper = (side == "long") != invert
+    bs = 1.0 if use_upper else -1.0
 
     t = tickmod.get_day_ticks(tickmod.contract_for(cfg.contract, day), day,
                               include_overnight=overnight)
@@ -138,9 +160,10 @@ def run_session(
 
     # The developing profile is only built if a gate or the value-area exit reads
     # it — it costs a value-area scan per bar, and a run that ignores it must not
-    # pay. The edge that matters is the one the trade sits *beyond*: VAH for a
-    # long from above value, VAL for a short from below it.
-    edge = "vah" if side == "long" else "val"
+    # pay. The edge that matters is the one the trade sits *beyond*, and that is a
+    # property of the band, not the trade sign: VAH on the upper band, VAL on the
+    # lower, whichever direction is traded there.
+    edge = "vah" if use_upper else "val"
     prof = edge_tick = edge_bar = None
     if confmod.needs_profile(cfg):
         prof = profmod.developing_profile(t, b, tick)
@@ -157,7 +180,7 @@ def run_session(
     if gates:
         ctx = confmod.SessionCtx(
             cfg=cfg, day=day, ticks=t, bars=b, value_edge_at_tick=edge_tick,
-            profile=prof, side=side,
+            profile=prof, side=side, band="upper" if use_upper else "lower",
         )
         for g in gates:
             g.prepare(ctx)
@@ -178,10 +201,11 @@ def run_session(
 
     price = t["price"].to_numpy(dtype="float64").tolist()
     ts = t["ts_utc"]
-    # dev1/dev2 on the side being traded: the upper bands for a long, the lower
-    # for a short. Everything downstream reads these two names only.
-    d1 = w["upper1" if side == "long" else "lower1"].to_numpy().tolist()
-    d2 = w["upper2" if side == "long" else "lower2"].to_numpy().tolist()
+    # dev1/dev2 on the band being traded: the upper bands for a long (or a short
+    # inverted onto them), the lower for a short (or an inverted long buying
+    # support). Everything downstream reads these two names only.
+    d1 = w["upper1" if use_upper else "lower1"].to_numpy().tolist()
+    d2 = w["upper2" if use_upper else "lower2"].to_numpy().tolist()
     md = w["mid"].to_numpy().tolist()
 
     n = len(price)
@@ -379,9 +403,11 @@ def run_session(
             touched = beyond and at_limit
             beyond = not at_limit
             if not halted and open_m <= mins[i] < close_m and i < force_i:
-                # Signed so the width is the distance between the bands, positive
-                # on both sides — a short's dev2 sits *below* its dev1.
-                band_w = s * (d2[i] - d1[i]) / tick
+                # Signed by the BAND so the width is the distance between the two
+                # bands, positive whichever band is traded — the lower dev2 sits
+                # below its dev1. (bs, not s: an inverted trade's dev2 is behind
+                # it, so the trade sign would report a negative width.)
+                band_w = bs * (d2[i] - d1[i]) / tick
                 fill = None
                 if band_w < cfg.min_band_width_ticks:
                     pass  # too tight to be worth the trade; the touch is missed,
@@ -430,17 +456,22 @@ def run_session(
             # count their own streaks so a vetoed entry is scored on the same rule.
             if cfg.exit_below_vah_bars and edge_bar is not None:
                 lvl = edge_bar[bi]
-                # Back inside value: below VAH for a long, above VAL for a short.
-                inside = not np.isnan(lvl) and s * (c - lvl) < 0
+                # Back inside value: below VAH on the upper band, above VAL on the
+                # lower — a property of the band (bs), so an inverted trade reads
+                # re-acceptance from the correct edge.
+                inside = not np.isnan(lvl) and bs * (c - lvl) < 0
                 for p_ in ([pos] if pos is not None else []) + [g for _, g in ghosts]:
                     p_.inside_value = p_.inside_value + 1 if inside else 0
                     if p_.inside_value >= cfg.exit_below_vah_bars:
                         p_.exit_on_next_tick = True
 
             if cfg.invalidate_below_mid_bars:
-                # Closes on the wrong side of the mid: below it for a long, above
-                # it for a short.
-                below_mid = below_mid + 1 if s * (c - md[i]) < 0 else 0
+                # Closes on the far side of the mid from the band: below it on the
+                # upper band, above it on the lower. Band-signed (bs) so an
+                # inverted setup — armed in the channel between its band and the
+                # mid — disarms when price closes THROUGH the mid and out the far
+                # side, not merely for sitting on its own side of it.
+                below_mid = below_mid + 1 if bs * (c - md[i]) < 0 else 0
                 if below_mid >= cfg.invalidate_below_mid_bars:
                     armed = False
                     awaiting_reclaim = False
@@ -475,13 +506,18 @@ def run_session(
 
 
 def run_session_globex(
-    cfg: SimConfig, day: date
+    cfg, day: date
 ) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
     """Registry entry point (``session="globex"``): the same rules, read against a
-    Globex-anchored VWAP. A separate callable rather than a config knob because a
-    knob the engine could ignore would let two different-looking configs produce
-    byte-identical runs."""
-    return run_session(cfg, day, overnight=True)
+    Globex-anchored VWAP, in the direction ``cfg.side`` picks (this strategy's
+    config is a ``GlobexBounceConfig``, which carries that knob). A Globex-anchored
+    VWAP is a separate callable rather than a config knob because a knob the engine
+    could ignore would let two different-looking configs produce byte-identical
+    runs; ``side`` is safe as a knob precisely because this entry point consumes
+    it — long and short never share output. ``invert`` flips the band each
+    direction reads (long buys the lower band, short sells the upper), which the
+    engine consumes the same way."""
+    return run_session(cfg, day, overnight=True, side=cfg.side, invert=cfg.invert)
 
 
 def run_session_short(
@@ -489,13 +525,6 @@ def run_session_short(
 ) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
     """Registry entry point: the bounce mirrored onto the lower bands."""
     return run_session(cfg, day, side="short")
-
-
-def run_session_globex_short(
-    cfg: SimConfig, day: date
-) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
-    """Registry entry point: the lower-band bounce off a Globex-anchored VWAP."""
-    return run_session(cfg, day, overnight=True, side="short")
 
 
 def run_session_fade(
@@ -855,6 +884,314 @@ def run_session_fade_long(
 ) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
     """Registry entry point: fade the lower-band stretch from below, long."""
     return run_session_fade(cfg, day, side="long")
+
+
+def run_session_profile_pullback(
+    cfg, day: date
+) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
+    """Simulate one session of the profile pullback (cfg is a
+    rules.ProfilePullbackConfig).
+
+    The Interactions Lab's upper-band cut, traded long: rest a limit on each
+    candidate developing level (NY/Globex POC/VAH, per the config), and fill
+    when price pulls back onto one from above while the level sits inside the
+    NY VWAP +1σ..+2σ channel. There is no arming candle and no stretch — the
+    level in force *is* the setup — so this is its own loop, not a mode of the
+    bounce or the fade.
+
+    Level discipline mirrors variant A's crossing rule: a level's limit is only
+    live once price has been ``rearm_ticks`` beyond it (above it — this is a
+    pullback, not a breakout), and it fills on the transition to at-or-through,
+    never on the standing inequality. Each crossing counts as one touch of that
+    level series whether or not it filled — ``max_touches_per_level`` reads the
+    series' touch count, so a first-touch config skips a level whose first
+    touch happened outside the entry window rather than promoting its second
+    touch to "first".
+
+    The overnight segment is spliced in (session="globex" in the registry)
+    because the Globex profile needs it; the NY VWAP bands and the NY profile
+    are anchored at the bell over the RTH ticks alone, exactly as the
+    Interactions study builds them. Entries and exits live in RTH only.
+    """
+    t = tickmod.get_day_ticks(tickmod.contract_for(cfg.contract, day), day,
+                              include_overnight=True)
+    if t is None or t.empty:
+        return [], [], pd.DataFrame(), pd.DataFrame()
+
+    rth_i0 = int(t["ts_utc"].searchsorted(tickmod.session_bounds_utc(day)[0], side="left"))
+    if cfg.use_globex_levels and rth_i0 == 0:
+        raise RuntimeError(
+            f"no overnight ticks for {day} — the Globex profile cannot be built")
+
+    b = barmod.tick_bars(t, cfg.ticks_per_bar)
+    if b.empty:
+        return [], [], b, pd.DataFrame()
+
+    tick = tick_size(cfg.instrument)
+    n = len(t)
+    price = t["price"].to_numpy(dtype="float64").tolist()
+    ts = t["ts_utc"]
+    mins = _minutes_et(ts)
+
+    # NY VWAP bands, anchored at the bell over the RTH ticks alone — NaN across
+    # the overnight, where no NY band exists to be inside of.
+    t_ny = t.iloc[rth_i0:].reset_index(drop=True)
+    if t_ny.empty:
+        return [], [], b, pd.DataFrame()
+    b_ny = barmod.tick_bars(t_ny, cfg.ticks_per_bar)
+    w_ny = vwapmod.vwap_bands(t_ny)
+    up1 = np.full(n, np.nan)
+    up2 = np.full(n, np.nan)
+    up1[rth_i0:] = w_ny["upper1"].to_numpy()
+    up2[rth_i0:] = w_ny["upper2"].to_numpy()
+    up1 = up1.tolist()
+    up2 = up2.tolist()
+
+    # Candidate level series, one per (anchor, level type) the config trades.
+    # Each is per-tick, "as known standing at that tick" (last closed bar).
+    levels: list[tuple[str, list[float]]] = []
+    # Each series' raw path, for the stability gate — which asks where the
+    # level has BEEN, a question that reaches through the NY warmup mask: the
+    # warmup gates candidacy (no limit may rest on a degenerate young profile),
+    # not existence, and a VAH that has sat in place since before it became a
+    # candidate really has sat there. For Globex series the two are the same.
+    level_paths: list[list[float]] = []
+    if cfg.use_globex_levels:
+        prof_gx = profmod.developing_profile(t, b, tick)
+        for edge, on in (("poc", cfg.trade_poc), ("vah", cfg.trade_vah)):
+            if on:
+                seg = profmod.levels_in_force(prof_gx, b, n, edge=edge).tolist()
+                levels.append((f"Globex {edge.upper()}", seg))
+                level_paths.append(seg)
+    if cfg.use_ny_levels:
+        prof_ny = profmod.developing_profile(t_ny, b_ny, tick)
+        # The NY profile is degenerate while minutes old — POC/VAH collapse onto
+        # the open print. Mask its levels until the anchor is warm; a limit
+        # cannot rest on a level that does not meaningfully exist yet.
+        warm = (mins[rth_i0:] - (mins[rth_i0] if rth_i0 < n else 0)) >= cfg.level_warmup_min
+        for edge, on in (("poc", cfg.trade_poc), ("vah", cfg.trade_vah)):
+            if on:
+                seg = profmod.levels_in_force(prof_ny, b_ny, len(t_ny), edge=edge)
+                lv = np.full(n, np.nan)
+                lv[rth_i0:] = np.where(warm, seg, np.nan)
+                raw = np.full(n, np.nan)
+                raw[rth_i0:] = seg
+                levels.append((f"NY {edge.upper()}", lv.tolist()))
+                level_paths.append(raw.tolist())
+    if not levels:
+        raise ValueError("no candidate levels: enable at least one anchor and one level type")
+
+    pv = point_value(cfg.instrument)
+    risk_pts = cfg.stop_ticks * tick
+    rearm_pts = cfg.rearm_ticks * tick
+    trail_dist_t = cfg.trail_stop_ticks
+    trail_step_t = cfg.trail_step_ticks or trail_dist_t
+    trail_be_t = cfg.trail_breakeven_ticks
+    trail_be_only = cfg.trail_breakeven_only
+
+    open_m = cfg.entry_open.hour * 60 + cfg.entry_open.minute
+    close_m = cfg.entry_close.hour * 60 + cfg.entry_close.minute
+    flat_m = cfg.flat_by.hour * 60 + cfg.flat_by.minute
+    holdable = np.flatnonzero(mins[rth_i0:] < flat_m) + rth_i0
+    force_i = int(holdable[-1]) if len(holdable) else n - 1
+
+    nlv = len(levels)
+    armed = [False] * nlv        # price has been rearm_ticks above the level
+    armed_i = [0] * nlv          # tick index of the arming print (the dwell clock)
+    prev_lv = [float("nan")] * nlv
+    touch_count = [0] * nlv
+    ts_ns = ts.astype("int64").to_numpy().tolist()
+    arm_ns = cfg.min_arm_min * 60_000_000_000
+    stab_ns = cfg.min_level_stability_min * 60_000_000_000
+    pos: _Pos | None = None
+    pos_level = ""
+    trades: list[dict] = []
+    day_net = 0.0
+    halted = False
+
+    def _row(p_: _Pos, reason: str, i: int, exit_price: float) -> dict:
+        pts = exit_price - p_.entry_price
+        gross = pts * pv * cfg.contracts
+        comm = 2 * cfg.commission_per_side * cfg.contracts
+        return {
+            "session": day,
+            "direction": "Long",
+            "entry_ts_utc": ts.iloc[p_.entry_i],
+            "exit_ts_utc": ts.iloc[i],
+            "entry_idx": p_.entry_i,
+            "exit_idx": i,
+            "avg_entry": p_.entry_price,
+            "avg_exit": exit_price,
+            "stop_price": p_.init_stop,
+            "final_stop_price": p_.stop_price,
+            "target_price": p_.target_price,
+            "exit_reason": reason,
+            "points": pts,
+            "r_multiple": pts / risk_pts,
+            "band_width_ticks": p_.band_width_ticks,
+            # The stamp of the moment the filled level armed — when price last
+            # cleared it from above, i.e. where this pullback began.
+            "acceptance_ts": p_.acceptance_ts,
+            "max_contracts": cfg.contracts,
+            "gross_pnl": gross,
+            "commission": comm,
+            "net_pnl": gross - comm,
+        }
+
+    def _exit(p_: _Pos, i: int, p: float) -> tuple[str, float] | None:
+        if p - p_.stop_price <= 0:
+            moved = p_.stop_price != p_.init_stop
+            return ("trail" if moved else "stop", p)
+        if p_.target_price is not None and p - p_.target_price >= 0:
+            return ("target", p_.target_price)
+        if i >= force_i:
+            return ("time", p)
+        return None
+
+    def _trail(p_: _Pos, p: float) -> None:
+        # The bounce's ratchet, verbatim — see run_session._trail.
+        if not trail_dist_t:
+            return
+        fav_t = round((p - p_.entry_price) / tick)
+        if fav_t < trail_dist_t + trail_be_t:
+            return
+        steps = 0 if trail_be_only else (fav_t - trail_dist_t - trail_be_t) // trail_step_t
+        lvl = p_.entry_price + (trail_be_t + steps * trail_step_t) * tick
+        if lvl - p_.stop_price > 0:
+            p_.stop_price = lvl
+
+    for i in range(n):
+        p = price[i]
+
+        if pos is not None:
+            hit = _exit(pos, i, p)
+            if hit:
+                trades.append({**_row(pos, hit[0], i, hit[1]), "level": pos_level})
+                day_net += trades[-1]["net_pnl"]
+                if cfg.daily_loss_stop and day_net <= -cfg.daily_loss_stop:
+                    halted = True
+                pos = None
+                # Every exit disarms every level: arming is not tracked while a
+                # position is on (this loop never reaches the level scan), so a
+                # pre-entry arm surviving the trade could book a "crossing" that
+                # really happened mid-hold. Price must clear a level afresh.
+                armed = [False] * nlv
+            else:
+                _trail(pos, p)
+            continue  # exits settle first; a fill can only happen from the next tick on
+
+        # Which level series were crossed on this tick (armed -> at-or-through).
+        # Every crossing consumes the series' arm and counts as a touch, whether
+        # or not it may fill — eligibility must not inflate a later touch into
+        # an earlier one.
+        fill_k = -1
+        fill_lvl = float("-inf")
+        for k in range(nlv):
+            lv = levels[k][1][i]
+            pl = prev_lv[k]
+            prev_lv[k] = lv
+            if lv != lv:  # NaN — the level does not exist yet
+                armed[k] = False
+                continue
+            # Relocation guard: the level moved up under a standing arm. The arm
+            # certifies that price cleared *this* level, and a level that rose
+            # since can void that. Into the approach zone (price no longer clear
+            # of it by the re-arm distance) — the clearing is stale, disarm. A
+            # jump that leaves price still clear re-arms against the new level:
+            # the dwell clock restarts, because the pullback context it measures
+            # is the new level's, not the one 150 points below.
+            if armed[k] and pl == pl and lv > pl:
+                if p <= lv + rearm_pts:
+                    armed[k] = False
+                elif lv - pl > rearm_pts:
+                    armed_i[k] = i
+            if armed[k] and p <= lv:
+                armed[k] = False
+                if i < rth_i0:
+                    # An overnight crossing consumes the arm (price really did
+                    # come back to the level) but is not a touch: the study
+                    # counts touches within the RTH session, and letting the
+                    # night spend a Globex level's first touch would disable
+                    # every Globex level under a first-touch config.
+                    continue
+                if i == 0 or price[i - 1] <= lv:
+                    # The level crossed price, not the other way around — a
+                    # VA-snap, the profile's value area rebuilt over the market.
+                    # No resting limit was touched: the old limit sat below a
+                    # market that never came down to it, and a limit at the new
+                    # level would be born marketable. The study scored these as
+                    # their own event class (trend ratification, not a
+                    # pullback), so the setup disarms without a fill and price
+                    # must clear the level afresh.
+                    continue
+                if arm_ns and ts_ns[i] - ts_ns[armed_i[k]] < arm_ns:
+                    # Price cleared the level only moments ago — this dip is the
+                    # same rotation continuing, not a fresh pullback. The study's
+                    # touch-gap rule scores it as part of the previous touch, so
+                    # it neither fills nor spends a touch count.
+                    continue
+                touch_count[k] += 1
+                ok = (not halted and open_m <= mins[i] < close_m and i < force_i
+                      and (not cfg.max_touches_per_level
+                           or touch_count[k] <= cfg.max_touches_per_level))
+                if ok and cfg.require_upper_band:
+                    ok = up1[i] <= lv <= up2[i]
+                if ok and cfg.min_band_width_ticks:
+                    # The upper channel must be at least this wide; a NaN band
+                    # (no NY VWAP here) fails the compare and vetoes, which is
+                    # correct — fills only ever happen in RTH where it exists.
+                    ok = up2[i] - up1[i] >= cfg.min_band_width_ticks * tick
+                if ok and cfg.require_confluence_pts:
+                    ok = any(
+                        m != k and levels[m][1][i] == levels[m][1][i]
+                        and abs(levels[m][1][i] - lv) <= cfg.require_confluence_pts
+                        for m in range(nlv)
+                    )
+                if ok and stab_ns:
+                    # The level must have SAT here: within rearm_ticks of the
+                    # fill value on every tick of the last
+                    # min_level_stability_min minutes, read off the series' raw
+                    # path (the warmup mask gates candidacy, not existence). A
+                    # level that relocated up to price more recently than that
+                    # is the profile chasing the market, and the scan back from
+                    # the fill is what catches it — the standing value alone
+                    # can't, because a relocated VAH looks identical to a
+                    # defended one. The walk stops at the first tick old enough
+                    # to certify the duration (or the first violation), so it
+                    # is bounded by the window, not the day.
+                    lvs = level_paths[k]
+                    cut = ts_ns[i] - stab_ns
+                    j = i - 1
+                    while (j >= 0 and ts_ns[j] > cut
+                           and lvs[j] == lvs[j] and abs(lvs[j] - lv) <= rearm_pts):
+                        j -= 1
+                    ok = (j >= 0 and ts_ns[j] <= cut
+                          and lvs[j] == lvs[j] and abs(lvs[j] - lv) <= rearm_pts)
+                # Stacked levels crossed on one tick: the highest is the first
+                # limit price reached on the way down, so it is the fill.
+                if ok and lv > fill_lvl:
+                    fill_k, fill_lvl = k, lv
+            elif p > lv + rearm_pts:
+                if not armed[k]:
+                    armed_i[k] = i
+                armed[k] = True
+
+        if fill_k >= 0:
+            fill = fill_lvl
+            tp = (fill + cfg.target_rr * risk_pts if cfg.target == "rr"
+                  else fill + cfg.target_ticks * tick)
+            stop = fill - risk_pts
+            width = (up2[i] - up1[i]) / tick
+            pos = _Pos(
+                entry_i=i, entry_price=fill,
+                stop_price=stop, init_stop=stop, target_price=tp,
+                band_width_ticks=width if width == width else 0.0,
+                acceptance_ts=ts.iloc[armed_i[fill_k]],
+            )
+            pos_level = levels[fill_k][0]
+
+    bands = w_ny.iloc[b_ny["end_idx"].to_numpy()].reset_index(drop=True)
+    return trades, [], b, bands
 
 
 def finalize(rows: list[dict], cfg: SimConfig) -> pd.DataFrame:

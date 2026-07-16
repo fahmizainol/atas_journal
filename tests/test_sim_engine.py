@@ -28,7 +28,8 @@ from journal.sim import confluences as confmod  # noqa: E402
 from journal.sim import engine, ticks  # noqa: E402
 from journal.sim import profile as profmod  # noqa: E402
 from journal.sim import vwap as vwapmod  # noqa: E402
-from journal.sim.rules import FadeConfig, SimConfig  # noqa: E402
+from journal.sim.rules import (  # noqa: E402
+    FadeConfig, GlobexBounceConfig, ProfilePullbackConfig, SimConfig)
 
 TICK = 0.25
 DAY = date(2025, 10, 13)
@@ -516,7 +517,10 @@ class _globex_cache:
             ticks._cache_path("TEST", DAY, "on"), index=False)
         self._frame(RTH_OPEN_UTC, self.rth, self.rth_size).to_parquet(
             ticks._cache_path("TEST", DAY, "rth"), index=False)
-        return SimConfig(contract="TEST", ticks_per_bar=50)
+        # The Globex strategy's config carries `side`; run_session_globex reads it.
+        # A GlobexBounceConfig is a SimConfig, so the run_session(side=…) calls that
+        # exercise the mirror through this same fixture keep working unchanged.
+        return GlobexBounceConfig(contract="TEST", ticks_per_bar=50)
 
     def __exit__(self, *exc):
         ticks.TICK_CACHE_DIR = self._old
@@ -599,6 +603,73 @@ def test_globex_refuses_a_session_with_no_overnight_ticks():
 
         # The RTH strategy is untouched by any of this — same data, still runs.
         engine.run_session(cfg, DAY)
+
+
+# --- the inverted band read --------------------------------------------------
+#
+# invert decouples the band from the trade: a long reads the LOWER band (buy the
+# pullback into support), a short the UPPER (sell the rally into resistance). The
+# entry is still a resting limit at dev1; only the direction — and, since dev2 is
+# now behind the trade, the R target — differ. As with the mirror, one reflection
+# test pins the whole signed loop: get any comparison's sign wrong and it breaks.
+
+# ON_SQUARE anchors the VWAP at 20000, so lower1 ~ 19970. A green candle in the
+# channel arms; a pull DOWN through the band fills the long; then it rallies to
+# the R target (19970 + 1.0 * 75 ticks = 19988.75).
+_INVERT_RTH = _grid((19985, 19998, 80), (19998, 19960, 150),
+                    (19960, 19992, 300), (19992, 19992, 100))
+
+
+def test_invert_long_buys_the_pullback_into_the_lower_band():
+    with _globex_cache(ON_SQUARE, 100, _INVERT_RTH, 1) as cfg:
+        cfg = replace(cfg, side="long", invert=True, target="rr", target_rr=1.0)
+        trades, _, _, _ = engine.run_session_globex(cfg, DAY)
+
+    assert len(trades) == 1, trades
+    tr = trades[0]
+    assert tr["direction"] == "Long"
+    assert abs(tr["avg_entry"] - 19970) < 1.0        # filled the lower dev1
+    assert tr["stop_price"] < tr["avg_entry"]        # a long's stop sits below it
+    assert tr["avg_exit"] > tr["avg_entry"]          # and it profits UP, toward the mid
+    assert tr["band_width_ticks"] > 0                # width is band-signed, never negative
+    assert tr["exit_reason"] == "target"
+
+
+def test_invert_short_is_the_invert_long_reflected():
+    """The load-bearing test: reflect the tape about a constant and the inverted
+    short (upper band) must reproduce the inverted long (lower band) trade for
+    trade, reflected. A sign error in any of the band-vs-trade reads breaks it."""
+    C = 40000.0
+    with _globex_cache(ON_SQUARE, 100, _INVERT_RTH, 1) as cfg:
+        longs, _, _, _ = engine.run_session_globex(
+            replace(cfg, side="long", invert=True, target="rr", target_rr=1.0), DAY)
+    with _globex_cache([C - p for p in ON_SQUARE], 100,
+                       [C - p for p in _INVERT_RTH], 1) as cfg:
+        shorts, _, _, _ = engine.run_session_globex(
+            replace(cfg, side="short", invert=True, target="rr", target_rr=1.0), DAY)
+
+    assert longs, "the fixture must trade for the mirror to mean anything"
+    assert len(longs) == len(shorts), (len(longs), len(shorts))
+    for lo, sh in zip(longs, shorts):
+        assert lo["direction"] == "Long" and sh["direction"] == "Short"
+        assert (lo["entry_idx"], lo["exit_idx"]) == (sh["entry_idx"], sh["exit_idx"])
+        assert lo["exit_reason"] == sh["exit_reason"]
+        assert abs(lo["avg_entry"] + sh["avg_entry"] - C) < 1e-6   # reflected prices
+        assert abs(lo["r_multiple"] - sh["r_multiple"]) < 1e-9
+
+
+def test_invert_off_is_byte_identical_to_the_bounce():
+    """The knob must not touch the default path: side=long/invert=False is the
+    upper-band bounce, unchanged."""
+    rth = _grid((20000, 20045, 50), (20045, 20025, 100),
+                (20025, 20070, 300), (20070, 20070, 150))
+    with _globex_cache(ON_SQUARE, 100, rth, 1) as cfg:
+        plain, _, _, _ = engine.run_session_globex(cfg, DAY)          # invert defaults off
+    with _globex_cache(ON_SQUARE, 100, rth, 1) as cfg:
+        explicit, _, _, _ = engine.run_session_globex(
+            replace(cfg, side="long", invert=False), DAY)
+    assert plain == explicit
+    assert plain and plain[0]["direction"] == "Long"
 
 
 # --- the lower-band mirror ---------------------------------------------------
@@ -1372,6 +1443,59 @@ def test_fade_inside_limit_offset_rests_below_the_band():
         trades, _, _, _ = engine.run_session_fade(cfg, DAY, side="short")
     assert len(trades) == 1, trades
     assert abs(trades[0]["avg_entry"] - 20025) < 0.5, "dev1 - 20 ticks"
+
+
+# --- the profile pullback's level-stability gate -----------------------------
+#
+# Against the real cached session that motivated the knob: 2025-12-09's only
+# fill — long the NY VAH at 25630.50 at 09:46:26 ET — sat on a VAH that had
+# held within the re-arm distance for ~3.6 minutes, but whose in-force series
+# was NaN until the 09:45 warmup. The three runs pin the gate's semantics:
+# off takes the fill, 2 minutes keeps it BECAUSE stability reads the level's
+# raw path through the warmup mask, and 5 minutes vetoes it.
+
+PB_DAY = date(2025, 12, 9)
+
+
+def _have_pb_ticks() -> bool:
+    return (ticks._cache_path("NQZ5", PB_DAY).exists()
+            and ticks._cache_path("NQZ5", PB_DAY, "on").exists())
+
+
+def _pullback(stability_min: int):
+    cfg = ProfilePullbackConfig(use_globex_levels=False, max_touches_per_level=1,
+                                min_level_stability_min=stability_min)
+    trades, _, _, _ = engine.run_session_profile_pullback(cfg, PB_DAY)
+    return trades
+
+
+def test_pullback_stability_off_takes_the_fill():
+    if not _have_pb_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    trades = _pullback(0)
+    assert len(trades) == 1, trades
+    tr = trades[0]
+    assert tr["level"] == "NY VAH"
+    assert abs(tr["avg_entry"] - 25630.50) < 1e-9
+
+
+def test_pullback_stability_reads_through_the_warmup_mask():
+    """The fill's VAH had sat in place since ~09:42:50 — longer than 2 minutes,
+    but reaching back past 09:45, where the warmup mask still hides the
+    in-force series. Stability must read the raw path, or this fill (and every
+    NY fill in the first minutes after warmup) would be wrongly vetoed."""
+    if not _have_pb_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    assert _pullback(2) == _pullback(0)
+
+
+def test_pullback_stability_vetoes_a_level_that_just_relocated():
+    if not _have_pb_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    assert _pullback(5) == []
 
 
 if __name__ == "__main__":

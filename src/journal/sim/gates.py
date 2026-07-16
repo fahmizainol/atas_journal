@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 
 from ..config import ET_TZ, tick_size
+from . import bars as barsmod
+from . import profile as profmod
 from . import regime as regmod
 from . import ticks as tickmod
 from . import vwap as vwapmod
@@ -610,6 +612,180 @@ class GxFloorGate:
         # fill, above a short's, by at most the configured distance.
         gap = self._side * (fill - line)
         return 0.0 <= gap <= self._max_pts + 1e-9
+
+
+class OnHighGate:
+    """Veto any entry filling too far beneath the overnight session high.
+
+    The idea it enforces: above the overnight high the session is discovering
+    price with no overnight inventory overhead; beneath it, every rally is
+    selling into positions the night already built. The loss study of run
+    9318bc07 found the bounce's stop-outs piled up under that wall — fills at or
+    above the overnight high carried 77% of the run's profit at 66% WR, while
+    the bands 0–25 and 100–200 ticks beneath it were net losers — so the gate
+    requires each fill to be within ``max_ticks_below`` of the high, or above it.
+
+    Mirrored by band side, and the knob keeps its long-flavoured name (see
+    rules.SimConfig): on the lower band the wall is the overnight LOW, and the
+    fill must be within reach of it or below — discovering price downward.
+
+    Honesty clause: the numbers above are a post-hoc cut of one run, not a
+    validated gate. This exists to A/B the idea off the ghost ledger, where the
+    rearm/daily-loss-stop interactions a post-hoc cut cannot see are honest.
+
+    Cache-only by doctrine (a gate must never spend at Databento): a day with no
+    cached overnight has no overnight high, and the gate vetoes it wholesale —
+    "no data" must not read as "confirmed". Splices the cached overnight itself,
+    so it is only correct on an RTH-frame strategy (same as gx_floor).
+
+    Config section::
+
+        {"on_high": {"enabled": true, "max_ticks_below": 100}}
+    """
+
+    name = "on_high"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Require the overnight high within reach",
+              default=False,
+              help="Vetoes any entry filling more than max_ticks_below beneath "
+                   "the overnight session high (above the overnight low, on a "
+                   "lower-band setup) — beneath that wall, rallies sell into "
+                   "the night's inventory."),
+        Field("max_ticks_below", "int", name, "Max distance beneath the high",
+              unit="ticks", min=0, default=100, depends_on=("enabled", True),
+              help="How far beneath the overnight high (above the overnight low, "
+                   "mirrored) a fill may sit and still pass. 0 demands the fill "
+                   "be at or beyond the wall itself."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown on_high knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        n = section.get("max_ticks_below", 100)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"max_ticks_below must be a non-negative int, got {n!r}")
+        self.max_ticks_below = n
+        self._wall: float | None = None
+        self._max_pts = 0.0
+        self._side = 1.0
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._max_pts = self.max_ticks_below * tick_size(ctx.cfg.instrument)
+        self._side = 1.0 if ctx.band_side() == "upper" else -1.0
+        self._wall = None
+        contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
+        on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
+        if on is None or on.empty:
+            return  # blind: no overnight, no wall — veto everything
+        self._wall = float(on["price"].max() if self._side > 0 else on["price"].min())
+
+    def allows(self, i: int, fill: float) -> bool:
+        if self._wall is None:
+            return False
+        # How far the fill sits on the *wrong* side of the wall — beneath the
+        # overnight high on a long, above the overnight low on a short. A fill
+        # beyond the wall is a negative gap and always passes.
+        gap = self._side * (self._wall - fill)
+        return gap <= self._max_pts + 1e-9
+
+
+class GxValueGate:
+    """Veto any entry that does not fill beyond the *Globex* developing value area.
+
+    The volume_profile gate's premise — the setup is traded from outside value —
+    read against the overnight anchor instead of the bell. The session profile an
+    hour into RTH is a story about sixty minutes; the Globex profile is the whole
+    night's auction, and the loss study of run 9318bc07 found it is the one that
+    discriminates: fills above the Globex VAH ran 65% WR at ~3x the per-trade
+    take of fills still inside overnight value, while the session VAH separated
+    nothing. As there, the edge is picked by the band side, never by config: VAH
+    on the upper band, VAL on the lower.
+
+    Honesty clause: post-hoc cut of one run, not a validated gate — this exists
+    to A/B the idea off the ghost ledger.
+
+    The engine never builds the Globex profile for an RTH strategy, so the gate
+    builds its own in prepare() — from the *cached* overnight ticks spliced onto
+    the engine's own frame, bars cut at the run's own ticks_per_bar, so the
+    level in force at tick ``i`` is one a closed bar had already published
+    (profile.levels_in_force). It cannot read ctx.profile: that one is anchored
+    at the bell, and a different anchor is the entire point. Cache-only by
+    doctrine; a day with no cached overnight is vetoed wholesale, and the splice
+    means the gate is only correct on an RTH-frame strategy (same as gx_floor).
+
+    Config section::
+
+        {"gx_value": {"enabled": true, "max_ticks_inside": 0}}
+
+    ``max_ticks_inside`` = 0 demands the fill be at or beyond the edge; raise it
+    to tolerate a fill that far back inside the overnight value area.
+    """
+
+    name = "gx_value"
+    needs_profile = False  # builds its own — ctx.profile is the wrong anchor
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Require the fill beyond Globex value",
+              default=False,
+              help="Vetoes any entry that fills inside the developing Globex "
+                   "value area (below its VAH on a long, above its VAL on a "
+                   "short) — still trading the prior night's accepted prices."),
+        Field("max_ticks_inside", "int", name,
+              "Max distance back inside the value area", unit="ticks", min=0,
+              default=0, depends_on=("enabled", True),
+              help="How far back inside the Globex value area a fill may sit and "
+                   "still pass. 0 demands the fill be at or beyond the edge (the "
+                   "Globex VAH on a long, its VAL on a short)."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown gx_value knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        n = section.get("max_ticks_inside", 0)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"max_ticks_inside must be a non-negative int, got {n!r}")
+        self.max_ticks_inside = n
+        self._edge: np.ndarray | None = None
+        self._margin = 0.0
+        self._side = 1.0
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._margin = self.max_ticks_inside * tick_size(ctx.cfg.instrument)
+        self._side = 1.0 if ctx.band_side() == "upper" else -1.0
+        self._edge = None
+        contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
+        on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
+        if on is None or on.empty:
+            return  # blind: no overnight, no Globex anchor — veto everything
+        comb = pd.concat([on, ctx.ticks], ignore_index=True)
+        b = barsmod.tick_bars(comb, ctx.cfg.ticks_per_bar)
+        prof = profmod.developing_profile(comb, b, tick_size(ctx.cfg.instrument))
+        edge = "vah" if self._side > 0 else "val"
+        line = profmod.levels_in_force(prof, b, len(comb), edge=edge)
+        self._edge = line[len(on):]
+
+    def allows(self, i: int, fill: float) -> bool:
+        if self._edge is None:
+            return False
+        edge = self._edge[i]
+        if np.isnan(edge):
+            return False
+        # Beyond the edge on the trade's side, or at most the margin back inside.
+        return self._side * (fill - edge) >= -self._margin - 1e-9
 
 
 class RegimeGate:

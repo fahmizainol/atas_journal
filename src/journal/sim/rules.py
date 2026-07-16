@@ -128,6 +128,158 @@ class SimConfig(_JsonMixin):
 
 
 @dataclass(frozen=True)
+class GlobexBounceConfig(SimConfig):
+    """The Globex bounce, tradeable in either direction.
+
+    Every rule is SimConfig's — this adds one knob, ``side``, the direction the
+    band bounce is read in. It is its own class rather than a field on SimConfig
+    because the RTH bounces fix their direction in their engine entry point
+    (``run_session`` for the long, ``run_session_short`` for the short): a
+    ``side`` they ignored would let two different-looking configs produce
+    byte-identical runs — the disease the per-family config split and the
+    registry's ``session`` attribute both exist to prevent. Here the Globex
+    entry point actually consumes it, so the knob is real. The RTH upper/lower
+    bounces keep their long-only confluence gates; only ``volume_profile`` (which
+    mirrors by direction) rides along on this bidirectional strategy.
+    """
+
+    # "long" bounces the upper Globex bands (accept above dev1, buy the pullback
+    # to it, target dev2); "short" mirrors onto the lower bands (accept below
+    # dev1, sell the pullback, target the lower dev2). The engine reads every
+    # comparison off a signed frame, so the long-flavoured knob names
+    # (acceptance_require_green, invalidate_below_mid_bars, exit_below_vah_bars)
+    # mean their mirror on a short.
+    side: str = "long"
+    # Invert the band each direction reads. Off: the bounce as above (long→upper,
+    # short→lower), running WITH the break toward dev2. On: long reads the LOWER
+    # band (buy the pullback into support), short reads the UPPER (sell the rally
+    # into resistance) — the same entry price at dev1, the opposite direction,
+    # reverting toward the mid. dev2 then sits behind the trade, so an inverted
+    # run cannot target it: target must be "rr" and acceptance_cap_at_dev2 must be
+    # off (the schema enforces both). The value-area edge, its exit and the mid
+    # invalidation follow the band, not the direction, so they stay coherent.
+    invert: bool = False
+
+
+@dataclass(frozen=True)
+class ProfilePullbackConfig(_JsonMixin):
+    """The Interactions Lab's upper-band pullback cut, traded.
+
+    Long the pullback-from-above onto a developing profile level — the NY or
+    Globex POC/VAH — while price holds the NY VWAP +1σ..+2σ channel. The
+    research behind it (NQ Jun 2025 – Jan 2026): that cut rejects ~68–73% at
+    30m with median MFE/MAE ~38/24 on first touches, against a 60.5%/symmetric
+    null; the same levels outside the channel are noise, and 15:00+ touches
+    score exactly at null (hence the 15:00 entry_close default). No day-type
+    filter is offered on purpose — no pre-known feature predicted the bounce,
+    and the trend-day label is partly *defined by* these pullbacks holding.
+    The stop is the whole risk story: trend-down days run a median ~89 pts
+    against this entry, and the fixed stop is what caps them.
+
+    Its own class because it shares no rules with the bounce or the fade: no
+    acceptance candle, no arming stretch — the level itself is the setup, and
+    a resting limit at the level in force is the entry.
+
+    There is deliberately no channel re-acceptance rule (disarm when price
+    falls back inside the middle band, re-arm only once it has held above +1σ
+    again): measured over this run's own window, winners had LESS time above
+    +1σ before the fill than losers (median 0.6 vs 1.3 min), and requiring
+    even 2 minutes of standing acceptance inverted the edge (PF 1.54 -> 0.51).
+    It is min_arm_min's lesson read from the price side — the profitable fill
+    is the fast pullback, and any rule that demands the setup be "established"
+    first selects the grinds instead.
+    """
+
+    # --- scope ---
+    instrument: str = "NQ"
+    contract: str = "NQ"
+    start_date: date = date(2025, 10, 13)
+    end_date: date = date(2025, 10, 17)
+
+    # --- bars ---
+    ticks_per_bar: int = 500
+
+    # --- session (ET wall clock) ---
+    entry_open: time = time(9, 45)   # the NY levels' warm-up; earlier touches are the open, not a level
+    entry_close: time = time(15, 0)  # 15:00+ touches scored exactly at the null baseline
+    flat_by: time = time(16, 0)
+
+    # --- levels (what a limit may rest on) ---
+    use_ny_levels: bool = True       # the session's own developing profile
+    use_globex_levels: bool = True   # the overnight profile — mature by the bell
+    trade_poc: bool = True
+    trade_vah: bool = True
+    # An NY-anchored profile is degenerate while it is minutes old (POC=VAH=VAL
+    # ≈ the open print); its levels are not candidates until the anchor is this
+    # old. Globex levels are ~15h old at the bell and are never gated by this.
+    level_warmup_min: int = 15
+
+    # --- setup (what makes a touch a trade) ---
+    # The cut's core condition: the level must sit inside the NY VWAP +1σ..+2σ
+    # channel at the fill. Off = trade every pullback onto a level, which the
+    # research showed is baseline noise — the switch exists to measure that.
+    require_upper_band: bool = True
+    # Price must clear the level by this much before a new touch of it can fill
+    # — the sim analog of the study's touch-gap rule, so a rotation sitting on
+    # the level reads as one touch, not many.
+    rearm_ticks: int = 8
+    # The touch-gap rule's other half, in time: a crossing may only fill (or
+    # count as a touch) if price cleared the level at least this many minutes
+    # ago; a level that relocates under price restarts the clock. 0 = off, and
+    # the measured default: even a 1-minute requirement inverted the edge
+    # in-sample (PF 1.54 -> 0.96), because the profitable fill is the FAST
+    # pullback that instantly rejects — an aged arm fills a later rotation
+    # where price is grinding along the level instead. The knob exists to keep
+    # that measurable, not because it should be on.
+    min_arm_min: int = 0
+    # 0 = every touch may fill. 1 = first touch only (the study's strongest
+    # sub-cut); N allows the first N touches of each level series per session.
+    max_touches_per_level: int = 0
+    # 0 = off. Require another active candidate level (a different series)
+    # within this many points of the fill — the study's "2+ sources stacked"
+    # cut, whose median MAE was the tightest of any conditioner.
+    require_confluence_pts: float = 0.0
+
+    # --- exit ---
+    stop_ticks: int = 70             # 17.5 pts — sized to the cut's ~24-pt median MAE budget
+    target: str = "rr"               # "rr" | "ticks"
+    target_rr: float | None = 1.5
+    target_ticks: int = 100          # 25 pts; used when target == "ticks"
+    # The trail: same rule and same knobs as the bounce's (see SimConfig).
+    trail_stop_ticks: int = 0
+    trail_step_ticks: int = 0
+    trail_breakeven_ticks: int = 0
+    trail_breakeven_only: bool = False
+
+    # --- filters / lifecycle ---
+    # 0 = off. Skip the fill when the NY VWAP +1σ..+2σ channel the level sits in
+    # (up2-up1) is tighter than this. A pinched upper band means dev1 and dev2
+    # are nearly on top of each other — the "inside the channel" condition
+    # require_upper_band tests is then trivially met by any level near the band,
+    # and the pullback has no room to run. Independent of require_upper_band: the
+    # width is the channel's, measured whether or not the inside-band gate is on.
+    min_band_width_ticks: int = 0
+    # 0 = off. Skip the fill unless the level has sat within rearm_ticks of its
+    # fill value for at least this many minutes. A VAH that relocated up under
+    # price moments before the touch is the profile chasing the market, not a
+    # level anyone defended — measured on this run's window, fills on levels
+    # stable under 2/3 minutes lost while the stable-level fills carried the
+    # edge (PF 1.54 -> 1.73/1.97 at 2/3 min, win% 52.5 -> 55.6/58.5). The
+    # tolerance is rearm_ticks on purpose: the distance that counts as price
+    # being clear of the level is the distance that counts as the level having
+    # moved.
+    min_level_stability_min: int = 0
+    daily_loss_stop: float = 0.0     # 0 = off. Same governor as the bounce's.
+
+    # --- size & cost ---
+    contracts: int = 1
+    commission_per_side: float = 7.0
+
+    # --- confluences (veto-only gates) ---
+    confluences: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class FadeConfig(_JsonMixin):
     """The band fade's knobs: mean-reversion against a dev1 stretch.
 

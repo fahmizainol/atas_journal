@@ -33,7 +33,7 @@ from fastapi import BackgroundTasks, HTTPException  # noqa: E402
 from journal import edges  # noqa: E402
 from journal.sim import confluences as confmod  # noqa: E402
 from journal.sim import engine, registry, runner, schema, store, ticks  # noqa: E402
-from journal.sim.rules import FadeConfig, SimConfig  # noqa: E402
+from journal.sim.rules import FadeConfig, GlobexBounceConfig, SimConfig  # noqa: E402
 from api.routers import strategies as api  # noqa: E402
 
 DAY = date(2025, 10, 13)
@@ -825,6 +825,116 @@ def test_gx_floor_gate_wants_the_globex_line_just_beneath_the_fill():
             pass
 
 
+def test_on_high_gate_wants_the_fill_within_reach_of_the_overnight_high():
+    from journal.sim import gates as gatesmod
+
+    ctx = _regime_ctx()
+    on = pd.DataFrame({"ts_utc": pd.to_datetime(["2025-10-13 09:00"] * 3, utc=True),
+                       "price": [95.0, 110.0, 100.0], "size": [1, 1, 1]})
+
+    real_contract = gatesmod.tickmod.contract_for_cached
+    real_on = gatesmod.tickmod.cached_overnight
+    try:
+        gatesmod.tickmod.contract_for_cached = lambda symbol, day: "NQZ5"
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on
+
+        g = gatesmod.OnHighGate({"enabled": True, "max_ticks_below": 100})  # 25 pts on NQ
+        g.prepare(ctx)  # wall = overnight high = 110
+        assert g.allows(0, 120.0), "a fill above the overnight high always passes"
+        assert g.allows(0, 110.0), "a fill on the wall itself passes"
+        assert g.allows(0, 85.0), "25 pts beneath is exactly within reach"
+        assert not g.allows(0, 84.75), "one tick past the reach is vetoed"
+
+        # The short mirror: the wall is the overnight LOW, reach is above it.
+        sctx = confmod.SessionCtx(cfg=ctx.cfg, day=ctx.day, ticks=ctx.ticks,
+                                  bars=pd.DataFrame(), value_edge_at_tick=None,
+                                  profile=None, side="short")
+        g = gatesmod.OnHighGate({"enabled": True, "max_ticks_below": 100})
+        g.prepare(sctx)  # wall = overnight low = 95
+        assert g.allows(0, 90.0), "a fill below the overnight low always passes"
+        assert g.allows(0, 120.0), "25 pts above the low is exactly within reach"
+        assert not g.allows(0, 120.25), "one tick past the reach is vetoed"
+
+        # Blind — no cached overnight — vetoes wholesale.
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: None
+        g = gatesmod.OnHighGate({"enabled": True})
+        g.prepare(ctx)
+        assert not g.allows(0, 200.0), "no overnight must not read as confirmed"
+    finally:
+        gatesmod.tickmod.contract_for_cached = real_contract
+        gatesmod.tickmod.cached_overnight = real_on
+
+    for bad in ({"enabled": True, "max_ticks": 10}, {"enabled": True, "max_ticks_below": -1},
+                {"enabled": True, "max_ticks_below": True}):
+        try:
+            gatesmod.OnHighGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_gx_value_gate_reads_the_globex_value_area_not_the_sessions():
+    from journal.sim import gates as gatesmod
+    from journal.sim.rules import SimConfig as _Cfg
+
+    # Overnight tape: 6 of 8 contracts print at 100, one each at 90 and 110.
+    # The 70% value area is the single 100 level — VAH = VAL = 100 — and with
+    # ticks_per_bar=4 both overnight bars have closed before RTH begins, so the
+    # level is in force from the first session tick.
+    on = pd.DataFrame({
+        "ts_utc": pd.to_datetime(["2025-10-13 09:00"] * 8, utc=True),
+        "price": [100.0, 100.0, 90.0, 100.0, 100.0, 110.0, 100.0, 100.0],
+        "size": [1] * 8,
+    })
+    rth = pd.DataFrame({"ts_utc": pd.to_datetime(["2025-10-13 13:35"] * 4, utc=True),
+                        "price": [101.0] * 4, "size": [1] * 4})
+    cfg = _Cfg(ticks_per_bar=4)
+    ctx = confmod.SessionCtx(cfg=cfg, day=DAY, ticks=rth, bars=pd.DataFrame(),
+                             value_edge_at_tick=None, profile=None)
+
+    real_contract = gatesmod.tickmod.contract_for_cached
+    real_on = gatesmod.tickmod.cached_overnight
+    try:
+        gatesmod.tickmod.contract_for_cached = lambda symbol, day: "NQZ5"
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on
+
+        g = gatesmod.GxValueGate({"enabled": True})
+        g.prepare(ctx)  # Globex VAH in force at every RTH tick = 100
+        assert g.allows(0, 101.0), "a fill above the Globex VAH passes"
+        assert g.allows(0, 100.0), "a fill on the edge passes at margin 0"
+        assert not g.allows(0, 99.0), "a fill back inside overnight value is vetoed"
+
+        g = gatesmod.GxValueGate({"enabled": True, "max_ticks_inside": 8})  # 2 pts
+        g.prepare(ctx)
+        assert g.allows(0, 98.0), "2 pts inside is within the configured tolerance"
+        assert not g.allows(0, 97.75), "one tick past the tolerance is vetoed"
+
+        # The short mirror reads the VAL: beyond means BELOW it.
+        sctx = confmod.SessionCtx(cfg=cfg, day=DAY, ticks=rth, bars=pd.DataFrame(),
+                                  value_edge_at_tick=None, profile=None, side="short")
+        g = gatesmod.GxValueGate({"enabled": True})
+        g.prepare(sctx)
+        assert g.allows(0, 99.0), "a fill below the Globex VAL passes the short"
+        assert not g.allows(0, 101.0), "a fill above it is inside value for a short"
+
+        # Blind — no cached overnight — vetoes wholesale.
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: None
+        g = gatesmod.GxValueGate({"enabled": True})
+        g.prepare(ctx)
+        assert not g.allows(0, 200.0), "no overnight must not read as confirmed"
+    finally:
+        gatesmod.tickmod.contract_for_cached = real_contract
+        gatesmod.tickmod.cached_overnight = real_on
+
+    for bad in ({"enabled": True, "min_ticks": 1}, {"enabled": True, "max_ticks_inside": -1},
+                {"enabled": True, "max_ticks_inside": True}):
+        try:
+            gatesmod.GxValueGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
 # --- preflight spend guard ------------------------------------------------------
 
 def test_preflight_globex_needs_the_overnight_segment_too():
@@ -1105,6 +1215,30 @@ def test_rr_target_without_an_rr_is_a_400():
         assert "target_rr" in str(exc)
     # ...but it is legal, and stays null, whenever the target isn't rr.
     assert store.config_from_json({"target": "dev2"}).target_rr is None
+
+
+def test_invert_needs_an_rr_target_and_no_dev2_cap():
+    """Inverting reverts toward the mid, so dev2 sits behind the entry. A dev2
+    target would fill instantly at a loss and an acceptance capped at dev2 could
+    never arm — both must be refused, not quietly mis-simulated."""
+    G = GlobexBounceConfig
+    try:
+        store.config_from_json({"invert": True, "target": "dev2"}, G)
+        raise AssertionError("expected a rejection")
+    except ValueError as exc:
+        assert "target" in str(exc) and "rr" in str(exc)
+    try:
+        store.config_from_json(
+            {"invert": True, "target": "rr", "target_rr": 1.5,
+             "acceptance_cap_at_dev2": True}, G)
+        raise AssertionError("expected a rejection")
+    except ValueError as exc:
+        assert "acceptance_cap_at_dev2" in str(exc)
+    # invert with an R target is fine; and the whole gate is off when invert is off
+    # (dev2 stays a legal target for the plain bounce).
+    assert store.config_from_json(
+        {"invert": True, "target": "rr", "target_rr": 1.5}, G).invert is True
+    assert store.config_from_json({"invert": False, "target": "dev2"}, G).target == "dev2"
 
 
 def test_a_limit_offset_past_the_acceptance_close_is_rejected():
