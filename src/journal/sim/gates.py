@@ -788,6 +788,118 @@ class GxValueGate:
         return self._side * (fill - edge) >= -self._margin - 1e-9
 
 
+class GxPocShapeGate:
+    """Veto any entry while the developing Globex POC hangs just below the
+    Globex VWAP — the thin-rally profile shape.
+
+    The idea it enforces: when the night's volume node (its POC) sits a little
+    below the night-anchored VWAP while price trades above both, the rally is
+    running on low participation over unfilled value — recent prices dragged
+    the mean up but acceptance stayed behind. The loss study of run 8762c799
+    found the pocket directly: fills with the Globex POC 25–100 ticks below the
+    Globex VWAP ran −$12.9k over 53 trades and, unlike every other geometry cut
+    in that study, stayed negative on up-grade and flat days alike; the mirror
+    shape (POC 25–100 ticks *above* the VWAP — a pullback into accepted value)
+    was the run's best cell (+$27.2k at 65% WR). Mirrored by band side: on the
+    lower band the toxic shape is the POC hanging just *above* the VWAP.
+
+    Honesty clause: post-hoc cut of one run, n=53, monthly P&L mixed (negative
+    7/11) — not a validated gate. This exists to A/B the shape off the ghost
+    ledger, where the rearm/daily-loss-stop interactions a post-hoc cut cannot
+    see are honest.
+
+    Both lines are built from the *cached* overnight ticks spliced onto the
+    engine's frame (same doctrine and same RTH-frame caveat as gx_floor and
+    gx_value): the VWAP per tick, the POC per closed bar via
+    profile.levels_in_force, so the node read at tick ``i`` is one a closed bar
+    had already published. Cache-only; a day with no cached overnight is vetoed
+    wholesale — "no data" must not read as "confirmed".
+
+    Config section::
+
+        {"gx_poc_shape": {"enabled": true, "zone_min_ticks": 25, "zone_max_ticks": 100}}
+
+    The zone is where the veto LIVES, not a requirement: a POC beyond
+    ``zone_max_ticks`` below the VWAP (a deep recovery day rallying over a far
+    node) or at/above it passes.
+    """
+
+    name = "gx_poc_shape"
+    needs_profile = False  # builds its own — ctx.profile is the wrong anchor
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Veto the thin-rally Globex shape",
+              default=False,
+              help="Vetoes any entry while the developing Globex POC sits "
+                   "zone_min..zone_max ticks below the Globex VWAP (above it, "
+                   "on a lower-band setup) — a low-participation rally over "
+                   "unfilled value."),
+        Field("zone_min_ticks", "int", name, "Zone starts (ticks below the VWAP)",
+              unit="ticks", min=0, default=25, depends_on=("enabled", True),
+              help="Inner edge of the veto zone: a POC at least this far below "
+                   "the Globex VWAP (mirrored on a short) is the toxic shape. "
+                   "Closer than this, POC and VWAP agree — that passes."),
+        Field("zone_max_ticks", "int", name, "Zone ends (ticks below the VWAP)",
+              unit="ticks", min=0, default=100, depends_on=("enabled", True),
+              help="Outer edge of the veto zone. A POC even further below the "
+                   "VWAP is a deep-recovery structure, not the thin rally, and "
+                   "passes."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown gx_poc_shape knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        lo = section.get("zone_min_ticks", 25)
+        hi = section.get("zone_max_ticks", 100)
+        for nm, v in (("zone_min_ticks", lo), ("zone_max_ticks", hi)):
+            if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                raise ValueError(f"{nm} must be a non-negative int, got {v!r}")
+        if lo > hi:
+            raise ValueError(
+                f"zone_min_ticks must not exceed zone_max_ticks, got {lo} > {hi}")
+        self.zone_min_ticks = lo
+        self.zone_max_ticks = hi
+        self._mid: np.ndarray | None = None
+        self._poc: np.ndarray | None = None
+        self._lo_pts = 0.0
+        self._hi_pts = 0.0
+        self._side = 1.0
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        tick = tick_size(ctx.cfg.instrument)
+        self._lo_pts = self.zone_min_ticks * tick
+        self._hi_pts = self.zone_max_ticks * tick
+        self._side = 1.0 if ctx.band_side() == "upper" else -1.0
+        self._mid = self._poc = None
+        contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
+        on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
+        if on is None or on.empty:
+            return  # blind: no overnight, no Globex anchor — veto everything
+        comb = pd.concat([on, ctx.ticks], ignore_index=True)
+        b = barsmod.tick_bars(comb, ctx.cfg.ticks_per_bar)
+        prof = profmod.developing_profile(comb, b, tick)
+        poc = profmod.levels_in_force(prof, b, len(comb), edge="poc")
+        self._mid = vwapmod.vwap_bands(comb)["mid"].to_numpy(dtype="float64")[len(on):]
+        self._poc = poc[len(on):]
+
+    def allows(self, i: int, fill: float) -> bool:
+        if self._mid is None or self._poc is None:
+            return False
+        mid, poc = self._mid[i], self._poc[i]
+        if np.isnan(mid) or np.isnan(poc):
+            return False
+        # How far the node hangs behind the mean, on the traded side's reading:
+        # below the VWAP for an upper-band setup, above it for a lower-band one.
+        gap = self._side * (mid - poc)
+        return not (self._lo_pts - 1e-9 <= gap <= self._hi_pts + 1e-9)
+
+
 class RegimeGate:
     """Veto every entry after its checkpoint ET on a day whose morning so far
     has lived below the VWAPs.

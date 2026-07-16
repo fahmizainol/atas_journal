@@ -73,7 +73,10 @@ STRATEGIES: dict[str, Strategy] = {
                 "reach of the overnight session high — beneath that wall, "
                 "rallies sell into the night's inventory — and gx_value "
                 "requires the fill beyond the developing GLOBEX value area "
-                "(above its VAH), not just the session's."
+                "(above its VAH), not just the session's. gx_poc_shape vetoes "
+                "entries while the developing Globex POC hangs just below the "
+                "Globex VWAP — a thin, low-participation rally over unfilled "
+                "value."
             ),
             # v2: added the developing-value-area exit (exit_below_vah_bars) and
             # the volume_profile gate. Both are off by default and a config that
@@ -98,7 +101,7 @@ STRATEGIES: dict[str, Strategy] = {
             version="6",
             confluences=("volume_profile", "regime", "vwap_slope", "vwap_cross",
                          "upper_occupancy", "gx_rescue", "gx_floor", "on_high",
-                         "gx_value"),
+                         "gx_value", "gx_poc_shape"),
         ),
         Strategy(
             slug="vwap-globex-bounce",

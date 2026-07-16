@@ -935,6 +935,85 @@ def test_gx_value_gate_reads_the_globex_value_area_not_the_sessions():
             pass
 
 
+def test_gx_poc_shape_gate_vetoes_the_thin_rally_zone():
+    from journal.sim import gates as gatesmod
+    from journal.sim.rules import SimConfig as _Cfg
+
+    # Overnight tape: six contracts at 100, two at 130 — POC 100, VWAP 107.5,
+    # so the node hangs 7.5 pts (30 ticks) below the mean. RTH prints carry
+    # size 0, freezing both lines at their overnight values: the in-force POC
+    # is the last closed overnight bar's, and zero volume cannot move the VWAP.
+    on = pd.DataFrame({
+        "ts_utc": pd.to_datetime(["2025-10-13 09:00"] * 8, utc=True),
+        "price": [100.0, 100.0, 100.0, 130.0, 100.0, 100.0, 130.0, 100.0],
+        "size": [1] * 8,
+    })
+    rth = pd.DataFrame({"ts_utc": pd.to_datetime(["2025-10-13 13:35"] * 4, utc=True),
+                        "price": [110.0] * 4, "size": [0] * 4})
+    cfg = _Cfg(ticks_per_bar=4)
+    ctx = confmod.SessionCtx(cfg=cfg, day=DAY, ticks=rth, bars=pd.DataFrame(),
+                             value_edge_at_tick=None, profile=None)
+
+    real_contract = gatesmod.tickmod.contract_for_cached
+    real_on = gatesmod.tickmod.cached_overnight
+    try:
+        gatesmod.tickmod.contract_for_cached = lambda symbol, day: "NQZ5"
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on
+
+        g = gatesmod.GxPocShapeGate({"enabled": True})  # zone 25..100 ticks
+        g.prepare(ctx)
+        assert not g.allows(0, 110.0), "POC 30 ticks under the VWAP is the thin rally"
+
+        g = gatesmod.GxPocShapeGate({"enabled": True, "zone_min_ticks": 40})
+        g.prepare(ctx)
+        assert g.allows(0, 110.0), "a 30-tick gap short of the zone is agreement"
+
+        g = gatesmod.GxPocShapeGate({"enabled": True, "zone_min_ticks": 10,
+                                     "zone_max_ticks": 25})
+        g.prepare(ctx)
+        assert g.allows(0, 110.0), "a 30-tick gap past the zone is the deep recovery"
+
+        g = gatesmod.GxPocShapeGate({"enabled": True, "zone_min_ticks": 30})
+        g.prepare(ctx)
+        assert not g.allows(0, 110.0), "the zone's inner edge is inclusive"
+
+        # The short mirror reads the gap the other way up: a POC *below* the
+        # VWAP says nothing on the lower band...
+        sctx = confmod.SessionCtx(cfg=cfg, day=DAY, ticks=rth, bars=pd.DataFrame(),
+                                  value_edge_at_tick=None, profile=None, side="short")
+        g = gatesmod.GxPocShapeGate({"enabled": True})
+        g.prepare(sctx)
+        assert g.allows(0, 110.0), "the long's toxic shape is inert on the short"
+
+        # ...and the mirrored tape (node above the mean) is the short's veto.
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on.assign(
+            price=[100.0, 100.0, 100.0, 70.0, 100.0, 100.0, 70.0, 100.0])
+        g = gatesmod.GxPocShapeGate({"enabled": True})
+        g.prepare(sctx)
+        assert not g.allows(0, 90.0), "POC 30 ticks above the VWAP vetoes the short"
+        g.prepare(ctx)
+        assert g.allows(0, 90.0), "and is inert on the long"
+
+        # Blind — no cached overnight — vetoes wholesale.
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: None
+        g = gatesmod.GxPocShapeGate({"enabled": True})
+        g.prepare(ctx)
+        assert not g.allows(0, 110.0), "no overnight must not read as confirmed"
+    finally:
+        gatesmod.tickmod.contract_for_cached = real_contract
+        gatesmod.tickmod.cached_overnight = real_on
+
+    for bad in ({"enabled": True, "zone_ticks": 10},
+                {"enabled": True, "zone_min_ticks": -1},
+                {"enabled": True, "zone_max_ticks": True},
+                {"enabled": True, "zone_min_ticks": 50, "zone_max_ticks": 25}):
+        try:
+            gatesmod.GxPocShapeGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
 # --- preflight spend guard ------------------------------------------------------
 
 def test_preflight_globex_needs_the_overnight_segment_too():
