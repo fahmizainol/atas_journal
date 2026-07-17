@@ -66,13 +66,50 @@ class _Pos:
     # The fade's mirror streak: consecutive closes re-accepted back beyond dev1
     # against the position (invalidate_beyond_dev1_bars). Unused by the bounce.
     beyond_band: int = 0
-    # A streak hit its limit: exit at market on the next tick.
-    exit_on_next_tick: bool = False
+    # A rule decided to leave: exit at market on the next tick, booked under
+    # this reason ("vah" for the bounce's value re-acceptance, "dev1" for the
+    # fade's, "panic" for the flow-shock exit). None = no market exit pending.
+    market_exit: str | None = None
+    # The panic exit's one read has been taken (see _panic — it evaluates once,
+    # at the window's end, never per tick).
+    panic_checked: bool = False
+    # --- pyramid (scale-in) ---
+    # Contracts actually filled so far — one lot at the first fill, one more on
+    # each add. This, not cfg.contracts, is what the trade's P&L and commission
+    # are priced on: a position whose adds never triggered exits at the size it
+    # really carried. Left at 1 by every non-pyramid caller, which prices P&L on
+    # cfg.contracts directly and never reads it.
+    size: int = 1
+    # Price of the next lot's stop trigger, or None once every lot is filled (and
+    # for a non-pyramid position, which has no adds). Advances one step past the
+    # first fill per lot, so it walks the grid regardless of where each add really
+    # printed.
+    next_add: float | None = None
+    # Lots still to add.
+    adds_left: int = 0
 
 
 def _minutes_et(ts: pd.Series) -> np.ndarray:
     et = ts.dt.tz_convert(ET_TZ)
     return (et.dt.hour * 60 + et.dt.minute).to_numpy()
+
+
+def _excursion(price: list[float], entry_i: int, exit_i: int,
+               entry: float, s: float) -> tuple[float, float]:
+    """The best and worst this trade was ever worth, in points, over its own life.
+
+    Read off the same tick stream the fills came from (``price``), from the entry
+    tick through the exit tick inclusive. In the trade's own direction (``s``): the
+    maximum favorable excursion is the furthest price ever ran in profit before the
+    trade was booked — what the exit left on the table — and the maximum adverse is
+    the deepest it went against, the heat the trade sat through to get paid. MFE is
+    >= 0 and MAE <= 0 except in the degenerate case where price never returned to a
+    limit entry, which is itself the reading that the trade was never really live.
+    """
+    seg = price[entry_i:exit_i + 1]
+    hi, lo = max(seg), min(seg)
+    fav, adv = (hi, lo) if s > 0 else (lo, hi)
+    return s * (fav - entry), s * (adv - entry)
 
 
 def run_session(
@@ -199,6 +236,37 @@ def run_session(
     # A breakeven stop, not a trail: the first click is the only one.
     trail_be_only = cfg.trail_breakeven_only
 
+    # Panic exit: the signed tape (buy aggressor volume minus sell), cumulative,
+    # so the delta since any fill is two lookups. Built only when the knob is on —
+    # it costs a full-session scan a run that ignores it must not pay. cum_delta[i]
+    # is the sum over the first i ticks, so ticks a..b inclusive are
+    # cum_delta[b+1] - cum_delta[a].
+    panic_delta = cfg.panic_exit_delta
+    cum_delta: list | None = None
+    ts_ns: list | None = None
+    if panic_delta:
+        sd = t["side"].to_numpy()
+        if not (sd != "N").any():
+            # A tape with no aggressor sides would make the panic exit a silent
+            # no-op — a run that looks like the idea but isn't it. Refuse, same
+            # as the missing-overnight guard above.
+            raise RuntimeError(
+                f"no aggressor sides in the {day} ticks — the panic exit cannot "
+                f"read the tape; re-fetch the day or turn panic_exit_delta off")
+        sz = t["size"].to_numpy(dtype="float64")
+        signed = np.where(sd == "B", sz, np.where(sd == "A", -sz, 0.0))
+        cum_delta = np.concatenate([[0.0], np.cumsum(signed)]).tolist()
+        ts_ns = t["ts_utc"].astype("int64").to_numpy().tolist()
+    panic_win_ns = int(cfg.panic_exit_window_s * 1_000_000_000)
+
+    # Pyramid: split the size into pyr_n equal lots, one added each time price
+    # runs pyr_step further in the trade's favour. pyr_n == 1 is the all-in fill —
+    # one lot of the whole size, no adds, byte-identical to before the knob.
+    pyr_n = max(1, cfg.pyramid_tranches)
+    lot = cfg.contracts // pyr_n
+    pyr_step = cfg.pyramid_step_ticks * tick
+    pyr_blend = cfg.pyramid_stop_mode == "blend"
+
     price = t["price"].to_numpy(dtype="float64").tolist()
     ts = t["ts_utc"]
     # dev1/dev2 on the band being traded: the upper bands for a long (or a short
@@ -235,7 +303,11 @@ def run_session(
     below_mid = 0
     acceptance_ts: pd.Timestamp | None = None
     pos: _Pos | None = None
-    ghosts: list[tuple[str, _Pos]] = []  # (gate name, vetoed entry being tracked)
+    # (vetoing gate names, vetoed entry being tracked). The list holds EVERY gate
+    # that rejected this fill, not just the first — the vetoed row keeps the whole
+    # set so a per-confluence breakdown can score what each gate independently
+    # caught, instead of only the one that happened to be checked first.
+    ghosts: list[tuple[list[str], _Pos]] = []
     trades: list[dict] = []
     vetoed: list[dict] = []
     # The daily loss stop reads realized net P&L only — closed trades, in exit
@@ -249,8 +321,12 @@ def run_session(
 
     def _row(p_: _Pos, reason: str, i: int, exit_price: float) -> dict:
         pts = s * (exit_price - p_.entry_price)
-        gross = pts * pv * cfg.contracts
-        comm = 2 * cfg.commission_per_side * cfg.contracts
+        # Priced on the size actually carried, not the config's: a pyramid whose
+        # later lots never triggered exits smaller than one whose lots all filled.
+        # With pyr_n == 1 the single lot is the whole size, so this is cfg.contracts.
+        gross = pts * pv * p_.size
+        comm = 2 * cfg.commission_per_side * p_.size
+        mfe_pts, mae_pts = _excursion(price, p_.entry_i, i, p_.entry_price, s)
         return {
             "session": day,
             "direction": "Long" if side == "long" else "Short",
@@ -261,6 +337,8 @@ def run_session(
             # does not uniquely identify a tick. The index does.
             "entry_idx": p_.entry_i,
             "exit_idx": i,
+            # The volume-weighted average across every lot that filled. With one
+            # lot it is that lot's price.
             "avg_entry": p_.entry_price,
             "avg_exit": exit_price,
             # The stop as entered (what was risked) and where the ratchet had
@@ -268,12 +346,22 @@ def run_session(
             "stop_price": p_.init_stop,
             "final_stop_price": p_.stop_price,
             "target_price": p_.target_price if p_.target_price is not None else d2[i],
+            # The peak and trough the open trade ever showed, in points and in R.
+            # MFE is what the exit left on the table; MAE the worst heat it sat
+            # through. Measured off the ticks, from entry to exit inclusive.
+            "mfe_points": mfe_pts,
+            "mae_points": mae_pts,
+            "mfe_r": mfe_pts / risk_pts,
+            "mae_r": mae_pts / risk_pts,
             "exit_reason": reason,
             "points": pts,
             "r_multiple": pts / risk_pts,
             "band_width_ticks": p_.band_width_ticks,
             "acceptance_ts": p_.acceptance_ts,
-            "max_contracts": cfg.contracts,
+            # The size the trade actually reached — its first lot plus every add
+            # that triggered. The column name predates the pyramid; it has always
+            # meant "the most contracts this trade held".
+            "max_contracts": p_.size,
             "gross_pnl": gross,
             "commission": comm,
             "net_pnl": gross - comm,
@@ -297,14 +385,15 @@ def run_session(
         function for real and ghost positions: the vetoed rows are only a
         counterfactual if they were exited by exactly the rules the real trades
         were."""
-        if p_.exit_on_next_tick:
-            # A market order sent on the previous bar's close. It fills at the
-            # next print, whatever that print is — including one straight through
-            # the stop. No free lunch for having decided to leave.
-            # Named "vah" for both sides: the reason is one rule (price was
+        if p_.market_exit:
+            # A market order sent when its rule tripped (a bar close for "vah",
+            # a print for "panic"). It fills at the next print, whatever that
+            # print is — including one straight through the stop. No free lunch
+            # for having decided to leave.
+            # "vah" is named for both sides: the reason is one rule (price was
             # re-accepted back inside value), and renaming it per side would fork
             # every consumer that groups exits by reason.
-            return ("vah", p)
+            return (p_.market_exit, p)
         tgt = p_.target_price if p_.target_price is not None else d2[i]
         if s * (p - p_.stop_price) <= 0:
             # Stop triggers on the first trade at or through it; fill at the
@@ -362,26 +451,91 @@ def run_session(
         if s * (lvl - p_.stop_price) > 0:
             p_.stop_price = lvl
 
+    def _add(p_: _Pos, i: int, p: float) -> None:
+        """Fill pyramid lots whose stop this print has reached, and — in blend
+        mode — re-strike the shared stop and target off the new average entry.
+
+        A lot's add is a stop in the trade's favour (a buy-stop above for a long),
+        so it fills at the traded price, never better than its trigger — the same
+        'no free lunch' the exit stop gets. One fast print can sweep several
+        triggers at once; the loop books each as a real lot at this print. next_add
+        walks the grid from the *first* fill (one step per lot), not from where the
+        last add happened to print, so a gap that skipped a level does not shrink
+        the next lot's distance.
+
+        Run BEFORE the tick's exit check: a print that reaches the target has
+        passed the add stops beneath it on the way, so those lots really would
+        have filled before the exit — scoring the exit on the larger size is the
+        honest outcome, not front-running it. It can never fill a lot into its own
+        stop: the adds are all in favour and the blended stop after an add sits
+        stop_ticks below an average that is itself below this print, so the new
+        stop stays under the price that installed it."""
+        while p_.next_add is not None and s * (p - p_.next_add) >= 0:
+            new_size = p_.size + lot
+            p_.entry_price = (p_.entry_price * p_.size + p * lot) / new_size
+            p_.size = new_size
+            p_.adds_left -= 1
+            p_.next_add = (p_.next_add + s * pyr_step) if p_.adds_left > 0 else None
+            if pyr_blend:
+                p_.stop_price = p_.entry_price - s * risk_pts
+                p_.init_stop = p_.stop_price
+                if p_.target_price is not None:
+                    p_.target_price = p_.entry_price + s * cfg.target_rr * risk_pts
+
+    def _panic(p_: _Pos, i: int) -> None:
+        """One read of the tape at the panic window's end; arm the market exit
+        if the whole window was a shock.
+
+        Deliberately NOT a per-tick trigger. The threshold is a NET delta over
+        the full window — a sustained dump the market did not absorb — and
+        that is only knowable when the window closes. The per-tick variant
+        (leave the moment the running delta touches the threshold) was A/B'd
+        first and lost $23k of the baseline (run 07d9927e): it also fires on
+        the transient spike that recovers within the minute, which is the
+        signature of the winners this strategy lives on, not of the dead fill.
+
+        Evaluated on the first tick at or past the boundary, over the ticks
+        strictly inside the window; the fill leaves on the NEXT print (via
+        market_exit, like every market order here). Signed with the trade: a
+        dump trips a long, a rip trips a short. A position that exited before
+        the window closed was simply never read.
+        """
+        if p_.panic_checked or ts_ns[i] - ts_ns[p_.entry_i] < panic_win_ns:
+            return
+        p_.panic_checked = True
+        if p_.market_exit:
+            return
+        if s * (cum_delta[i] - cum_delta[p_.entry_i]) <= -panic_delta:
+            p_.market_exit = "panic"
+
     for i in range(n):
         p = price[i]
 
         # Ghost positions: vetoed entries ride the same exit rules as a real
         # position (but never touch the arm/entry state) so the vetoed row
-        # carries a would-be P&L, not just "an entry happened here".
-        for gname, gp in ghosts[:]:
+        # carries a would-be P&L, not just "an entry happened here". They pyramid
+        # too, so the vetoed P&L stays comparable to a real pyramided trade.
+        for gnames, gp in ghosts[:]:
+            _add(gp, i, p)
             hit = _exit(gp, i, p)
             if hit:
-                vetoed.append({**_row(gp, hit[0], i, hit[1]), "gate": gname})
-                ghosts.remove((gname, gp))
+                vetoed.append({**_row(gp, hit[0], i, hit[1]),
+                               "gate": gnames[0], "gates": "|".join(gnames)})
+                ghosts.remove((gnames, gp))
             else:
                 _trail(gp, p)
+                if panic_delta:
+                    _panic(gp, i)
 
         if pos is not None:
+            _add(pos, i, p)
             hit = _exit(pos, i, p)
             if hit:
                 _close(hit[0], i, hit[1])
             else:
                 _trail(pos, p)
+                if panic_delta:
+                    _panic(pos, i)
 
         elif armed:
             # Where variant A's limit rests: dev1, or entry_limit_offset_ticks in
@@ -432,15 +586,21 @@ def run_session(
                         entry_i=i, entry_price=fill,
                         stop_price=stop, init_stop=stop, target_price=tp,
                         band_width_ticks=band_w, acceptance_ts=acceptance_ts,
+                        # First lot down. The rest rest as stops one step apart in
+                        # front of it; pyr_n == 1 leaves next_add None (no adds) and
+                        # size == the whole contracts, i.e. the all-in fill.
+                        size=lot, adds_left=pyr_n - 1,
+                        next_add=(fill + s * pyr_step) if pyr_n > 1 else None,
                     )
-                    veto = next((g.name for g in gates if not g.allows(i, fill)), None)
-                    if veto is None:
+                    vetoes = [g.name for g in gates if not g.allows(i, fill)]
+                    if not vetoes:
                         pos = new_pos
                     else:
                         # Consume the setup exactly as a real entry would have —
                         # leaving it armed would re-fire the same (vetoed) entry
-                        # on the very next tick.
-                        ghosts.append((veto, new_pos))
+                        # on the very next tick. The ghost keeps every gate that
+                        # rejected it, so overlapping vetoes stay attributable.
+                        ghosts.append((vetoes, new_pos))
                         armed = False
                         awaiting_reclaim = False
 
@@ -463,7 +623,7 @@ def run_session(
                 for p_ in ([pos] if pos is not None else []) + [g for _, g in ghosts]:
                     p_.inside_value = p_.inside_value + 1 if inside else 0
                     if p_.inside_value >= cfg.exit_below_vah_bars:
-                        p_.exit_on_next_tick = True
+                        p_.market_exit = "vah"
 
             if cfg.invalidate_below_mid_bars:
                 # Closes on the far side of the mid from the band: below it on the
@@ -673,7 +833,7 @@ def run_session_fade(
     seen_mid = False          # a print at/past the mid since the last fill
     arm_ts: pd.Timestamp | None = None
     pos: _Pos | None = None
-    ghosts: list[tuple[str, _Pos]] = []
+    ghosts: list[tuple[list[str], _Pos]] = []  # (all vetoing gates, ghost entry)
     trades: list[dict] = []
     vetoed: list[dict] = []
     day_net = 0.0
@@ -688,6 +848,7 @@ def run_session_fade(
         pts = s * (exit_price - p_.entry_price)
         gross = pts * pv * cfg.contracts
         comm = 2 * cfg.commission_per_side * cfg.contracts
+        mfe_pts, mae_pts = _excursion(price, p_.entry_i, i, p_.entry_price, s)
         return {
             "session": day,
             "direction": "Long" if side == "long" else "Short",
@@ -701,6 +862,11 @@ def run_session_fade(
             "final_stop_price": p_.stop_price,
             "target_price": (p_.target_price if p_.target_price is not None
                              else _live_target(i)),
+            # Peak/trough the open trade ever showed — see run_session._row.
+            "mfe_points": mfe_pts,
+            "mae_points": mae_pts,
+            "mfe_r": mfe_pts / risk_pts,
+            "mae_r": mae_pts / risk_pts,
             "exit_reason": reason,
             "points": pts,
             "r_multiple": pts / risk_pts,
@@ -730,10 +896,10 @@ def run_session_fade(
     def _exit(p_: _Pos, i: int, p: float) -> tuple[str, float] | None:
         """(reason, fill) if this position is out at tick i, else None. Shared
         by real and ghost positions, exactly as in the bounce."""
-        if p_.exit_on_next_tick:
+        if p_.market_exit:
             # The dev1 re-acceptance exit: a market order sent on the previous
             # bar's close, filled at the next print whatever it is.
-            return ("dev1", p)
+            return (p_.market_exit, p)
         tgt = p_.target_price if p_.target_price is not None else _live_target(i)
         if s * (p - p_.stop_price) <= 0:
             moved = p_.stop_price != p_.init_stop
@@ -761,11 +927,12 @@ def run_session_fade(
     for i in range(n):
         p = price[i]
 
-        for gname, gp in ghosts[:]:
+        for gnames, gp in ghosts[:]:
             hit = _exit(gp, i, p)
             if hit:
-                vetoed.append({**_row(gp, hit[0], i, hit[1]), "gate": gname})
-                ghosts.remove((gname, gp))
+                vetoed.append({**_row(gp, hit[0], i, hit[1]),
+                               "gate": gnames[0], "gates": "|".join(gnames)})
+                ghosts.remove((gnames, gp))
             else:
                 _trail(gp, p)
 
@@ -813,13 +980,13 @@ def run_session_fade(
                         stop_price=stop, init_stop=stop, target_price=tp,
                         band_width_ticks=band_w, acceptance_ts=arm_ts,
                     )
-                    veto = next((g.name for g in gates if not g.allows(i, fill)), None)
-                    if veto is None:
+                    vetoes = [g.name for g in gates if not g.allows(i, fill)]
+                    if not vetoes:
                         pos = new_pos
                         # The next setup must build its own approach from the mid.
                         seen_mid = False
                     else:
-                        ghosts.append((veto, new_pos))
+                        ghosts.append((vetoes, new_pos))
                         armed = False
                         awaiting_reclaim = False
 
@@ -834,7 +1001,7 @@ def run_session_fade(
                 for p_ in ([pos] if pos is not None else []) + [g for _, g in ghosts]:
                     p_.beyond_band = p_.beyond_band + 1 if outside else 0
                     if p_.beyond_band >= cfg.invalidate_beyond_dev1_bars:
-                        p_.exit_on_next_tick = True
+                        p_.market_exit = "dev1"
 
             # The dev2 cap: an armed, unfilled setup dies on a close beyond the
             # outer band. `stretched` stays true, so re-arming needs the price
@@ -1013,6 +1180,7 @@ def run_session_profile_pullback(
         pts = exit_price - p_.entry_price
         gross = pts * pv * cfg.contracts
         comm = 2 * cfg.commission_per_side * cfg.contracts
+        mfe_pts, mae_pts = _excursion(price, p_.entry_i, i, p_.entry_price, 1.0)
         return {
             "session": day,
             "direction": "Long",
@@ -1025,6 +1193,11 @@ def run_session_profile_pullback(
             "stop_price": p_.init_stop,
             "final_stop_price": p_.stop_price,
             "target_price": p_.target_price,
+            # Peak/trough the open trade ever showed — see run_session._row.
+            "mfe_points": mfe_pts,
+            "mae_points": mae_pts,
+            "mfe_r": mfe_pts / risk_pts,
+            "mae_r": mae_pts / risk_pts,
             "exit_reason": reason,
             "points": pts,
             "r_multiple": pts / risk_pts,

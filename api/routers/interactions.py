@@ -42,6 +42,13 @@ def interactions_run(
     return inter.get(cfg, refresh=refresh)
 
 
+@router.get("/interactions/runs")
+def interactions_runs() -> list[dict]:
+    """Every saved snapshot, newest first — lets the UI reopen a past run
+    without retyping its config (same hash -> served from disk)."""
+    return inter.list_runs()
+
+
 @router.get("/interactions/coverage")
 def interactions_coverage(
     symbol: str = Query(...),
@@ -58,6 +65,7 @@ def interactions_day_chart(
     bin_size: float | None = Query(None),
     va_pct: float = Query(inter.profmod.VALUE_AREA_PCT),
     sources: str = Query("ny,globex"),
+    ticks_per_bar: int | None = Query(None),
 ) -> dict:
     return inter.day_chart(
         symbol,
@@ -65,4 +73,5 @@ def interactions_day_chart(
         bin_size=bin_size,
         va_pct=va_pct,
         sources=tuple(s for s in sources.split(",") if s) or ("ny", "globex"),
+        ticks_per_bar=ticks_per_bar,
     )

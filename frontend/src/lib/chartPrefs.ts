@@ -8,6 +8,7 @@ const DEFAULT_VISIBILITY: IndicatorVisibility = {
   vwapGlobex: true,
   vwapNy: true,
   atr: true,
+  cvd: true,
   levels: true,
   volumeProfile: true,
   developingProfileGlobex: true,

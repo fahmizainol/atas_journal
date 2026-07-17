@@ -105,6 +105,27 @@ class SimConfig(_JsonMixin):
     # what a breakeven stop refuses to do. The step is then irrelevant (there is
     # no second step to take). Ignored when trail_stop_ticks is 0.
     trail_breakeven_only: bool = False
+    # 0 = off. Read the tape ONCE, when the fill is panic_exit_window_s old: if
+    # the net aggressor delta over that window (buy volume minus sell volume,
+    # signed against the trade) ran this many contracts against the position,
+    # exit at market. A single read of the whole window, not a running trigger,
+    # and the distinction is worth $31k on the baseline: the per-tick variant
+    # (leave the moment the running delta touches the threshold) also fires on
+    # the transient spike that recovers within the minute — the signature of
+    # this strategy's winners, which routinely start ugly — and A/B'd $23k
+    # UNDER the baseline where the one-shot read came out ahead. This is a flow
+    # SHOCK detector, not a loser detector: set it far beyond a normal minute
+    # of tape (the 9b7f54c6 study: every exit rule tuned to the typical loser
+    # tested net-negative; only the violent, unrecovered tail marked fills that
+    # were nearly always dead). Fires like any market order: on the tick after
+    # the read.
+    panic_exit_delta: int = 0
+    # The window the one read covers, in seconds after the fill. The shock
+    # decays fast — the same delta read two minutes in tested negative (the
+    # price has already paid most of the stop by then) — so the window stays
+    # tight. A position that exits before the window closes is never read.
+    # Ignored when panic_exit_delta is 0.
+    panic_exit_window_s: int = 60
 
     # --- filters / lifecycle ---
     min_band_width_ticks: int = 0        # 0 = off. Skip entry if dev2-dev1 is tighter.
@@ -119,6 +140,35 @@ class SimConfig(_JsonMixin):
     # --- size & cost ---
     contracts: int = 1
     commission_per_side: float = 7.0
+
+    # --- pyramid (scale-in) ---
+    # 1 = off: the whole `contracts` size fills at once, as a single all-in touch.
+    # N > 1 splits the position into N equal lots (contracts must divide by N, the
+    # schema enforces it): the FIRST lot fills exactly as the base variant does
+    # (variant A's limit at dev1, variant B's stop on the reclaim), and each later
+    # lot rests a stop pyramid_step_ticks further in the trade's favour, off the
+    # first fill's grid — so size is added only as the move confirms, never against
+    # it. A lot whose trigger is never reached simply never fills: a trade that
+    # rejects straight off dev1 keeps only its first lot, while one that runs
+    # reaches full size. That asymmetry — small losers, big winners — is the whole
+    # point of scaling in over an all-in fill, and it rides the base rule path, so
+    # a config that leaves it at 1 simulates identically to one without the knob.
+    pyramid_tranches: int = 1
+    # The favourable distance between one lot's fill grid and the next: lot 2's
+    # stop sits this far beyond the first fill, lot 3 twice as far, and so on.
+    # Read only when pyramid_tranches > 1.
+    pyramid_step_ticks: int = 40
+    # How the one shared stop and target track as lots are added:
+    #   "blend"  — re-struck off the running average entry on every add, so the
+    #              stop stays stop_ticks behind the average and each lot risks the
+    #              same. Total dollar risk grows with size, but the R the trade is
+    #              measured against is always the blended basis.
+    #   "anchor" — left where the first lot set them. Later lots ride on the
+    #              initial risk (they are house money once price has run to them),
+    #              but a full stack that reverses to the first lot's stop books a
+    #              larger adverse excursion on the lots added higher up.
+    # Read only when pyramid_tranches > 1.
+    pyramid_stop_mode: str = "blend"
 
     # --- confluences (veto-only gates) ---
     # One namespaced section per gate, e.g. {"volume_profile": {"enabled": true, ...}}.

@@ -34,6 +34,7 @@ import type {
   ATRPoint,
   Bar,
   ChartMarker,
+  CvdPoint,
   Footprint,
   PriceLineSpec,
   ProfilePoint,
@@ -55,6 +56,12 @@ interface Props {
   profileGlobex?: ProfilePoint[];
   profileNy?: ProfilePoint[];
   atrPoints?: ATRPoint[];
+  /**
+   * Cumulative volume delta (signed aggressor volume, running sum) per bar, drawn
+   * as a line in its own pane under the candles. Only the sim's charts supply it —
+   * it needs the tape's aggressor side. See lib/chartTypes.CvdPoint.
+   */
+  cvd?: CvdPoint[];
   markers?: ChartMarker[];
   /**
    * Level-interaction overlay from the Interactions Lab: touch dots (coloured by
@@ -142,6 +149,7 @@ export function CandlestickChart({
   profileGlobex,
   profileNy,
   atrPoints,
+  cvd,
   markers,
   touches,
   vaSnaps,
@@ -428,6 +436,40 @@ export function CandlestickChart({
       }
     };
 
+    // CVD gets the same create/remove-on-toggle treatment as ATR and its own pane.
+    // On the sim's charts ATR is never supplied (atrPoints is empty), so CVD sits
+    // directly under the ribbon; the offset keeps it correct if both ever coexist.
+    let cvdSeries: ISeriesApi<"Line"> | null = null;
+    const cvdPane = atrPane + (atrPoints && atrPoints.length > 0 ? 1 : 0);
+    const addCvd = () => {
+      cvdSeries = chart.addSeries(
+        LineSeries,
+        {
+          color: palette.blue,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: true,
+          priceFormat: { type: "volume" },
+        },
+        cvdPane,
+      );
+      cvdSeries.setData(cvd!.map((p) => ({ time: p.time as Time, value: p.value })));
+      // A zero reference: CVD crosses sign, and which side of zero it sits on is
+      // the whole read (net buying vs net selling since the anchor).
+      cvdSeries.createPriceLine({
+        price: 0,
+        color: palette.grid,
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: false,
+      });
+      const panes = chart.panes();
+      if (panes.length > cvdPane) {
+        panes[0].setStretchFactor(1000);
+        panes[cvdPane].setStretchFactor(200);
+      }
+    };
+
     // The ribbon is a strip, not a chart: it gets just enough height to read as a
     // colour band. Set after addAtr so both panes are sized from one place.
     const panes0 = chart.panes();
@@ -516,7 +558,12 @@ export function CandlestickChart({
 
     // Interaction overlay (touch dots + VA-snap markers). Attached unconditionally
     // so its toggles exist even before the arrays fill; empty arrays draw nothing.
-    const interactionPrim = new InteractionPrimitive(touches ?? [], vaSnaps ?? []);
+    // Events are stamped on the minute grid, but the candles may be tick bars —
+    // and timeToCoordinate returns null for any off-grid time — so snap each mark
+    // onto the actual bar grid, exactly as the native markers above are snapped.
+    const snappedTouches = (touches ?? []).map((t) => ({ ...t, ts: nearestBar(t.ts) }));
+    const snappedSnaps = (vaSnaps ?? []).map((s) => ({ ...s, ts: nearestBar(s.ts) }));
+    const interactionPrim = new InteractionPrimitive(snappedTouches, snappedSnaps);
     candle.attachPrimitive(interactionPrim as any);
 
     for (const pl of priceLines ?? []) {
@@ -889,6 +936,13 @@ export function CandlestickChart({
           atrSeries = null;
         }
       }
+      if (cvd && cvd.length > 0) {
+        if (v.cvd && !cvdSeries) addCvd();
+        else if (!v.cvd && cvdSeries) {
+          chart.removeSeries(cvdSeries);
+          cvdSeries = null;
+        }
+      }
     };
     applyRef.current(visRef.current);
 
@@ -1005,6 +1059,7 @@ export function CandlestickChart({
     profileGlobex,
     profileNy,
     atrPoints,
+    cvd,
     markers,
     touches,
     vaSnaps,
@@ -1045,6 +1100,8 @@ export function CandlestickChart({
     });
   if (atrPoints && atrPoints.length > 0)
     legendItems.push({ key: "atr", label: "ATR 14", color: palette.gold });
+  if (cvd && cvd.length > 0)
+    legendItems.push({ key: "cvd", label: "CVD · cumulative delta", color: palette.blue });
   if (levels && levels.length > 0)
     legendItems.push({ key: "levels", label: "Session levels", color: palette.blue });
   if (touches && touches.length > 0)

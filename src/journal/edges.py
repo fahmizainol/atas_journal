@@ -331,3 +331,433 @@ def cuts(trades: pd.DataFrame, names: tuple[str, ...],
             "holds": p is not None and p <= bar,
         }
     return out
+
+
+def confluence_breakdown(vetoed: pd.DataFrame) -> pd.DataFrame:
+    """Per-confluence veto stats over the ghost ledger, counting overlaps.
+
+    The ``by_gate`` cut partitions the vetoed book by the *first* gate that
+    rejected each entry — so a gate late in the check order only gets credit for
+    the entries the earlier ones let through, and you can't read what any single
+    stacked confluence is actually doing. This does not partition: each vetoed
+    entry carries the FULL set of gates that rejected it (``gates``, pipe-joined),
+    and here every gate in that set is scored on the entry. A trade two gates both
+    blocked counts once under EACH, so the ``trades`` column sums to more than the
+    ghost total — that overlap is the answer to "what does each gate independently
+    veto".
+
+    Columns mirror the cut frames (trades/net_pnl/win_rate/expectancy/avg_r; the
+    bucket is the confluence name) with one addition: ``unique`` — how many of a
+    gate's vetoes it caught *alone*, i.e. entries that would have traded had only
+    that gate been switched off. A high ``unique`` is a gate pulling its own
+    weight; a low one is redundant with the rest of the stack.
+
+    A vetoed row's ``net_pnl`` is the would-be ghost P&L: positive means the gate
+    cut a *winner*, negative means it saved the loss. Empty in -> empty out. Older
+    ledgers predate the full set and only carry the first-match ``gate``; the
+    breakdown falls back to it, which is exact whenever one gate was enabled and a
+    first-match approximation when several were.
+    """
+    if vetoed is None or vetoed.empty:
+        return pd.DataFrame()
+    col = "gates" if "gates" in vetoed.columns else "gate"
+    sets = [
+        [g for g in str(s or "").split("|") if g]
+        for s in vetoed[col].tolist()
+    ]
+    # Explode positionally: one row per (vetoed entry × gate that rejected it). A
+    # fresh RangeIndex on both the repeated frame and the confluence key keeps the
+    # groupby from aligning on duplicate labels.
+    reps = [len(gs) for gs in sets]
+    exploded = vetoed.iloc[np.repeat(np.arange(len(vetoed)), reps)].reset_index(drop=True)
+    if exploded.empty:
+        return pd.DataFrame()
+    conf = pd.Series([g for gs in sets for g in gs], name="_conf")
+    out = _by(exploded, conf)
+    # Entries a gate caught alone: it, and nothing else, stood between them and a
+    # real fill.
+    unique: dict[str, int] = {}
+    for gs in sets:
+        if len(gs) == 1:
+            unique[gs[0]] = unique.get(gs[0], 0) + 1
+    out["unique"] = out["bucket"].map(lambda b: unique.get(b, 0)).astype(int)
+    return out.sort_values("trades", ascending=False).reset_index(drop=True)
+
+
+# --- MFE / MAE: what the trade was worth vs. what it booked --------------------
+
+EXCURSION_GROUPS = ("All", "Winners", "Losers")
+
+
+def excursions(trades: pd.DataFrame) -> pd.DataFrame:
+    """The maximum-favorable / maximum-adverse profile of a book, split by outcome.
+
+    Every simulated trade carries how far it ever ran in its own favor before it
+    was booked (``mfe_r``, in R) and the deepest it went against (``mae_r``, <= 0) —
+    both measured off the ticks over the trade's own life, by the engine. This rolls
+    them up three ways: the whole book, the winners, and the losers. What the split
+    answers is not "which bucket to trade" (MFE/MAE are outcomes, unknowable at the
+    fill) but "is the exit fit for the trade it's exiting":
+
+      - ``mfe_r`` / ``mae_r`` — the median peak and trough in R. Winners that peak
+        far above what they book, and losers that never peak at all, are two
+        different exit problems.
+      - ``capture`` — of the peak a trade showed, the median fraction the exit
+        actually kept (booked R / peak R), over trades that were ever in profit. Low
+        capture is a trail or target giving open profit back.
+      - ``reach_1r`` — share of the group that ever reached +1R MFE. Losers that
+        never reach it were never really working; a breakeven rule can't save them.
+      - ``heat_1r`` — share that sat through <= -1R MAE. Winners taking that heat
+        are surviving on luck the stop should have cut.
+
+    Empty (no trades, or a pre-MFE/MAE run whose frame lacks the columns) -> empty
+    out, and the panel says the run predates the tracking rather than drawing zeros.
+    """
+    need = ("mfe_r", "mae_r", "net_pnl", "points", "mfe_points")
+    if trades is None or trades.empty or any(c not in trades.columns for c in need):
+        return pd.DataFrame()
+    pnl = trades["net_pnl"].astype(float)
+    groups = {"All": trades, "Winners": trades[pnl > 0], "Losers": trades[pnl <= 0]}
+    rows = []
+    for name in EXCURSION_GROUPS:
+        g = groups[name]
+        if g.empty:
+            continue
+        mfe_r = g["mfe_r"].astype(float)
+        mae_r = g["mae_r"].astype(float)
+        # Capture — booked R as a fraction of peak R — only reads on trades that
+        # booked a profit: a loser's "fraction of its peak kept" is a negative over a
+        # near-zero peak, a meaningless blow-up, not a 0.4-of-peak the way a winner's
+        # is. So it is the median over the group's *winning* trades (and is therefore
+        # null for the Losers row, which has none) — the honest question is "when this
+        # group won, how much of the run did the exit keep".
+        won = g[(g["points"].astype(float) > 0) & (g["mfe_points"].astype(float) > 0)]
+        capture = (float((won["points"].astype(float)
+                          / won["mfe_points"].astype(float)).median())
+                   if not won.empty else float("nan"))
+        rows.append({
+            "bucket": name,
+            "trades": int(len(g)),
+            "mfe_r": float(mfe_r.median()),
+            "mae_r": float(mae_r.median()),
+            "capture": capture,
+            "reach_1r": float((mfe_r >= 1.0).mean()),
+            "heat_1r": float((mae_r <= -1.0).mean()),
+        })
+    return pd.DataFrame(rows)
+
+
+# --- winners vs losers: the distribution the bucket cuts average away ----------
+
+WIN_LOSS_GROUPS = ("Winners", "Losers")
+
+
+def _max_streaks(won: np.ndarray) -> tuple[int, int]:
+    """Longest run of wins and longest run of losses, read over the frame's own
+    order — which is the order the engine booked them, i.e. chronological. A
+    single pass; a win resets the loss counter and vice versa."""
+    max_w = max_l = cur_w = cur_l = 0
+    for w in won:
+        if w:
+            cur_w += 1
+            cur_l = 0
+            max_w = max(max_w, cur_w)
+        else:
+            cur_l += 1
+            cur_w = 0
+            max_l = max(max_l, cur_l)
+    return max_w, max_l
+
+
+def win_loss_profile(trades: pd.DataFrame) -> dict:
+    """The winner/loser distribution the per-bucket cuts blend together.
+
+    Every cut in ``CUTS`` mixes winners and losers inside each bucket and reports
+    the net — so a bucket that made money by winning big and a bucket that made the
+    same money by rarely losing read identically. This splits the book the one way
+    those cuts never do, into what won and what lost, and reports the shape of each
+    side rather than its middle:
+
+      - the tails (``best_r``/``best_pnl`` — the single biggest trade on that side,
+        and ``top3_share`` — the fraction of the side's P&L its three most extreme
+        trades carried). A book whose winners' top-3 carry most of the green is one
+        outlier away from flat, and no median shows that.
+      - the payoff geometry: ``avg_r``/``med_r``/``std_r`` per side, and at the book
+        level ``payoff_ratio`` (avg win R over avg loss R) and ``profit_factor``
+        (gross won over gross lost) — the two numbers a win rate hides.
+      - ``med_hold_s`` per side: whether winners are given room to run while losers
+        are cut fast, or the reverse (the signature of exiting winners early).
+      - the sequence: ``max_win_streak``/``max_loss_streak`` and ``max_drawdown``
+        (deepest peak-to-trough of cumulative net over the booked order) — the run
+        of red a win rate averages out but an account has to sit through.
+
+    Losers is ``net <= 0`` to match ``excursions``: a scratch is not a win. Empty
+    (no trades, or a run predating ``r_multiple``) -> empty dict, and the panel
+    hides the table rather than drawing zeros.
+    """
+    need = ("net_pnl", "r_multiple", "duration_s")
+    if trades is None or trades.empty or any(c not in trades.columns for c in need):
+        return {}
+    pnl = trades["net_pnl"].astype(float)
+    r = trades["r_multiple"].astype(float)
+    hold = trades["duration_s"].astype(float)
+    n = len(trades)
+
+    sides = []
+    for name in WIN_LOSS_GROUPS:
+        mask = pnl > 0 if name == "Winners" else pnl <= 0
+        gp, gr, gh = pnl[mask], r[mask], hold[mask]
+        k = len(gp)
+        if k == 0:
+            continue
+        # "Biggest" reads in the side's own direction — the fattest win, the deepest
+        # loss — so a Losers row shows -$250 not the smallest scratch near zero.
+        extreme = float(gr.max() if name == "Winners" else gr.min())
+        extreme_pnl = float(gp.max() if name == "Winners" else gp.min())
+        # Concentration: the three most extreme trades' P&L over the side's total.
+        # Both numerator and total share the side's sign, so the fraction is positive
+        # on either row; near 1.0 means three trades are the whole side.
+        total = gp.sum()
+        top3 = float(gp.loc[gp.abs().nlargest(3).index].sum() / total) if total else float("nan")
+        sides.append({
+            "bucket": name,
+            "trades": k,
+            "share": k / n,
+            "net_pnl": float(gp.sum()),
+            "avg_pnl": float(gp.mean()),
+            "avg_r": float(gr.mean()),
+            "med_r": float(gr.median()),
+            "std_r": float(gr.std(ddof=0)),
+            "best_r": extreme,
+            "best_pnl": extreme_pnl,
+            "top3_share": top3,
+            "med_hold_s": float(gh.median()),
+        })
+
+    wins, losses = pnl[pnl > 0], pnl[pnl <= 0]
+    gross_win = float(wins.sum())
+    gross_loss = float(-losses.sum())  # a positive magnitude
+    avg_win_r = float(r[pnl > 0].mean()) if len(wins) else 0.0
+    avg_loss_r = float(r[pnl <= 0].mean()) if len(losses) else 0.0
+    equity = pnl.to_numpy().cumsum()
+    drawdown = equity - np.maximum.accumulate(equity)  # <= 0 at every point
+    max_w, max_l = _max_streaks((pnl > 0).to_numpy())
+    summary = {
+        # inf when a side is empty — sanitize() sends "inf", the panel renders ∞,
+        # which is the honest reading of "won with nothing lost against it".
+        "profit_factor": gross_win / gross_loss if gross_loss > 0 else float("inf"),
+        "payoff_ratio": avg_win_r / abs(avg_loss_r) if avg_loss_r else float("inf"),
+        "expectancy_r": float(r.mean()),
+        "max_win_streak": max_w,
+        "max_loss_streak": max_l,
+        "max_drawdown": float(drawdown.min()) if n else 0.0,
+    }
+    return {"sides": sides, "summary": summary}
+
+
+# --- the R-outcome distribution: the shape a mean/median can't show ------------
+
+# Half-open (lo, hi] so a stop at exactly -1R lands in the first bucket and a
+# target at exactly +2R in "1 to 2R" — the two spikes a fixed-stop engine makes.
+R_BINS: tuple[tuple[str, float | None, float | None], ...] = (
+    ("≤ -1R", None, -1.0),
+    ("-1 to 0R", -1.0, 0.0),
+    ("0 to 1R", 0.0, 1.0),
+    ("1 to 2R", 1.0, 2.0),
+    ("2 to 3R", 2.0, 3.0),
+    ("> 3R", 3.0, None),
+)
+
+
+def r_histogram(trades: pd.DataFrame) -> list[dict]:
+    """Every trade's booked R dropped into fixed R-buckets — the distribution the
+    win/loss summary averages into two numbers. On a fixed-stop, fixed-target
+    engine this is the most honest single picture of the book: a wall at ``≤ -1R``
+    (the stops), a spike at the target bucket, and whatever tail there is past it.
+    ``net_pnl`` per bucket says which part of the shape actually holds the money.
+
+    Empty (no trades, or a run with no ``r_multiple``) -> empty list."""
+    if trades is None or trades.empty or "r_multiple" not in trades.columns:
+        return []
+    r = trades["r_multiple"].astype(float).to_numpy()
+    pnl = trades["net_pnl"].astype(float).to_numpy()
+    rows = []
+    for label, lo, hi in R_BINS:
+        if lo is None:
+            m = r <= hi
+        elif hi is None:
+            m = r > lo
+        else:
+            m = (r > lo) & (r <= hi)
+        rows.append({
+            "bucket": label,
+            "trades": int(m.sum()),
+            "share": float(m.mean()),
+            "net_pnl": float(pnl[m].sum()),
+        })
+    return rows
+
+
+# --- what separated winners from losers at entry ------------------------------
+
+@dataclass(frozen=True)
+class Discriminator:
+    key: str
+    label: str
+    unit: str
+    # Columns the value reads — a frame without them just drops the row.
+    needs: tuple[str, ...]
+    value: Callable[[pd.DataFrame], pd.Series]
+
+
+# Every field here was a fact *before* the fill, so a gap between what winners and
+# losers carried is a filter you could have traded — the point the outcome cuts
+# can't make. Stop distance and time-at-band are the two nothing else on the page
+# measures; band width restates the by_band_width cut as a W/L contrast, and size
+# asks whether the engine bet bigger into worse.
+DISCRIMINATORS: tuple[Discriminator, ...] = (
+    Discriminator("band_width", "Band width", "ticks", ("band_width_ticks",),
+                  lambda t: t["band_width_ticks"].astype(float)),
+    Discriminator("stop_distance", "Stop distance", "pts", ("avg_entry", "stop_price"),
+                  lambda t: (t["avg_entry"].astype(float) - t["stop_price"].astype(float)).abs()),
+    Discriminator("time_at_band", "Time at band pre-entry", "s",
+                  ("entry_ts_utc", "acceptance_ts"),
+                  lambda t: (t["entry_ts_utc"] - t["acceptance_ts"]).dt.total_seconds()),
+    Discriminator("position_size", "Position size", "contracts", ("max_contracts",),
+                  lambda t: t["max_contracts"].astype(float)),
+)
+
+
+def _auc(ranks: np.ndarray, win: np.ndarray) -> float:
+    """P(a random winner's value exceeds a random loser's), ties at 0.5 — the
+    common-language effect size, read off pre-computed average ranks. 0.5 is no
+    separation; the distance from it, in either direction, is the whole signal.
+    Scale-free and outlier-robust, which a difference-of-means is not."""
+    nw = int(win.sum())
+    nl = len(win) - nw
+    if nw == 0 or nl == 0:
+        return float("nan")
+    u = float(ranks[win].sum()) - nw * (nw + 1) / 2.0
+    return u / (nw * nl)
+
+
+def _sep_luck(vals: np.ndarray, win: np.ndarray) -> float | None:
+    """How often relabelling the same values, at the same win/loss ratio, separates
+    them at least this hard. The AUC analogue of :func:`luck` — same seed, same
+    permutation count, same reason: with 344 trades and a handful of features, one
+    feature clearing 0.5 by a bit is what shuffling hands you for free.
+
+    None when there is nothing to test (too few trades, or one side empty)."""
+    n = len(vals)
+    nw = int(win.sum())
+    if n < MIN_TRADES_FOR_LUCK or nw == 0 or nw == n:
+        return None
+    ranks = pd.Series(vals).rank().to_numpy()
+    obs = abs(_auc(ranks, win) - 0.5)
+    rng = np.random.default_rng(SEED)
+    idx = np.arange(n)
+    beat = 0
+    for _ in range(PERMUTATIONS):
+        sel = rng.choice(idx, nw, replace=False)
+        u = float(ranks[sel].sum()) - nw * (nw + 1) / 2.0
+        if abs(u / (nw * (n - nw)) - 0.5) >= obs:
+            beat += 1
+    return (beat + 1) / (PERMUTATIONS + 1)
+
+
+def entry_discriminator(trades: pd.DataFrame, with_luck: bool = True) -> dict:
+    """For each entry-knowable field, what winners carried vs what losers did — and
+    whether the gap is more than the split's own shape hands you.
+
+    The cuts test one bucket of one feature at a time; this reads every feature at
+    once as a winner-mean/loser-mean contrast with a separation score (AUC) and the
+    same permutation floor the cuts carry, so the rows that *hold* are the honest
+    shortlist of "there might be a filter here". Winners is ``net > 0``.
+
+    Empty (no trades, or none of the features' columns present) -> empty dict."""
+    if trades is None or trades.empty or "net_pnl" not in trades.columns:
+        return {}
+    pnl = trades["net_pnl"].astype(float)
+    win_all = (pnl > 0).to_numpy()
+
+    scored = []
+    for d in DISCRIMINATORS:
+        if any(c not in trades.columns for c in d.needs):
+            continue
+        v = d.value(trades).astype(float).to_numpy()
+        m = ~np.isnan(v)  # time-at-band is NaT-then-NaN when acceptance wasn't logged
+        vv, ww = v[m], win_all[m]
+        # A feature the engine holds constant (a fixed stop, a fixed size) can't
+        # separate anything — AUC is 0.5 by construction. Drop it rather than print
+        # a row that only ever says "no", which for a fixed-risk engine is most of them.
+        if len(vv) == 0 or ww.all() or not ww.any() or vv.std() == 0:
+            continue
+        ranks = pd.Series(vv).rank().to_numpy()
+        scored.append((d, vv, ww,
+                       _auc(ranks, ww),
+                       _sep_luck(vv, ww) if with_luck else None))
+
+    # Bonferroni over the features actually tested — same bar, same reasoning as
+    # luck_bar; a feature we couldn't score (too sparse) doesn't tighten it.
+    tested = sum(1 for *_, p in scored if p is not None)
+    bar = 0.05 / max(1, tested)
+    rows = [{
+        "feature": d.label,
+        "unit": d.unit,
+        "win_mean": float(vv[ww].mean()),
+        "loss_mean": float(vv[~ww].mean()),
+        "auc": auc,
+        "luck": p,
+        "holds": p is not None and p <= bar,
+    } for d, vv, ww, auc, p in scored]
+    return {
+        "rows": rows,
+        "luck_bar": bar,
+        "n_win": int(win_all.sum()),
+        "n_loss": int((~win_all).sum()),
+    }
+
+
+# --- daily concentration: did a few sessions make the book? -------------------
+
+def daily_concentration(trades: pd.DataFrame) -> dict:
+    """The book rolled up to sessions — the risk view a trade-level table hides.
+
+    A win rate says nothing about how the green arrived: a book that grinds a little
+    every day and one that is three huge days over a flat year read identically at
+    the trade level and could not be more different to sit through. ``top3_share``
+    is the daily analogue of the win/loss table's tail column — the fraction of net
+    the three best days carried — and ``worst_day`` is the number a max-drawdown in
+    dollars is built out of. ``series`` is every session's net in order, for a strip
+    that shows the clustering directly.
+
+    Grouped by the engine's ``session`` key (falling back to the local entry date).
+    Empty -> empty dict."""
+    if trades is None or trades.empty or "net_pnl" not in trades.columns:
+        return {}
+    if "session" in trades.columns:
+        key = trades["session"].astype(str)
+    elif "entry_ts_local" in trades.columns:
+        key = trades["entry_ts_local"].dt.date.astype(str)
+    else:
+        return {}
+    daily = trades.groupby(key)["net_pnl"].sum().astype(float).sort_index()
+    nets = daily.to_numpy()
+    idx = [str(i) for i in daily.index]
+    total = float(nets.sum())
+    # Of all the net made, how much the three best days were. Only meaningful over a
+    # profitable book — a share of a negative total is not a concentration.
+    top3 = float(np.sort(nets)[::-1][:3].sum() / total) if total > 0 else float("nan")
+    best_i, worst_i = int(np.argmax(nets)), int(np.argmin(nets))
+    return {
+        "days": int(len(daily)),
+        "green_share": float((nets > 0).mean()),
+        "avg_day": float(nets.mean()),
+        "med_day": float(np.median(nets)),
+        "best_day": float(nets[best_i]),
+        "best_date": idx[best_i],
+        "worst_day": float(nets[worst_i]),
+        "worst_date": idx[worst_i],
+        "top3_share": top3,
+        "series": [{"date": idx[i], "net": float(nets[i])} for i in range(len(nets))],
+    }

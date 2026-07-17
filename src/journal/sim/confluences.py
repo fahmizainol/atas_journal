@@ -137,9 +137,10 @@ def needs_profile(cfg) -> bool:
 # above without a cycle. Every entry point that resolves a config goes through
 # this module, so importing it is what makes the gates exist.
 from .gates import (  # noqa: E402
-    GxFloorGate, GxPocShapeGate, GxRescueCapGate, GxRescueGate, GxValueGate,
-    OnHighGate, RegimeGate, UpperOccupancyCapGate, UpperOccupancyGate,
-    VolumeProfileGate, VwapCrossGate, VwapSlopeCapGate, VwapSlopeGate,
+    GxFloorGate, GxOverhangGate, GxPocShapeGate, GxRescueCapGate, GxRescueGate,
+    GxValueGate, NyPocFloorGate, OnHighGate, RegimeGate, UpperOccupancyCapGate,
+    UpperOccupancyGate, VolumeProfileGate, VwapCrossGate, VwapSlopeCapGate,
+    VwapSlopeGate,
 )
 
 GATE_FACTORIES[VolumeProfileGate.name] = VolumeProfileGate
@@ -155,3 +156,5 @@ GATE_FACTORIES[GxFloorGate.name] = GxFloorGate
 GATE_FACTORIES[OnHighGate.name] = OnHighGate
 GATE_FACTORIES[GxValueGate.name] = GxValueGate
 GATE_FACTORIES[GxPocShapeGate.name] = GxPocShapeGate
+GATE_FACTORIES[NyPocFloorGate.name] = NyPocFloorGate
+GATE_FACTORIES[GxOverhangGate.name] = GxOverhangGate

@@ -550,7 +550,13 @@ class GxFloorGate:
 
     Config section::
 
-        {"gx_floor": {"enabled": true, "max_ticks_below": 80}}
+        {"gx_floor": {"enabled": true, "max_ticks_below": 80, "max_ticks_above": 0}}
+
+    ``max_ticks_above`` (default 0 — the original rule) lets the line sit that
+    far on the *wrong* side of the fill and still count: the 8762c799 setup
+    study's best cell filled anywhere from 50 ticks below the Globex dev1 to
+    150 above it, and a strict floor cannot express the lower half of that
+    window.
     """
 
     name = "gx_floor"
@@ -568,6 +574,12 @@ class GxFloorGate:
                    "the Globex dev1 may sit and still count as a floor. Beyond "
                    "stop distance it would rescue nobody; 0 demands the lines "
                    "touch."),
+        Field("max_ticks_above", "int", name, "Max overshoot past the line",
+              unit="ticks", min=0, default=0, depends_on=("enabled", True),
+              help="How far the line may sit on the WRONG side of the fill "
+                   "(above it on a long) and still count — a fill slightly "
+                   "under the Globex dev1 is still trading against it. 0 keeps "
+                   "the strict floor."),
     )
 
     KNOBS = {f.name for f in SCHEMA}
@@ -582,13 +594,19 @@ class GxFloorGate:
         n = section.get("max_ticks_below", 80)
         if not isinstance(n, int) or isinstance(n, bool) or n < 0:
             raise ValueError(f"max_ticks_below must be a non-negative int, got {n!r}")
+        a = section.get("max_ticks_above", 0)
+        if not isinstance(a, int) or isinstance(a, bool) or a < 0:
+            raise ValueError(f"max_ticks_above must be a non-negative int, got {a!r}")
         self.max_ticks_below = n
+        self.max_ticks_above = a
         self._line: np.ndarray | None = None
         self._max_pts = 0.0
+        self._above_pts = 0.0
         self._side = 1.0
 
     def prepare(self, ctx: "SessionCtx") -> None:
         self._max_pts = self.max_ticks_below * tick_size(ctx.cfg.instrument)
+        self._above_pts = self.max_ticks_above * tick_size(ctx.cfg.instrument)
         # The Globex band on the setup's side of the market (see
         # VolumeProfileGate.prepare on why this is the band side, not the
         # trade's direction).
@@ -609,9 +627,10 @@ class GxFloorGate:
         if np.isnan(line):
             return False
         # The line on the traded side of the fill, within reach: below a long's
-        # fill, above a short's, by at most the configured distance.
+        # fill, above a short's, by at most the configured distance — or on the
+        # wrong side by at most the configured overshoot.
         gap = self._side * (fill - line)
-        return 0.0 <= gap <= self._max_pts + 1e-9
+        return -self._above_pts - 1e-9 <= gap <= self._max_pts + 1e-9
 
 
 class OnHighGate:
@@ -817,11 +836,17 @@ class GxPocShapeGate:
 
     Config section::
 
-        {"gx_poc_shape": {"enabled": true, "zone_min_ticks": 25, "zone_max_ticks": 100}}
+        {"gx_poc_shape": {"enabled": true, "zone_min_ticks": 25,
+                          "zone_max_ticks": 100, "mode": "veto"}}
 
-    The zone is where the veto LIVES, not a requirement: a POC beyond
-    ``zone_max_ticks`` below the VWAP (a deep recovery day rallying over a far
-    node) or at/above it passes.
+    In ``mode: "veto"`` (the default) the zone is where the veto LIVES, not a
+    requirement: a POC beyond ``zone_max_ticks`` below the VWAP (a deep
+    recovery day rallying over a far node) or at/above it passes. In
+    ``mode: "require_mirror"`` the gate flips into the setup study's positive
+    read — only fills whose Globex POC sits ``zone_min..zone_max`` ticks on
+    the FAR side of the VWAP (above it, on a long) pass: the night built its
+    acceptance high, and the pullback lands into accepted value. That mirror
+    shape was the 8762c799 study's best cell (+$27.2k at 65% WR over 66).
     """
 
     name = "gx_poc_shape"
@@ -834,16 +859,27 @@ class GxPocShapeGate:
                    "zone_min..zone_max ticks below the Globex VWAP (above it, "
                    "on a lower-band setup) — a low-participation rally over "
                    "unfilled value."),
-        Field("zone_min_ticks", "int", name, "Zone starts (ticks below the VWAP)",
+        Field("zone_min_ticks", "int", name, "Zone starts (ticks from the VWAP)",
               unit="ticks", min=0, default=25, depends_on=("enabled", True),
-              help="Inner edge of the veto zone: a POC at least this far below "
-                   "the Globex VWAP (mirrored on a short) is the toxic shape. "
-                   "Closer than this, POC and VWAP agree — that passes."),
-        Field("zone_max_ticks", "int", name, "Zone ends (ticks below the VWAP)",
+              help="Inner edge of the zone, measured from the Globex VWAP. In "
+                   "veto mode the zone sits below it (the thin-rally side, "
+                   "mirrored on a short); in require_mirror mode the same "
+                   "distances apply above it (the accepted-value side). Closer "
+                   "than this, POC and VWAP agree."),
+        Field("zone_max_ticks", "int", name, "Zone ends (ticks from the VWAP)",
               unit="ticks", min=0, default=100, depends_on=("enabled", True),
-              help="Outer edge of the veto zone. A POC even further below the "
-                   "VWAP is a deep-recovery structure, not the thin rally, and "
-                   "passes."),
+              help="Outer edge of the zone. A POC even further out is a "
+                   "deep-recovery structure, not the shape this gate reads — "
+                   "it passes a veto and fails the mirror requirement."),
+        Field("mode", "enum", name, "Mode",
+              choices=(("veto", "veto — block the thin-rally zone"),
+                       ("require_mirror", "require mirror — only accepted-value "
+                                          "shapes pass")),
+              default="veto", depends_on=("enabled", True),
+              help="veto blocks fills while the POC hangs in the zone below "
+                   "the VWAP. require_mirror passes ONLY fills whose POC sits "
+                   "in the zone on the far side (above the VWAP on a long) — "
+                   "the setup study's accepted-value shape."),
     )
 
     KNOBS = {f.name for f in SCHEMA}
@@ -863,6 +899,10 @@ class GxPocShapeGate:
         if lo > hi:
             raise ValueError(
                 f"zone_min_ticks must not exceed zone_max_ticks, got {lo} > {hi}")
+        mode = section.get("mode", "veto")
+        if mode not in ("veto", "require_mirror"):
+            raise ValueError(f"mode must be veto|require_mirror, got {mode!r}")
+        self.mode = mode
         self.zone_min_ticks = lo
         self.zone_max_ticks = hi
         self._mid: np.ndarray | None = None
@@ -897,7 +937,180 @@ class GxPocShapeGate:
         # How far the node hangs behind the mean, on the traded side's reading:
         # below the VWAP for an upper-band setup, above it for a lower-band one.
         gap = self._side * (mid - poc)
+        if self.mode == "require_mirror":
+            # Only the mirror shape passes: the node the same zone beyond the
+            # VWAP on the traded side (above it, for an upper-band setup).
+            return self._lo_pts - 1e-9 <= -gap <= self._hi_pts + 1e-9
         return not (self._lo_pts - 1e-9 <= gap <= self._hi_pts + 1e-9)
+
+
+class NyPocFloorGate:
+    """Veto any entry without the developing NY POC as a node just beneath it.
+
+    The idea it enforces: a dev1 pullback that lands with the session's own
+    volume node directly underneath is landing on defended ground; one whose
+    POC sits far below is floating over an air pocket down to it. The 8762c799
+    loss study measured both halves: fills with the NY POC 0–100 ticks below
+    ran 61% WR for +$37.2k (negative in only 2 of 12 months — the stable core
+    of the run), and 85% of stopped losses completed the rotation all the way
+    to the POC within 30 minutes. Stacked with the widened gx_floor it was the
+    study's strongest robust setup (72.5% WR, n=69, held in both halves).
+
+    Honesty clause: post-hoc cut of one run, not a validated gate — this
+    exists to A/B the setup off the ghost ledger, where the rearm and
+    daily-loss-stop interactions a post-hoc cut cannot see are honest.
+
+    Mirrored by band side: on the lower band the node must sit just *above*
+    the fill. Reads the engine's own developing profile (``needs_profile``
+    makes the engine build it), through profile.levels_in_force — the node
+    judged at tick ``i`` is one a closed bar had already published. Ticks
+    before the first bar close have no profile and are vetoed: "no data" must
+    not read as "confirmed".
+
+    Config section::
+
+        {"ny_poc_floor": {"enabled": true, "max_ticks_below": 100}}
+    """
+
+    name = "ny_poc_floor"
+    needs_profile = True
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Require the NY POC just beneath the fill",
+              default=False,
+              help="Vetoes any entry whose fill does not have the developing "
+                   "session POC within reach beneath it (above it, on a "
+                   "lower-band setup) — the defended node the pullback lands "
+                   "on."),
+        Field("max_ticks_below", "int", name, "Max distance to the node",
+              unit="ticks", min=0, default=100, depends_on=("enabled", True),
+              help="How far beyond the fill the developing POC may sit and "
+                   "still count. Past stop distance the node rescues nobody; "
+                   "0 demands the fill sit on the node itself."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown ny_poc_floor knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        n = section.get("max_ticks_below", 100)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"max_ticks_below must be a non-negative int, got {n!r}")
+        self.max_ticks_below = n
+        self._poc: np.ndarray | None = None
+        self._max_pts = 0.0
+        self._side = 1.0
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._max_pts = self.max_ticks_below * tick_size(ctx.cfg.instrument)
+        self._side = 1.0 if ctx.band_side() == "upper" else -1.0
+        self._poc = None
+        if ctx.profile is None or ctx.bars.empty:
+            return  # nothing to read — veto everything rather than guess
+        self._poc = profmod.levels_in_force(
+            ctx.profile, ctx.bars, len(ctx.ticks), edge="poc")
+
+    def allows(self, i: int, fill: float) -> bool:
+        if self._poc is None:
+            return False
+        poc = self._poc[i]
+        if np.isnan(poc):
+            return False
+        # The node on the traded side of the fill, within reach: below a
+        # long's fill, above a short's, by at most the configured distance.
+        gap = self._side * (fill - poc)
+        return 0.0 <= gap <= self._max_pts + 1e-9
+
+
+class GxOverhangGate:
+    """Veto any entry while the Globex VWAP hangs too far over the NY VWAP.
+
+    The idea it enforces: when the night-anchored VWAP sits well above the
+    session's, the RTH rally is climbing into the overnight's average
+    inventory — every tick higher hands the night's longs a better exit, and
+    the session bounce is selling pressure's guest. The 8762c799 loss study
+    found the band directly: fills with the Globex VWAP 50–200 ticks above the
+    NY VWAP ran 43% WR for −$10.0k, while every other reading of the spread
+    was fine — including the deep (>200t) gap, which is a recovery day, not an
+    overhang, so this gate caps the spread rather than requiring a sign.
+
+    Honesty clause: post-hoc cut of one run, not a validated gate — this
+    exists to A/B the spread cap off the ghost ledger (it is half of the
+    study's "accepted-value" setup, with gx_poc_shape's require_mirror).
+
+    Mirrored by band side: on the lower band the overhang is the Globex VWAP
+    hanging that far *below* the NY VWAP. The NY line is the engine's own
+    anchor recomputed here; the Globex line comes from the *cached* overnight
+    ticks spliced onto the engine's frame (cache-only doctrine, RTH-frame
+    caveat — same as gx_floor). A day with no cached overnight is vetoed
+    wholesale.
+
+    Config section::
+
+        {"gx_overhang": {"enabled": true, "max_ticks": 50}}
+    """
+
+    name = "gx_overhang"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Cap the Globex-over-NY VWAP spread",
+              default=False,
+              help="Vetoes any entry while the Globex VWAP sits more than "
+                   "max_ticks above the NY VWAP (below it, on a lower-band "
+                   "setup) — rallying into the night's average inventory."),
+        Field("max_ticks", "int", name, "Max overhang",
+              unit="ticks", min=0, default=50, depends_on=("enabled", True),
+              help="How far the Globex VWAP may sit on the overhead side of "
+                   "the NY VWAP before entries stand down. A spread the other "
+                   "way (Globex beneath) always passes."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown gx_overhang knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        n = section.get("max_ticks", 50)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"max_ticks must be a non-negative int, got {n!r}")
+        self.max_ticks = n
+        self._ny: np.ndarray | None = None
+        self._gx: np.ndarray | None = None
+        self._max_pts = 0.0
+        self._side = 1.0
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._max_pts = self.max_ticks * tick_size(ctx.cfg.instrument)
+        self._side = 1.0 if ctx.band_side() == "upper" else -1.0
+        self._ny = self._gx = None
+        contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
+        on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
+        if on is None or on.empty:
+            return  # blind: no overnight, no Globex anchor — veto everything
+        self._ny = vwapmod.vwap_bands(ctx.ticks)["mid"].to_numpy(dtype="float64")
+        comb = pd.concat([on, ctx.ticks], ignore_index=True)
+        self._gx = vwapmod.vwap_bands(comb)["mid"].to_numpy(dtype="float64")[len(on):]
+
+    def allows(self, i: int, fill: float) -> bool:
+        if self._ny is None or self._gx is None:
+            return False
+        ny, gx = self._ny[i], self._gx[i]
+        if np.isnan(ny) or np.isnan(gx):
+            return False
+        # The spread on the overhead side of the setup: Globex above NY for an
+        # upper-band long, below it for the mirror. Negative spread (Globex on
+        # the friendly side) always passes.
+        return self._side * (gx - ny) <= self._max_pts + 1e-9
 
 
 class RegimeGate:

@@ -2,6 +2,7 @@ export type IndicatorKey =
   | "vwapGlobex"
   | "vwapNy"
   | "atr"
+  | "cvd"
   | "levels"
   | "volumeProfile"
   | "developingProfileGlobex"

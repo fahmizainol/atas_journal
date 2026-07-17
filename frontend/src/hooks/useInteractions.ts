@@ -5,6 +5,7 @@ import type {
   Coverage,
   InteractionParams,
   InteractionResult,
+  SavedRun,
 } from "../lib/interactionTypes";
 
 // The interaction study is market structure over the tick cache, not trades — so
@@ -20,6 +21,15 @@ export function useInteractions(params: InteractionParams | null) {
     queryFn: () => apiGet<InteractionResult>("/interactions", { ...params }),
     enabled: !!params,
     retry: false,
+  });
+}
+
+// Every snapshot saved on disk, newest first — the "saved runs" list. Committing
+// a saved config re-hits the same cache file, so reopening one is instant.
+export function useInteractionRuns() {
+  return useQuery({
+    queryKey: ["interactions", "saved-runs"],
+    queryFn: () => apiGet<SavedRun[]>("/interactions/runs"),
   });
 }
 
@@ -45,14 +55,24 @@ export function useInteractionDayChart(
   day: string | null,
   binSize?: number,
   sources?: string[],
+  ticksPerBar?: number,
 ) {
   return useQuery({
-    queryKey: ["interactions", "day-chart", symbol, day, binSize ?? null, sources],
+    queryKey: [
+      "interactions",
+      "day-chart",
+      symbol,
+      day,
+      binSize ?? null,
+      sources,
+      ticksPerBar ?? null,
+    ],
     queryFn: () =>
       apiGet<DayChartData>(`/interactions/day-chart/${day}`, {
         symbol,
         bin_size: binSize,
         sources,
+        ticks_per_bar: ticksPerBar,
       }),
     enabled: !!symbol && !!day,
     retry: false,

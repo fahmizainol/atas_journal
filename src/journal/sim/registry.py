@@ -76,7 +76,12 @@ STRATEGIES: dict[str, Strategy] = {
                 "(above its VAH), not just the session's. gx_poc_shape vetoes "
                 "entries while the developing Globex POC hangs just below the "
                 "Globex VWAP — a thin, low-participation rally over unfilled "
-                "value."
+                "value — or, in require_mirror mode, passes only the opposite "
+                "shape. ny_poc_floor requires the developing session POC "
+                "within reach beneath the fill (the defended node the pullback "
+                "lands on), and gx_overhang stands entries down while the "
+                "Globex VWAP hangs too far over the NY VWAP — rallying into "
+                "the night's average inventory."
             ),
             # v2: added the developing-value-area exit (exit_below_vah_bars) and
             # the volume_profile gate. Both are off by default and a config that
@@ -98,10 +103,23 @@ STRATEGIES: dict[str, Strategy] = {
             # front of dev1 instead of on it. 0 (the default) rests it on dev1 and
             # simulates identically to v5, but it moves the fill price on the base
             # rule path, so v5 runs are quarantined rather than trusted.
-            version="6",
+            # v7: added the pyramid scale-in (pyramid_tranches / pyramid_step_ticks /
+            # pyramid_stop_mode) — the position may fill in equal lots, adding each
+            # as price runs in its favour, instead of all at once. pyramid_tranches=1
+            # (the default) is the all-in fill and simulates identically to v6, but
+            # the knobs ride the base rule path, so v6 runs are quarantined.
+            # v8: added the panic exit (panic_exit_delta / panic_exit_window_s) —
+            # one read of the tape at the window's end after each fill: exit at
+            # market if the net aggressor delta over the window ran the
+            # configured contracts against the trade. 0 (the default) never
+            # reads the tape and simulates identically to v7, but the exit lives
+            # on the base rule path, so v7 runs are quarantined rather than
+            # trusted.
+            version="8",
             confluences=("volume_profile", "regime", "vwap_slope", "vwap_cross",
                          "upper_occupancy", "gx_rescue", "gx_floor", "on_high",
-                         "gx_value", "gx_poc_shape"),
+                         "gx_value", "gx_poc_shape", "ny_poc_floor",
+                         "gx_overhang"),
         ),
         Strategy(
             slug="vwap-globex-bounce",
@@ -148,7 +166,12 @@ STRATEGIES: dict[str, Strategy] = {
             # (the default) reads the same band and simulates identically to v6, but
             # the knob rides the base rule path and is part of the config hash, so
             # v6 runs are quarantined rather than trusted.
-            version="7",
+            # v8: added the pyramid scale-in — see vwap-upper-band-bounce v7. It
+            # rides the shared run_session, so this family inherits it; tranches=1
+            # (the default) simulates identically to v7.
+            # v9: added the panic exit — see vwap-upper-band-bounce v8. Rides the
+            # shared run_session; 0 (the default) simulates identically to v8.
+            version="9",
             config_cls=GlobexBounceConfig,
             confluences=("volume_profile",),
             run_session=engine.run_session_globex,
@@ -183,7 +206,14 @@ STRATEGIES: dict[str, Strategy] = {
             # vwap-upper-band-bounce v5.
             # v5: added entry_limit_offset_ticks — variant A's limit may rest in
             # front of dev1 instead of on it. See vwap-upper-band-bounce v6.
-            version="5",
+            # v6: added the pyramid scale-in — see vwap-upper-band-bounce v7. It
+            # rides the shared run_session (via run_session_short), so this mirror
+            # inherits it; tranches=1 (the default) simulates identically to v5.
+            # v7: added the panic exit — see vwap-upper-band-bounce v8. Rides the
+            # shared run_session (via run_session_short); on a short the shock is
+            # a buy rip, the signed mirror. 0 (the default) simulates identically
+            # to v6.
+            version="7",
             confluences=("volume_profile", "on_high", "gx_value"),
             run_session=engine.run_session_short,
         ),

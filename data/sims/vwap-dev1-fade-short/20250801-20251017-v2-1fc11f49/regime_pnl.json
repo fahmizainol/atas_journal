@@ -1,0 +1,6038 @@
+{
+  "stats_version": 2,
+  "regime_version": 7,
+  "permutations": 500,
+  "symbol": "NQ",
+  "start": "2025-08-01",
+  "end": "2025-10-17",
+  "checkpoints": [
+    "09:30",
+    "09:45",
+    "10:30",
+    "12:00",
+    "eod"
+  ],
+  "kpis": [
+    {
+      "key": "abr",
+      "label": "Above both VWAPs (ABR)",
+      "pct": true
+    },
+    {
+      "key": "bbr",
+      "label": "Below both VWAPs (BBR)",
+      "pct": true
+    },
+    {
+      "key": "net_conviction",
+      "label": "Net conviction (ABR \u2212 BBR)"
+    },
+    {
+      "key": "quadrant_transitions_rate",
+      "label": "Quadrant transitions / hr"
+    },
+    {
+      "key": "deep_flip_rate",
+      "label": "Deep flips / hr (side changes)"
+    },
+    {
+      "key": "shallow_flip_rate",
+      "label": "Shallow flips / hr (anchor churn)"
+    },
+    {
+      "key": "net_travel",
+      "label": "Net travel (close\u2212open \u00f7 range)"
+    },
+    {
+      "key": "ny_touch_hold_ratio",
+      "label": "NY +1\u03c3 touch \u2192 hold",
+      "pct": true
+    },
+    {
+      "key": "gx_touch_hold_ratio",
+      "label": "Globex +1\u03c3 touch \u2192 hold",
+      "pct": true
+    },
+    {
+      "key": "ny_upper_channel_occupancy",
+      "label": "NY upper-channel occupancy",
+      "pct": true
+    },
+    {
+      "key": "gx_upper_channel_occupancy",
+      "label": "Globex upper-channel occupancy",
+      "pct": true
+    },
+    {
+      "key": "ny_middle_band_occupancy",
+      "label": "NY middle-band occupancy (\u00b11\u03c3)",
+      "pct": true
+    },
+    {
+      "key": "gx_middle_band_occupancy",
+      "label": "Globex middle-band occupancy (\u00b11\u03c3)",
+      "pct": true
+    },
+    {
+      "key": "upper_wrap_occupancy",
+      "label": "Globex wraps NY upper channel",
+      "pct": true
+    },
+    {
+      "key": "upper_dev1_gap_sigma",
+      "label": "NY\u2212Globex upper dev1 gap (\u03c3)"
+    },
+    {
+      "key": "gx_upper_rescue_ratio",
+      "label": "Globex +1\u03c3 rescues broken NY +1\u03c3",
+      "pct": true
+    },
+    {
+      "key": "ny_band_cross_rate",
+      "label": "NY +1\u03c3 crossings / hr"
+    },
+    {
+      "key": "ny_vwap_cross_rate",
+      "label": "NY VWAP crossings / hr"
+    },
+    {
+      "key": "longest_hold_min",
+      "label": "Longest hold above both (min)"
+    },
+    {
+      "key": "norm_spread",
+      "label": "VWAP spread (\u03c3)"
+    },
+    {
+      "key": "spread_slope",
+      "label": "VWAP spread slope (30m)"
+    },
+    {
+      "key": "ny_vwap_slope_ppm",
+      "label": "NY VWAP slope (pts/min, 30m)"
+    },
+    {
+      "key": "ny_vwap_slope_deg",
+      "label": "NY VWAP slope (\u00b0, ATR-norm)"
+    },
+    {
+      "key": "gx_vwap_slope_ppm",
+      "label": "Globex VWAP slope (pts/min, 30m)"
+    },
+    {
+      "key": "gx_vwap_slope_deg",
+      "label": "Globex VWAP slope (\u00b0, ATR-norm)"
+    },
+    {
+      "key": "on_abr",
+      "label": "Overnight above Globex VWAP",
+      "pct": true
+    },
+    {
+      "key": "on_vwap_slope_ppm",
+      "label": "Overnight VWAP slope (pts/min, 30m)"
+    },
+    {
+      "key": "on_vwap_slope_deg",
+      "label": "Overnight VWAP slope (\u00b0, ATR-norm)"
+    },
+    {
+      "key": "on_range_pts",
+      "label": "Overnight range (pts)"
+    },
+    {
+      "key": "open_z",
+      "label": "Open in Globex \u03c3-terms"
+    }
+  ],
+  "sessions_in_range": 56,
+  "traded_days": 55,
+  "untraded_days": 1,
+  "skipped": [],
+  "days": [
+    {
+      "date": "2025-08-01",
+      "class": "trend_down",
+      "partial": false,
+      "net": 444.0,
+      "trades": 4,
+      "wins": 2
+    },
+    {
+      "date": "2025-08-04",
+      "class": "trend_up",
+      "partial": false,
+      "net": -570.0,
+      "trades": 5,
+      "wins": 1
+    },
+    {
+      "date": "2025-08-05",
+      "class": "trend_down",
+      "partial": false,
+      "net": -264.0,
+      "trades": 1,
+      "wins": 0
+    },
+    {
+      "date": "2025-08-06",
+      "class": "trend_up",
+      "partial": false,
+      "net": -1584.0,
+      "trades": 6,
+      "wins": 0
+    },
+    {
+      "date": "2025-08-07",
+      "class": "parked",
+      "partial": false,
+      "net": -1056.0,
+      "trades": 4,
+      "wins": 0
+    },
+    {
+      "date": "2025-08-08",
+      "class": "trend_up",
+      "partial": false,
+      "net": -1320.0,
+      "trades": 5,
+      "wins": 0
+    },
+    {
+      "date": "2025-08-11",
+      "class": "balance",
+      "partial": false,
+      "net": -42.0,
+      "trades": 3,
+      "wins": 1
+    },
+    {
+      "date": "2025-08-12",
+      "class": "trend_up",
+      "partial": false,
+      "net": -528.0,
+      "trades": 2,
+      "wins": 0
+    },
+    {
+      "date": "2025-08-13",
+      "class": "trend_down",
+      "partial": false,
+      "net": 708.0,
+      "trades": 3,
+      "wins": 2
+    },
+    {
+      "date": "2025-08-14",
+      "class": "mixed",
+      "partial": false,
+      "net": 180.0,
+      "trades": 5,
+      "wins": 2
+    },
+    {
+      "date": "2025-08-15",
+      "class": "trend_down",
+      "partial": false,
+      "net": 486.0,
+      "trades": 1,
+      "wins": 1
+    },
+    {
+      "date": "2025-08-18",
+      "class": "mixed",
+      "partial": false,
+      "net": 930.0,
+      "trades": 5,
+      "wins": 3
+    },
+    {
+      "date": "2025-08-19",
+      "class": "trend_down",
+      "partial": false,
+      "net": -264.0,
+      "trades": 1,
+      "wins": 0
+    },
+    {
+      "date": "2025-08-20",
+      "class": "mixed",
+      "partial": false,
+      "net": 222.0,
+      "trades": 2,
+      "wins": 1
+    },
+    {
+      "date": "2025-08-21",
+      "class": "mixed",
+      "partial": false,
+      "net": 175.0,
+      "trades": 5,
+      "wins": 2
+    },
+    {
+      "date": "2025-08-22",
+      "class": "trend_up",
+      "partial": false,
+      "net": -84.0,
+      "trades": 6,
+      "wins": 2
+    },
+    {
+      "date": "2025-08-25",
+      "class": "parked",
+      "partial": false,
+      "net": -42.0,
+      "trades": 3,
+      "wins": 1
+    },
+    {
+      "date": "2025-08-26",
+      "class": "trend_up",
+      "partial": false,
+      "net": -876.0,
+      "trades": 9,
+      "wins": 2
+    },
+    {
+      "date": "2025-08-27",
+      "class": "trend_up",
+      "partial": false,
+      "net": -549.0,
+      "trades": 6,
+      "wins": 2
+    },
+    {
+      "date": "2025-08-28",
+      "class": "parked",
+      "partial": false,
+      "net": 180.0,
+      "trades": 5,
+      "wins": 2
+    },
+    {
+      "date": "2025-08-29",
+      "class": "trend_down",
+      "partial": false,
+      "net": 486.0,
+      "trades": 1,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-01",
+      "class": "trend_up",
+      "partial": false,
+      "net": -413.0,
+      "trades": 2,
+      "wins": 0
+    },
+    {
+      "date": "2025-09-02",
+      "class": "mixed",
+      "partial": false,
+      "net": -353.0,
+      "trades": 7,
+      "wins": 2
+    },
+    {
+      "date": "2025-09-03",
+      "class": "balance",
+      "partial": false,
+      "net": -792.0,
+      "trades": 3,
+      "wins": 0
+    },
+    {
+      "date": "2025-09-04",
+      "class": "trend_up",
+      "partial": false,
+      "net": -1056.0,
+      "trades": 4,
+      "wins": 0
+    },
+    {
+      "date": "2025-09-05",
+      "class": "trend_down",
+      "partial": false,
+      "net": 222.0,
+      "trades": 2,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-08",
+      "class": "balance",
+      "partial": false,
+      "net": -1098.0,
+      "trades": 7,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-09",
+      "class": "balance",
+      "partial": false,
+      "net": 955.0,
+      "trades": 5,
+      "wins": 3
+    },
+    {
+      "date": "2025-09-10",
+      "class": "mixed",
+      "partial": false,
+      "net": 180.0,
+      "trades": 5,
+      "wins": 2
+    },
+    {
+      "date": "2025-09-11",
+      "class": "parked",
+      "partial": false,
+      "net": 41.0,
+      "trades": 6,
+      "wins": 2
+    },
+    {
+      "date": "2025-09-12",
+      "class": "trend_up",
+      "partial": false,
+      "net": -815.0,
+      "trades": 5,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-15",
+      "class": "trend_up",
+      "partial": false,
+      "net": -1098.0,
+      "trades": 7,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-16",
+      "class": "trend_down",
+      "partial": false,
+      "net": 486.0,
+      "trades": 1,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-17",
+      "class": "parked",
+      "partial": false,
+      "net": -144.0,
+      "trades": 6,
+      "wins": 2
+    },
+    {
+      "date": "2025-09-18",
+      "class": "parked",
+      "partial": false,
+      "net": -1327.0,
+      "trades": 8,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-19",
+      "class": "trend_up",
+      "partial": false,
+      "net": -306.0,
+      "trades": 4,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-22",
+      "class": "trend_up",
+      "partial": false,
+      "net": -306.0,
+      "trades": 4,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-23",
+      "class": "trend_down",
+      "partial": false,
+      "net": -264.0,
+      "trades": 1,
+      "wins": 0
+    },
+    {
+      "date": "2025-09-25",
+      "class": "mixed",
+      "partial": false,
+      "net": -306.0,
+      "trades": 4,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-26",
+      "class": "mixed",
+      "partial": false,
+      "net": -839.0,
+      "trades": 6,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-29",
+      "class": "mixed",
+      "partial": false,
+      "net": -306.0,
+      "trades": 4,
+      "wins": 1
+    },
+    {
+      "date": "2025-09-30",
+      "class": "balance",
+      "partial": false,
+      "net": 2166.0,
+      "trades": 6,
+      "wins": 5
+    },
+    {
+      "date": "2025-10-01",
+      "class": "trend_up",
+      "partial": false,
+      "net": -306.0,
+      "trades": 4,
+      "wins": 1
+    },
+    {
+      "date": "2025-10-02",
+      "class": "balance",
+      "partial": false,
+      "net": -528.0,
+      "trades": 2,
+      "wins": 0
+    },
+    {
+      "date": "2025-10-03",
+      "class": "mixed",
+      "partial": false,
+      "net": -306.0,
+      "trades": 4,
+      "wins": 1
+    },
+    {
+      "date": "2025-10-06",
+      "class": "parked",
+      "partial": false,
+      "net": 222.0,
+      "trades": 2,
+      "wins": 1
+    },
+    {
+      "date": "2025-10-07",
+      "class": "trend_down",
+      "partial": false,
+      "net": 444.0,
+      "trades": 4,
+      "wins": 2
+    },
+    {
+      "date": "2025-10-08",
+      "class": "trend_up",
+      "partial": false,
+      "net": -306.0,
+      "trades": 4,
+      "wins": 1
+    },
+    {
+      "date": "2025-10-09",
+      "class": "parked",
+      "partial": false,
+      "net": 222.0,
+      "trades": 2,
+      "wins": 1
+    },
+    {
+      "date": "2025-10-10",
+      "class": "trend_down",
+      "partial": false,
+      "net": -264.0,
+      "trades": 1,
+      "wins": 0
+    },
+    {
+      "date": "2025-10-13",
+      "class": "mixed",
+      "partial": false,
+      "net": -1610.0,
+      "trades": 10,
+      "wins": 2
+    },
+    {
+      "date": "2025-10-14",
+      "class": "parked",
+      "partial": false,
+      "net": -1071.0,
+      "trades": 4,
+      "wins": 0
+    },
+    {
+      "date": "2025-10-15",
+      "class": "balance",
+      "partial": false,
+      "net": 1194.0,
+      "trades": 4,
+      "wins": 3
+    },
+    {
+      "date": "2025-10-16",
+      "class": "trend_down",
+      "partial": false,
+      "net": -89.0,
+      "trades": 6,
+      "wins": 2
+    },
+    {
+      "date": "2025-10-17",
+      "class": "trend_up",
+      "partial": false,
+      "net": -136.0,
+      "trades": 9,
+      "wins": 3
+    }
+  ],
+  "class_buckets": [
+    {
+      "class": "trend_down",
+      "label": "Trend down",
+      "days": 12,
+      "net": 2131.0,
+      "avg_net": 177.58333333333334,
+      "trades": 26,
+      "win_rate": 46.15384615384615,
+      "dates": [
+        "2025-08-01",
+        "2025-08-05",
+        "2025-08-13",
+        "2025-08-15",
+        "2025-08-19",
+        "2025-08-29",
+        "2025-09-05",
+        "2025-09-16",
+        "2025-09-23",
+        "2025-10-07",
+        "2025-10-10",
+        "2025-10-16"
+      ]
+    },
+    {
+      "class": "balance",
+      "label": "Balance",
+      "days": 7,
+      "net": 1855.0,
+      "avg_net": 265.0,
+      "trades": 30,
+      "win_rate": 43.333333333333336,
+      "dates": [
+        "2025-08-11",
+        "2025-09-03",
+        "2025-09-08",
+        "2025-09-09",
+        "2025-09-30",
+        "2025-10-02",
+        "2025-10-15"
+      ]
+    },
+    {
+      "class": "mixed",
+      "label": "Mixed",
+      "days": 11,
+      "net": -2033.0,
+      "avg_net": -184.8181818181818,
+      "trades": 57,
+      "win_rate": 31.57894736842105,
+      "dates": [
+        "2025-08-14",
+        "2025-08-18",
+        "2025-08-20",
+        "2025-08-21",
+        "2025-09-02",
+        "2025-09-10",
+        "2025-09-25",
+        "2025-09-26",
+        "2025-09-29",
+        "2025-10-03",
+        "2025-10-13"
+      ]
+    },
+    {
+      "class": "parked",
+      "label": "Parked",
+      "days": 9,
+      "net": -2975.0,
+      "avg_net": -330.55555555555554,
+      "trades": 40,
+      "win_rate": 25.0,
+      "dates": [
+        "2025-08-07",
+        "2025-08-25",
+        "2025-08-28",
+        "2025-09-11",
+        "2025-09-17",
+        "2025-09-18",
+        "2025-10-06",
+        "2025-10-09",
+        "2025-10-14"
+      ]
+    },
+    {
+      "class": "trend_up",
+      "label": "Trend up",
+      "days": 16,
+      "net": -10253.0,
+      "avg_net": -640.8125,
+      "trades": 82,
+      "win_rate": 19.51219512195122,
+      "dates": [
+        "2025-08-04",
+        "2025-08-06",
+        "2025-08-08",
+        "2025-08-12",
+        "2025-08-22",
+        "2025-08-26",
+        "2025-08-27",
+        "2025-09-01",
+        "2025-09-04",
+        "2025-09-12",
+        "2025-09-15",
+        "2025-09-19",
+        "2025-09-22",
+        "2025-10-01",
+        "2025-10-08",
+        "2025-10-17"
+      ]
+    }
+  ],
+  "boards": {
+    "09:30": {
+      "luck_bar": 0.01,
+      "expected_false_positives": 0.25,
+      "holds": 0,
+      "rows": [
+        {
+          "key": "on_range_pts",
+          "label": "Overnight range (pts)",
+          "rho": -0.1385548273276588,
+          "edge": -205.33333333333337,
+          "win_edge": -5.30925013683634,
+          "luck": 0.33,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2377.0,
+              "avg_net": -132.05555555555554,
+              "trades": 63,
+              "win_rate": 31.746031746031743,
+              "lo": 53.0,
+              "hi": 123.5
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2825.0,
+              "avg_net": -148.68421052631578,
+              "trades": 85,
+              "win_rate": 30.58823529411765,
+              "lo": 124.5,
+              "hi": 181.5
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -6073.0,
+              "avg_net": -337.3888888888889,
+              "trades": 87,
+              "win_rate": 26.436781609195403,
+              "lo": 182.0,
+              "hi": 541.75
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_abr",
+          "label": "Overnight above Globex VWAP",
+          "pct": true,
+          "rho": -0.10908972987838597,
+          "edge": -165.77777777777777,
+          "win_edge": -5.485232067510545,
+          "luck": 0.438,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1657.0,
+              "avg_net": -92.05555555555556,
+              "trades": 78,
+              "win_rate": 33.33333333333333,
+              "lo": 0.0785,
+              "hi": 0.4495
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4977.0,
+              "avg_net": -261.94736842105266,
+              "trades": 78,
+              "win_rate": 26.923076923076923,
+              "lo": 0.4538,
+              "hi": 0.7226
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4641.0,
+              "avg_net": -257.8333333333333,
+              "trades": 79,
+              "win_rate": 27.848101265822784,
+              "lo": 0.7269,
+              "hi": 0.9957
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_ppm",
+          "label": "Overnight VWAP slope (pts/min, 30m)",
+          "rho": -0.05770454244556397,
+          "edge": -101.49999999999999,
+          "win_edge": -2.615765288087662,
+          "luck": 0.676,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -0.7887,
+              "hi": -0.0256
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5086.0,
+              "avg_net": -267.6842105263158,
+              "trades": 84,
+              "win_rate": 27.380952380952383,
+              "lo": -0.0225,
+              "hi": 0.1506
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4008.0,
+              "avg_net": -222.66666666666666,
+              "trades": 82,
+              "win_rate": 29.268292682926827,
+              "lo": 0.1521,
+              "hi": 0.6824
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_deg",
+          "label": "Overnight VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.04971912987169444,
+          "edge": -39.777777777777786,
+          "win_edge": -1.747071669644626,
+          "luck": 0.716,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -3.8647,
+              "hi": -0.2748
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6197.0,
+              "avg_net": -326.1578947368421,
+              "trades": 93,
+              "win_rate": 26.881720430107524,
+              "lo": -0.2454,
+              "hi": 1.1961
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -2897.0,
+              "avg_net": -160.94444444444446,
+              "trades": 73,
+              "win_rate": 30.136986301369863,
+              "lo": 1.3505,
+              "hi": 4.1219
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "open_z",
+          "label": "Open in Globex \u03c3-terms",
+          "rho": -0.03804814226373129,
+          "edge": -35.66666666666666,
+          "win_edge": -0.6487488415199252,
+          "luck": 0.78,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2650.0,
+              "avg_net": -147.22222222222223,
+              "trades": 65,
+              "win_rate": 30.76923076923077,
+              "lo": -1.9831,
+              "hi": -0.1194
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5333.0,
+              "avg_net": -280.6842105263158,
+              "trades": 87,
+              "win_rate": 27.586206896551722,
+              "lo": 0.0109,
+              "hi": 0.7347
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -3292.0,
+              "avg_net": -182.88888888888889,
+              "trades": 83,
+              "win_rate": 30.120481927710845,
+              "lo": 0.7666,
+              "hi": 1.7162
+            }
+          ],
+          "holds": false
+        }
+      ]
+    },
+    "09:45": {
+      "luck_bar": 0.0016666666666666668,
+      "expected_false_positives": 1.5,
+      "holds": 0,
+      "rows": [
+        {
+          "key": "ny_band_cross_rate",
+          "label": "NY +1\u03c3 crossings / hr",
+          "rho": -0.3316364895225151,
+          "edge": -592.6666666666667,
+          "win_edge": -17.168784029038115,
+          "luck": 0.022,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2393.0,
+              "avg_net": 132.94444444444446,
+              "trades": 58,
+              "win_rate": 41.37931034482759,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5393.0,
+              "avg_net": -283.8421052631579,
+              "trades": 82,
+              "win_rate": 26.82926829268293,
+              "lo": 4.0,
+              "hi": 12.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8275.0,
+              "avg_net": -459.72222222222223,
+              "trades": 95,
+              "win_rate": 24.210526315789473,
+              "lo": 12.0,
+              "hi": 28.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_upper_channel_occupancy",
+          "label": "NY upper-channel occupancy",
+          "pct": true,
+          "rho": -0.35259849115744185,
+          "edge": -570.3333333333334,
+          "win_edge": -18.390804597701152,
+          "luck": 0.01,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2393.0,
+              "avg_net": 132.94444444444446,
+              "trades": 58,
+              "win_rate": 41.37931034482759,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5795.0,
+              "avg_net": -305.0,
+              "trades": 90,
+              "win_rate": 27.77777777777778,
+              "lo": 0.0667,
+              "hi": 0.3333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7873.0,
+              "avg_net": -437.3888888888889,
+              "trades": 87,
+              "win_rate": 22.988505747126435,
+              "lo": 0.3333,
+              "hi": 0.6667
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_upper_channel_occupancy",
+          "label": "Globex upper-channel occupancy",
+          "pct": true,
+          "rho": -0.2725171278407517,
+          "edge": -525.3333333333334,
+          "win_edge": -16.404494382022474,
+          "luck": 0.05,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1825.0,
+              "avg_net": 101.38888888888889,
+              "trades": 60,
+              "win_rate": 40.0,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5469.0,
+              "avg_net": -287.8421052631579,
+              "trades": 86,
+              "win_rate": 27.906976744186046,
+              "lo": 0.0,
+              "hi": 0.3333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7631.0,
+              "avg_net": -423.94444444444446,
+              "trades": 89,
+              "win_rate": 23.595505617977526,
+              "lo": 0.4,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_slope_ppm",
+          "label": "NY VWAP slope (pts/min, 30m)",
+          "rho": -0.26145902888923034,
+          "edge": -521.8888888888888,
+          "win_edge": -15.010176390773406,
+          "luck": 0.05,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1103.0,
+              "avg_net": -61.27777777777778,
+              "trades": 67,
+              "win_rate": 34.32835820895522,
+              "lo": -6.0656,
+              "hi": -1.3392
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": 325.0,
+              "avg_net": 17.105263157894736,
+              "trades": 80,
+              "win_rate": 36.25,
+              "lo": -1.2821,
+              "hi": 1.0584
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10497.0,
+              "avg_net": -583.1666666666666,
+              "trades": 88,
+              "win_rate": 19.318181818181817,
+              "lo": 1.097,
+              "hi": 3.6649
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_upper_rescue_ratio",
+          "label": "Globex +1\u03c3 rescues broken NY +1\u03c3",
+          "pct": true,
+          "rho": -0.012825256766214682,
+          "edge": 479.16666666666663,
+          "win_edge": 12.903225806451612,
+          "luck": 0.944,
+          "days": 19,
+          "bands": [
+            {
+              "band": "low",
+              "days": 6,
+              "net": -5059.0,
+              "avg_net": -843.1666666666666,
+              "trades": 31,
+              "win_rate": 12.903225806451612,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 7,
+              "net": -1496.0,
+              "avg_net": -213.71428571428572,
+              "trades": 34,
+              "win_rate": 29.411764705882355,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "high",
+              "days": 6,
+              "net": -2184.0,
+              "avg_net": -364.0,
+              "trades": 31,
+              "win_rate": 25.806451612903224,
+              "lo": 0.3333,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_slope_deg",
+          "label": "NY VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.27594839740561805,
+          "edge": -469.94444444444446,
+          "win_edge": -13.108614232209735,
+          "luck": 0.034,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1547.0,
+              "avg_net": -85.94444444444444,
+              "trades": 63,
+              "win_rate": 33.33333333333333,
+              "lo": -10.7449,
+              "hi": -4.2518
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": 278.0,
+              "avg_net": 14.631578947368421,
+              "trades": 83,
+              "win_rate": 36.144578313253014,
+              "lo": -3.8681,
+              "hi": 2.9916
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10006.0,
+              "avg_net": -555.8888888888889,
+              "trades": 89,
+              "win_rate": 20.224719101123593,
+              "lo": 3.2002,
+              "hi": 9.4277
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "longest_hold_min",
+          "label": "Longest hold above both (min)",
+          "rho": -0.2929181252552755,
+          "edge": -453.55555555555554,
+          "win_edge": -15.0,
+          "luck": 0.034,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 679.0,
+              "avg_net": 37.72222222222222,
+              "trades": 64,
+              "win_rate": 37.5,
+              "lo": 0,
+              "hi": 1
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4469.0,
+              "avg_net": -235.21052631578948,
+              "trades": 91,
+              "win_rate": 29.67032967032967,
+              "lo": 1,
+              "hi": 6
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7485.0,
+              "avg_net": -415.8333333333333,
+              "trades": 80,
+              "win_rate": 22.5,
+              "lo": 6,
+              "hi": 15
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "abr",
+          "label": "Above both VWAPs (ABR)",
+          "pct": true,
+          "rho": -0.31085373253216747,
+          "edge": -433.1111111111111,
+          "win_edge": -14.175506268081005,
+          "luck": 0.022,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 351.0,
+              "avg_net": 19.5,
+              "trades": 61,
+              "win_rate": 37.704918032786885,
+              "lo": 0.0,
+              "hi": 0.0667
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4181.0,
+              "avg_net": -220.05263157894737,
+              "trades": 89,
+              "win_rate": 29.213483146067414,
+              "lo": 0.0667,
+              "hi": 0.5333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7445.0,
+              "avg_net": -413.6111111111111,
+              "trades": 85,
+              "win_rate": 23.52941176470588,
+              "lo": 0.6667,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "norm_spread",
+          "label": "VWAP spread (\u03c3)",
+          "rho": -0.23136016611079907,
+          "edge": -418.0,
+          "win_edge": -13.812475784579618,
+          "luck": 0.102,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1388.0,
+              "avg_net": 77.11111111111111,
+              "trades": 58,
+              "win_rate": 39.6551724137931,
+              "lo": -1.1307,
+              "hi": -0.5258
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6527.0,
+              "avg_net": -343.5263157894737,
+              "trades": 88,
+              "win_rate": 26.136363636363637,
+              "lo": -0.3991,
+              "hi": 0.6829
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -6136.0,
+              "avg_net": -340.8888888888889,
+              "trades": 89,
+              "win_rate": 25.842696629213485,
+              "lo": 0.6939,
+              "hi": 1.3104
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "net_conviction",
+          "label": "Net conviction (ABR \u2212 BBR)",
+          "rho": -0.31836044436736405,
+          "edge": -363.55555555555554,
+          "win_edge": -12.40808823529412,
+          "luck": 0.02,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -901.0,
+              "avg_net": -50.05555555555556,
+              "trades": 64,
+              "win_rate": 35.9375,
+              "lo": -0.9333,
+              "hi": -0.4
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2929.0,
+              "avg_net": -154.1578947368421,
+              "trades": 86,
+              "win_rate": 30.23255813953488,
+              "lo": -0.2667,
+              "hi": 0.5333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7445.0,
+              "avg_net": -413.6111111111111,
+              "trades": 85,
+              "win_rate": 23.52941176470588,
+              "lo": 0.6667,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "quadrant_transitions_rate",
+          "label": "Quadrant transitions / hr",
+          "rho": -0.14990771514736276,
+          "edge": -348.05555555555554,
+          "win_edge": -9.133489461358316,
+          "luck": 0.302,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 951.0,
+              "avg_net": 52.833333333333336,
+              "trades": 61,
+              "win_rate": 37.704918032786885,
+              "lo": 0.0,
+              "hi": 8.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6912.0,
+              "avg_net": -363.7894736842105,
+              "trades": 83,
+              "win_rate": 24.096385542168676,
+              "lo": 8.0,
+              "hi": 16.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -5314.0,
+              "avg_net": -295.22222222222223,
+              "trades": 91,
+              "win_rate": 28.57142857142857,
+              "lo": 16.0,
+              "hi": 32.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "spread_slope",
+          "label": "VWAP spread slope (30m)",
+          "rho": -0.22503687561112862,
+          "edge": -346.94444444444446,
+          "win_edge": -10.519909580942443,
+          "luck": 0.122,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -619.0,
+              "avg_net": -34.388888888888886,
+              "trades": 71,
+              "win_rate": 35.2112676056338,
+              "lo": -1.3216,
+              "hi": -0.4188
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3792.0,
+              "avg_net": -199.57894736842104,
+              "trades": 83,
+              "win_rate": 28.915662650602407,
+              "lo": -0.3854,
+              "hi": 0.1639
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -6864.0,
+              "avg_net": -381.3333333333333,
+              "trades": 81,
+              "win_rate": 24.691358024691358,
+              "lo": 0.1831,
+              "hi": 1.0826
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "upper_wrap_occupancy",
+          "label": "Globex wraps NY upper channel",
+          "pct": true,
+          "rho": -0.14437356568474566,
+          "edge": -319.5,
+          "win_edge": -9.19540229885057,
+          "luck": 0.298,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1487.0,
+              "avg_net": -82.61111111111111,
+              "trades": 63,
+              "win_rate": 33.33333333333333,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2550.0,
+              "avg_net": -134.21052631578948,
+              "trades": 85,
+              "win_rate": 31.76470588235294,
+              "lo": 0.0,
+              "hi": 0.3333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7238.0,
+              "avg_net": -402.1111111111111,
+              "trades": 87,
+              "win_rate": 24.137931034482758,
+              "lo": 0.4,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_vwap_slope_deg",
+          "label": "Globex VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.19125243779860368,
+          "edge": -307.05555555555554,
+          "win_edge": -11.260110685398043,
+          "luck": 0.158,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1388.0,
+              "avg_net": 77.11111111111111,
+              "trades": 58,
+              "win_rate": 39.6551724137931,
+              "lo": -8.2236,
+              "hi": -0.9542
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -8524.0,
+              "avg_net": -448.63157894736844,
+              "trades": 96,
+              "win_rate": 23.958333333333336,
+              "lo": -0.747,
+              "hi": 1.7763
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4139.0,
+              "avg_net": -229.94444444444446,
+              "trades": 81,
+              "win_rate": 28.39506172839506,
+              "lo": 1.922,
+              "hi": 7.5301
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "upper_dev1_gap_sigma",
+          "label": "NY\u2212Globex upper dev1 gap (\u03c3)",
+          "rho": -0.18261662963048234,
+          "edge": -277.6111111111111,
+          "win_edge": -8.415032679738562,
+          "luck": 0.19,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2568.0,
+              "avg_net": -142.66666666666666,
+              "trades": 72,
+              "win_rate": 31.944444444444443,
+              "lo": -10.8058,
+              "hi": -2.0122
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1142.0,
+              "avg_net": -60.10526315789474,
+              "trades": 78,
+              "win_rate": 33.33333333333333,
+              "lo": -1.9513,
+              "hi": -0.0037
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7565.0,
+              "avg_net": -420.27777777777777,
+              "trades": 85,
+              "win_rate": 23.52941176470588,
+              "lo": 0.2027,
+              "hi": 3.5328
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "deep_flip_rate",
+          "label": "Deep flips / hr (side changes)",
+          "rho": -0.15224461195679218,
+          "edge": -273.8333333333333,
+          "win_edge": -6.744186046511629,
+          "luck": 0.248,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -3200.0,
+              "avg_net": -177.77777777777777,
+              "trades": 70,
+              "win_rate": 30.0,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": 54.0,
+              "avg_net": 2.8421052631578947,
+              "trades": 79,
+              "win_rate": 35.44303797468354,
+              "lo": 0.0,
+              "hi": 4.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8129.0,
+              "avg_net": -451.6111111111111,
+              "trades": 86,
+              "win_rate": 23.25581395348837,
+              "lo": 4.0,
+              "hi": 20.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_vwap_slope_ppm",
+          "label": "Globex VWAP slope (pts/min, 30m)",
+          "rho": -0.175570677359421,
+          "edge": -255.49999999999997,
+          "win_edge": -9.385930820054408,
+          "luck": 0.196,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -78.0,
+              "avg_net": -4.333333333333333,
+              "trades": 62,
+              "win_rate": 37.096774193548384,
+              "lo": -3.1924,
+              "hi": -0.3203
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6520.0,
+              "avg_net": -343.1578947368421,
+              "trades": 90,
+              "win_rate": 25.555555555555554,
+              "lo": -0.3051,
+              "hi": 0.6365
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4677.0,
+              "avg_net": -259.8333333333333,
+              "trades": 83,
+              "win_rate": 27.710843373493976,
+              "lo": 0.646,
+              "hi": 2.2708
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "net_travel",
+          "label": "Net travel (close\u2212open \u00f7 range)",
+          "rho": -0.21239247531000235,
+          "edge": -238.16666666666669,
+          "win_edge": -6.596409055425443,
+          "luck": 0.088,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1264.0,
+              "avg_net": -70.22222222222223,
+              "trades": 61,
+              "win_rate": 32.78688524590164,
+              "lo": -0.9714,
+              "hi": -0.3949
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4460.0,
+              "avg_net": -234.73684210526315,
+              "trades": 90,
+              "win_rate": 30.0,
+              "lo": -0.2839,
+              "hi": 0.5071
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -5551.0,
+              "avg_net": -308.3888888888889,
+              "trades": 84,
+              "win_rate": 26.190476190476193,
+              "lo": 0.5517,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_range_pts",
+          "label": "Overnight range (pts)",
+          "rho": -0.1385548273276588,
+          "edge": -205.33333333333337,
+          "win_edge": -5.30925013683634,
+          "luck": 0.33,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2377.0,
+              "avg_net": -132.05555555555554,
+              "trades": 63,
+              "win_rate": 31.746031746031743,
+              "lo": 53.0,
+              "hi": 123.5
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2825.0,
+              "avg_net": -148.68421052631578,
+              "trades": 85,
+              "win_rate": 30.58823529411765,
+              "lo": 124.5,
+              "hi": 181.5
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -6073.0,
+              "avg_net": -337.3888888888889,
+              "trades": 87,
+              "win_rate": 26.436781609195403,
+              "lo": 182.0,
+              "hi": 541.75
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "bbr",
+          "label": "Below both VWAPs (BBR)",
+          "pct": true,
+          "rho": 0.20510922325977768,
+          "edge": 182.77777777777777,
+          "win_edge": 7.366071428571431,
+          "luck": 0.126,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -4191.0,
+              "avg_net": -232.83333333333334,
+              "trades": 84,
+              "win_rate": 28.57142857142857,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6183.0,
+              "avg_net": -325.42105263157896,
+              "trades": 87,
+              "win_rate": 25.287356321839084,
+              "lo": 0.0667,
+              "hi": 0.4667
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -901.0,
+              "avg_net": -50.05555555555556,
+              "trades": 64,
+              "win_rate": 35.9375,
+              "lo": 0.5333,
+              "hi": 0.9333
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_abr",
+          "label": "Overnight above Globex VWAP",
+          "pct": true,
+          "rho": -0.10908972987838597,
+          "edge": -165.77777777777777,
+          "win_edge": -5.485232067510545,
+          "luck": 0.438,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1657.0,
+              "avg_net": -92.05555555555556,
+              "trades": 78,
+              "win_rate": 33.33333333333333,
+              "lo": 0.0785,
+              "hi": 0.4495
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4977.0,
+              "avg_net": -261.94736842105266,
+              "trades": 78,
+              "win_rate": 26.923076923076923,
+              "lo": 0.4538,
+              "hi": 0.7226
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4641.0,
+              "avg_net": -257.8333333333333,
+              "trades": 79,
+              "win_rate": 27.848101265822784,
+              "lo": 0.7269,
+              "hi": 0.9957
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_cross_rate",
+          "label": "NY VWAP crossings / hr",
+          "rho": -0.06551078745284782,
+          "edge": -105.44444444444446,
+          "win_edge": -0.563063063063062,
+          "luck": 0.666,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -3236.0,
+              "avg_net": -179.77777777777777,
+              "trades": 74,
+              "win_rate": 29.72972972972973,
+              "lo": 0.0,
+              "hi": 8.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2905.0,
+              "avg_net": -152.89473684210526,
+              "trades": 65,
+              "win_rate": 29.230769230769234,
+              "lo": 8.0,
+              "hi": 12.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -5134.0,
+              "avg_net": -285.22222222222223,
+              "trades": 96,
+              "win_rate": 29.166666666666668,
+              "lo": 12.0,
+              "hi": 28.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_ppm",
+          "label": "Overnight VWAP slope (pts/min, 30m)",
+          "rho": -0.05770454244556397,
+          "edge": -101.49999999999999,
+          "win_edge": -2.615765288087662,
+          "luck": 0.676,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -0.7887,
+              "hi": -0.0256
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5086.0,
+              "avg_net": -267.6842105263158,
+              "trades": 84,
+              "win_rate": 27.380952380952383,
+              "lo": -0.0225,
+              "hi": 0.1506
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4008.0,
+              "avg_net": -222.66666666666666,
+              "trades": 82,
+              "win_rate": 29.268292682926827,
+              "lo": 0.1521,
+              "hi": 0.6824
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_touch_hold_ratio",
+          "label": "Globex +1\u03c3 touch \u2192 hold",
+          "pct": true,
+          "rho": -0.0478688003132768,
+          "edge": 87.99999999999997,
+          "win_edge": 2.365591397849464,
+          "luck": 0.828,
+          "days": 23,
+          "bands": [
+            {
+              "band": "low",
+              "days": 7,
+              "net": -2050.0,
+              "avg_net": -292.85714285714283,
+              "trades": 30,
+              "win_rate": 26.666666666666668,
+              "lo": 0.0,
+              "hi": 0.6667
+            },
+            {
+              "band": "mid",
+              "days": 9,
+              "net": -5668.0,
+              "avg_net": -629.7777777777778,
+              "trades": 47,
+              "win_rate": 19.148936170212767,
+              "lo": 0.75,
+              "hi": 1.0
+            },
+            {
+              "band": "high",
+              "days": 7,
+              "net": -1434.0,
+              "avg_net": -204.85714285714286,
+              "trades": 31,
+              "win_rate": 29.03225806451613,
+              "lo": 1.0,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_middle_band_occupancy",
+          "label": "NY middle-band occupancy (\u00b11\u03c3)",
+          "pct": true,
+          "rho": 0.010484779861659937,
+          "edge": -56.666666666666686,
+          "win_edge": 0.195694716242663,
+          "luck": 0.94,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2957.0,
+              "avg_net": -164.27777777777777,
+              "trades": 63,
+              "win_rate": 28.57142857142857,
+              "lo": 0.0667,
+              "hi": 0.3333
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4341.0,
+              "avg_net": -228.47368421052633,
+              "trades": 99,
+              "win_rate": 30.303030303030305,
+              "lo": 0.3333,
+              "hi": 0.5333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -3977.0,
+              "avg_net": -220.94444444444446,
+              "trades": 73,
+              "win_rate": 28.767123287671232,
+              "lo": 0.5333,
+              "hi": 0.8
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_touch_hold_ratio",
+          "label": "NY +1\u03c3 touch \u2192 hold",
+          "pct": true,
+          "rho": -0.06178428066851169,
+          "edge": -43.18181818181819,
+          "win_edge": -3.287981859410433,
+          "luck": 0.726,
+          "days": 35,
+          "bands": [
+            {
+              "band": "low",
+              "days": 11,
+              "net": -3356.0,
+              "avg_net": -305.09090909090907,
+              "trades": 54,
+              "win_rate": 27.77777777777778,
+              "lo": 0.0,
+              "hi": 0.6
+            },
+            {
+              "band": "mid",
+              "days": 13,
+              "net": -6661.0,
+              "avg_net": -512.3846153846154,
+              "trades": 69,
+              "win_rate": 23.18840579710145,
+              "lo": 0.6667,
+              "hi": 0.8
+            },
+            {
+              "band": "high",
+              "days": 11,
+              "net": -3831.0,
+              "avg_net": -348.27272727272725,
+              "trades": 49,
+              "win_rate": 24.489795918367346,
+              "lo": 0.8333,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_deg",
+          "label": "Overnight VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.04971912987169444,
+          "edge": -39.777777777777786,
+          "win_edge": -1.747071669644626,
+          "luck": 0.716,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -3.8647,
+              "hi": -0.2748
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6197.0,
+              "avg_net": -326.1578947368421,
+              "trades": 93,
+              "win_rate": 26.881720430107524,
+              "lo": -0.2454,
+              "hi": 1.1961
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -2897.0,
+              "avg_net": -160.94444444444446,
+              "trades": 73,
+              "win_rate": 30.136986301369863,
+              "lo": 1.3505,
+              "hi": 4.1219
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "open_z",
+          "label": "Open in Globex \u03c3-terms",
+          "rho": -0.03804814226373129,
+          "edge": -35.66666666666666,
+          "win_edge": -0.6487488415199252,
+          "luck": 0.78,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2650.0,
+              "avg_net": -147.22222222222223,
+              "trades": 65,
+              "win_rate": 30.76923076923077,
+              "lo": -1.9831,
+              "hi": -0.1194
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5333.0,
+              "avg_net": -280.6842105263158,
+              "trades": 87,
+              "win_rate": 27.586206896551722,
+              "lo": 0.0109,
+              "hi": 0.7347
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -3292.0,
+              "avg_net": -182.88888888888889,
+              "trades": 83,
+              "win_rate": 30.120481927710845,
+              "lo": 0.7666,
+              "hi": 1.7162
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "shallow_flip_rate",
+          "label": "Shallow flips / hr (anchor churn)",
+          "rho": 0.01224204425634097,
+          "edge": -29.166666666666657,
+          "win_edge": -1.4117647058823515,
+          "luck": 0.936,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -3860.0,
+              "avg_net": -214.44444444444446,
+              "trades": 85,
+              "win_rate": 29.411764705882355,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3030.0,
+              "avg_net": -159.47368421052633,
+              "trades": 75,
+              "win_rate": 30.666666666666664,
+              "lo": 0.0,
+              "hi": 4.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4385.0,
+              "avg_net": -243.61111111111111,
+              "trades": 75,
+              "win_rate": 28.000000000000004,
+              "lo": 4.0,
+              "hi": 12.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_middle_band_occupancy",
+          "label": "Globex middle-band occupancy (\u00b11\u03c3)",
+          "pct": true,
+          "rho": 0.0776284923189162,
+          "edge": 11.777777777777771,
+          "win_edge": 0.4219409282700397,
+          "luck": 0.552,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1896.0,
+              "avg_net": -105.33333333333333,
+              "trades": 79,
+              "win_rate": 32.91139240506329,
+              "lo": 0.0,
+              "hi": 0.3333
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -7695.0,
+              "avg_net": -405.0,
+              "trades": 75,
+              "win_rate": 21.333333333333336,
+              "lo": 0.4,
+              "hi": 0.7333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -1684.0,
+              "avg_net": -93.55555555555556,
+              "trades": 81,
+              "win_rate": 33.33333333333333,
+              "lo": 0.7333,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        }
+      ]
+    },
+    "10:30": {
+      "luck_bar": 0.0016666666666666668,
+      "expected_false_positives": 1.5,
+      "holds": 8,
+      "rows": [
+        {
+          "key": "ny_band_cross_rate",
+          "label": "NY +1\u03c3 crossings / hr",
+          "rho": -0.499484459543018,
+          "edge": -856.2777777777778,
+          "win_edge": -24.03846153846154,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 4237.0,
+              "avg_net": 235.38888888888889,
+              "trades": 52,
+              "win_rate": 46.15384615384615,
+              "lo": 0.0,
+              "hi": 4.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4336.0,
+              "avg_net": -228.21052631578948,
+              "trades": 79,
+              "win_rate": 27.848101265822784,
+              "lo": 4.0,
+              "hi": 8.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -11176.0,
+              "avg_net": -620.8888888888889,
+              "trades": 104,
+              "win_rate": 22.115384615384613,
+              "lo": 8.0,
+              "hi": 15.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "gx_vwap_slope_ppm",
+          "label": "Globex VWAP slope (pts/min, 30m)",
+          "rho": -0.37943356306879605,
+          "edge": -812.1666666666667,
+          "win_edge": -21.9193427931292,
+          "luck": 0.004,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2732.0,
+              "avg_net": 151.77777777777777,
+              "trades": 52,
+              "win_rate": 42.30769230769231,
+              "lo": -2.0624,
+              "hi": -0.1331
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2120.0,
+              "avg_net": -111.57894736842105,
+              "trades": 80,
+              "win_rate": 32.5,
+              "lo": -0.126,
+              "hi": 0.2472
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -11887.0,
+              "avg_net": -660.3888888888889,
+              "trades": 103,
+              "win_rate": 20.388349514563107,
+              "lo": 0.2533,
+              "hi": 3.8588
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "net_travel",
+          "label": "Net travel (close\u2212open \u00f7 range)",
+          "rho": -0.45563824686196724,
+          "edge": -760.0,
+          "win_edge": -24.257425742574256,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 6181.0,
+              "avg_net": 343.3888888888889,
+              "trades": 56,
+              "win_rate": 50.0,
+              "lo": -1.0,
+              "hi": -0.2063
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -9957.0,
+              "avg_net": -524.0526315789474,
+              "trades": 78,
+              "win_rate": 19.230769230769234,
+              "lo": -0.1927,
+              "hi": 0.4041
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7499.0,
+              "avg_net": -416.6111111111111,
+              "trades": 101,
+              "win_rate": 25.742574257425744,
+              "lo": 0.5132,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "gx_upper_channel_occupancy",
+          "label": "Globex upper-channel occupancy",
+          "pct": true,
+          "rho": -0.40006629788365367,
+          "edge": -758.0,
+          "win_edge": -19.263925729442974,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2748.0,
+              "avg_net": 152.66666666666666,
+              "trades": 58,
+              "win_rate": 41.37931034482759,
+              "lo": 0.0,
+              "hi": 0.0167
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3127.0,
+              "avg_net": -164.57894736842104,
+              "trades": 73,
+              "win_rate": 30.136986301369863,
+              "lo": 0.0167,
+              "hi": 0.3333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10896.0,
+              "avg_net": -605.3333333333334,
+              "trades": 104,
+              "win_rate": 22.115384615384613,
+              "lo": 0.3667,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "longest_hold_min",
+          "label": "Longest hold above both (min)",
+          "rho": -0.45812556526353065,
+          "edge": -730.3888888888889,
+          "win_edge": -22.782931354359928,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 4945.0,
+              "avg_net": 274.72222222222223,
+              "trades": 55,
+              "win_rate": 47.27272727272727,
+              "lo": 0,
+              "hi": 9
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -8018.0,
+              "avg_net": -422.0,
+              "trades": 82,
+              "win_rate": 23.170731707317074,
+              "lo": 9,
+              "hi": 30
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8202.0,
+              "avg_net": -455.6666666666667,
+              "trades": 98,
+              "win_rate": 24.489795918367346,
+              "lo": 30,
+              "hi": 60
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "abr",
+          "label": "Above both VWAPs (ABR)",
+          "pct": true,
+          "rho": -0.46434528246499307,
+          "edge": -690.2222222222222,
+          "win_edge": -20.444444444444443,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 3694.0,
+              "avg_net": 205.22222222222223,
+              "trades": 54,
+              "win_rate": 44.44444444444444,
+              "lo": 0.0,
+              "hi": 0.25
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6239.0,
+              "avg_net": -328.36842105263156,
+              "trades": 81,
+              "win_rate": 25.925925925925924,
+              "lo": 0.25,
+              "hi": 0.6667
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8730.0,
+              "avg_net": -485.0,
+              "trades": 100,
+              "win_rate": 24.0,
+              "lo": 0.6833,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "net_conviction",
+          "label": "Net conviction (ABR \u2212 BBR)",
+          "rho": -0.4344475139740371,
+          "edge": -688.7777777777778,
+          "win_edge": -21.52777777777778,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 3694.0,
+              "avg_net": 205.22222222222223,
+              "trades": 54,
+              "win_rate": 44.44444444444444,
+              "lo": -0.9833,
+              "hi": -0.2167
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6265.0,
+              "avg_net": -329.7368421052632,
+              "trades": 85,
+              "win_rate": 27.058823529411764,
+              "lo": -0.1667,
+              "hi": 0.4667
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8704.0,
+              "avg_net": -483.55555555555554,
+              "trades": 96,
+              "win_rate": 22.916666666666664,
+              "lo": 0.4833,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "ny_upper_channel_occupancy",
+          "label": "NY upper-channel occupancy",
+          "pct": true,
+          "rho": -0.4697027304313967,
+          "edge": -667.7222222222222,
+          "win_edge": -21.033138401559455,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 4584.0,
+              "avg_net": 254.66666666666666,
+              "trades": 54,
+              "win_rate": 46.2962962962963,
+              "lo": 0.0,
+              "hi": 0.0833
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -8424.0,
+              "avg_net": -443.36842105263156,
+              "trades": 86,
+              "win_rate": 23.25581395348837,
+              "lo": 0.1,
+              "hi": 0.3333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7435.0,
+              "avg_net": -413.05555555555554,
+              "trades": 95,
+              "win_rate": 25.263157894736842,
+              "lo": 0.35,
+              "hi": 0.8167
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "gx_vwap_slope_deg",
+          "label": "Globex VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.3927666727509583,
+          "edge": -638.3888888888889,
+          "win_edge": -18.545316070068544,
+          "luck": 0.002,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2732.0,
+              "avg_net": 151.77777777777777,
+              "trades": 52,
+              "win_rate": 42.30769230769231,
+              "lo": -4.5024,
+              "hi": -0.453
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5248.0,
+              "avg_net": -276.2105263157895,
+              "trades": 82,
+              "win_rate": 28.04878048780488,
+              "lo": -0.3754,
+              "hi": 0.9871
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8759.0,
+              "avg_net": -486.6111111111111,
+              "trades": 101,
+              "win_rate": 23.762376237623762,
+              "lo": 0.9894,
+              "hi": 5.1779
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "upper_dev1_gap_sigma",
+          "label": "NY\u2212Globex upper dev1 gap (\u03c3)",
+          "rho": -0.2626152877234558,
+          "edge": -595.6666666666666,
+          "win_edge": -17.579351238228114,
+          "luck": 0.068,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2271.0,
+              "avg_net": 126.16666666666667,
+              "trades": 61,
+              "win_rate": 40.98360655737705,
+              "lo": -5.0048,
+              "hi": -0.9838
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5095.0,
+              "avg_net": -268.1578947368421,
+              "trades": 80,
+              "win_rate": 27.500000000000004,
+              "lo": -0.9577,
+              "hi": 0.1424
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8451.0,
+              "avg_net": -469.5,
+              "trades": 94,
+              "win_rate": 23.404255319148938,
+              "lo": 0.143,
+              "hi": 1.6779
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "bbr",
+          "label": "Below both VWAPs (BBR)",
+          "pct": true,
+          "rho": 0.3738754452436335,
+          "edge": 579.4444444444445,
+          "win_edge": 19.47656725502131,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -6457.0,
+              "avg_net": -358.72222222222223,
+              "trades": 93,
+              "win_rate": 25.806451612903224,
+              "lo": 0.0,
+              "hi": 0.1
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -8791.0,
+              "avg_net": -462.6842105263158,
+              "trades": 89,
+              "win_rate": 23.595505617977526,
+              "lo": 0.1,
+              "hi": 0.45
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 3973.0,
+              "avg_net": 220.72222222222223,
+              "trades": 53,
+              "win_rate": 45.28301886792453,
+              "lo": 0.45,
+              "hi": 0.9833
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "norm_spread",
+          "label": "VWAP spread (\u03c3)",
+          "rho": -0.3487204377846825,
+          "edge": -530.6666666666666,
+          "win_edge": -16.515521450994072,
+          "luck": 0.008,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2096.0,
+              "avg_net": 116.44444444444444,
+              "trades": 61,
+              "win_rate": 40.98360655737705,
+              "lo": -0.8679,
+              "hi": -0.2537
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5915.0,
+              "avg_net": -311.3157894736842,
+              "trades": 80,
+              "win_rate": 26.25,
+              "lo": -0.2525,
+              "hi": 0.4898
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7456.0,
+              "avg_net": -414.22222222222223,
+              "trades": 94,
+              "win_rate": 24.46808510638298,
+              "lo": 0.4941,
+              "hi": 0.8888
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_touch_hold_ratio",
+          "label": "NY +1\u03c3 touch \u2192 hold",
+          "pct": true,
+          "rho": -0.3605855659458663,
+          "edge": -522.7333333333333,
+          "win_edge": -13.62922230950511,
+          "luck": 0.018,
+          "days": 47,
+          "bands": [
+            {
+              "band": "low",
+              "days": 15,
+              "net": 932.0,
+              "avg_net": 62.13333333333333,
+              "trades": 67,
+              "win_rate": 37.3134328358209,
+              "lo": 0.0,
+              "hi": 0.6667
+            },
+            {
+              "band": "mid",
+              "days": 17,
+              "net": -5958.0,
+              "avg_net": -350.47058823529414,
+              "trades": 72,
+              "win_rate": 25.0,
+              "lo": 0.6667,
+              "hi": 0.8125
+            },
+            {
+              "band": "high",
+              "days": 15,
+              "net": -6909.0,
+              "avg_net": -460.6,
+              "trades": 76,
+              "win_rate": 23.684210526315788,
+              "lo": 0.8182,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_touch_hold_ratio",
+          "label": "Globex +1\u03c3 touch \u2192 hold",
+          "pct": true,
+          "rho": -0.4646722211196155,
+          "edge": -505.5833333333333,
+          "win_edge": -9.508660303994343,
+          "luck": 0.004,
+          "days": 37,
+          "bands": [
+            {
+              "band": "low",
+              "days": 12,
+              "net": -304.0,
+              "avg_net": -25.333333333333332,
+              "trades": 41,
+              "win_rate": 34.146341463414636,
+              "lo": 0.0,
+              "hi": 0.6667
+            },
+            {
+              "band": "mid",
+              "days": 13,
+              "net": -5823.0,
+              "avg_net": -447.9230769230769,
+              "trades": 67,
+              "win_rate": 23.88059701492537,
+              "lo": 0.6667,
+              "hi": 0.8333
+            },
+            {
+              "band": "high",
+              "days": 12,
+              "net": -6371.0,
+              "avg_net": -530.9166666666666,
+              "trades": 69,
+              "win_rate": 24.637681159420293,
+              "lo": 0.8333,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_slope_deg",
+          "label": "NY VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.3621980798211229,
+          "edge": -446.94444444444446,
+          "win_edge": -12.317935913441534,
+          "luck": 0.01,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 704.0,
+              "avg_net": 39.111111111111114,
+              "trades": 54,
+              "win_rate": 37.03703703703704,
+              "lo": -5.2315,
+              "hi": -0.554
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4638.0,
+              "avg_net": -244.10526315789474,
+              "trades": 92,
+              "win_rate": 29.347826086956523,
+              "lo": -0.4111,
+              "hi": 2.072
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7341.0,
+              "avg_net": -407.8333333333333,
+              "trades": 89,
+              "win_rate": 24.719101123595504,
+              "lo": 2.2425,
+              "hi": 6.7929
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "shallow_flip_rate",
+          "label": "Shallow flips / hr (anchor churn)",
+          "rho": 0.22356252955367312,
+          "edge": 438.83333333333337,
+          "win_edge": 12.7275880006936,
+          "luck": 0.098,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -8751.0,
+              "avg_net": -486.1666666666667,
+              "trades": 79,
+              "win_rate": 21.518987341772153,
+              "lo": 0.0,
+              "hi": 1.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1672.0,
+              "avg_net": -88.0,
+              "trades": 83,
+              "win_rate": 32.53012048192771,
+              "lo": 1.0,
+              "hi": 3.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -852.0,
+              "avg_net": -47.333333333333336,
+              "trades": 73,
+              "win_rate": 34.24657534246575,
+              "lo": 3.0,
+              "hi": 9.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_slope_ppm",
+          "label": "NY VWAP slope (pts/min, 30m)",
+          "rho": -0.3350621303053943,
+          "edge": -386.38888888888886,
+          "win_edge": -7.801418439716308,
+          "luck": 0.018,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -796.0,
+              "avg_net": -44.22222222222222,
+              "trades": 54,
+              "win_rate": 33.33333333333333,
+              "lo": -2.3982,
+              "hi": -0.1366
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2728.0,
+              "avg_net": -143.57894736842104,
+              "trades": 87,
+              "win_rate": 31.03448275862069,
+              "lo": -0.1139,
+              "hi": 0.397
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7751.0,
+              "avg_net": -430.6111111111111,
+              "trades": 94,
+              "win_rate": 25.53191489361702,
+              "lo": 0.422,
+              "hi": 5.0724
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "upper_wrap_occupancy",
+          "label": "Globex wraps NY upper channel",
+          "pct": true,
+          "rho": -0.30840208780115025,
+          "edge": -352.44444444444446,
+          "win_edge": -10.037664783427498,
+          "luck": 0.022,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -186.0,
+              "avg_net": -10.333333333333334,
+              "trades": 59,
+              "win_rate": 35.59322033898305,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4559.0,
+              "avg_net": -239.94736842105263,
+              "trades": 86,
+              "win_rate": 29.069767441860467,
+              "lo": 0.0,
+              "hi": 0.25
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -6530.0,
+              "avg_net": -362.77777777777777,
+              "trades": 90,
+              "win_rate": 25.555555555555554,
+              "lo": 0.3667,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_middle_band_occupancy",
+          "label": "NY middle-band occupancy (\u00b11\u03c3)",
+          "pct": true,
+          "rho": 0.14677110197149304,
+          "edge": 297.44444444444446,
+          "win_edge": 9.958333333333336,
+          "luck": 0.26,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2605.0,
+              "avg_net": -144.72222222222223,
+              "trades": 75,
+              "win_rate": 30.666666666666664,
+              "lo": 0.1167,
+              "hi": 0.3833
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -11419.0,
+              "avg_net": -601.0,
+              "trades": 96,
+              "win_rate": 20.833333333333336,
+              "lo": 0.3833,
+              "hi": 0.5167
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 2749.0,
+              "avg_net": 152.72222222222223,
+              "trades": 64,
+              "win_rate": 40.625,
+              "lo": 0.55,
+              "hi": 0.7833
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "quadrant_transitions_rate",
+          "label": "Quadrant transitions / hr",
+          "rho": 0.17121702601913039,
+          "edge": 297.22222222222223,
+          "win_edge": 10.640025990903176,
+          "luck": 0.208,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -4284.0,
+              "avg_net": -238.0,
+              "trades": 76,
+              "win_rate": 27.631578947368425,
+              "lo": 0.0,
+              "hi": 6.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -8057.0,
+              "avg_net": -424.05263157894734,
+              "trades": 78,
+              "win_rate": 21.794871794871796,
+              "lo": 6.0,
+              "hi": 11.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 1066.0,
+              "avg_net": 59.22222222222222,
+              "trades": 81,
+              "win_rate": 38.2716049382716,
+              "lo": 11.0,
+              "hi": 20.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_cross_rate",
+          "label": "NY VWAP crossings / hr",
+          "rho": 0.1581486194148098,
+          "edge": 278.5,
+          "win_edge": 9.40576652601969,
+          "luck": 0.24,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -5836.0,
+              "avg_net": -324.22222222222223,
+              "trades": 79,
+              "win_rate": 25.31645569620253,
+              "lo": 0.0,
+              "hi": 5.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4616.0,
+              "avg_net": -242.94736842105263,
+              "trades": 84,
+              "win_rate": 28.57142857142857,
+              "lo": 5.0,
+              "hi": 7.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -823.0,
+              "avg_net": -45.72222222222222,
+              "trades": 72,
+              "win_rate": 34.72222222222222,
+              "lo": 7.0,
+              "hi": 17.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_middle_band_occupancy",
+          "label": "Globex middle-band occupancy (\u00b11\u03c3)",
+          "pct": true,
+          "rho": 0.14256542855684917,
+          "edge": 235.16666666666669,
+          "win_edge": 5.684710673680637,
+          "luck": 0.298,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -6237.0,
+              "avg_net": -346.5,
+              "trades": 83,
+              "win_rate": 25.301204819277107,
+              "lo": 0.0,
+              "hi": 0.4167
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3034.0,
+              "avg_net": -159.68421052631578,
+              "trades": 81,
+              "win_rate": 32.098765432098766,
+              "lo": 0.4167,
+              "hi": 0.6667
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -2004.0,
+              "avg_net": -111.33333333333333,
+              "trades": 71,
+              "win_rate": 30.985915492957744,
+              "lo": 0.6667,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_range_pts",
+          "label": "Overnight range (pts)",
+          "rho": -0.1385548273276588,
+          "edge": -205.33333333333337,
+          "win_edge": -5.30925013683634,
+          "luck": 0.33,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2377.0,
+              "avg_net": -132.05555555555554,
+              "trades": 63,
+              "win_rate": 31.746031746031743,
+              "lo": 53.0,
+              "hi": 123.5
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2825.0,
+              "avg_net": -148.68421052631578,
+              "trades": 85,
+              "win_rate": 30.58823529411765,
+              "lo": 124.5,
+              "hi": 181.5
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -6073.0,
+              "avg_net": -337.3888888888889,
+              "trades": 87,
+              "win_rate": 26.436781609195403,
+              "lo": 182.0,
+              "hi": 541.75
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "spread_slope",
+          "label": "VWAP spread slope (30m)",
+          "rho": 0.11222937309700795,
+          "edge": 200.11111111111111,
+          "win_edge": 7.930785868781545,
+          "luck": 0.408,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -5049.0,
+              "avg_net": -280.5,
+              "trades": 76,
+              "win_rate": 26.31578947368421,
+              "lo": -0.6133,
+              "hi": -0.1424
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4779.0,
+              "avg_net": -251.52631578947367,
+              "trades": 86,
+              "win_rate": 27.906976744186046,
+              "lo": -0.1368,
+              "hi": 0.1114
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -1447.0,
+              "avg_net": -80.38888888888889,
+              "trades": 73,
+              "win_rate": 34.24657534246575,
+              "lo": 0.1143,
+              "hi": 0.4169
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_abr",
+          "label": "Overnight above Globex VWAP",
+          "pct": true,
+          "rho": -0.10908972987838597,
+          "edge": -165.77777777777777,
+          "win_edge": -5.485232067510545,
+          "luck": 0.438,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1657.0,
+              "avg_net": -92.05555555555556,
+              "trades": 78,
+              "win_rate": 33.33333333333333,
+              "lo": 0.0785,
+              "hi": 0.4495
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4977.0,
+              "avg_net": -261.94736842105266,
+              "trades": 78,
+              "win_rate": 26.923076923076923,
+              "lo": 0.4538,
+              "hi": 0.7226
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4641.0,
+              "avg_net": -257.8333333333333,
+              "trades": 79,
+              "win_rate": 27.848101265822784,
+              "lo": 0.7269,
+              "hi": 0.9957
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_ppm",
+          "label": "Overnight VWAP slope (pts/min, 30m)",
+          "rho": -0.05770454244556397,
+          "edge": -101.49999999999999,
+          "win_edge": -2.615765288087662,
+          "luck": 0.676,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -0.7887,
+              "hi": -0.0256
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5086.0,
+              "avg_net": -267.6842105263158,
+              "trades": 84,
+              "win_rate": 27.380952380952383,
+              "lo": -0.0225,
+              "hi": 0.1506
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4008.0,
+              "avg_net": -222.66666666666666,
+              "trades": 82,
+              "win_rate": 29.268292682926827,
+              "lo": 0.1521,
+              "hi": 0.6824
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_upper_rescue_ratio",
+          "label": "Globex +1\u03c3 rescues broken NY +1\u03c3",
+          "pct": true,
+          "rho": -0.040573578001335917,
+          "edge": 98.875,
+          "win_edge": 5.226480836236934,
+          "luck": 0.848,
+          "days": 26,
+          "bands": [
+            {
+              "band": "low",
+              "days": 8,
+              "net": -5615.0,
+              "avg_net": -701.875,
+              "trades": 35,
+              "win_rate": 14.285714285714285,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 10,
+              "net": -2519.0,
+              "avg_net": -251.9,
+              "trades": 56,
+              "win_rate": 30.357142857142854,
+              "lo": 0.0,
+              "hi": 0.3333
+            },
+            {
+              "band": "high",
+              "days": 8,
+              "net": -4824.0,
+              "avg_net": -603.0,
+              "trades": 41,
+              "win_rate": 19.51219512195122,
+              "lo": 0.3333,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "deep_flip_rate",
+          "label": "Deep flips / hr (side changes)",
+          "rho": -0.03280444890693633,
+          "edge": -75.05555555555557,
+          "win_edge": -0.47236655644780257,
+          "luck": 0.846,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2032.0,
+              "avg_net": -112.88888888888889,
+              "trades": 73,
+              "win_rate": 31.506849315068493,
+              "lo": 0.0,
+              "hi": 1.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5860.0,
+              "avg_net": -308.42105263157896,
+              "trades": 75,
+              "win_rate": 25.333333333333336,
+              "lo": 1.0,
+              "hi": 2.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -3383.0,
+              "avg_net": -187.94444444444446,
+              "trades": 87,
+              "win_rate": 31.03448275862069,
+              "lo": 2.0,
+              "hi": 9.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_deg",
+          "label": "Overnight VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.04971912987169444,
+          "edge": -39.777777777777786,
+          "win_edge": -1.747071669644626,
+          "luck": 0.716,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -3.8647,
+              "hi": -0.2748
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6197.0,
+              "avg_net": -326.1578947368421,
+              "trades": 93,
+              "win_rate": 26.881720430107524,
+              "lo": -0.2454,
+              "hi": 1.1961
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -2897.0,
+              "avg_net": -160.94444444444446,
+              "trades": 73,
+              "win_rate": 30.136986301369863,
+              "lo": 1.3505,
+              "hi": 4.1219
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "open_z",
+          "label": "Open in Globex \u03c3-terms",
+          "rho": -0.03804814226373129,
+          "edge": -35.66666666666666,
+          "win_edge": -0.6487488415199252,
+          "luck": 0.78,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2650.0,
+              "avg_net": -147.22222222222223,
+              "trades": 65,
+              "win_rate": 30.76923076923077,
+              "lo": -1.9831,
+              "hi": -0.1194
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5333.0,
+              "avg_net": -280.6842105263158,
+              "trades": 87,
+              "win_rate": 27.586206896551722,
+              "lo": 0.0109,
+              "hi": 0.7347
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -3292.0,
+              "avg_net": -182.88888888888889,
+              "trades": 83,
+              "win_rate": 30.120481927710845,
+              "lo": 0.7666,
+              "hi": 1.7162
+            }
+          ],
+          "holds": false
+        }
+      ]
+    },
+    "12:00": {
+      "luck_bar": 0.0016666666666666668,
+      "expected_false_positives": 1.5,
+      "holds": 13,
+      "rows": [
+        {
+          "key": "gx_touch_hold_ratio",
+          "label": "Globex +1\u03c3 touch \u2192 hold",
+          "pct": true,
+          "rho": -0.6237366425420431,
+          "edge": -988.3076923076924,
+          "win_edge": -26.960784313725494,
+          "luck": 0.0,
+          "days": 41,
+          "bands": [
+            {
+              "band": "low",
+              "days": 13,
+              "net": 3046.0,
+              "avg_net": 234.30769230769232,
+              "trades": 51,
+              "win_rate": 43.13725490196079,
+              "lo": 0.0,
+              "hi": 0.6667
+            },
+            {
+              "band": "mid",
+              "days": 15,
+              "net": -5523.0,
+              "avg_net": -368.2,
+              "trades": 77,
+              "win_rate": 27.27272727272727,
+              "lo": 0.6923,
+              "hi": 0.8182
+            },
+            {
+              "band": "high",
+              "days": 13,
+              "net": -9802.0,
+              "avg_net": -754.0,
+              "trades": 68,
+              "win_rate": 16.176470588235293,
+              "lo": 0.8333,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "ny_band_cross_rate",
+          "label": "NY +1\u03c3 crossings / hr",
+          "rho": -0.5609526600321045,
+          "edge": -873.1111111111111,
+          "win_edge": -25.486760124610598,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 4538.0,
+              "avg_net": 252.11111111111111,
+              "trades": 48,
+              "win_rate": 47.91666666666667,
+              "lo": 0.0,
+              "hi": 2.4
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4635.0,
+              "avg_net": -243.94736842105263,
+              "trades": 80,
+              "win_rate": 27.500000000000004,
+              "lo": 2.8,
+              "hi": 6.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -11178.0,
+              "avg_net": -621.0,
+              "trades": 107,
+              "win_rate": 22.429906542056074,
+              "lo": 6.0,
+              "hi": 10.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "ny_touch_hold_ratio",
+          "label": "NY +1\u03c3 touch \u2192 hold",
+          "pct": true,
+          "rho": -0.4347015427787251,
+          "edge": -804.5625,
+          "win_edge": -21.379310344827587,
+          "luck": 0.0,
+          "days": 49,
+          "bands": [
+            {
+              "band": "low",
+              "days": 16,
+              "net": 2833.0,
+              "avg_net": 177.0625,
+              "trades": 58,
+              "win_rate": 41.37931034482759,
+              "lo": 0.0,
+              "hi": 0.6667
+            },
+            {
+              "band": "mid",
+              "days": 17,
+              "net": -4812.0,
+              "avg_net": -283.05882352941177,
+              "trades": 83,
+              "win_rate": 27.710843373493976,
+              "lo": 0.6667,
+              "hi": 0.7778
+            },
+            {
+              "band": "high",
+              "days": 16,
+              "net": -10040.0,
+              "avg_net": -627.5,
+              "trades": 80,
+              "win_rate": 20.0,
+              "lo": 0.7778,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "ny_upper_channel_occupancy",
+          "label": "NY upper-channel occupancy",
+          "pct": true,
+          "rho": -0.5162930694530377,
+          "edge": -786.1111111111111,
+          "win_edge": -23.143236074270558,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1982.0,
+              "avg_net": 110.11111111111111,
+              "trades": 52,
+              "win_rate": 40.38461538461539,
+              "lo": 0.0,
+              "hi": 0.0733
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1089.0,
+              "avg_net": -57.31578947368421,
+              "trades": 96,
+              "win_rate": 34.375,
+              "lo": 0.0733,
+              "hi": 0.3867
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -12168.0,
+              "avg_net": -676.0,
+              "trades": 87,
+              "win_rate": 17.24137931034483,
+              "lo": 0.4,
+              "hi": 0.74
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "abr",
+          "label": "Above both VWAPs (ABR)",
+          "pct": true,
+          "rho": -0.5416302147374557,
+          "edge": -749.4444444444443,
+          "win_edge": -22.74247491638796,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2732.0,
+              "avg_net": 151.77777777777777,
+              "trades": 52,
+              "win_rate": 42.30769230769231,
+              "lo": 0.0,
+              "hi": 0.2067
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3249.0,
+              "avg_net": -171.0,
+              "trades": 91,
+              "win_rate": 31.868131868131865,
+              "lo": 0.2267,
+              "hi": 0.7133
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10758.0,
+              "avg_net": -597.6666666666666,
+              "trades": 92,
+              "win_rate": 19.565217391304348,
+              "lo": 0.72,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "ny_vwap_slope_deg",
+          "label": "NY VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.41155587880712186,
+          "edge": -737.2222222222223,
+          "win_edge": -20.81064730792498,
+          "luck": 0.002,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2132.0,
+              "avg_net": 118.44444444444444,
+              "trades": 57,
+              "win_rate": 40.35087719298245,
+              "lo": -4.0036,
+              "hi": -0.8166
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2269.0,
+              "avg_net": -119.42105263157895,
+              "trades": 91,
+              "win_rate": 31.868131868131865,
+              "lo": -0.6372,
+              "hi": 0.6758
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -11138.0,
+              "avg_net": -618.7777777777778,
+              "trades": 87,
+              "win_rate": 19.54022988505747,
+              "lo": 0.7945,
+              "hi": 3.3961
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "net_conviction",
+          "label": "Net conviction (ABR \u2212 BBR)",
+          "rho": -0.5213846318433435,
+          "edge": -735.9444444444443,
+          "win_edge": -20.963704630788484,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2246.0,
+              "avg_net": 124.77777777777777,
+              "trades": 51,
+              "win_rate": 41.17647058823529,
+              "lo": -0.9933,
+              "hi": -0.3867
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2520.0,
+              "avg_net": -132.6315789473684,
+              "trades": 90,
+              "win_rate": 32.22222222222222,
+              "lo": -0.32,
+              "hi": 0.5467
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -11001.0,
+              "avg_net": -611.1666666666666,
+              "trades": 94,
+              "win_rate": 20.212765957446805,
+              "lo": 0.5733,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "gx_upper_channel_occupancy",
+          "label": "Globex upper-channel occupancy",
+          "pct": true,
+          "rho": -0.44425658282161923,
+          "edge": -717.9444444444445,
+          "win_edge": -20.64132104454685,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2536.0,
+              "avg_net": 140.88888888888889,
+              "trades": 56,
+              "win_rate": 41.07142857142857,
+              "lo": 0.0,
+              "hi": 0.0333
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3424.0,
+              "avg_net": -180.21052631578948,
+              "trades": 86,
+              "win_rate": 31.3953488372093,
+              "lo": 0.0533,
+              "hi": 0.3933
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10387.0,
+              "avg_net": -577.0555555555555,
+              "trades": 93,
+              "win_rate": 20.43010752688172,
+              "lo": 0.4133,
+              "hi": 0.86
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "bbr",
+          "label": "Below both VWAPs (BBR)",
+          "pct": true,
+          "rho": 0.5062365147918243,
+          "edge": 714.1666666666667,
+          "win_edge": 19.394292370413506,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -10609.0,
+              "avg_net": -589.3888888888889,
+              "trades": 101,
+              "win_rate": 21.782178217821784,
+              "lo": 0.0,
+              "hi": 0.14
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2912.0,
+              "avg_net": -153.26315789473685,
+              "trades": 83,
+              "win_rate": 31.32530120481928,
+              "lo": 0.14,
+              "hi": 0.5267
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 2246.0,
+              "avg_net": 124.77777777777777,
+              "trades": 51,
+              "win_rate": 41.17647058823529,
+              "lo": 0.5867,
+              "hi": 0.9933
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "longest_hold_min",
+          "label": "Longest hold above both (min)",
+          "rho": -0.509336073562034,
+          "edge": -673.1666666666666,
+          "win_edge": -20.75351213282248,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2949.0,
+              "avg_net": 163.83333333333334,
+              "trades": 54,
+              "win_rate": 42.592592592592595,
+              "lo": 0,
+              "hi": 18
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5056.0,
+              "avg_net": -266.10526315789474,
+              "trades": 94,
+              "win_rate": 28.723404255319153,
+              "lo": 19,
+              "hi": 85
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -9168.0,
+              "avg_net": -509.3333333333333,
+              "trades": 87,
+              "win_rate": 21.839080459770116,
+              "lo": 91,
+              "hi": 150
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "gx_vwap_slope_deg",
+          "label": "Globex VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.47421065438671356,
+          "edge": -663.5,
+          "win_edge": -18.641588296760716,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1160.0,
+              "avg_net": 64.44444444444444,
+              "trades": 55,
+              "win_rate": 38.18181818181819,
+              "lo": -3.6328,
+              "hi": -0.5835
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1652.0,
+              "avg_net": -86.94736842105263,
+              "trades": 93,
+              "win_rate": 33.33333333333333,
+              "lo": -0.5394,
+              "hi": 0.6681
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10783.0,
+              "avg_net": -599.0555555555555,
+              "trades": 87,
+              "win_rate": 19.54022988505747,
+              "lo": 0.7609,
+              "hi": 3.0138
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "net_travel",
+          "label": "Net travel (close\u2212open \u00f7 range)",
+          "rho": -0.5383107535090871,
+          "edge": -659.2777777777777,
+          "win_edge": -20.736434108527135,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2288.0,
+              "avg_net": 127.11111111111111,
+              "trades": 48,
+              "win_rate": 41.66666666666667,
+              "lo": -0.9415,
+              "hi": -0.3568
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3984.0,
+              "avg_net": -209.68421052631578,
+              "trades": 101,
+              "win_rate": 30.693069306930692,
+              "lo": -0.1824,
+              "hi": 0.4902
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -9579.0,
+              "avg_net": -532.1666666666666,
+              "trades": 86,
+              "win_rate": 20.930232558139537,
+              "lo": 0.5057,
+              "hi": 0.9688
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "gx_vwap_slope_ppm",
+          "label": "Globex VWAP slope (pts/min, 30m)",
+          "rho": -0.4820515346063049,
+          "edge": -652.7777777777777,
+          "win_edge": -18.6641697877653,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1424.0,
+              "avg_net": 79.11111111111111,
+              "trades": 54,
+              "win_rate": 38.88888888888889,
+              "lo": -3.2062,
+              "hi": -0.1108
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2373.0,
+              "avg_net": -124.89473684210526,
+              "trades": 92,
+              "win_rate": 32.608695652173914,
+              "lo": -0.0992,
+              "hi": 0.1226
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10326.0,
+              "avg_net": -573.6666666666666,
+              "trades": 89,
+              "win_rate": 20.224719101123593,
+              "lo": 0.1252,
+              "hi": 0.6004
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "ny_vwap_slope_ppm",
+          "label": "NY VWAP slope (pts/min, 30m)",
+          "rho": -0.39623544925363463,
+          "edge": -625.7222222222222,
+          "win_edge": -16.233421750663133,
+          "luck": 0.008,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 760.0,
+              "avg_net": 42.22222222222222,
+              "trades": 65,
+              "win_rate": 36.92307692307693,
+              "lo": -3.5345,
+              "hi": -0.122
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1532.0,
+              "avg_net": -80.63157894736842,
+              "trades": 83,
+              "win_rate": 32.53012048192771,
+              "lo": -0.1106,
+              "hi": 0.0868
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10503.0,
+              "avg_net": -583.5,
+              "trades": 87,
+              "win_rate": 20.689655172413794,
+              "lo": 0.1138,
+              "hi": 0.7977
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "upper_dev1_gap_sigma",
+          "label": "NY\u2212Globex upper dev1 gap (\u03c3)",
+          "rho": -0.3121898852408721,
+          "edge": -565.3333333333334,
+          "win_edge": -16.364247311827953,
+          "luck": 0.02,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1947.0,
+              "avg_net": 108.16666666666667,
+              "trades": 62,
+              "win_rate": 40.32258064516129,
+              "lo": -3.1862,
+              "hi": -0.717
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4993.0,
+              "avg_net": -262.7894736842105,
+              "trades": 77,
+              "win_rate": 27.27272727272727,
+              "lo": -0.6598,
+              "hi": 0.1098
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8229.0,
+              "avg_net": -457.1666666666667,
+              "trades": 96,
+              "win_rate": 23.958333333333336,
+              "lo": 0.1892,
+              "hi": 0.8195
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "upper_wrap_occupancy",
+          "label": "Globex wraps NY upper channel",
+          "pct": true,
+          "rho": -0.30835580571615634,
+          "edge": -562.0,
+          "win_edge": -15.43524765509298,
+          "luck": 0.016,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2064.0,
+              "avg_net": 114.66666666666667,
+              "trades": 59,
+              "win_rate": 40.67796610169492,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5287.0,
+              "avg_net": -278.2631578947368,
+              "trades": 73,
+              "win_rate": 26.027397260273972,
+              "lo": 0.0,
+              "hi": 0.4067
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8052.0,
+              "avg_net": -447.3333333333333,
+              "trades": 103,
+              "win_rate": 25.24271844660194,
+              "lo": 0.4133,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "norm_spread",
+          "label": "VWAP spread (\u03c3)",
+          "rho": -0.4395951555370891,
+          "edge": -551.6111111111111,
+          "win_edge": -13.97058823529412,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 906.0,
+              "avg_net": 50.333333333333336,
+              "trades": 56,
+              "win_rate": 37.5,
+              "lo": -0.6623,
+              "hi": -0.2648
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3158.0,
+              "avg_net": -166.21052631578948,
+              "trades": 77,
+              "win_rate": 31.16883116883117,
+              "lo": -0.2163,
+              "hi": 0.3341
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -9023.0,
+              "avg_net": -501.27777777777777,
+              "trades": 102,
+              "win_rate": 23.52941176470588,
+              "lo": 0.3459,
+              "hi": 0.6966
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "quadrant_transitions_rate",
+          "label": "Quadrant transitions / hr",
+          "rho": 0.2371334004630696,
+          "edge": 480.94444444444446,
+          "win_edge": 15.776241357636703,
+          "luck": 0.072,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -8456.0,
+              "avg_net": -469.77777777777777,
+              "trades": 74,
+              "win_rate": 20.27027027027027,
+              "lo": 0.0,
+              "hi": 4.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3020.0,
+              "avg_net": -158.94736842105263,
+              "trades": 75,
+              "win_rate": 30.666666666666664,
+              "lo": 4.0,
+              "hi": 6.4
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 201.0,
+              "avg_net": 11.166666666666666,
+              "trades": 86,
+              "win_rate": 36.04651162790697,
+              "lo": 6.8,
+              "hi": 14.8
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "shallow_flip_rate",
+          "label": "Shallow flips / hr (anchor churn)",
+          "rho": 0.25756827791735315,
+          "edge": 471.5555555555556,
+          "win_edge": 13.01313628899836,
+          "luck": 0.066,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -8566.0,
+              "avg_net": -475.8888888888889,
+              "trades": 84,
+              "win_rate": 22.61904761904762,
+              "lo": 0.0,
+              "hi": 1.2
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2631.0,
+              "avg_net": -138.47368421052633,
+              "trades": 64,
+              "win_rate": 29.6875,
+              "lo": 1.2,
+              "hi": 2.0
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -78.0,
+              "avg_net": -4.333333333333333,
+              "trades": 87,
+              "win_rate": 35.63218390804598,
+              "lo": 2.0,
+              "hi": 4.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_cross_rate",
+          "label": "NY VWAP crossings / hr",
+          "rho": 0.2710005135171327,
+          "edge": 397.16666666666663,
+          "win_edge": 12.659176029962548,
+          "luck": 0.054,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -4730.0,
+              "avg_net": -262.77777777777777,
+              "trades": 75,
+              "win_rate": 26.666666666666668,
+              "lo": 0.0,
+              "hi": 2.4
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -8964.0,
+              "avg_net": -471.7894736842105,
+              "trades": 71,
+              "win_rate": 19.718309859154928,
+              "lo": 2.8,
+              "hi": 4.8
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 2419.0,
+              "avg_net": 134.38888888888889,
+              "trades": 89,
+              "win_rate": 39.325842696629216,
+              "lo": 4.8,
+              "hi": 9.2
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_middle_band_occupancy",
+          "label": "Globex middle-band occupancy (\u00b11\u03c3)",
+          "pct": true,
+          "rho": 0.11167541846499608,
+          "edge": 396.8333333333333,
+          "win_edge": 12.650093015389817,
+          "luck": 0.424,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -7452.0,
+              "avg_net": -414.0,
+              "trades": 73,
+              "win_rate": 21.91780821917808,
+              "lo": 0.0933,
+              "hi": 0.38
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3514.0,
+              "avg_net": -184.94736842105263,
+              "trades": 81,
+              "win_rate": 30.864197530864196,
+              "lo": 0.3867,
+              "hi": 0.5867
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -309.0,
+              "avg_net": -17.166666666666668,
+              "trades": 81,
+              "win_rate": 34.5679012345679,
+              "lo": 0.5867,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_middle_band_occupancy",
+          "label": "NY middle-band occupancy (\u00b11\u03c3)",
+          "pct": true,
+          "rho": 0.19071817337752314,
+          "edge": 340.8888888888889,
+          "win_edge": 9.824802473376849,
+          "luck": 0.136,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -5279.0,
+              "avg_net": -293.27777777777777,
+              "trades": 71,
+              "win_rate": 26.76056338028169,
+              "lo": 0.1467,
+              "hi": 0.3733
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6853.0,
+              "avg_net": -360.6842105263158,
+              "trades": 82,
+              "win_rate": 24.390243902439025,
+              "lo": 0.3733,
+              "hi": 0.5533
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 857.0,
+              "avg_net": 47.611111111111114,
+              "trades": 82,
+              "win_rate": 36.58536585365854,
+              "lo": 0.56,
+              "hi": 0.76
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_range_pts",
+          "label": "Overnight range (pts)",
+          "rho": -0.1385548273276588,
+          "edge": -205.33333333333337,
+          "win_edge": -5.30925013683634,
+          "luck": 0.33,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2377.0,
+              "avg_net": -132.05555555555554,
+              "trades": 63,
+              "win_rate": 31.746031746031743,
+              "lo": 53.0,
+              "hi": 123.5
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2825.0,
+              "avg_net": -148.68421052631578,
+              "trades": 85,
+              "win_rate": 30.58823529411765,
+              "lo": 124.5,
+              "hi": 181.5
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -6073.0,
+              "avg_net": -337.3888888888889,
+              "trades": 87,
+              "win_rate": 26.436781609195403,
+              "lo": 182.0,
+              "hi": 541.75
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_abr",
+          "label": "Overnight above Globex VWAP",
+          "pct": true,
+          "rho": -0.10908972987838597,
+          "edge": -165.77777777777777,
+          "win_edge": -5.485232067510545,
+          "luck": 0.438,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1657.0,
+              "avg_net": -92.05555555555556,
+              "trades": 78,
+              "win_rate": 33.33333333333333,
+              "lo": 0.0785,
+              "hi": 0.4495
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4977.0,
+              "avg_net": -261.94736842105266,
+              "trades": 78,
+              "win_rate": 26.923076923076923,
+              "lo": 0.4538,
+              "hi": 0.7226
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4641.0,
+              "avg_net": -257.8333333333333,
+              "trades": 79,
+              "win_rate": 27.848101265822784,
+              "lo": 0.7269,
+              "hi": 0.9957
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "spread_slope",
+          "label": "VWAP spread slope (30m)",
+          "rho": 0.10146171270328343,
+          "edge": 148.83333333333331,
+          "win_edge": 3.258003766478346,
+          "luck": 0.452,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -6400.0,
+              "avg_net": -355.55555555555554,
+              "trades": 90,
+              "win_rate": 25.555555555555554,
+              "lo": -0.1563,
+              "hi": -0.0231
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1154.0,
+              "avg_net": -60.73684210526316,
+              "trades": 86,
+              "win_rate": 33.72093023255814,
+              "lo": -0.0224,
+              "hi": 0.0184
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -3721.0,
+              "avg_net": -206.72222222222223,
+              "trades": 59,
+              "win_rate": 28.8135593220339,
+              "lo": 0.0188,
+              "hi": 0.1108
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_upper_rescue_ratio",
+          "label": "Globex +1\u03c3 rescues broken NY +1\u03c3",
+          "pct": true,
+          "rho": -0.08764926971206113,
+          "edge": -130.90000000000003,
+          "win_edge": 0.0,
+          "luck": 0.644,
+          "days": 31,
+          "bands": [
+            {
+              "band": "low",
+              "days": 10,
+              "net": -2634.0,
+              "avg_net": -263.4,
+              "trades": 36,
+              "win_rate": 25.0,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 11,
+              "net": -7168.0,
+              "avg_net": -651.6363636363636,
+              "trades": 67,
+              "win_rate": 22.388059701492537,
+              "lo": 0.0,
+              "hi": 0.375
+            },
+            {
+              "band": "high",
+              "days": 10,
+              "net": -3943.0,
+              "avg_net": -394.3,
+              "trades": 52,
+              "win_rate": 25.0,
+              "lo": 0.4,
+              "hi": 0.8
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_ppm",
+          "label": "Overnight VWAP slope (pts/min, 30m)",
+          "rho": -0.05770454244556397,
+          "edge": -101.49999999999999,
+          "win_edge": -2.615765288087662,
+          "luck": 0.676,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -0.7887,
+              "hi": -0.0256
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5086.0,
+              "avg_net": -267.6842105263158,
+              "trades": 84,
+              "win_rate": 27.380952380952383,
+              "lo": -0.0225,
+              "hi": 0.1506
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4008.0,
+              "avg_net": -222.66666666666666,
+              "trades": 82,
+              "win_rate": 29.268292682926827,
+              "lo": 0.1521,
+              "hi": 0.6824
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_deg",
+          "label": "Overnight VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.04971912987169444,
+          "edge": -39.777777777777786,
+          "win_edge": -1.747071669644626,
+          "luck": 0.716,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -3.8647,
+              "hi": -0.2748
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6197.0,
+              "avg_net": -326.1578947368421,
+              "trades": 93,
+              "win_rate": 26.881720430107524,
+              "lo": -0.2454,
+              "hi": 1.1961
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -2897.0,
+              "avg_net": -160.94444444444446,
+              "trades": 73,
+              "win_rate": 30.136986301369863,
+              "lo": 1.3505,
+              "hi": 4.1219
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "open_z",
+          "label": "Open in Globex \u03c3-terms",
+          "rho": -0.03804814226373129,
+          "edge": -35.66666666666666,
+          "win_edge": -0.6487488415199252,
+          "luck": 0.78,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2650.0,
+              "avg_net": -147.22222222222223,
+              "trades": 65,
+              "win_rate": 30.76923076923077,
+              "lo": -1.9831,
+              "hi": -0.1194
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5333.0,
+              "avg_net": -280.6842105263158,
+              "trades": 87,
+              "win_rate": 27.586206896551722,
+              "lo": 0.0109,
+              "hi": 0.7347
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -3292.0,
+              "avg_net": -182.88888888888889,
+              "trades": 83,
+              "win_rate": 30.120481927710845,
+              "lo": 0.7666,
+              "hi": 1.7162
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "deep_flip_rate",
+          "label": "Deep flips / hr (side changes)",
+          "rho": 0.0341914341120496,
+          "edge": 27.166666666666657,
+          "win_edge": 2.339793958442467,
+          "luck": 0.804,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -3566.0,
+              "avg_net": -198.11111111111111,
+              "trades": 69,
+              "win_rate": 28.985507246376812,
+              "lo": 0.0,
+              "hi": 0.4
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4632.0,
+              "avg_net": -243.78947368421052,
+              "trades": 83,
+              "win_rate": 27.710843373493976,
+              "lo": 0.4,
+              "hi": 1.6
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -3077.0,
+              "avg_net": -170.94444444444446,
+              "trades": 83,
+              "win_rate": 31.32530120481928,
+              "lo": 1.6,
+              "hi": 6.0
+            }
+          ],
+          "holds": false
+        }
+      ]
+    },
+    "eod": {
+      "luck_bar": 0.0016666666666666668,
+      "expected_false_positives": 1.5,
+      "holds": 12,
+      "rows": [
+        {
+          "key": "gx_touch_hold_ratio",
+          "label": "Globex +1\u03c3 touch \u2192 hold",
+          "pct": true,
+          "rho": -0.589455487600158,
+          "edge": -866.6428571428571,
+          "win_edge": -21.818181818181817,
+          "luck": 0.0,
+          "days": 44,
+          "bands": [
+            {
+              "band": "low",
+              "days": 14,
+              "net": 1620.0,
+              "avg_net": 115.71428571428571,
+              "trades": 60,
+              "win_rate": 40.0,
+              "lo": 0.25,
+              "hi": 0.6786
+            },
+            {
+              "band": "mid",
+              "days": 16,
+              "net": -3128.0,
+              "avg_net": -195.5,
+              "trades": 72,
+              "win_rate": 29.166666666666668,
+              "lo": 0.6897,
+              "hi": 0.7805
+            },
+            {
+              "band": "high",
+              "days": 14,
+              "net": -10513.0,
+              "avg_net": -750.9285714285714,
+              "trades": 77,
+              "win_rate": 18.181818181818183,
+              "lo": 0.7826,
+              "hi": 0.8889
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "norm_spread",
+          "label": "VWAP spread (\u03c3)",
+          "rho": -0.5209668709957053,
+          "edge": -756.7777777777778,
+          "win_edge": -18.867924528301884,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1688.0,
+              "avg_net": 93.77777777777777,
+              "trades": 53,
+              "win_rate": 39.62264150943396,
+              "lo": -0.4827,
+              "hi": -0.1404
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1029.0,
+              "avg_net": -54.1578947368421,
+              "trades": 76,
+              "win_rate": 34.21052631578947,
+              "lo": -0.1347,
+              "hi": 0.2595
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -11934.0,
+              "avg_net": -663.0,
+              "trades": 106,
+              "win_rate": 20.754716981132077,
+              "lo": 0.2722,
+              "hi": 0.5212
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "abr",
+          "label": "Above both VWAPs (ABR)",
+          "pct": true,
+          "rho": -0.5122054209203689,
+          "edge": -720.3333333333333,
+          "win_edge": -19.780219780219785,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1202.0,
+              "avg_net": 66.77777777777777,
+              "trades": 52,
+              "win_rate": 38.46153846153847,
+              "lo": 0.0,
+              "hi": 0.2385
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -713.0,
+              "avg_net": -37.526315789473685,
+              "trades": 92,
+              "win_rate": 34.78260869565217,
+              "lo": 0.2436,
+              "hi": 0.8359
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -11764.0,
+              "avg_net": -653.5555555555555,
+              "trades": 91,
+              "win_rate": 18.681318681318682,
+              "lo": 0.8538,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "gx_upper_channel_occupancy",
+          "label": "Globex upper-channel occupancy",
+          "pct": true,
+          "rho": -0.46191391891171973,
+          "edge": -711.6111111111112,
+          "win_edge": -18.59712957347888,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1581.0,
+              "avg_net": 87.83333333333333,
+              "trades": 51,
+              "win_rate": 39.21568627450981,
+              "lo": 0.0,
+              "hi": 0.0359
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1628.0,
+              "avg_net": -85.6842105263158,
+              "trades": 87,
+              "win_rate": 33.33333333333333,
+              "lo": 0.0385,
+              "hi": 0.4333
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -11228.0,
+              "avg_net": -623.7777777777778,
+              "trades": 97,
+              "win_rate": 20.618556701030926,
+              "lo": 0.5077,
+              "hi": 0.941
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "quadrant_transitions_rate",
+          "label": "Quadrant transitions / hr",
+          "rho": 0.38008844632674266,
+          "edge": 698.1111111111111,
+          "win_edge": 24.23634336677815,
+          "luck": 0.004,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -8671.0,
+              "avg_net": -481.72222222222223,
+              "trades": 69,
+              "win_rate": 18.84057971014493,
+              "lo": 0.0,
+              "hi": 2.1538
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6499.0,
+              "avg_net": -342.05263157894734,
+              "trades": 101,
+              "win_rate": 27.722772277227726,
+              "lo": 2.3077,
+              "hi": 3.6923
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 3895.0,
+              "avg_net": 216.38888888888889,
+              "trades": 65,
+              "win_rate": 43.07692307692308,
+              "lo": 3.6923,
+              "hi": 8.4615
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_cross_rate",
+          "label": "NY VWAP crossings / hr",
+          "rho": 0.3385305821274666,
+          "edge": 695.9444444444445,
+          "win_edge": 22.344322344322343,
+          "luck": 0.016,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -8917.0,
+              "avg_net": -495.3888888888889,
+              "trades": 78,
+              "win_rate": 20.51282051282051,
+              "lo": 0.0,
+              "hi": 1.3846
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5968.0,
+              "avg_net": -314.10526315789474,
+              "trades": 87,
+              "win_rate": 26.436781609195403,
+              "lo": 1.4286,
+              "hi": 2.6154
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 3610.0,
+              "avg_net": 200.55555555555554,
+              "trades": 70,
+              "win_rate": 42.857142857142854,
+              "lo": 2.7692,
+              "hi": 5.5385
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "shallow_flip_rate",
+          "label": "Shallow flips / hr (anchor churn)",
+          "rho": 0.3447923131083881,
+          "edge": 695.2777777777778,
+          "win_edge": 18.676470588235293,
+          "luck": 0.004,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -11120.0,
+              "avg_net": -617.7777777777778,
+              "trades": 85,
+              "win_rate": 18.823529411764707,
+              "lo": 0.0,
+              "hi": 0.5714
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1550.0,
+              "avg_net": -81.57894736842105,
+              "trades": 70,
+              "win_rate": 32.857142857142854,
+              "lo": 0.6154,
+              "hi": 1.2308
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 1395.0,
+              "avg_net": 77.5,
+              "trades": 80,
+              "win_rate": 37.5,
+              "lo": 1.2308,
+              "hi": 2.7692
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "spread_slope",
+          "label": "VWAP spread slope (30m)",
+          "rho": 0.38418085725968854,
+          "edge": 681.7777777777778,
+          "win_edge": 18.571428571428573,
+          "luck": 0.002,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -10342.0,
+              "avg_net": -574.5555555555555,
+              "trades": 98,
+              "win_rate": 21.428571428571427,
+              "lo": -0.0526,
+              "hi": -0.0147
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2863.0,
+              "avg_net": -150.68421052631578,
+              "trades": 72,
+              "win_rate": 30.555555555555557,
+              "lo": -0.0145,
+              "hi": 0.0107
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 1930.0,
+              "avg_net": 107.22222222222223,
+              "trades": 65,
+              "win_rate": 40.0,
+              "lo": 0.0115,
+              "hi": 0.0739
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "net_conviction",
+          "label": "Net conviction (ABR \u2212 BBR)",
+          "rho": -0.48454413143564645,
+          "edge": -669.2222222222222,
+          "win_edge": -17.62820512820513,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 1202.0,
+              "avg_net": 66.77777777777777,
+              "trades": 52,
+              "win_rate": 38.46153846153847,
+              "lo": -0.9949,
+              "hi": -0.4436
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1633.0,
+              "avg_net": -85.94736842105263,
+              "trades": 87,
+              "win_rate": 33.33333333333333,
+              "lo": -0.3846,
+              "hi": 0.759
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10844.0,
+              "avg_net": -602.4444444444445,
+              "trades": 96,
+              "win_rate": 20.833333333333336,
+              "lo": 0.7846,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "longest_hold_min",
+          "label": "Longest hold above both (min)",
+          "rho": -0.4598169571566721,
+          "edge": -643.9444444444445,
+          "win_edge": -17.775280898876407,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 980.0,
+              "avg_net": 54.44444444444444,
+              "trades": 50,
+              "win_rate": 38.0,
+              "lo": 0,
+              "hi": 56
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1644.0,
+              "avg_net": -86.52631578947368,
+              "trades": 96,
+              "win_rate": 33.33333333333333,
+              "lo": 72,
+              "hi": 220
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10611.0,
+              "avg_net": -589.5,
+              "trades": 89,
+              "win_rate": 20.224719101123593,
+              "lo": 244,
+              "hi": 390
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "ny_upper_channel_occupancy",
+          "label": "NY upper-channel occupancy",
+          "pct": true,
+          "rho": -0.49972948024118086,
+          "edge": -643.0555555555557,
+          "win_edge": -16.375781081663437,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 716.0,
+              "avg_net": 39.77777777777778,
+              "trades": 51,
+              "win_rate": 37.254901960784316,
+              "lo": 0.0,
+              "hi": 0.0949
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1132.0,
+              "avg_net": -59.578947368421055,
+              "trades": 93,
+              "win_rate": 33.33333333333333,
+              "lo": 0.1,
+              "hi": 0.4619
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10859.0,
+              "avg_net": -603.2777777777778,
+              "trades": 91,
+              "win_rate": 20.87912087912088,
+              "lo": 0.4769,
+              "hi": 0.859
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "ny_band_cross_rate",
+          "label": "NY +1\u03c3 crossings / hr",
+          "rho": -0.5082810754869513,
+          "edge": -615.7222222222222,
+          "win_edge": -13.437217705510388,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 426.0,
+              "avg_net": 23.666666666666668,
+              "trades": 41,
+              "win_rate": 36.58536585365854,
+              "lo": 0.0,
+              "hi": 1.8462
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1044.0,
+              "avg_net": -54.94736842105263,
+              "trades": 86,
+              "win_rate": 33.72093023255814,
+              "lo": 1.8462,
+              "hi": 3.2308
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -10657.0,
+              "avg_net": -592.0555555555555,
+              "trades": 108,
+              "win_rate": 23.14814814814815,
+              "lo": 3.2308,
+              "hi": 7.6923
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "ny_touch_hold_ratio",
+          "label": "NY +1\u03c3 touch \u2192 hold",
+          "pct": true,
+          "rho": -0.3397392202354041,
+          "edge": -589.3333333333334,
+          "win_edge": -18.142780461621044,
+          "luck": 0.006,
+          "days": 54,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2044.0,
+              "avg_net": 113.55555555555556,
+              "trades": 69,
+              "win_rate": 39.130434782608695,
+              "lo": 0.0,
+              "hi": 0.7
+            },
+            {
+              "band": "mid",
+              "days": 18,
+              "net": -5241.0,
+              "avg_net": -291.1666666666667,
+              "trades": 84,
+              "win_rate": 28.57142857142857,
+              "lo": 0.7,
+              "hi": 0.7917
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8564.0,
+              "avg_net": -475.77777777777777,
+              "trades": 81,
+              "win_rate": 20.98765432098765,
+              "lo": 0.7949,
+              "hi": 0.9412
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_middle_band_occupancy",
+          "label": "Globex middle-band occupancy (\u00b11\u03c3)",
+          "pct": true,
+          "rho": 0.3798902094713854,
+          "edge": 578.1666666666667,
+          "win_edge": 16.483516483516482,
+          "luck": 0.002,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -9997.0,
+              "avg_net": -555.3888888888889,
+              "trades": 78,
+              "win_rate": 19.230769230769234,
+              "lo": 0.0359,
+              "hi": 0.3564
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1688.0,
+              "avg_net": -88.84210526315789,
+              "trades": 87,
+              "win_rate": 33.33333333333333,
+              "lo": 0.359,
+              "hi": 0.6128
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 410.0,
+              "avg_net": 22.77777777777778,
+              "trades": 70,
+              "win_rate": 35.714285714285715,
+              "lo": 0.6128,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "bbr",
+          "label": "Below both VWAPs (BBR)",
+          "pct": true,
+          "rho": 0.46224226607355984,
+          "edge": 567.4444444444445,
+          "win_edge": 16.870629370629377,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -9012.0,
+              "avg_net": -500.6666666666667,
+              "trades": 88,
+              "win_rate": 21.59090909090909,
+              "lo": 0.0,
+              "hi": 0.0872
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3465.0,
+              "avg_net": -182.3684210526316,
+              "trades": 95,
+              "win_rate": 31.57894736842105,
+              "lo": 0.0974,
+              "hi": 0.6205
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 1202.0,
+              "avg_net": 66.77777777777777,
+              "trades": 52,
+              "win_rate": 38.46153846153847,
+              "lo": 0.6462,
+              "hi": 0.9949
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "upper_wrap_occupancy",
+          "label": "Globex wraps NY upper channel",
+          "pct": true,
+          "rho": -0.325975134687005,
+          "edge": -558.3333333333334,
+          "win_edge": -16.43554185927068,
+          "luck": 0.014,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 2064.0,
+              "avg_net": 114.66666666666667,
+              "trades": 59,
+              "win_rate": 40.67796610169492,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5353.0,
+              "avg_net": -281.7368421052632,
+              "trades": 77,
+              "win_rate": 27.27272727272727,
+              "lo": 0.0,
+              "hi": 0.3205
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7986.0,
+              "avg_net": -443.6666666666667,
+              "trades": 99,
+              "win_rate": 24.242424242424242,
+              "lo": 0.4641,
+              "hi": 1.0
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_middle_band_occupancy",
+          "label": "NY middle-band occupancy (\u00b11\u03c3)",
+          "pct": true,
+          "rho": 0.4501305894811467,
+          "edge": 485.33333333333337,
+          "win_edge": 14.945011783189319,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -7649.0,
+              "avg_net": -424.94444444444446,
+              "trades": 76,
+              "win_rate": 22.36842105263158,
+              "lo": 0.1077,
+              "hi": 0.3538
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4713.0,
+              "avg_net": -248.05263157894737,
+              "trades": 92,
+              "win_rate": 29.347826086956523,
+              "lo": 0.3641,
+              "hi": 0.5538
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": 1087.0,
+              "avg_net": 60.388888888888886,
+              "trades": 67,
+              "win_rate": 37.3134328358209,
+              "lo": 0.559,
+              "hi": 0.7949
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "upper_dev1_gap_sigma",
+          "label": "NY\u2212Globex upper dev1 gap (\u03c3)",
+          "rho": -0.38376953369714145,
+          "edge": -484.05555555555554,
+          "win_edge": -12.377495462794922,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -747.0,
+              "avg_net": -41.5,
+              "trades": 58,
+              "win_rate": 34.48275862068966,
+              "lo": -2.5738,
+              "hi": -0.4572
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -1068.0,
+              "avg_net": -56.21052631578947,
+              "trades": 82,
+              "win_rate": 34.146341463414636,
+              "lo": -0.454,
+              "hi": 0.1236
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -9460.0,
+              "avg_net": -525.5555555555555,
+              "trades": 95,
+              "win_rate": 22.105263157894736,
+              "lo": 0.1378,
+              "hi": 0.3314
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "net_travel",
+          "label": "Net travel (close\u2212open \u00f7 range)",
+          "rho": -0.5132343900418226,
+          "edge": -483.27777777777777,
+          "win_edge": -12.041666666666664,
+          "luck": 0.0,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 235.0,
+              "avg_net": 13.055555555555555,
+              "trades": 50,
+              "win_rate": 36.0,
+              "lo": -0.9155,
+              "hi": -0.207
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3046.0,
+              "avg_net": -160.31578947368422,
+              "trades": 89,
+              "win_rate": 31.46067415730337,
+              "lo": -0.1691,
+              "hi": 0.483
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -8464.0,
+              "avg_net": -470.22222222222223,
+              "trades": 96,
+              "win_rate": 23.958333333333336,
+              "lo": 0.512,
+              "hi": 1.0
+            }
+          ],
+          "holds": true
+        },
+        {
+          "key": "gx_vwap_slope_ppm",
+          "label": "Globex VWAP slope (pts/min, 30m)",
+          "rho": -0.3281607103886111,
+          "edge": -439.3888888888889,
+          "win_edge": -10.972017673048601,
+          "luck": 0.022,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": 211.0,
+              "avg_net": 11.722222222222221,
+              "trades": 56,
+              "win_rate": 35.714285714285715,
+              "lo": -1.5559,
+              "hi": -0.057
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3788.0,
+              "avg_net": -199.3684210526316,
+              "trades": 82,
+              "win_rate": 30.48780487804878,
+              "lo": -0.046,
+              "hi": 0.1754
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -7698.0,
+              "avg_net": -427.6666666666667,
+              "trades": 97,
+              "win_rate": 24.742268041237114,
+              "lo": 0.1755,
+              "hi": 0.4261
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_vwap_slope_deg",
+          "label": "Globex VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.3292447030456975,
+          "edge": -295.44444444444446,
+          "win_edge": -5.92314901593252,
+          "luck": 0.02,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1025.0,
+              "avg_net": -56.94444444444444,
+              "trades": 55,
+              "win_rate": 32.72727272727273,
+              "lo": -3.525,
+              "hi": -0.3173
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3907.0,
+              "avg_net": -205.6315789473684,
+              "trades": 83,
+              "win_rate": 30.120481927710845,
+              "lo": -0.311,
+              "hi": 0.9709
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -6343.0,
+              "avg_net": -352.3888888888889,
+              "trades": 97,
+              "win_rate": 26.804123711340207,
+              "lo": 0.9816,
+              "hi": 3.933
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_slope_deg",
+          "label": "NY VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.2538349472010563,
+          "edge": -211.1111111111111,
+          "win_edge": -3.5904255319148923,
+          "luck": 0.084,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1866.0,
+              "avg_net": -103.66666666666667,
+              "trades": 64,
+              "win_rate": 31.25,
+              "lo": -3.5339,
+              "hi": -0.3613
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3743.0,
+              "avg_net": -197.0,
+              "trades": 77,
+              "win_rate": 29.87012987012987,
+              "lo": -0.1538,
+              "hi": 1.0295
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -5666.0,
+              "avg_net": -314.77777777777777,
+              "trades": 94,
+              "win_rate": 27.659574468085108,
+              "lo": 1.0699,
+              "hi": 3.7205
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "ny_vwap_slope_ppm",
+          "label": "NY VWAP slope (pts/min, 30m)",
+          "rho": -0.25329295087251313,
+          "edge": -209.05555555555554,
+          "win_edge": -3.125,
+          "luck": 0.086,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1866.0,
+              "avg_net": -103.66666666666667,
+              "trades": 64,
+              "win_rate": 31.25,
+              "lo": -1.5599,
+              "hi": -0.0633
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -3780.0,
+              "avg_net": -198.94736842105263,
+              "trades": 75,
+              "win_rate": 29.333333333333332,
+              "lo": -0.0268,
+              "hi": 0.1706
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -5629.0,
+              "avg_net": -312.72222222222223,
+              "trades": 96,
+              "win_rate": 28.125,
+              "lo": 0.1749,
+              "hi": 0.455
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_range_pts",
+          "label": "Overnight range (pts)",
+          "rho": -0.1385548273276588,
+          "edge": -205.33333333333337,
+          "win_edge": -5.30925013683634,
+          "luck": 0.33,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2377.0,
+              "avg_net": -132.05555555555554,
+              "trades": 63,
+              "win_rate": 31.746031746031743,
+              "lo": 53.0,
+              "hi": 123.5
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -2825.0,
+              "avg_net": -148.68421052631578,
+              "trades": 85,
+              "win_rate": 30.58823529411765,
+              "lo": 124.5,
+              "hi": 181.5
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -6073.0,
+              "avg_net": -337.3888888888889,
+              "trades": 87,
+              "win_rate": 26.436781609195403,
+              "lo": 182.0,
+              "hi": 541.75
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "deep_flip_rate",
+          "label": "Deep flips / hr (side changes)",
+          "rho": 0.09923598349438909,
+          "edge": 166.11111111111114,
+          "win_edge": 7.553694939934477,
+          "luck": 0.464,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -4823.0,
+              "avg_net": -267.94444444444446,
+              "trades": 67,
+              "win_rate": 25.37313432835821,
+              "lo": 0.0,
+              "hi": 0.3077
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4619.0,
+              "avg_net": -243.10526315789474,
+              "trades": 86,
+              "win_rate": 29.069767441860467,
+              "lo": 0.3077,
+              "hi": 0.7692
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -1833.0,
+              "avg_net": -101.83333333333333,
+              "trades": 82,
+              "win_rate": 32.926829268292686,
+              "lo": 0.7692,
+              "hi": 2.9231
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_abr",
+          "label": "Overnight above Globex VWAP",
+          "pct": true,
+          "rho": -0.10908972987838597,
+          "edge": -165.77777777777777,
+          "win_edge": -5.485232067510545,
+          "luck": 0.438,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -1657.0,
+              "avg_net": -92.05555555555556,
+              "trades": 78,
+              "win_rate": 33.33333333333333,
+              "lo": 0.0785,
+              "hi": 0.4495
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -4977.0,
+              "avg_net": -261.94736842105266,
+              "trades": 78,
+              "win_rate": 26.923076923076923,
+              "lo": 0.4538,
+              "hi": 0.7226
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4641.0,
+              "avg_net": -257.8333333333333,
+              "trades": 79,
+              "win_rate": 27.848101265822784,
+              "lo": 0.7269,
+              "hi": 0.9957
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_ppm",
+          "label": "Overnight VWAP slope (pts/min, 30m)",
+          "rho": -0.05770454244556397,
+          "edge": -101.49999999999999,
+          "win_edge": -2.615765288087662,
+          "luck": 0.676,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -0.7887,
+              "hi": -0.0256
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5086.0,
+              "avg_net": -267.6842105263158,
+              "trades": 84,
+              "win_rate": 27.380952380952383,
+              "lo": -0.0225,
+              "hi": 0.1506
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -4008.0,
+              "avg_net": -222.66666666666666,
+              "trades": 82,
+              "win_rate": 29.268292682926827,
+              "lo": 0.1521,
+              "hi": 0.6824
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "gx_upper_rescue_ratio",
+          "label": "Globex +1\u03c3 rescues broken NY +1\u03c3",
+          "pct": true,
+          "rho": 0.01730457603913762,
+          "edge": 100.18181818181819,
+          "win_edge": 4.423076923076923,
+          "luck": 0.9,
+          "days": 34,
+          "bands": [
+            {
+              "band": "low",
+              "days": 11,
+              "net": -4295.0,
+              "avg_net": -390.45454545454544,
+              "trades": 40,
+              "win_rate": 22.5,
+              "lo": 0.0,
+              "hi": 0.0
+            },
+            {
+              "band": "mid",
+              "days": 12,
+              "net": -7919.0,
+              "avg_net": -659.9166666666666,
+              "trades": 76,
+              "win_rate": 22.36842105263158,
+              "lo": 0.0,
+              "hi": 0.4286
+            },
+            {
+              "band": "high",
+              "days": 11,
+              "net": -3193.0,
+              "avg_net": -290.27272727272725,
+              "trades": 52,
+              "win_rate": 26.923076923076923,
+              "lo": 0.4286,
+              "hi": 0.8
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "on_vwap_slope_deg",
+          "label": "Overnight VWAP slope (\u00b0, ATR-norm)",
+          "rho": -0.04971912987169444,
+          "edge": -39.777777777777786,
+          "win_edge": -1.747071669644626,
+          "luck": 0.716,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2181.0,
+              "avg_net": -121.16666666666667,
+              "trades": 69,
+              "win_rate": 31.88405797101449,
+              "lo": -3.8647,
+              "hi": -0.2748
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -6197.0,
+              "avg_net": -326.1578947368421,
+              "trades": 93,
+              "win_rate": 26.881720430107524,
+              "lo": -0.2454,
+              "hi": 1.1961
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -2897.0,
+              "avg_net": -160.94444444444446,
+              "trades": 73,
+              "win_rate": 30.136986301369863,
+              "lo": 1.3505,
+              "hi": 4.1219
+            }
+          ],
+          "holds": false
+        },
+        {
+          "key": "open_z",
+          "label": "Open in Globex \u03c3-terms",
+          "rho": -0.03804814226373129,
+          "edge": -35.66666666666666,
+          "win_edge": -0.6487488415199252,
+          "luck": 0.78,
+          "days": 55,
+          "bands": [
+            {
+              "band": "low",
+              "days": 18,
+              "net": -2650.0,
+              "avg_net": -147.22222222222223,
+              "trades": 65,
+              "win_rate": 30.76923076923077,
+              "lo": -1.9831,
+              "hi": -0.1194
+            },
+            {
+              "band": "mid",
+              "days": 19,
+              "net": -5333.0,
+              "avg_net": -280.6842105263158,
+              "trades": 87,
+              "win_rate": 27.586206896551722,
+              "lo": 0.0109,
+              "hi": 0.7347
+            },
+            {
+              "band": "high",
+              "days": 18,
+              "net": -3292.0,
+              "avg_net": -182.88888888888889,
+              "trades": 83,
+              "win_rate": 30.120481927710845,
+              "lo": 0.7666,
+              "hi": 1.7162
+            }
+          ],
+          "holds": false
+        }
+      ]
+    }
+  }
+}

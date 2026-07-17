@@ -165,8 +165,10 @@ export interface SimTrade {
   target_price: number;
   /** "vah" = price was re-accepted back inside the value area (exit_below_vah_bars).
    * "dev1" = the fade's mirror: re-accepted back beyond dev1 (invalidate_beyond_dev1_bars).
-   * "trail" = stopped out on a ratcheted stop (breakeven or better), not the initial one. */
-  exit_reason: "target" | "stop" | "time" | "vah" | "dev1" | "trail";
+   * "trail" = stopped out on a ratcheted stop (breakeven or better), not the initial one.
+   * "panic" = the flow-shock market exit: the tape ran panic_exit_delta contracts
+   * against the trade inside the panic window. */
+  exit_reason: "target" | "stop" | "time" | "vah" | "dev1" | "trail" | "panic";
   points: number;
   r_multiple: number;
   band_width_ticks: number;

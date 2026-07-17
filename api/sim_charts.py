@@ -123,6 +123,37 @@ def _footprint(t: pd.DataFrame, b: pd.DataFrame, ts_size: float) -> list[list[li
     return out
 
 
+def _cvd(t: pd.DataFrame, b: pd.DataFrame, times: np.ndarray) -> list[dict]:
+    """Cumulative volume delta per bar: the running sum of signed aggressor
+    volume (buy market orders minus sell market orders) as of each bar's close.
+
+    Straight off the tape's aggressor ``side``, binned over the same tick frame
+    the footprint is — so it lines up with the candles bar-for-bar. Anchored at
+    the first drawn bar (the 18:00 Globex open when the night is on the chart,
+    else the bell) and accumulated across the whole session: one line to read
+    order-flow pressure against price.
+
+    When the feed carried no aggressor side (every tick ``"N"`` — an older cache,
+    or a symbol the vendor never tagged) there is nothing to accumulate, so the
+    series comes back empty and the pane and its legend toggle simply don't
+    appear rather than drawing a flat zero line.
+    """
+    n = len(b)
+    side = t["side"].to_numpy()
+    size = t["size"].to_numpy().astype(float)
+    signed = np.where(side == "B", size, np.where(side == "A", -size, 0.0))
+    if not signed.any():
+        return []
+    # Same bar assignment as _footprint: a tick belongs to the bar whose end it
+    # falls before; trailing ticks past the last full bar land at n and drop.
+    bar_of = np.searchsorted(b["end_idx"].to_numpy(), np.arange(len(t)), side="left")
+    keep = bar_of < n
+    per_bar = np.zeros(n)
+    np.add.at(per_bar, bar_of[keep], signed[keep])
+    cvd = np.cumsum(per_bar)
+    return [{"time": int(tm), "value": float(v)} for tm, v in zip(times, cvd)]
+
+
 def _vwap_rows(w: pd.DataFrame, pos: np.ndarray, times: np.ndarray) -> list[dict]:
     """Sample a band frame at the tick positions where bars closed. ``pos`` is
     positional into *w*, so a negative entry (a bar that closed before this
@@ -184,7 +215,7 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
     """One session's bars + both anchored VWAPs + display times, shared by the
     per-trade and full-day payloads. Returns
     (ticks, bars_rows, vwap_gx_rows, vwap_ny_rows, profile_gx_rows,
-    profile_ny_rows, bar_time, footprint), or None if no data.
+    profile_ny_rows, bar_time, footprint, cvd_rows), or None if no data.
 
     Every strategy's chart shows the same thing: the overnight candles from 18:00
     ET, the RTH session, both anchored VWAPs, and both developing profiles. What
@@ -297,7 +328,8 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
 
     return (full, bars_rows, vwap_gx_rows, vwap_ny_rows, profile_gx_rows,
             profile_ny_rows, bar_time,
-            _footprint(full, b_all, tick_size(cfg.contract)))
+            _footprint(full, b_all, tick_size(cfg.contract)),
+            _cvd(full, b_all, times))
 
 
 def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
@@ -320,7 +352,7 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
     frame = _session_frame(cfg, day, tz, overnight=globex)
     if frame is None:
         return {"available": False}
-    t, bars_rows, vwap_gx, vwap_ny, profile_gx, profile_ny, bar_time, footprint = frame
+    t, bars_rows, vwap_gx, vwap_ny, profile_gx, profile_ny, bar_time, footprint, cvd = frame
 
     entry_t, exit_t = bar_time(entry_ts), bar_time(exit_ts)
 
@@ -379,6 +411,7 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
         "excursion": excursion,
         "instrument": tickmod.contract_for(cfg.contract, day),
         "footprint": footprint,
+        "cvd": cvd,
         "tick_size": tick_size(cfg.contract),
         "point_value": point_value(cfg.contract),
     }
@@ -432,7 +465,7 @@ def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
     frame = _session_frame(cfg, day, tz, overnight=globex)
     if frame is None:
         return {"available": False}
-    _, bars_rows, vwap_gx, vwap_ny, profile_gx, profile_ny, bar_time, footprint = frame
+    _, bars_rows, vwap_gx, vwap_ny, profile_gx, profile_ny, bar_time, footprint, cvd = frame
 
     day_trades = trades
     if not trades.empty:
@@ -459,6 +492,7 @@ def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
         "levels": [],
         "trades": rects,
         "footprint": footprint,
+        "cvd": cvd,
         "tick_size": tick_size(cfg.contract),
         "point_value": point_value(cfg.contract),
     }

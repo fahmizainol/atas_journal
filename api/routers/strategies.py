@@ -26,6 +26,15 @@ from ..serialize import records
 router = APIRouter()
 
 EDGE_COLS = ["bucket", "trades", "net_pnl", "win_rate", "expectancy", "avg_r"]
+# The per-confluence veto breakdown carries the same metrics plus ``unique`` (how
+# many entries a gate caught alone). ``bucket`` is the confluence name.
+CONFLUENCE_COLS = ["bucket", "trades", "unique", "net_pnl", "win_rate",
+                   "expectancy", "avg_r"]
+# The MFE/MAE profile: one row per outcome group (All/Winners/Losers), the median
+# peak and trough in R, what fraction of the peak the exit kept, and the shares
+# that reached +1R in favor / sat through -1R against. ``bucket`` is the group.
+EXCURSION_COLS = ["bucket", "trades", "mfe_r", "mae_r", "capture",
+                  "reach_1r", "heat_1r"]
 
 # The cuts a run is served in. Order is the order they are rendered in, and the
 # count is the family the luck bar corrects for — adding a seventh cut here makes
@@ -37,7 +46,8 @@ VETOED_CUTS = TRADED_CUTS + ("by_gate",)
 TRADE_COLS = [
     "trade_no", "session", "direction", "entry_ts_local", "exit_ts_local",
     "avg_entry", "avg_exit", "stop_price", "final_stop_price", "target_price", "exit_reason",
-    "points", "r_multiple", "band_width_ticks", "duration_s",
+    "points", "r_multiple", "mfe_points", "mae_points", "mfe_r", "mae_r",
+    "band_width_ticks", "duration_s",
     "gross_pnl", "commission", "net_pnl",
 ]
 VETOED_COLS = TRADE_COLS + ["gate"]
@@ -362,6 +372,20 @@ def _edge_scopes(traded, vetoed, with_luck: bool) -> dict:
         out[scope] = {
             "trades": int(len(book)),
             "net_pnl": float(book["net_pnl"].sum()),
+            # The MFE/MAE profile of this book. Empty for a run that predates the
+            # engine's excursion columns; the panel reads that as "re-run to populate"
+            # rather than as a book with no trades.
+            "excursions": records(edges.excursions(book), EXCURSION_COLS),
+            # The winner/loser distribution the bucket cuts average away — tails,
+            # payoff geometry, hold-time split, streaks and drawdown. A plain dict
+            # (not a cut frame): sanitize() handles its inf/nan the same way.
+            "win_loss": edges.win_loss_profile(book),
+            # The full R-outcome shape (stop wall + target spike), what separated
+            # winners from losers at entry (permutation-scored like the cuts), and
+            # the session-level concentration — the deeper winner/loser reads.
+            "r_hist": edges.r_histogram(book),
+            "discriminator": edges.entry_discriminator(book, with_luck=with_luck),
+            "daily": edges.daily_concentration(book),
             "cuts": [
                 {
                     "name": c["name"],
@@ -374,6 +398,14 @@ def _edge_scopes(traded, vetoed, with_luck: bool) -> dict:
                 for c in cuts.values()
             ],
         }
+        # The vetoed book is the only one with a gate set per row, so it is the
+        # only one that gets the per-confluence (overlap-counting) breakdown. The
+        # first-match ``by_gate`` cut above stays as-is next to it; the two answer
+        # different questions (who fired first vs. what each gate independently
+        # catches), and both are worth showing.
+        if scope == "vetoed":
+            out[scope]["confluences"] = records(
+                edges.confluence_breakdown(book), CONFLUENCE_COLS)
     return out
 
 

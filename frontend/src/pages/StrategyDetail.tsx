@@ -106,6 +106,7 @@ function RunTradeChart({ slug, runId, tradeNo }: { slug: string; runId: string; 
         profileGlobex={data.profile_globex}
         profileNy={data.profile_ny}
         atrPoints={[]}
+        cvd={data.cvd}
         markers={data.markers}
         priceLines={data.price_lines}
         levels={[]}
@@ -230,6 +231,7 @@ function RunDayChart({
           profileGlobex={data.profile_globex}
           profileNy={data.profile_ny}
           atrPoints={[]}
+          cvd={data.cvd}
           markers={data.markers}
           priceLines={[]}
           levels={[]}
@@ -1035,14 +1037,21 @@ export function StrategyDetail() {
         accessorFn: (r) => r.meta.label || r.run_id,
         cell: (c) => {
           const r = c.row.original;
+          const label = r.meta.label || r.run_id;
           return (
-            <span>
+            <span style={{ display: "flex", alignItems: "center", minWidth: 0 }}>
               {r.run_id === baseline?.run_id && (
-                <span className="badge" title="baseline — deltas are measured against this run" style={{ marginRight: 6 }}>
+                <span className="badge" title="baseline — deltas are measured against this run" style={{ marginRight: 6, flexShrink: 0 }}>
                   ★ baseline
                 </span>
               )}
-              {r.meta.label || <span className="muted">{r.run_id}</span>}
+              <span
+                title={label}
+                className={r.meta.label ? undefined : "muted"}
+                style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 280 }}
+              >
+                {label}
+              </span>
             </span>
           );
         },

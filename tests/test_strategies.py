@@ -797,6 +797,14 @@ def test_gx_floor_gate_wants_the_globex_line_just_beneath_the_fill():
         assert not g.allows(1, 100.0), "line above the fill is no floor"
         assert not g.allows(2, 100.0), "a NaN line must not read as confirmed"
 
+        # max_ticks_above tolerates the line on the wrong side of the fill.
+        g = gatesmod.GxFloorGate({"enabled": True, "max_ticks_below": 80,
+                                  "max_ticks_above": 40})  # 10 pts on NQ
+        g.prepare(ctx)
+        assert g.allows(1, 100.0), "line 5 pts above the fill is within the overshoot"
+        assert g.allows(1, 95.0), "line exactly max_ticks_above over the fill passes"
+        assert not g.allows(1, 94.75), "one tick past the overshoot is vetoed"
+
         # The short mirror: the floor becomes a ceiling within reach ABOVE.
         sctx = confmod.SessionCtx(cfg=ctx.cfg, day=ctx.day, ticks=ctx.ticks,
                                   bars=ctx.bars, value_edge_at_tick=None,
@@ -977,6 +985,12 @@ def test_gx_poc_shape_gate_vetoes_the_thin_rally_zone():
         g.prepare(ctx)
         assert not g.allows(0, 110.0), "the zone's inner edge is inclusive"
 
+        # require_mirror flips the gate into the accepted-value requirement:
+        # a POC BELOW the VWAP is never the mirror shape.
+        g = gatesmod.GxPocShapeGate({"enabled": True, "mode": "require_mirror"})
+        g.prepare(ctx)
+        assert not g.allows(0, 110.0), "thin-rally shape fails the mirror requirement"
+
         # The short mirror reads the gap the other way up: a POC *below* the
         # VWAP says nothing on the lower band...
         sctx = confmod.SessionCtx(cfg=cfg, day=DAY, ticks=rth, bars=pd.DataFrame(),
@@ -993,6 +1007,14 @@ def test_gx_poc_shape_gate_vetoes_the_thin_rally_zone():
         assert not g.allows(0, 90.0), "POC 30 ticks above the VWAP vetoes the short"
         g.prepare(ctx)
         assert g.allows(0, 90.0), "and is inert on the long"
+        # The node-above-the-mean tape IS the long's mirror shape.
+        g = gatesmod.GxPocShapeGate({"enabled": True, "mode": "require_mirror"})
+        g.prepare(ctx)
+        assert g.allows(0, 90.0), "POC 30 ticks above the VWAP is the accepted-value shape"
+        g = gatesmod.GxPocShapeGate({"enabled": True, "mode": "require_mirror",
+                                     "zone_max_ticks": 25})
+        g.prepare(ctx)
+        assert not g.allows(0, 90.0), "a node past the mirror zone fails the requirement"
 
         # Blind — no cached overnight — vetoes wholesale.
         gatesmod.tickmod.cached_overnight = lambda symbol, day: None
@@ -1006,9 +1028,128 @@ def test_gx_poc_shape_gate_vetoes_the_thin_rally_zone():
     for bad in ({"enabled": True, "zone_ticks": 10},
                 {"enabled": True, "zone_min_ticks": -1},
                 {"enabled": True, "zone_max_ticks": True},
-                {"enabled": True, "zone_min_ticks": 50, "zone_max_ticks": 25}):
+                {"enabled": True, "zone_min_ticks": 50, "zone_max_ticks": 25},
+                {"enabled": True, "mode": "require"}):
         try:
             gatesmod.GxPocShapeGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_ny_poc_floor_gate_wants_the_session_node_just_beneath_the_fill():
+    import numpy as np
+
+    from journal.sim import gates as gatesmod
+    from journal.sim.profile import DevelopingProfile
+    from journal.sim.rules import SimConfig as _Cfg
+
+    # Two closed bars publishing POCs 100 then 105; four ticks. levels_in_force
+    # semantics: nothing is in force until the first bar has closed, so ticks
+    # 0-1 are blind and tick 2-3 read bar 0's node (bar 1 closes ON tick 3).
+    prof = DevelopingProfile(poc=np.array([100.0, 105.0]),
+                             vah=np.array([101.0, 106.0]),
+                             val=np.array([99.0, 104.0]))
+    bars = pd.DataFrame({"end_idx": [1, 3]})
+    ticks = pd.DataFrame({"ts_utc": pd.to_datetime(["2025-10-13 13:35"] * 4, utc=True),
+                          "price": [100.0] * 4, "size": [1] * 4})
+    ctx = confmod.SessionCtx(cfg=_Cfg(), day=DAY, ticks=ticks, bars=bars,
+                             value_edge_at_tick=None, profile=prof)
+
+    g = gatesmod.NyPocFloorGate({"enabled": True, "max_ticks_below": 100})  # 25 pts
+    g.prepare(ctx)
+    assert not g.allows(0, 101.0), "no closed bar yet — no node, no fill"
+    assert g.allows(2, 100.0), "a fill on the node itself passes"
+    assert g.allows(2, 125.0), "the node exactly 25 pts beneath is within reach"
+    assert not g.allows(2, 125.25), "one tick past the reach is vetoed"
+    assert not g.allows(2, 99.0), "a node above the fill is no floor"
+
+    # The short mirror: the node must sit within reach ABOVE the fill.
+    sctx = confmod.SessionCtx(cfg=_Cfg(), day=DAY, ticks=ticks, bars=bars,
+                              value_edge_at_tick=None, profile=prof, side="short")
+    g = gatesmod.NyPocFloorGate({"enabled": True, "max_ticks_below": 100})
+    g.prepare(sctx)
+    assert g.allows(2, 99.0), "node 1 pt above a short's fill is its ceiling"
+    assert not g.allows(2, 101.0), "node below a short's fill is no ceiling"
+
+    # No profile built (engine had no reason) — veto rather than guess.
+    bctx = confmod.SessionCtx(cfg=_Cfg(), day=DAY, ticks=ticks, bars=bars,
+                              value_edge_at_tick=None, profile=None)
+    g = gatesmod.NyPocFloorGate({"enabled": True})
+    g.prepare(bctx)
+    assert not g.allows(2, 100.0), "no profile must not read as confirmed"
+
+    for bad in ({"enabled": True, "max_ticks": 10},
+                {"enabled": True, "max_ticks_below": -1},
+                {"enabled": True, "max_ticks_below": True}):
+        try:
+            gatesmod.NyPocFloorGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_gx_overhang_gate_caps_the_globex_over_ny_vwap_spread():
+    from journal.sim import gates as gatesmod
+    from journal.sim.rules import SimConfig as _Cfg
+
+    # Overnight: three contracts at 120. RTH: four at 100. At RTH tick 0 the NY
+    # VWAP is 100 and the Globex VWAP (360+100)/4 = 115 — a 15-pt (60-tick)
+    # overhang that shrinks as the session trades: by tick 3 the Globex VWAP is
+    # (360+400)/7 ≈ 108.57, ~34 ticks over.
+    on = pd.DataFrame({"ts_utc": pd.to_datetime(["2025-10-13 09:00"] * 3, utc=True),
+                       "price": [120.0] * 3, "size": [1] * 3})
+    rth = pd.DataFrame({"ts_utc": pd.to_datetime(["2025-10-13 13:35"] * 4, utc=True),
+                        "price": [100.0] * 4, "size": [1] * 4})
+    ctx = confmod.SessionCtx(cfg=_Cfg(), day=DAY, ticks=rth, bars=pd.DataFrame(),
+                             value_edge_at_tick=None, profile=None)
+
+    real_contract = gatesmod.tickmod.contract_for_cached
+    real_on = gatesmod.tickmod.cached_overnight
+    try:
+        gatesmod.tickmod.contract_for_cached = lambda symbol, day: "NQZ5"
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on
+
+        g = gatesmod.GxOverhangGate({"enabled": True, "max_ticks": 50})
+        g.prepare(ctx)
+        assert not g.allows(0, 100.0), "a 60-tick overhang past the 50-tick cap is vetoed"
+        assert g.allows(3, 100.0), "the spread decays under the cap as the session trades"
+
+        g = gatesmod.GxOverhangGate({"enabled": True, "max_ticks": 60})
+        g.prepare(ctx)
+        assert g.allows(0, 100.0), "the cap itself is inclusive"
+
+        # The short mirror: a Globex VWAP far ABOVE the NY line is friendly
+        # ground for a short — never an overhang on that side.
+        sctx = confmod.SessionCtx(cfg=_Cfg(), day=DAY, ticks=rth, bars=pd.DataFrame(),
+                                  value_edge_at_tick=None, profile=None, side="short")
+        g = gatesmod.GxOverhangGate({"enabled": True, "max_ticks": 50})
+        g.prepare(sctx)
+        assert g.allows(0, 100.0), "globex over NY is the short's friendly side"
+
+        # ...its overhang is the Globex VWAP hanging BELOW the NY line.
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on.assign(
+            price=[80.0] * 3)
+        g = gatesmod.GxOverhangGate({"enabled": True, "max_ticks": 50})
+        g.prepare(sctx)
+        assert not g.allows(0, 100.0), "a 60-tick under-hang past the cap vetoes the short"
+        g.prepare(ctx)
+        assert g.allows(0, 100.0), "and is the long's friendly side"
+
+        # Blind — no cached overnight — vetoes wholesale.
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: None
+        g = gatesmod.GxOverhangGate({"enabled": True})
+        g.prepare(ctx)
+        assert not g.allows(0, 100.0), "no overnight must not read as confirmed"
+    finally:
+        gatesmod.tickmod.contract_for_cached = real_contract
+        gatesmod.tickmod.cached_overnight = real_on
+
+    for bad in ({"enabled": True, "max_ticks_above": 10},
+                {"enabled": True, "max_ticks": -1},
+                {"enabled": True, "max_ticks": True}):
+        try:
+            gatesmod.GxOverhangGate(bad)
             raise AssertionError(f"expected ValueError for {bad!r}")
         except ValueError:
             pass
@@ -1225,6 +1366,46 @@ def test_a_cut_that_separates_nothing_does_not_hold():
     row = edges.by_direction(base).iloc[0]
     assert abs(row["avg_r"] - base["r_multiple"].mean()) < 1e-9
     assert row["trades"] == n
+
+
+def test_confluence_breakdown_scores_every_gate_that_vetoed_not_just_the_first():
+    """by_gate credits only the first gate to reject an entry, so a stacked gate is
+    under-counted. The per-confluence breakdown scores EVERY gate in each ghost's
+    veto set — the rows overlap, and that overlap is the point."""
+    v = pd.DataFrame([
+        # blocked by two gates: counts under each, unique to neither
+        {"net_pnl": 100.0, "r_multiple": 1.0, "gate": "regime", "gates": "regime|slope"},
+        # slope alone
+        {"net_pnl": -50.0, "r_multiple": -0.5, "gate": "slope", "gates": "slope"},
+        # all three
+        {"net_pnl": -30.0, "r_multiple": -0.3, "gate": "regime", "gates": "regime|slope|overhang"},
+        # overhang alone
+        {"net_pnl": 200.0, "r_multiple": 2.0, "gate": "overhang", "gates": "overhang"},
+    ])
+    out = edges.confluence_breakdown(v).set_index("bucket")
+
+    # slope vetoed 3 of the 4 ghosts though by_gate would credit it with 1.
+    assert out.loc["slope", "trades"] == 3
+    assert out.loc["regime", "trades"] == 2
+    assert out.loc["overhang", "trades"] == 2
+    # Rows overlap: the counts sum past the ghost total (4), unlike a partition.
+    assert out["trades"].sum() == 7
+
+    # net_pnl is summed over exactly that gate's ghosts (positive = cut a winner).
+    assert abs(out.loc["slope", "net_pnl"] - (100 - 50 - 30)) < 1e-9
+    assert abs(out.loc["regime", "net_pnl"] - (100 - 30)) < 1e-9
+
+    # unique = caught alone. regime never was; slope and overhang once each.
+    assert out.loc["regime", "unique"] == 0
+    assert out.loc["slope", "unique"] == 1
+    assert out.loc["overhang", "unique"] == 1
+
+    # No gate set (a legacy ledger) falls back to the first-match gate: then the
+    # breakdown IS a partition and its counts sum to the ghost total.
+    legacy = edges.confluence_breakdown(v.drop(columns=["gates"]))
+    assert legacy["trades"].sum() == len(v)
+
+    assert edges.confluence_breakdown(pd.DataFrame()).empty
 
 
 def test_api_bad_config_is_a_400_not_a_run():

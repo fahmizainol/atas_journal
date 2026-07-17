@@ -159,6 +159,19 @@ FIELDS: tuple[Field, ...] = (
                "level once the trade is the trail distance in front of it, and then "
                "stays there. The step is then irrelevant. Ignored when the trailing "
                "stop is off."),
+    Field("panic_exit_delta", "int", "exit", "Panic exit on a flow shock",
+          unit="contracts", min=1, zero_means_off=True, on_default=300,
+          help="One read of the tape when the fill is a panic-window old: exit at "
+               "market if the net aggressor delta over that window ran this many "
+               "contracts against the trade. A shock detector, not a loser "
+               "detector — set it far beyond a normal minute of tape, or it reads "
+               "the winners that start ugly and recover as shocks."),
+    Field("panic_exit_window_s", "int", "exit", "Panic window", unit="s", min=1,
+          help="The window the read covers, in seconds after the fill. The "
+               "shock's edge decays within a couple of minutes — by then the "
+               "price has paid most of the stop — so it stays tight. A position "
+               "that exits before the window closes is never read. Ignored when "
+               "the panic exit is off."),
 
     # --- filters / lifecycle ---
     Field("min_band_width_ticks", "int", "filters", "Minimum band width",
@@ -204,6 +217,22 @@ FIELDS: tuple[Field, ...] = (
     Field("commission_per_side", "float", "size", "Commission per side",
           unit="$ / contract", min=0,
           help="Charged on entry and on exit, per contract."),
+    Field("pyramid_tranches", "int", "size", "Scale-in lots", unit="lots", min=1,
+          help="1 fills the whole size at once. N>1 splits it into N equal lots "
+               "(Contracts must divide by N): the first fills at dev1, each later "
+               "lot stops in one step further in the trade's favour, so size is "
+               "added only as the move confirms. A lot whose trigger is never "
+               "reached never fills — losers stay small, winners reach full size."),
+    Field("pyramid_step_ticks", "int", "size", "Scale-in step", unit="ticks", min=1,
+          help="The favourable distance between one scale-in lot's stop and the "
+               "next, measured from the first fill. Read only with 2+ lots."),
+    Field("pyramid_stop_mode", "enum", "size", "Scale-in stop",
+          choices=(("blend", "Blend — re-strike the stop off the average entry"),
+                   ("anchor", "Anchor — keep the first lot's stop")),
+          help="Blend keeps each lot risking the same distance off the running "
+               "average (total risk grows with size). Anchor leaves the stop and "
+               "target where the first lot set them — later lots ride the initial "
+               "risk. Read only with 2+ lots."),
 )
 
 BY_NAME: dict[str, Field] = {f.name: f for f in FIELDS}
@@ -561,6 +590,14 @@ def _check_cross_field(cfg) -> None:
                 f"entry_limit_offset_ticks ({cfg.entry_limit_offset_ticks}) may not "
                 f"exceed acceptance_min_ticks ({cfg.acceptance_min_ticks}): the limit "
                 f"would sit beyond the acceptance close, on the far side of the market")
+        if cfg.pyramid_tranches > 1 and cfg.contracts % cfg.pyramid_tranches:
+            # Each scale-in lot is an equal whole slice of the size. A remainder
+            # would either drop contracts on the floor or fill an uneven last lot —
+            # the engine's `contracts // pyramid_tranches` silently does the former,
+            # trading a smaller position than the config says.
+            raise ValueError(
+                f"contracts ({cfg.contracts}) must divide evenly by pyramid_tranches "
+                f"({cfg.pyramid_tranches}): each scale-in lot is an equal whole slice")
     if isinstance(cfg, GlobexBounceConfig) and cfg.invert:
         # Inverting reverts toward the mid, so dev2 sits BEHIND the entry — a
         # dev2 target fills instantly at a loss, and an acceptance capped at dev2

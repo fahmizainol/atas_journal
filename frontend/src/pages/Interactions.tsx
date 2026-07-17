@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { type ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "../components/DataTable";
 import { CandlestickChart } from "../components/charts/CandlestickChart";
@@ -6,13 +7,21 @@ import {
   useInteractions,
   useInteractionCoverage,
   useInteractionDayChart,
+  useInteractionRuns,
 } from "../hooks/useInteractions";
+import { useRegimeRange } from "../hooks/useRegime";
+import { CLASS_LABEL, type RegimeClass } from "../lib/regimeTypes";
+import { regimePalette } from "../theme";
 import type {
   AggRow,
+  BandContextRow,
+  BandOccupancyRow,
   InteractionParams,
+  SavedRun,
   Touch,
   VaSnap,
   VaSnapAggRow,
+  VaSnapContRow,
 } from "../lib/interactionTypes";
 import { fmt, fmtInt, fmtPct } from "../lib/format";
 
@@ -23,6 +32,7 @@ function DayChart({
   day,
   binSize,
   sources,
+  ticksPerBar,
   touches,
   vaSnaps,
 }: {
@@ -30,10 +40,11 @@ function DayChart({
   day: string;
   binSize?: number;
   sources?: string[];
+  ticksPerBar?: number;
   touches: Touch[];
   vaSnaps: VaSnap[];
 }) {
-  const { data, isLoading } = useInteractionDayChart(symbol, day, binSize, sources);
+  const { data, isLoading } = useInteractionDayChart(symbol, day, binSize, sources, ticksPerBar);
   if (isLoading) return <div className="notice">Loading session…</div>;
   if (!data || !data.available) return <div className="notice">No cached ticks for this session.</div>;
   if (!data.bars || data.bars.length === 0) return <div className="notice">No bars for this session.</div>;
@@ -65,8 +76,41 @@ const ALL_SOURCES = [
   { key: "vwap_bands", label: "VWAP bands" },
 ];
 
-const pct = (v: number | null) => (v == null ? "—" : fmtPct(v));
+// The interactions API sends rates as fractions (0.714), but fmtPct expects an
+// already-scaled percentage (71.4) like the rest of the API sends — scale here.
+const pct = (v: number | null) => (v == null ? "—" : fmtPct(v * 100));
 const num = (v: number | null) => (v == null ? "—" : fmt(v, false));
+
+// The per-session day-type from the (shared, per-day) regime cache — the same
+// class the Strategies tab colours its calendar by. Shown here so a session's
+// touch/band behaviour can be read against the regime it happened in. `dot` is
+// the compact swatch for the Sessions chips; the full pill labels the drill-down.
+function RegimeBadge({ klass, dot }: { klass: RegimeClass; dot?: boolean }) {
+  const bg = regimePalette.klass[klass];
+  const label = CLASS_LABEL[klass];
+  if (dot) {
+    return (
+      <span
+        title={`Regime: ${label}`}
+        style={{ width: 8, height: 8, borderRadius: 2, background: bg, flexShrink: 0 }}
+      />
+    );
+  }
+  return (
+    <span
+      style={{
+        background: bg,
+        borderRadius: 4,
+        padding: "1px 8px",
+        fontSize: 12,
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
 
 const aggColumns: ColumnDef<AggRow, any>[] = [
   { accessorKey: "label", header: "Bucket", cell: (c) => String(c.getValue()) },
@@ -79,21 +123,177 @@ const aggColumns: ColumnDef<AggRow, any>[] = [
 const vasnapColumns: ColumnDef<VaSnapAggRow, any>[] = [
   { accessorKey: "label", header: "Snap", cell: (c) => String(c.getValue()) },
   { accessorKey: "n", header: "N", cell: (c) => fmtInt(c.getValue() as number) },
-  { accessorKey: "revert_rate", header: "Reverted to VWAP %", cell: (c) => pct(c.getValue() as number | null) },
+  { accessorKey: "n_trivial", header: "Triv", cell: (c) => fmtInt(c.getValue() as number) },
+  { accessorKey: "revert_rate_30", header: "≤30m %", cell: (c) => pct(c.getValue() as number | null) },
+  { accessorKey: "revert_rate_60", header: "≤60m %", cell: (c) => pct(c.getValue() as number | null) },
+  { accessorKey: "revert_rate", header: "By close %", cell: (c) => pct(c.getValue() as number | null) },
   { accessorKey: "avg_move", header: "Avg move", cell: (c) => num(c.getValue() as number | null) },
+  { accessorKey: "avg_adverse", header: "Avg adverse", cell: (c) => num(c.getValue() as number | null) },
+  { accessorKey: "avg_dist", header: "Avg dist", cell: (c) => num(c.getValue() as number | null) },
 ];
 
-function AggTable({ title, data, columns, caption }: {
+const bandContextColumns: ColumnDef<BandContextRow, any>[] = [
+  { accessorKey: "label", header: "Cut", cell: (c) => String(c.getValue()) },
+  {
+    accessorKey: "n",
+    header: "N",
+    cell: (c) => {
+      const v = c.getValue() as number | null;
+      return v == null ? <span className="muted">—</span> : fmtInt(v);
+    },
+  },
+  { accessorKey: "reject_rate", header: "Reject % (30m)", cell: (c) => pct(c.getValue() as number | null) },
+  { accessorKey: "med_mfe", header: "Med MFE", cell: (c) => num(c.getValue() as number | null) },
+  { accessorKey: "med_mae", header: "Med MAE", cell: (c) => num(c.getValue() as number | null) },
+  {
+    accessorKey: "ratio",
+    header: "MFE/MAE",
+    cell: (c) => {
+      const v = c.getValue() as number | null;
+      if (v == null) return <span className="muted">—</span>;
+      const cls = v >= 1.3 ? "pos" : v <= 0.8 ? "neg" : "muted";
+      return <span className={cls}>{num(v)}</span>;
+    },
+  },
+];
+
+const bandOccupancyColumns: ColumnDef<BandOccupancyRow, any>[] = [
+  {
+    accessorKey: "label",
+    header: "Band",
+    cell: (c) => {
+      const v = String(c.getValue());
+      return v === "Total" ? <strong>{v}</strong> : v;
+    },
+  },
+  { accessorKey: "avg_min", header: "Avg min/session", cell: (c) => num(c.getValue() as number | null) },
+  { accessorKey: "pct", header: "% of session", cell: (c) => pct(c.getValue() as number | null) },
+  { accessorKey: "minutes", header: "Total min", cell: (c) => fmtInt(c.getValue() as number) },
+];
+
+// Append a summary row so the table foots to the whole session: minutes and
+// avg/session sum across the bands, and pct is 100% by construction (the bands
+// partition every classified minute). Empty in → empty out (no phantom total).
+function withBandTotals(rows: BandOccupancyRow[]): BandOccupancyRow[] {
+  if (rows.length === 0) return rows;
+  const minutes = rows.reduce((s, r) => s + r.minutes, 0);
+  const avg_min = rows.reduce((s, r) => s + (r.avg_min ?? 0), 0);
+  return [...rows, { label: "Total", minutes, pct: 1, avg_min: Math.round(avg_min * 10) / 10 }];
+}
+
+// The regime-class mix across the run's sessions — how many trend-up / balance /
+// … days the window held. `klass: null` marks the grand-total row.
+interface RegimeMixRow {
+  klass: RegimeClass | null;
+  days: number;
+  pct: number | null;
+}
+
+const REGIME_ORDER: RegimeClass[] = [
+  "trend_up", "trend_down", "balance", "parked", "mixed", "unknown",
+];
+
+const regimeMixColumns: ColumnDef<RegimeMixRow, any>[] = [
+  {
+    accessorKey: "klass",
+    header: "Regime",
+    cell: (c) => {
+      const k = c.getValue() as RegimeClass | null;
+      if (k == null) return <strong>Total</strong>;
+      return (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <RegimeBadge klass={k} dot />
+          {CLASS_LABEL[k]}
+        </span>
+      );
+    },
+  },
+  { accessorKey: "days", header: "Days", cell: (c) => fmtInt(c.getValue() as number) },
+  { accessorKey: "pct", header: "% of sessions", cell: (c) => pct(c.getValue() as number | null) },
+];
+
+// Regime mix cross-tabbed by weekday: rows Mon..Fri (+ any weekend session that
+// slipped in), one column per regime class present in the run, plus a total.
+// `weekday: null` marks the grand-total row.
+interface WeekdayRow {
+  weekday: string | null;
+  counts: Partial<Record<RegimeClass, number>>;
+  total: number;
+}
+
+const WEEKDAY_LABEL: Record<number, string> = {
+  1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 0: "Sun",
+};
+// Mon-first ordering; weekend last if it ever appears.
+const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+
+// Parse "YYYY-MM-DD" as UTC midnight so the weekday can't drift with the local
+// zone, then read the UTC day-of-week.
+function weekdayIdx(day: string): number {
+  return new Date(`${day}T00:00:00Z`).getUTCDay();
+}
+
+function weekdayColumns(classes: RegimeClass[]): ColumnDef<WeekdayRow, any>[] {
+  const cols: ColumnDef<WeekdayRow, any>[] = [
+    {
+      id: "weekday",
+      header: "Day",
+      accessorFn: (r) => r.weekday,
+      cell: (c) => {
+        const v = c.getValue() as string | null;
+        return v == null ? <strong>Total</strong> : v;
+      },
+    },
+  ];
+  for (const k of classes) {
+    cols.push({
+      id: k,
+      header: CLASS_LABEL[k],
+      accessorFn: (r) => r.counts[k] ?? 0,
+      cell: (c) => {
+        const n = c.getValue() as number;
+        return n === 0 ? <span className="muted">—</span> : fmtInt(n);
+      },
+    });
+  }
+  cols.push({
+    id: "total",
+    header: "Total",
+    accessorFn: (r) => r.total,
+    cell: (c) => <strong>{fmtInt(c.getValue() as number)}</strong>,
+  });
+  return cols;
+}
+
+const vasnapContColumns: ColumnDef<VaSnapContRow, any>[] = [
+  { accessorKey: "label", header: "Snap", cell: (c) => String(c.getValue()) },
+  { accessorKey: "n", header: "N", cell: (c) => fmtInt(c.getValue() as number) },
+  { accessorKey: "hold_rate_30", header: "Hold ≤30m %", cell: (c) => pct(c.getValue() as number | null) },
+  { accessorKey: "hold_rate_60", header: "Hold ≤60m %", cell: (c) => pct(c.getValue() as number | null) },
+  { accessorKey: "avg_run_30", header: "Run 30m", cell: (c) => num(c.getValue() as number | null) },
+  { accessorKey: "avg_run_60", header: "Run 60m", cell: (c) => num(c.getValue() as number | null) },
+  { accessorKey: "avg_stop_dist", header: "Stop dist", cell: (c) => num(c.getValue() as number | null) },
+  { accessorKey: "rr_60", header: "R:R 60m", cell: (c) => num(c.getValue() as number | null) },
+];
+
+function AggTable({ title, data, columns, caption, keepOrder }: {
   title: string;
   data: any[];
   columns: ColumnDef<any, any>[];
   caption?: string;
+  // Preserve the server's row order (band position, cut → benchmark) instead
+  // of sorting by N — the band-context tables read top-to-bottom as a story.
+  keepOrder?: boolean;
 }) {
   return (
     <div className="panel">
       <div className="section-cap">{title}</div>
       {data.length > 0 ? (
-        <DataTable data={data} columns={columns} initialSort={[{ id: "n", desc: true }]} />
+        <DataTable
+          data={data}
+          columns={columns}
+          initialSort={keepOrder ? [] : [{ id: "n", desc: true }]}
+        />
       ) : (
         <div className="muted">No data.</div>
       )}
@@ -102,20 +302,30 @@ function AggTable({ title, data, columns, caption }: {
   );
 }
 
+const outcomeSpan = (v: string) => {
+  const cls = v === "reject" ? "pos" : v === "accept" ? "neg" : "muted";
+  return <span className={cls}>{v}</span>;
+};
+
 const touchColumns: ColumnDef<Touch, any>[] = [
   { accessorKey: "hhmm", header: "Time", cell: (c) => String(c.getValue()) },
   { accessorKey: "label", header: "Level", cell: (c) => String(c.getValue()) },
   { accessorKey: "zone_px", header: "Price", cell: (c) => fmt(c.getValue() as number, false) },
   { accessorKey: "approach", header: "Appr", cell: (c) => String(c.getValue()) },
   { accessorKey: "nth_touch", header: "Nth", cell: (c) => fmtInt(c.getValue() as number) },
+  { accessorKey: "level_age_min", header: "Age", cell: (c) => fmtInt(c.getValue() as number) },
+  { accessorKey: "outcome", header: "Outcome", cell: (c) => outcomeSpan(String(c.getValue())) },
   {
-    accessorKey: "outcome",
-    header: "Outcome",
-    cell: (c) => {
-      const v = String(c.getValue());
-      const cls = v === "reject" ? "pos" : v === "accept" ? "neg" : "muted";
-      return <span className={cls}>{v}</span>;
-    },
+    id: "o30",
+    header: "30m",
+    accessorFn: (r) => r.outcomes?.["30"]?.outcome ?? "—",
+    cell: (c) => outcomeSpan(String(c.getValue())),
+  },
+  {
+    id: "o60",
+    header: "60m",
+    accessorFn: (r) => r.outcomes?.["60"]?.outcome ?? "—",
+    cell: (c) => outcomeSpan(String(c.getValue())),
   },
   { accessorKey: "mfe", header: "MFE", cell: (c) => num(c.getValue() as number | null) },
   { accessorKey: "mae", header: "MAE", cell: (c) => num(c.getValue() as number | null) },
@@ -141,7 +351,17 @@ const snapColumns: ColumnDef<VaSnap, any>[] = [
     header: "Reverted",
     cell: (c) => (c.getValue() ? <span className="pos">yes</span> : <span className="muted">no</span>),
   },
+  {
+    accessorKey: "revert_min",
+    header: "→VWAP min",
+    cell: (c) => {
+      const v = c.getValue() as number | null | undefined;
+      return v == null ? <span className="muted">—</span> : fmtInt(v);
+    },
+  },
+  { accessorKey: "vwap_dist_pts", header: "Dist", cell: (c) => num((c.getValue() as number) ?? null) },
   { accessorKey: "revert_move", header: "Move", cell: (c) => num((c.getValue() as number) ?? null) },
+  { accessorKey: "adverse_move", header: "Adverse", cell: (c) => num((c.getValue() as number) ?? null) },
 ];
 
 export function Interactions() {
@@ -153,9 +373,37 @@ export function Interactions() {
   const [windowMin, setWindowMin] = useState("10");
   const [committed, setCommitted] = useState<InteractionParams | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  // Chart timeframe for the session drill-down: null = 1-minute candles, a number
+  // = that many ticks per bar (the strategies' native tick bars). The events are
+  // unchanged; only the candle grid they overlay swaps.
+  const [chartTicks, setChartTicks] = useState<number | null>(null);
 
   const coverage = useInteractionCoverage(symbol, start, end);
   const run = useInteractions(committed);
+  const savedRuns = useInteractionRuns();
+  const queryClient = useQueryClient();
+
+  // The shared per-day regime, over the committed run's window — same cache the
+  // Strategies tab reads, so no recompute. Range payload carries the class per
+  // day (no ribbon). day → class lookup for the Sessions chips and drill-down.
+  const regimeRange = useRegimeRange(
+    committed?.symbol ?? null,
+    committed?.start ?? null,
+    committed?.end ?? null,
+  );
+  const regimeByDay = useMemo(() => {
+    const m = new Map<string, RegimeClass>();
+    for (const d of regimeRange.data?.days ?? []) m.set(d.date, d.class);
+    return m;
+  }, [regimeRange.data]);
+
+  // A fresh compute writes a new snapshot server-side — refresh the list so it
+  // shows up without a reload.
+  useEffect(() => {
+    if (run.isSuccess) {
+      queryClient.invalidateQueries({ queryKey: ["interactions", "saved-runs"] });
+    }
+  }, [run.isSuccess, run.dataUpdatedAt, queryClient]);
 
   const toggleSource = (key: string) =>
     setSources((prev) => (prev.includes(key) ? prev.filter((s) => s !== key) : [...prev, key]));
@@ -172,6 +420,29 @@ export function Interactions() {
     });
   };
 
+  // Reopen a snapshot: sync the config bar to its (fully resolved) params and
+  // commit them verbatim — same config hash, so the server answers from disk.
+  const loadRun = (r: SavedRun) => {
+    const c = r.config;
+    setSymbol(c.symbol);
+    setStart(c.start);
+    setEnd(c.end);
+    setBinSize(String(c.bin_size));
+    setWindowMin(String(c.outcome_window_min));
+    setSources(c.sources);
+    setSelectedDay(null);
+    setCommitted({
+      symbol: c.symbol,
+      start: c.start,
+      end: c.end,
+      bin_size: c.bin_size,
+      va_pct: c.va_pct,
+      sources: c.sources,
+      outcome_window_min: c.outcome_window_min,
+      zone_cluster_pts: c.zone_cluster_pts,
+    });
+  };
+
   const data = run.data;
   const dayList = useMemo(
     () => (data ? Object.keys(data.day_index).sort() : []),
@@ -185,6 +456,63 @@ export function Interactions() {
     () => (data && selectedDay ? data.events.va_snaps.filter((s) => s.day === selectedDay) : []),
     [data, selectedDay],
   );
+  // Tally the regime class over the sessions this run actually covered (dayList),
+  // so the mix matches the Sessions chips rather than the raw calendar range.
+  const regimeMix = useMemo<RegimeMixRow[]>(() => {
+    const counts = new Map<RegimeClass, number>();
+    for (const d of dayList) {
+      const k = regimeByDay.get(d);
+      if (k) counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    const total = [...counts.values()].reduce((a, b) => a + b, 0);
+    if (total === 0) return [];
+    const rows: RegimeMixRow[] = REGIME_ORDER.filter((k) => counts.has(k)).map((k) => ({
+      klass: k,
+      days: counts.get(k)!,
+      pct: counts.get(k)! / total,
+    }));
+    rows.push({ klass: null, days: total, pct: 1 });
+    return rows;
+  }, [dayList, regimeByDay]);
+  // The same tally cross-cut by weekday. `classes` are the regime classes that
+  // actually appear (drives the columns); `rows` are Mon..Fri with per-class
+  // counts and a grand-total row.
+  const weekdayMix = useMemo<{ rows: WeekdayRow[]; classes: RegimeClass[] }>(() => {
+    // grid[weekdayIdx][class] = count
+    const grid = new Map<number, Map<RegimeClass, number>>();
+    const seenClasses = new Set<RegimeClass>();
+    for (const d of dayList) {
+      const k = regimeByDay.get(d);
+      if (!k) continue;
+      const wd = weekdayIdx(d);
+      if (!grid.has(wd)) grid.set(wd, new Map());
+      const row = grid.get(wd)!;
+      row.set(k, (row.get(k) ?? 0) + 1);
+      seenClasses.add(k);
+    }
+    if (seenClasses.size === 0) return { rows: [], classes: [] };
+    const classes = REGIME_ORDER.filter((k) => seenClasses.has(k));
+    const totals = new Map<RegimeClass, number>();
+    let grand = 0;
+    const rows: WeekdayRow[] = [];
+    for (const wd of WEEKDAY_ORDER) {
+      const row = grid.get(wd);
+      if (!row) continue;
+      const counts: Partial<Record<RegimeClass, number>> = {};
+      let total = 0;
+      for (const k of classes) {
+        const n = row.get(k) ?? 0;
+        if (n) counts[k] = n;
+        total += n;
+        totals.set(k, (totals.get(k) ?? 0) + n);
+      }
+      grand += total;
+      rows.push({ weekday: WEEKDAY_LABEL[wd], counts, total });
+    }
+    rows.push({ weekday: null, counts: Object.fromEntries(totals) as WeekdayRow["counts"], total: grand });
+    return { rows, classes };
+  }, [dayList, regimeByDay]);
+  const weekdayCols = useMemo(() => weekdayColumns(weekdayMix.classes), [weekdayMix.classes]);
 
   return (
     <div>
@@ -209,6 +537,28 @@ export function Interactions() {
           {run.isFetching ? "Running…" : "Run tracking"}
         </button>
       </div>
+
+      {/* saved snapshots — reopening one is a disk read, not a recompute */}
+      {savedRuns.data && savedRuns.data.length > 0 && (
+        <div className="panel">
+          <div className="section-cap">Saved runs</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {savedRuns.data.map((r) => (
+              <button
+                key={r.run_id}
+                type="button"
+                className="chip"
+                title={`bin ${r.config.bin_size} · VA ${r.config.va_pct} · window ${r.config.outcome_window_min}m · cluster ${r.config.zone_cluster_pts} pts · ${r.coverage.ran_days}/${r.coverage.requested_days} sessions`}
+                onClick={() => loadRun(r)}
+                disabled={run.isFetching}
+              >
+                {r.config.symbol} · {r.config.start} → {r.config.end} ·{" "}
+                {r.config.sources.join("+")} · {r.n_touches}t/{r.n_snaps}s
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* cache coverage strip */}
       {coverage.data && (
@@ -248,6 +598,44 @@ export function Interactions() {
           </div>
 
           {/* aggregates */}
+          <AggTable
+            title="Outcome by horizon"
+            data={data.aggregates.by_horizon ?? []}
+            columns={aggColumns}
+            caption="The same touches rescored at fixed 10/30/60-minute windows — how much of the outcome is just the clock."
+          />
+          <div className="grid-2">
+            <AggTable
+              title="Upper-band pullback (the cut)"
+              data={data.aggregates.upper_band_pullback ?? []}
+              columns={bandContextColumns}
+              keepOrder
+              caption="Pullback-from-above onto a developing POC/VAH while price holds NY VWAP +1σ..+2σ, scored at 30m with medians. Judge every row against the null baseline: beat its reject rate AND show MFE/MAE asymmetry, or it's noise."
+            />
+            <AggTable
+              title="By band context"
+              data={data.aggregates.by_band_context ?? []}
+              columns={bandContextColumns}
+              keepOrder
+              caption="All touches grouped by where price sat in the NY VWAP bands, per approach side — the same level means different things in different bands."
+            />
+          </div>
+          <div className="grid-2">
+            <AggTable
+              title="Time in band · NY VWAP"
+              data={withBandTotals(data.aggregates.band_occupancy ?? [])}
+              columns={bandOccupancyColumns}
+              keepOrder
+              caption="How long price spent in each NY VWAP band, tallied per RTH minute. Rows read top-to-bottom like the chart (>+2σ down to <-2σ). Avg min/session is the comparable read — the total scales with the date range."
+            />
+            <AggTable
+              title="Time in band · Globex (ON) VWAP"
+              data={withBandTotals(data.aggregates.band_occupancy_gx ?? [])}
+              columns={bandOccupancyColumns}
+              keepOrder
+              caption="The same per-minute tally against the overnight-anchored Globex VWAP bands. Empty unless 'globex' is among the sources."
+            />
+          </div>
           <div className="grid-2">
             <div>
               <AggTable title="By level source" data={data.aggregates.by_source} columns={aggColumns} />
@@ -261,43 +649,95 @@ export function Interactions() {
                 caption="Reject rate of a lone level vs. one stacked with another source."
               />
               <AggTable
-                title="VA-snap → reversion"
+                title="VA-snap → reversion (fade)"
                 data={data.aggregates.vasnap_reversion}
                 columns={vasnapColumns}
-                caption="After a value boundary snapped across price, did price revert to session VWAP."
+                caption="After a level snapped across price, did price revert to NY VWAP. Rates exclude trivial snaps (already at/through VWAP at the snap bar)."
+              />
+              <AggTable
+                title="VA-snap → continuation (flip)"
+                data={data.aggregates.vasnap_continuation ?? []}
+                columns={vasnapContColumns}
+                caption="The same snaps traded with the snap direction, stop = a close through NY VWAP. Hold % = never stopped within the window; run = excursion before the stop."
               />
             </div>
+          </div>
+
+          <div className="grid-2">
+            <AggTable
+              title="Regime mix"
+              data={regimeMix}
+              columns={regimeMixColumns}
+              keepOrder
+              caption="Day-type breakdown across the run's sessions — the same per-day regime class the Strategies tab colours its calendar by."
+            />
+            <AggTable
+              title="Regime by weekday"
+              data={weekdayMix.rows}
+              columns={weekdayCols}
+              keepOrder
+              caption="The same day-types cross-cut by weekday (Mon–Fri) — does the window lean trendy early in the week, balanced on Fridays, etc."
+            />
           </div>
 
           {/* per-day drill-down */}
           <div className="panel">
             <div className="section-cap">Sessions</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {dayList.map((d) => (
-                <button
-                  key={d}
-                  type="button"
-                  className={d === selectedDay ? "chip selected" : "chip"}
-                  onClick={() => setSelectedDay(d === selectedDay ? null : d)}
-                >
-                  {d} · {data.day_index[d].n_touches}t/{data.day_index[d].n_snaps}s
-                </button>
-              ))}
+              {dayList.map((d) => {
+                const klass = regimeByDay.get(d);
+                return (
+                  <button
+                    key={d}
+                    type="button"
+                    className={d === selectedDay ? "chip selected" : "chip"}
+                    onClick={() => setSelectedDay(d === selectedDay ? null : d)}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                  >
+                    {klass && <RegimeBadge klass={klass} dot />}
+                    {d} · {data.day_index[d].n_touches}t/{data.day_index[d].n_snaps}s
+                  </button>
+                );
+              })}
             </div>
           </div>
 
           {selectedDay && (
             <>
               <div className="panel">
-                <div className="section-cap">
-                  {selectedDay} — session · green/red dots = touch reject/accept (ringed = 2+
-                  sources stacked), triangles = VA-snaps
+                <div
+                  className="section-cap"
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    {regimeByDay.get(selectedDay) && (
+                      <RegimeBadge klass={regimeByDay.get(selectedDay)!} />
+                    )}
+                    <span>
+                      {selectedDay} — session · green/red dots = touch reject/accept (ringed = 2+
+                      sources stacked), triangles = VA-snaps
+                    </span>
+                  </span>
+                  <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                    {([["1m", null], ["500t", 500]] as const).map(([label, n]) => (
+                      <button
+                        key={label}
+                        type="button"
+                        className={chartTicks === n ? "chip selected" : "chip"}
+                        onClick={() => setChartTicks(n)}
+                        title={n == null ? "1-minute candles" : `${n}-tick bars`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </span>
                 </div>
                 <DayChart
                   symbol={data.symbol}
                   day={selectedDay}
                   binSize={committed?.bin_size}
                   sources={committed?.sources}
+                  ticksPerBar={chartTicks ?? undefined}
                   touches={dayTouches}
                   vaSnaps={daySnaps}
                 />

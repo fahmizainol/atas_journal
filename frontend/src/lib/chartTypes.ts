@@ -36,6 +36,16 @@ export interface ProfilePoint {
   val: number;
 }
 
+// Cumulative volume delta: the running sum of signed aggressor volume (buy market
+// orders minus sell market orders) as of each bar's close, anchored at the first
+// drawn bar. Only the sim's charts send it — it needs the tape's aggressor side,
+// which the journal's Databento bars don't carry. Drawn in its own pane under the
+// candles. See api/sim_charts._cvd.
+export interface CvdPoint {
+  time: number;
+  value: number;
+}
+
 export interface ChartMarker {
   time: number;
   position: "aboveBar" | "belowBar" | "inBar";
@@ -109,6 +119,7 @@ export interface TradeChartData {
   trade_rect?: TradeRect | null;
   excursion?: Omit<Excursion, "available">;
   footprint?: Footprint;
+  cvd?: CvdPoint[];
   tick_size?: number;
   /** Dollars per full point per contract (contract spec) — for the ruler's $/lot. */
   point_value?: number;
@@ -130,6 +141,7 @@ export interface DayChartData {
   levels?: PriceLineSpec[];
   trades?: TradeRect[];
   footprint?: Footprint;
+  cvd?: CvdPoint[];
   tick_size?: number;
   /** Dollars per full point per contract (contract spec) — for the ruler's $/lot. */
   point_value?: number;

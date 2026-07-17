@@ -172,7 +172,14 @@ export function suggestLabel(diffs: ConfigDiff[]): string {
 export function draftFrom(schema: ConfigSchema, config: SimConfig | null): DraftConfig {
   const base: DraftConfig = {};
   for (const f of schema.fields) {
-    base[f.name] = config ? (config as unknown as DraftConfig)[f.name] : f.default;
+    // Fall back to the field default when the config lacks the key — a config
+    // saved before a knob existed (an older engine version) has no value for it,
+    // and leaving it undefined would render the field blank and fail validation
+    // as "required". `??` only fills a missing/null key, so a legitimate 0 or a
+    // nullable null (target_rr) is preserved. The gate loop below already does
+    // this; the scalar loop now matches it.
+    const stored = config ? (config as unknown as DraftConfig)[f.name] : undefined;
+    base[f.name] = stored ?? f.default;
   }
   const conf = ((config?.confluences ?? {}) as Record<string, Section>) ?? {};
   const sections: Record<string, Section> = {};

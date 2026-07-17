@@ -298,10 +298,137 @@ export interface RunCut {
   rows: RunEdgeRow[];
 }
 
+// One confluence's independent veto stats over the ghost ledger. Unlike the
+// by_gate cut (which credits only the FIRST gate to reject each entry), every
+// gate that would have vetoed a trade is scored on it here — so rows overlap and
+// `trades` sums to more than the vetoed total. `unique` is how many a gate caught
+// alone (nothing else stood between the entry and a real fill).
+export interface ConfluenceRow extends RunEdgeRow {
+  bucket: string; // the confluence / gate name
+  unique: number;
+}
+
+// One outcome group's MFE/MAE profile (bucket = "All" | "Winners" | "Losers").
+// mfe_r/mae_r are the median peak/trough in R; capture is the median fraction of
+// the peak the exit actually booked (null when no trade in the group was ever in
+// profit); reach_1r/heat_1r are the shares that reached +1R in favor / -1R against.
+export interface ExcursionRow {
+  bucket: string;
+  trades: number;
+  mfe_r: number;
+  mae_r: number;
+  capture: number | null;
+  reach_1r: number;
+  heat_1r: number;
+}
+
+// One side (bucket = "Winners" | "Losers") of the win/loss distribution the
+// bucket cuts blend together. best_r/best_pnl are the single most extreme trade on
+// that side; top3_share is the fraction of the side's P&L its three most extreme
+// trades carried (near 1 = a few outliers are the whole side); med_hold_s is the
+// median hold in seconds.
+export interface WinLossSide {
+  bucket: string;
+  trades: number;
+  share: number;
+  net_pnl: number;
+  avg_pnl: number;
+  avg_r: number;
+  med_r: number;
+  std_r: number;
+  best_r: number;
+  best_pnl: number;
+  top3_share: number | null;
+  med_hold_s: number;
+}
+
+// Book-level payoff geometry and sequence. profit_factor/payoff_ratio may be "inf"
+// (a side was empty); max_drawdown is the deepest peak-to-trough of cumulative net.
+export interface WinLossSummary {
+  profit_factor: Num;
+  payoff_ratio: Num;
+  expectancy_r: number;
+  max_win_streak: number;
+  max_loss_streak: number;
+  max_drawdown: number;
+}
+
+// Empty object ({}) for a run predating r_multiple — the panel hides the table.
+export interface WinLossProfile {
+  sides?: WinLossSide[];
+  summary?: WinLossSummary;
+}
+
+// One R-bucket of the outcome distribution (bucket = "≤ -1R" … "> 3R"). The stop
+// wall sits in the first bucket, the target spike in whichever holds the target R.
+export interface RHistBin {
+  bucket: string;
+  trades: number;
+  share: number;
+  net_pnl: number;
+}
+
+// One entry-knowable feature's winner-vs-loser contrast. auc is P(a random winner's
+// value > a random loser's) — 0.5 = no separation; luck is the permutation floor
+// (null = not scored), holds = clears the multiple-testing bar.
+export interface DiscriminatorRow {
+  feature: string;
+  unit: string;
+  win_mean: number;
+  loss_mean: number;
+  auc: number;
+  luck: number | null;
+  holds: boolean;
+}
+
+// The whole discriminator block. Zero-variance features (a fixed stop, fixed size)
+// are dropped server-side, so rows may be empty even on a full run.
+export interface Discriminator {
+  rows: DiscriminatorRow[];
+  luck_bar: number;
+  n_win: number;
+  n_loss: number;
+}
+
+// One session's net, in booked order — the strip that shows day-level clustering.
+export interface DailyDay {
+  date: string;
+  net: number;
+}
+
+// The book rolled up to sessions. top3_share is the fraction of net the three best
+// days carried (null over an unprofitable book); worst_day is the number a dollar
+// drawdown is built from.
+export interface DailyConcentration {
+  days: number;
+  green_share: number;
+  avg_day: number;
+  med_day: number;
+  best_day: number;
+  best_date: string;
+  worst_day: number;
+  worst_date: string;
+  top3_share: number | null;
+  series: DailyDay[];
+}
+
 export interface RunEdgeScope {
   trades: number;
   net_pnl: number;
+  // The MFE/MAE breakdown of this book. Empty for a run that predates the engine's
+  // excursion columns — the panel reads that as "re-run to populate".
+  excursions: ExcursionRow[];
+  // The winners-vs-losers distribution: tails, payoff, hold split, streaks, drawdown.
+  win_loss?: WinLossProfile;
+  // The R-outcome histogram, the entry discriminator, and the daily concentration —
+  // the deeper winner/loser reads. Empty/absent on runs predating r_multiple.
+  r_hist?: RHistBin[];
+  discriminator?: Discriminator;
+  daily?: DailyConcentration;
   cuts: RunCut[];
+  // Present only on the vetoed scope; empty on runs with no gates (or older runs
+  // whose ledger predates the full gate set, where it falls back to first-match).
+  confluences?: ConfluenceRow[];
 }
 
 // traded = what the run took; vetoed = the ghost trades its gates cut; all = the
