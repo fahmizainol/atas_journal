@@ -126,6 +126,42 @@ a {
   margin-top: 1px;
 }
 
+/* ---- workspace switch ---- */
+/* The Journal/Lab mode selector sits above the tab strip; the tabs below it
+   belong to the active workspace. */
+.app-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.workspace-switch {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  padding: 3px;
+}
+.workspace-switch button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 6px 18px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.workspace-switch button:hover:not(.active) {
+  color: var(--text);
+}
+.workspace-switch button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* ---- tabs / nav ---- */
 .tabs {
   display: flex;
