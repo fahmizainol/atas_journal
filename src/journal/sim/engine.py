@@ -94,9 +94,9 @@ def _minutes_et(ts: pd.Series) -> np.ndarray:
     return (et.dt.hour * 60 + et.dt.minute).to_numpy()
 
 
-def _excursion(price: list[float], entry_i: int, exit_i: int,
-               entry: float, s: float) -> tuple[float, float]:
-    """The best and worst this trade was ever worth, in points, over its own life.
+def _excursion(price: list[float], ts, entry_i: int, exit_i: int,
+               entry: float, s: float) -> tuple[float, float, float]:
+    """The best and worst this trade was ever worth, and how fast it climbed back.
 
     Read off the same tick stream the fills came from (``price``), from the entry
     tick through the exit tick inclusive. In the trade's own direction (``s``): the
@@ -105,11 +105,23 @@ def _excursion(price: list[float], entry_i: int, exit_i: int,
     the deepest it went against, the heat the trade sat through to get paid. MFE is
     >= 0 and MAE <= 0 except in the degenerate case where price never returned to a
     limit entry, which is itself the reading that the trade was never really live.
+
+    The third value is the recovery time in seconds: from the deepest adverse tick
+    back to the first tick that returned to breakeven (the entry, in the trade's
+    favor). It is how long the trade spent climbing out of its worst heat — 0 for a
+    trade that never went underwater, and NaN for one that never recovered (a loser
+    that died below water), which the winner-recovery read filters on anyway.
     """
-    seg = price[entry_i:exit_i + 1]
-    hi, lo = max(seg), min(seg)
-    fav, adv = (hi, lo) if s > 0 else (lo, hi)
-    return s * (fav - entry), s * (adv - entry)
+    signed = s * (np.asarray(price[entry_i:exit_i + 1], dtype=float) - entry)
+    fav, adv = float(signed.max()), float(signed.min())
+    recovery_s = 0.0
+    if adv < 0:
+        lo = int(signed.argmin())  # earliest deepest tick, if the low is touched twice
+        back = np.nonzero(signed[lo:] >= 0)[0]
+        recovery_s = (float((ts.iloc[entry_i + lo + int(back[0])]
+                             - ts.iloc[entry_i + lo]).total_seconds())
+                      if len(back) else float("nan"))
+    return fav, adv, recovery_s
 
 
 def run_session(
@@ -326,7 +338,7 @@ def run_session(
         # With pyr_n == 1 the single lot is the whole size, so this is cfg.contracts.
         gross = pts * pv * p_.size
         comm = 2 * cfg.commission_per_side * p_.size
-        mfe_pts, mae_pts = _excursion(price, p_.entry_i, i, p_.entry_price, s)
+        mfe_pts, mae_pts, recovery_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, s)
         return {
             "session": day,
             "direction": "Long" if side == "long" else "Short",
@@ -353,6 +365,9 @@ def run_session(
             "mae_points": mae_pts,
             "mfe_r": mfe_pts / risk_pts,
             "mae_r": mae_pts / risk_pts,
+            # How long the trade spent climbing back from its worst heat to
+            # breakeven, in seconds (0 if never underwater, NaN if never recovered).
+            "recovery_s": recovery_s,
             "exit_reason": reason,
             "points": pts,
             "r_multiple": pts / risk_pts,
@@ -848,7 +863,7 @@ def run_session_fade(
         pts = s * (exit_price - p_.entry_price)
         gross = pts * pv * cfg.contracts
         comm = 2 * cfg.commission_per_side * cfg.contracts
-        mfe_pts, mae_pts = _excursion(price, p_.entry_i, i, p_.entry_price, s)
+        mfe_pts, mae_pts, recovery_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, s)
         return {
             "session": day,
             "direction": "Long" if side == "long" else "Short",
@@ -867,6 +882,9 @@ def run_session_fade(
             "mae_points": mae_pts,
             "mfe_r": mfe_pts / risk_pts,
             "mae_r": mae_pts / risk_pts,
+            # How long the trade spent climbing back from its worst heat to
+            # breakeven, in seconds (0 if never underwater, NaN if never recovered).
+            "recovery_s": recovery_s,
             "exit_reason": reason,
             "points": pts,
             "r_multiple": pts / risk_pts,
@@ -1180,7 +1198,7 @@ def run_session_profile_pullback(
         pts = exit_price - p_.entry_price
         gross = pts * pv * cfg.contracts
         comm = 2 * cfg.commission_per_side * cfg.contracts
-        mfe_pts, mae_pts = _excursion(price, p_.entry_i, i, p_.entry_price, 1.0)
+        mfe_pts, mae_pts, recovery_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, 1.0)
         return {
             "session": day,
             "direction": "Long",
@@ -1198,6 +1216,9 @@ def run_session_profile_pullback(
             "mae_points": mae_pts,
             "mfe_r": mfe_pts / risk_pts,
             "mae_r": mae_pts / risk_pts,
+            # How long the trade spent climbing back from its worst heat to
+            # breakeven, in seconds (0 if never underwater, NaN if never recovered).
+            "recovery_s": recovery_s,
             "exit_reason": reason,
             "points": pts,
             "r_multiple": pts / risk_pts,

@@ -10,7 +10,10 @@ import type {
   Discriminator,
   DiscriminatorRow,
   ExcursionRow,
+  LoserGiveback,
   RHistBin,
+  WinnerHeat,
+  WinnerRecovery,
   RunCut,
   RunEdgeRow,
   RunEdgeScope,
@@ -134,7 +137,7 @@ function Body({ slug, runId }: { slug: string; runId: string }) {
 
       {shown.r_hist && shown.r_hist.length > 0 && <RHistogram bins={shown.r_hist} />}
 
-      {shown.discriminator && (
+      {shown.discriminator?.rows && (
         <DiscriminatorBreakdown disc={shown.discriminator} />
       )}
 
@@ -147,6 +150,18 @@ function Body({ slug, runId }: { slug: string; runId: string }) {
           This run predates MFE/MAE tracking — re-run it (same config, no logic change) to populate
           the excursion profile.
         </div>
+      )}
+
+      {shown.loser_giveback?.buckets && shown.loser_giveback.buckets.length > 0 && (
+        <LoserGivebackBreakdown lg={shown.loser_giveback} />
+      )}
+
+      {shown.winner_heat?.buckets && shown.winner_heat.buckets.length > 0 && (
+        <WinnerHeatBreakdown wh={shown.winner_heat} />
+      )}
+
+      {shown.winner_recovery?.buckets && shown.winner_recovery.buckets.length > 0 && (
+        <WinnerRecoveryBreakdown wr={shown.winner_recovery} />
       )}
 
       {scope === "vetoed" && shown.confluences && shown.confluences.length > 0 && (
@@ -541,6 +556,13 @@ const excursionColumns: ColumnDef<ExcursionRow, any>[] = [
       return v == null ? <span className="muted">—</span> : pctFrac(v);
     },
   },
+  {
+    accessorKey: "ever_green",
+    header: "Ever green",
+    // The weaker sibling of Reached +1R: was the trade ever in profit at all. The
+    // gap between this and Reached +1R on the Losers row is the give-back.
+    cell: (c) => pctFrac(c.getValue() as number),
+  },
   { accessorKey: "reach_1r", header: "Reached +1R", cell: (c) => pctFrac(c.getValue() as number) },
   { accessorKey: "heat_1r", header: "Took −1R heat", cell: (c) => pctFrac(c.getValue() as number) },
 ];
@@ -558,11 +580,174 @@ function ExcursionBreakdown({ rows }: { rows: ExcursionRow[] }) {
         worst heat it sat through (MAE), in R, split by outcome — measured off the ticks over each
         trade's own life. <strong>Capture</strong> is the median fraction of the peak the exit
         actually kept: low means a trail or target is handing open profit back.{" "}
-        <strong>Reached +1R</strong> is the share that ever got that far in favor — losers that
-        rarely do were never really working, so no breakeven rule saves them.{" "}
+        <strong>Ever green</strong> is the share that was ever in profit at all; read against{" "}
+        <strong>Reached +1R</strong> on the Losers row, the gap between them is how many were briefly
+        up and gave it all back. <strong>Reached +1R</strong> is the share that got a full R in favor —
+        losers that rarely do were never really working, so no breakeven rule saves them.{" "}
         <strong>Took −1R heat</strong> is the share that sat through a full stop's worth against;
         winners doing so are surviving on luck the stop should have cut. Read it as a description of
         the exits, not a filter — MFE and MAE are known only after the fill.
+      </div>
+    </div>
+  );
+}
+
+// The losers split by how far they ever ran in favor before turning — the answer
+// to "how many of these were ever green, and by how much". "Never green" is a loss
+// from the fill that no exit rule reaches; the give-back buckets above it are
+// losers the exit was in the trade to catch. The headline is the share ever green;
+// the net beside each bucket is what that slice of losers cost.
+function LoserGivebackBreakdown({ lg }: { lg: LoserGiveback }) {
+  const maxShare = Math.max(...lg.buckets.map((b) => b.share), 0.0001);
+  return (
+    <div className="panel">
+      <div className="section-cap">Losers: how far did they ever get?</div>
+      <div style={{ fontSize: 12, margin: "2px 0 8px" }}>
+        <strong className={lg.ever_green >= 0.5 ? "neg" : undefined}>{pctFrac(lg.ever_green)}</strong>{" "}
+        of the {fmtInt(lg.losers)} losers were <strong>ever in profit</strong> before they turned.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, margin: "4px 0" }}>
+        {lg.buckets.map((b) => (
+          <div key={b.bucket} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+            <span style={{ width: 84, textAlign: "right", flexShrink: 0 }}>{b.bucket}</span>
+            <div style={{ flex: 1, background: "var(--panel-2, #1a1a1a)", borderRadius: 3, height: 16 }}>
+              <div
+                style={{
+                  width: `${(b.share / maxShare) * 100}%`,
+                  height: "100%",
+                  borderRadius: 3,
+                  // "Never green" is unrecoverable — dim it; the give-back buckets
+                  // (an exit could reach them) get the fuller red.
+                  background: "var(--neg, #f85149)",
+                  opacity: b.bucket === "Never green" ? 0.35 : 0.7,
+                  minWidth: b.trades > 0 ? 2 : 0,
+                }}
+              />
+            </div>
+            <span style={{ width: 92, flexShrink: 0 }}>
+              {fmtInt(b.trades)} <span className="muted">({fmtPct(b.share * 100, 0)})</span>
+            </span>
+            <span style={{ width: 88, textAlign: "right", flexShrink: 0 }} className="neg">
+              {fmt(b.net_pnl)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="section-cap" style={{ marginTop: 6 }}>
+        Every losing trade by the best it ever showed (peak MFE, in R). <strong>Never green</strong>{" "}
+        (dimmed) was wrong from the fill — no breakeven or partial exit reaches it. The buckets above
+        it were <em>green and gave it back</em>: the higher they cluster, the more an earlier exit
+        could have saved, and the net beside each is what that slice cost. Read with the exit in mind —
+        a wall at <strong>0 to 0.5R</strong> means the losers barely poked into profit, so a breakeven
+        stop would mostly just scratch them, not rescue them.
+      </div>
+    </div>
+  );
+}
+
+// The mirror of the give-back table: winners split by the worst heat they sat
+// through before working. "No heat" is a clean entry that worked from the fill; the
+// buckets above it went underwater first, and the deeper they cluster the more the
+// green is riding on stop room a tighter stop would have cut. The headline is the
+// share that took any heat; the net beside each bucket is what that slice made.
+function WinnerHeatBreakdown({ wh }: { wh: WinnerHeat }) {
+  const maxShare = Math.max(...wh.buckets.map((b) => b.share), 0.0001);
+  return (
+    <div className="panel">
+      <div className="section-cap">Winners: how much heat did they take?</div>
+      <div style={{ fontSize: 12, margin: "2px 0 8px" }}>
+        <strong className={wh.took_heat >= 0.5 ? "neg" : "pos"}>{pctFrac(wh.took_heat)}</strong>{" "}
+        of the {fmtInt(wh.winners)} winners went <strong>underwater</strong> before they worked.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, margin: "4px 0" }}>
+        {wh.buckets.map((b) => (
+          <div key={b.bucket} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+            <span style={{ width: 84, textAlign: "right", flexShrink: 0 }}>{b.bucket}</span>
+            <div style={{ flex: 1, background: "var(--panel-2, #1a1a1a)", borderRadius: 3, height: 16 }}>
+              <div
+                style={{
+                  width: `${(b.share / maxShare) * 100}%`,
+                  height: "100%",
+                  borderRadius: 3,
+                  background: "var(--pos, #3fb950)",
+                  // "No heat" is a clean entry — nothing to fix; dim it, and give the
+                  // heat-taking buckets (the ones riding on stop room) the fuller green.
+                  opacity: b.bucket === "No heat" ? 0.35 : 0.7,
+                  minWidth: b.trades > 0 ? 2 : 0,
+                }}
+              />
+            </div>
+            <span style={{ width: 92, flexShrink: 0 }}>
+              {fmtInt(b.trades)} <span className="muted">({fmtPct(b.share * 100, 0)})</span>
+            </span>
+            <span style={{ width: 88, textAlign: "right", flexShrink: 0 }} className="pos">
+              {fmt(b.net_pnl)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="section-cap" style={{ marginTop: 6 }}>
+        Every winning trade by the worst it ever sat through (peak MAE, in R). <strong>No heat</strong>{" "}
+        (dimmed) worked from the fill — a clean entry with nothing to fix. The buckets above it went
+        underwater first and came back: the net beside each is the P&amp;L riding on that stop room, so
+        a wall at <strong>−0.5 to −1R</strong> means much of the green is trades a tighter stop would
+        have killed — an edge surviving on room, not timing. The stop caps heat near a full R, so{" "}
+        <strong>&lt; −1R</strong> is usually empty — the mirror of the losers' empty <strong>1R+</strong>{" "}
+        under the target. (Adverse, so signed negative — the losers' give-back buckets above run
+        positive.)
+      </div>
+    </div>
+  );
+}
+
+// The follow-on to the heat table: of the winners that went underwater, how long
+// they took to climb back to breakeven (recovery time from the deepest tick). A
+// fast recovery barely wobbled; a slow one was a real drawdown that happened to come
+// back — the kind a tighter time-stop or a nervier hand bails on early. The net
+// beside the slow buckets is the green that only exists because the red was held.
+function WinnerRecoveryBreakdown({ wr }: { wr: WinnerRecovery }) {
+  const maxShare = Math.max(...wr.buckets.map((b) => b.share), 0.0001);
+  return (
+    <div className="panel">
+      <div className="section-cap">Underwater winners: how fast did they recover?</div>
+      <div style={{ fontSize: 12, margin: "2px 0 8px" }}>
+        Median recovery <strong className="pos">{fmtHold(wr.median_recovery_s)}</strong> across the{" "}
+        {fmtInt(wr.winners)} winners that went underwater — from their deepest heat back to breakeven.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, margin: "4px 0" }}>
+        {wr.buckets.map((b) => (
+          <div key={b.bucket} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+            <span style={{ width: 84, textAlign: "right", flexShrink: 0 }}>{b.bucket}</span>
+            <div style={{ flex: 1, background: "var(--panel-2, #1a1a1a)", borderRadius: 3, height: 16 }}>
+              <div
+                style={{
+                  width: `${(b.share / maxShare) * 100}%`,
+                  height: "100%",
+                  borderRadius: 3,
+                  background: "var(--pos, #3fb950)",
+                  // Fast recoveries are the clean ones — dim them; the slow buckets
+                  // (a real drawdown held through) get the fuller green.
+                  opacity: b.bucket === "< 30s" ? 0.35 : 0.7,
+                  minWidth: b.trades > 0 ? 2 : 0,
+                }}
+              />
+            </div>
+            <span style={{ width: 92, flexShrink: 0 }}>
+              {fmtInt(b.trades)} <span className="muted">({fmtPct(b.share * 100, 0)})</span>
+            </span>
+            <span style={{ width: 88, textAlign: "right", flexShrink: 0 }} className="pos">
+              {fmt(b.net_pnl)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="section-cap" style={{ marginTop: 6 }}>
+        For each winner that went underwater, the seconds from its deepest heat back to breakeven.{" "}
+        <strong>&lt; 30s</strong> (dimmed) barely wobbled — noise around the entry, not a real
+        drawdown. The slower buckets sat red for a genuine stretch and came back: the net beside each
+        is the P&amp;L that only exists because the trade was held through it, so a wall out at{" "}
+        <strong>2 to 5m</strong> is green a time-stop or a nervier exit would have cut. Pair it with
+        the heat table above — deep <em>and</em> slow is the trade most exposed to a tighter rule.
       </div>
     </div>
   );

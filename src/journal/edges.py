@@ -441,10 +441,191 @@ def excursions(trades: pd.DataFrame) -> pd.DataFrame:
             "mfe_r": float(mfe_r.median()),
             "mae_r": float(mae_r.median()),
             "capture": capture,
+            # Ever in profit at all — mfe_r > 0. The weaker sibling of reach_1r, and
+            # the one that keeps reach_1r honest: a Losers row can read 0% reached
+            # +1R while nearly all of them were briefly green and gave it back, which
+            # is a give-back problem, not a "never worked" one.
+            "ever_green": float((mfe_r > 0).mean()),
             "reach_1r": float((mfe_r >= 1.0).mean()),
             "heat_1r": float((mae_r <= -1.0).mean()),
         })
     return pd.DataFrame(rows)
+
+
+# --- how far the losers ever got: give-back vs never-worked -------------------
+
+# Half-open (lo, hi] on peak MFE in R. "Never green" is mfe_r <= 0 — a trade that
+# was never once above its entry, a loss from the tick. The rest were green and
+# turned; how far they got says whether an earlier exit could have saved them.
+LOSER_GIVEBACK_BINS: tuple[tuple[str, float | None, float | None], ...] = (
+    ("Never green", None, 0.0),
+    ("0 to 0.5R", 0.0, 0.5),
+    ("0.5 to 1R", 0.5, 1.0),
+    ("1R+", 1.0, None),
+)
+
+
+def loser_giveback(trades: pd.DataFrame) -> dict:
+    """The losers split by the best they ever showed — the answer to "how many of
+    these were ever in profit, and by how much".
+
+    A loser that was never green (``mfe_r <= 0``) was wrong from the fill and no
+    exit rule reaches it; a loser that ran to +0.8R and came back is a give-back the
+    exit could in principle have caught. The split is the evidence for or against a
+    breakeven/partial rule: if the losers cluster in "never green" there is nothing
+    to protect, and if they cluster past +0.5R there is. ``net_pnl`` per bucket is
+    the P&L those losers cost, so the give-back buckets show what the leak is worth.
+
+    Losers is ``net <= 0`` to match ``excursions``. Empty (no trades, no losers, or
+    a run predating ``mfe_r``) -> empty dict / zero-loser dict."""
+    need = ("mfe_r", "net_pnl")
+    if trades is None or trades.empty or any(c not in trades.columns for c in need):
+        return {}
+    pnl = trades["net_pnl"].astype(float)
+    losers = trades[pnl <= 0]
+    if losers.empty:
+        return {"losers": 0, "ever_green": float("nan"), "buckets": []}
+    mfe = losers["mfe_r"].astype(float).to_numpy()
+    lp = losers["net_pnl"].astype(float).to_numpy()
+    buckets = []
+    for label, lo, hi in LOSER_GIVEBACK_BINS:
+        if lo is None:
+            m = mfe <= hi
+        elif hi is None:
+            m = mfe > lo
+        else:
+            m = (mfe > lo) & (mfe <= hi)
+        buckets.append({
+            "bucket": label,
+            "trades": int(m.sum()),
+            "share": float(m.mean()),
+            "net_pnl": float(lp[m].sum()),
+        })
+    return {
+        "losers": int(len(losers)),
+        "ever_green": float((mfe > 0).mean()),
+        "buckets": buckets,
+    }
+
+
+# --- how much heat the winners took: clean entry vs survived-on-luck ----------
+
+# Half-open (lo, hi] on heat = -mae_r (>= 0, in R). "No heat" is a winner that never
+# went underwater — a clean entry that worked from the fill. The rest took heat
+# before they turned; how deep says whether the stop was doing real work or the
+# trade was one tick from being cut. Bin bounds are the heat magnitude; the labels
+# carry the minus sign because MAE is adverse (matching the signed MAE column), so
+# these read negative where the losers' favorable give-back buckets read positive.
+WINNER_HEAT_BINS: tuple[tuple[str, float | None, float | None], ...] = (
+    ("No heat", None, 0.0),
+    ("0 to −0.5R", 0.0, 0.5),
+    ("−0.5 to −1R", 0.5, 1.0),
+    ("< −1R", 1.0, None),
+)
+
+
+def winner_heat(trades: pd.DataFrame) -> dict:
+    """The winners split by the worst heat they ever sat through before booking —
+    the mirror of :func:`loser_giveback`.
+
+    A winner that took no heat (``mae_r == 0``) worked from the fill; one that ran to
+    -0.8R and came back won on an entry the stop nearly cut. The split reads on stop
+    placement and entry timing: winners bunched in "No heat" are clean entries, while
+    a wall out at "0.5 to 1R" says the green is being made by trades a tighter stop
+    would have killed — an edge surviving on room, not timing. ``net_pnl`` per bucket
+    is the P&L that slice of winners made, so the deep-heat buckets show how much of
+    the book is riding on that room. (The stop caps heat near -1R, so "1R+" is
+    normally empty — its mirror is losers' empty "1R+" favorable under the target.)
+
+    Winners is ``net > 0`` to match :func:`excursions`. Empty (no trades, no winners,
+    or a run predating ``mae_r``) -> empty dict / zero-winner dict."""
+    need = ("mae_r", "net_pnl")
+    if trades is None or trades.empty or any(c not in trades.columns for c in need):
+        return {}
+    pnl = trades["net_pnl"].astype(float)
+    winners = trades[pnl > 0]
+    if winners.empty:
+        return {"winners": 0, "took_heat": float("nan"), "buckets": []}
+    heat = (-winners["mae_r"].astype(float)).to_numpy()  # adverse is <= 0, so heat >= 0
+    wp = winners["net_pnl"].astype(float).to_numpy()
+    buckets = []
+    for label, lo, hi in WINNER_HEAT_BINS:
+        if lo is None:
+            m = heat <= hi
+        elif hi is None:
+            m = heat > lo
+        else:
+            m = (heat > lo) & (heat <= hi)
+        buckets.append({
+            "bucket": label,
+            "trades": int(m.sum()),
+            "share": float(m.mean()),
+            "net_pnl": float(wp[m].sum()),
+        })
+    return {
+        "winners": int(len(winners)),
+        "took_heat": float((heat > 0).mean()),
+        "buckets": buckets,
+    }
+
+
+# --- how fast the underwater winners climbed back ----------------------------
+
+# Half-open (lo, hi] on recovery seconds — the time from a winner's deepest heat
+# back to breakeven. Buckets span seconds to minutes because a bounce that recovers
+# in ten seconds and one that sits red for five minutes are different trades even
+# when both end green.
+RECOVERY_BINS: tuple[tuple[str, float | None, float | None], ...] = (
+    ("< 30s", None, 30.0),
+    ("30s to 2m", 30.0, 120.0),
+    ("2 to 5m", 120.0, 300.0),
+    ("5m+", 300.0, None),
+)
+
+
+def winner_recovery(trades: pd.DataFrame) -> dict:
+    """Of the winners that went underwater, how long they took to climb back.
+
+    ``recovery_s`` is measured by the engine: the seconds from a trade's deepest
+    adverse tick to the first tick back at breakeven. This reads it over the winners
+    that actually took heat (``mae_r < 0``) — a winner that recovered in ten seconds
+    barely wobbled, while one that sat red for minutes was a genuine drawdown that
+    happened to come back, and only the second is the kind a tighter time-stop or a
+    nervier hand would have bailed out of early. ``net_pnl`` per bucket is the P&L in
+    the slow-recovery buckets — the green that only exists because the trade was held
+    through the red.
+
+    Needs the engine's ``recovery_s`` (runs predating it -> empty dict). Zero-winner
+    or no-underwater-winner books -> zero dict."""
+    need = ("recovery_s", "mae_r", "net_pnl")
+    if trades is None or trades.empty or any(c not in trades.columns for c in need):
+        return {}
+    pnl = trades["net_pnl"].astype(float)
+    mae = trades["mae_r"].astype(float)
+    w = trades[(pnl > 0) & (mae < 0) & trades["recovery_s"].notna()]
+    if w.empty:
+        return {"winners": 0, "median_recovery_s": float("nan"), "buckets": []}
+    rec = w["recovery_s"].astype(float).to_numpy()
+    wp = w["net_pnl"].astype(float).to_numpy()
+    buckets = []
+    for label, lo, hi in RECOVERY_BINS:
+        if lo is None:
+            m = rec <= hi
+        elif hi is None:
+            m = rec > lo
+        else:
+            m = (rec > lo) & (rec <= hi)
+        buckets.append({
+            "bucket": label,
+            "trades": int(m.sum()),
+            "share": float(m.mean()),
+            "net_pnl": float(wp[m].sum()),
+        })
+    return {
+        "winners": int(len(w)),
+        "median_recovery_s": float(np.median(rec)),
+        "buckets": buckets,
+    }
 
 
 # --- winners vs losers: the distribution the bucket cuts average away ----------

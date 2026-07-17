@@ -318,8 +318,71 @@ export interface ExcursionRow {
   mfe_r: number;
   mae_r: number;
   capture: number | null;
+  // Share ever in profit (mfe_r > 0) — the weaker sibling of reach_1r. On the
+  // Losers row it keeps reach_1r honest: 0% reached +1R can sit next to ~100%
+  // ever green, which is a give-back, not a never-worked.
+  ever_green: number;
   reach_1r: number;
   heat_1r: number;
+}
+
+// One peak-MFE bucket of the losers (bucket = "Never green" … "1R+"). Answers
+// "how far did the losers ever run in favor before turning" — never-worked at the
+// bottom, give-backs the exit might have caught higher up. net_pnl is what that
+// slice of losers cost.
+export interface LoserGivebackBin {
+  bucket: string;
+  trades: number;
+  share: number;
+  net_pnl: number;
+}
+
+// The losers split by peak MFE, plus the headline share that were ever green.
+// Empty buckets / zero losers on a run with no losers; absent on runs predating
+// mfe_r (re-run to populate, same as the excursion profile).
+export interface LoserGiveback {
+  losers: number;
+  ever_green: number;
+  buckets: LoserGivebackBin[];
+}
+
+// One heat bucket of the winners (bucket = "No heat" … "1R+"), the mirror of
+// LoserGivebackBin. Answers "how far underwater did the winners go before turning" —
+// clean entries at the bottom, near-stopped survivors higher up. net_pnl is what
+// that slice of winners made.
+export interface WinnerHeatBin {
+  bucket: string;
+  trades: number;
+  share: number;
+  net_pnl: number;
+}
+
+// The winners split by peak heat (−mae_r), plus the headline share that took any
+// heat at all. Empty buckets / zero winners on a run with no winners; absent on
+// runs predating mae_r (re-run to populate).
+export interface WinnerHeat {
+  winners: number;
+  took_heat: number;
+  buckets: WinnerHeatBin[];
+}
+
+// One recovery-time bucket of the underwater winners (bucket = "< 30s" … "5m+") —
+// how long they took to climb from their deepest heat back to breakeven. net_pnl is
+// the green riding on the trades held through the red.
+export interface WinnerRecoveryBin {
+  bucket: string;
+  trades: number;
+  share: number;
+  net_pnl: number;
+}
+
+// The underwater winners split by recovery time, plus the median. Needs the engine's
+// recovery_s — absent on runs predating it (re-run to populate). Zero winners / no
+// underwater winners -> empty buckets.
+export interface WinnerRecovery {
+  winners: number;
+  median_recovery_s: number;
+  buckets: WinnerRecoveryBin[];
 }
 
 // One side (bucket = "Winners" | "Losers") of the win/loss distribution the
@@ -425,6 +488,12 @@ export interface RunEdgeScope {
   r_hist?: RHistBin[];
   discriminator?: Discriminator;
   daily?: DailyConcentration;
+  // The losers split by how far they ever ran in favor. Absent on runs predating mfe_r.
+  loser_giveback?: LoserGiveback;
+  // The mirror: winners split by the heat they took before working. Absent pre-mae_r.
+  winner_heat?: WinnerHeat;
+  // Of those underwater winners, how fast they recovered. Absent pre-recovery_s.
+  winner_recovery?: WinnerRecovery;
   cuts: RunCut[];
   // Present only on the vetoed scope; empty on runs with no gates (or older runs
   // whose ledger predates the full gate set, where it falls back to first-match).

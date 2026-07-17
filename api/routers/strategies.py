@@ -34,7 +34,7 @@ CONFLUENCE_COLS = ["bucket", "trades", "unique", "net_pnl", "win_rate",
 # peak and trough in R, what fraction of the peak the exit kept, and the shares
 # that reached +1R in favor / sat through -1R against. ``bucket`` is the group.
 EXCURSION_COLS = ["bucket", "trades", "mfe_r", "mae_r", "capture",
-                  "reach_1r", "heat_1r"]
+                  "ever_green", "reach_1r", "heat_1r"]
 
 # The cuts a run is served in. Order is the order they are rendered in, and the
 # count is the family the luck bar corrects for — adding a seventh cut here makes
@@ -386,6 +386,13 @@ def _edge_scopes(traded, vetoed, with_luck: bool) -> dict:
             "r_hist": edges.r_histogram(book),
             "discriminator": edges.entry_discriminator(book, with_luck=with_luck),
             "daily": edges.daily_concentration(book),
+            # The losers split by how far they ever ran in favor — give-back vs
+            # never-worked. Empty on runs predating mfe_r (same as excursions).
+            "loser_giveback": edges.loser_giveback(book),
+            # The mirror: winners split by the heat they took before working.
+            "winner_heat": edges.winner_heat(book),
+            # Of those underwater winners, how fast they climbed back to breakeven.
+            "winner_recovery": edges.winner_recovery(book),
             "cuts": [
                 {
                     "name": c["name"],
