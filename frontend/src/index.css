@@ -295,6 +295,33 @@ a {
     grid-template-columns: 1fr;
   }
 }
+/* Fixed detail slot below the by-trade list: the clicked trade's chart renders
+   here instead of inline between rows, so selecting a trade never reflows the
+   list above it. */
+.trade-detail-slot {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--card-border);
+}
+.trade-detail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.trade-detail-head .link-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 400;
+  padding: 0;
+}
+.trade-detail-head .link-btn:hover {
+  color: var(--text);
+}
 
 /* ---- sections / cards ---- */
 .section-title {
@@ -545,6 +572,23 @@ button:disabled {
 }
 .radio-group button.active {
   background: var(--accent);
+  color: #fff;
+}
+
+/* Multi-select toggle chips (trade filter's "why out"). Unlike .radio-group,
+   chips are independent toggles, so they keep their own borders. */
+.chip-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.chip-row button {
+  padding: 5px 9px;
+  font-weight: 500;
+}
+.chip-row button.active {
+  background: var(--accent);
+  border-color: var(--accent);
   color: #fff;
 }
 
@@ -831,4 +875,126 @@ button:disabled {
   background: var(--bg-2);
   border: 1px solid var(--card-border);
   overflow-x: auto;
+}
+
+/* ---- research (Lab reading room) ---- */
+.research-index {
+  max-width: 760px;
+}
+.research-card {
+  display: block;
+  cursor: pointer;
+}
+.research-card:hover {
+  border-color: var(--accent);
+}
+.research-card-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.research-doc {
+  max-width: 860px;
+}
+.research-doc-nav {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 10px 0 4px;
+  font-size: 13px;
+}
+/* Rendered markdown. The docs are stat-heavy memos: readable measure, tables
+   that scroll inside the panel instead of widening the page, tabular digits. */
+.md-body {
+  padding: 22px 28px;
+  line-height: 1.65;
+  font-size: 14px;
+}
+.md-body h1 {
+  font-size: 22px;
+  line-height: 1.25;
+  margin: 4px 0 12px;
+}
+.md-body h2 {
+  font-size: 17px;
+  margin: 26px 0 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--card-border);
+}
+.md-body h3 {
+  font-size: 14.5px;
+  margin: 18px 0 6px;
+}
+.md-body p,
+.md-body ul,
+.md-body ol {
+  margin: 0 0 10px;
+}
+.md-body li {
+  margin-bottom: 4px;
+}
+.md-body blockquote {
+  margin: 0 0 10px;
+  padding: 8px 14px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-2);
+  border-radius: 0 8px 8px 0;
+  color: var(--text);
+}
+.md-body code {
+  font-family: monospace;
+  font-size: 12.5px;
+  background: var(--bg-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.md-body pre {
+  background: var(--bg-2);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.md-body pre code {
+  background: none;
+  padding: 0;
+}
+.md-body table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 12px;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--card-border);
+  padding: 5px 10px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.md-body th {
+  background: var(--bg-2);
+  font-weight: 600;
+}
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--card-border);
+  margin: 20px 0;
+}
+.md-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md-body input[type="checkbox"] {
+  accent-color: var(--accent);
+  margin-right: 6px;
+}
+.research-frame {
+  width: 100%;
+  height: calc(100vh - 170px);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  background: #fff; /* artifact pages paint their own bg; white avoids a dark flash on light pages */
+  margin: 10px 0;
 }

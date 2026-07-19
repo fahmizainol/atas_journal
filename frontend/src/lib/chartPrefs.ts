@@ -7,9 +7,14 @@ const STORAGE_KEY = "chart.indicatorVisibility";
 const DEFAULT_VISIBILITY: IndicatorVisibility = {
   vwapGlobex: true,
   vwapNy: true,
+  vwapWeekly: true,
   atr: true,
   cvd: true,
   levels: true,
+  initialBalance: true,
+  // Platform-convention guide lines with no measured edge (the study says 1×+
+  // extensions rarely print) — off until asked for.
+  ibExtensions: false,
   volumeProfile: true,
   developingProfileGlobex: true,
   developingProfileNy: true,

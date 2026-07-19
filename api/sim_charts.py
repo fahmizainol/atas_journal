@@ -15,10 +15,12 @@ import pandas as pd
 
 from journal.config import point_value, tick_size
 from journal.sim import bars as barmod
+from journal.sim import ib as ibmod
 from journal.sim import profile as profmod
 from journal.sim import registry, store
 from journal.sim import ticks as tickmod
 from journal.sim import vwap as vwapmod
+from journal.sim import weekly as weeklymod
 
 from .charts_data import ACCENT, BLUE, GOLD, GREEN, ORANGE, RED, _epoch_local
 
@@ -27,14 +29,18 @@ def _is_globex(slug: str) -> bool:
     return registry.get(slug).session == "globex"
 
 
-def _vwap_slots(gx_rows: list[dict], ny_rows: list[dict], globex: bool) -> dict:
-    """Both anchors, each in the slot that names it — the frontend colours from
-    the slot (``vwap_globex`` gray/white, ``vwap_ny`` purple) and gives each its
-    own legend toggle. ``vwap_anchor`` says which of the two the engine actually
-    traded; the other is context. The chart must never leave that ambiguous."""
+def _vwap_slots(gx_rows: list[dict], ny_rows: list[dict], wk_rows: list[dict],
+                globex: bool) -> dict:
+    """Each anchor in the slot that names it — the frontend colours from the
+    slot (``vwap_globex`` gray/white, ``vwap_ny`` purple, ``vwap_weekly``
+    orange) and gives each its own legend toggle. ``vwap_anchor`` says which
+    the engine actually traded; the others are context. No engine trades the
+    weekly anchor, so it is never a ``vwap_anchor`` value. The chart must never
+    leave that ambiguous."""
     return {
         "vwap_globex": gx_rows,
         "vwap_ny": ny_rows,
+        "vwap_weekly": wk_rows,
         "vwap_anchor": "globex" if globex else "ny",
     }
 
@@ -212,10 +218,11 @@ def _lead_bars(on: pd.DataFrame, n: int) -> pd.DataFrame:
 
 
 def _session_frame(cfg, day, tz, overnight: bool = False):
-    """One session's bars + both anchored VWAPs + display times, shared by the
+    """One session's bars + the anchored VWAPs + display times, shared by the
     per-trade and full-day payloads. Returns
-    (ticks, bars_rows, vwap_gx_rows, vwap_ny_rows, profile_gx_rows,
-    profile_ny_rows, bar_time, footprint, cvd_rows), or None if no data.
+    (ticks, bars_rows, vwap_gx_rows, vwap_ny_rows, vwap_wk_rows,
+    profile_gx_rows, profile_ny_rows, bar_time, ib, footprint, cvd_rows), or
+    None if no data.
 
     Every strategy's chart shows the same thing: the overnight candles from 18:00
     ET, the RTH session, both anchored VWAPs, and both developing profiles. What
@@ -282,6 +289,14 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
     # strategy this slice IS the engine's own tick frame, so the numbers match
     # exactly what it traded.
     w_ny = vwapmod.vwap_bands(full.iloc[rth_i0:].reset_index(drop=True))
+    # Weekly-anchored: the Globex accumulation seeded with the week's prior
+    # sessions. Same honesty rule as the Globex anchor — absent, not
+    # approximated, when the night isn't on disk or the week has a hole
+    # (weekly.weekly_seed returns None). On the week's first session the seed
+    # is zero and the weekly line coincides with the Globex one, which is what
+    # a weekly anchor genuinely looks like on a Monday.
+    wk_seed = weeklymod.weekly_seed(cfg.contract, day) if rth_i0 > 0 else None
+    w_wk = vwapmod.vwap_bands(full, seed=wk_seed) if wk_seed is not None else None
 
     times = _strictly_increasing(np.asarray(_epoch_local(b_all["ts_utc"], tz)))
 
@@ -296,6 +311,7 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
     # A bar that closed overnight has no NY VWAP yet — the anchor hasn't started,
     # so its position is negative and _vwap_rows drops it.
     vwap_ny_rows = _vwap_rows(w_ny, bar_pos - rth_i0, times)
+    vwap_wk_rows = [] if w_wk is None else _vwap_rows(w_wk, bar_pos, times)
 
     # Two developing value areas, anchored exactly where the two VWAPs are and
     # drawn together: the Globex one accumulates from the 18:00 open, the NY one
@@ -326,8 +342,13 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
         i = int(np.searchsorted(bar_ns, _utc(ts).value, side="left"))
         return int(times[min(i, len(times) - 1)])
 
-    return (full, bars_rows, vwap_gx_rows, vwap_ny_rows, profile_gx_rows,
-            profile_ny_rows, bar_time,
+    # The Initial Balance (first 60 min of RTH), measured on the same RTH ticks
+    # the engine traded and the same window as the IB/ORB study — what the chart
+    # draws is what the study's break/extension stats were measured against.
+    ib = ibmod.chart_overlay(full.iloc[rth_i0:], day, b_all["ts_utc"], times)
+
+    return (full, bars_rows, vwap_gx_rows, vwap_ny_rows, vwap_wk_rows,
+            profile_gx_rows, profile_ny_rows, bar_time, ib,
             _footprint(full, b_all, tick_size(cfg.contract)),
             _cvd(full, b_all, times))
 
@@ -352,7 +373,8 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
     frame = _session_frame(cfg, day, tz, overnight=globex)
     if frame is None:
         return {"available": False}
-    t, bars_rows, vwap_gx, vwap_ny, profile_gx, profile_ny, bar_time, footprint, cvd = frame
+    (t, bars_rows, vwap_gx, vwap_ny, vwap_wk, profile_gx, profile_ny,
+     bar_time, ib, footprint, cvd) = frame
 
     entry_t, exit_t = bar_time(entry_ts), bar_time(exit_ts)
 
@@ -401,12 +423,13 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
     return {
         "available": True,
         "bars": bars_rows,
-        **_vwap_slots(vwap_gx, vwap_ny, globex),
+        **_vwap_slots(vwap_gx, vwap_ny, vwap_wk, globex),
         **_profile_slots(profile_gx, profile_ny),
         "atr_points": [],
         "markers": markers,
         "price_lines": price_lines,
         "levels": [],
+        "ib": ib,
         "trade_rect": _trade_rect(trade, entry_t, exit_t, tz, cfg),
         "excursion": excursion,
         "instrument": tickmod.contract_for(cfg.contract, day),
@@ -465,7 +488,8 @@ def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
     frame = _session_frame(cfg, day, tz, overnight=globex)
     if frame is None:
         return {"available": False}
-    _, bars_rows, vwap_gx, vwap_ny, profile_gx, profile_ny, bar_time, footprint, cvd = frame
+    (_, bars_rows, vwap_gx, vwap_ny, vwap_wk, profile_gx, profile_ny,
+     bar_time, ib, footprint, cvd) = frame
 
     day_trades = trades
     if not trades.empty:
@@ -485,11 +509,12 @@ def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
         "available": True,
         "instrument": tickmod.contract_for(cfg.contract, day),
         "bars": bars_rows,
-        **_vwap_slots(vwap_gx, vwap_ny, globex),
+        **_vwap_slots(vwap_gx, vwap_ny, vwap_wk, globex),
         **_profile_slots(profile_gx, profile_ny),
         "atr_points": [],
         "markers": markers,
         "levels": [],
+        "ib": ib,
         "trades": rects,
         "footprint": footprint,
         "cvd": cvd,

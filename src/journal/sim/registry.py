@@ -19,7 +19,10 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import engine
-from .rules import FadeConfig, GlobexBounceConfig, ProfilePullbackConfig, SimConfig
+from .rules import (
+    DriftFadeConfig, FadeConfig, GlobexBounceConfig, OrbConfig,
+    ProfilePullbackConfig, SimConfig, ValueRotationConfig,
+)
 
 
 @dataclass(frozen=True)
@@ -115,11 +118,40 @@ STRATEGIES: dict[str, Strategy] = {
             # reads the tape and simulates identically to v7, but the exit lives
             # on the base rule path, so v7 runs are quarantined rather than
             # trusted.
-            version="8",
+            # v9: added the big-lot participation size-up (size_up_participation /
+            # size_up_contracts / biglot_min_size / biglot_window_s) — at each fill
+            # the entry is sized up when the trailing big-lot participation clears
+            # the threshold. 0 (the default) sizes every fill at the base contracts
+            # and simulates identically to v8, but the sizing rides the base rule
+            # path, so v8 runs are quarantined rather than trusted.
+            # v10: added reenter_after_stop_only — any exit other than a full
+            # stop-out stands the session down; skipped entries ride the exit
+            # rules as "reentry_halt" ghosts and a ghost stop-out lifts the
+            # halt. False (the default) simulates identically to v9, but the
+            # halt lives on the base rule path, so v9 runs are quarantined
+            # rather than trusted.
+            # v11: added reentry_rearm_window_min — a stop's re-arm may expire
+            # after a set number of minutes instead of lasting until the next
+            # non-stop exit. 0 (the default) keeps the open-ended re-arm and
+            # simulates identically to v10, but the clock rides the base rule
+            # path, so v10 runs are quarantined rather than trusted.
+            # v12: added pyramid_direction — "against" walks the scale-in grid
+            # the other way (resting limits below the fill: averaging down).
+            # "with" (the default) simulates identically to v11, but the signed
+            # step rides the base rule path, so v11 runs are quarantined rather
+            # than trusted.
+            # v13: added daily_loss_exit_open — the daily loss stop may now also
+            # FLATTEN the open trade (once realized net plus the position marked to
+            # the current print reaches the limit), not just refuse new entries.
+            # False (the default) never arms and simulates identically to v12, but
+            # the exit rides the base rule path, so v12 runs are quarantined rather
+            # than trusted.
+            version="13",
             confluences=("volume_profile", "regime", "vwap_slope", "vwap_cross",
                          "upper_occupancy", "gx_rescue", "gx_floor", "on_high",
                          "gx_value", "gx_poc_shape", "ny_poc_floor",
-                         "gx_overhang"),
+                         "gx_overhang", "ib_in_on", "ib_width", "wk_ext",
+                         "chop", "structure_clarity"),
         ),
         Strategy(
             slug="vwap-globex-bounce",
@@ -171,7 +203,19 @@ STRATEGIES: dict[str, Strategy] = {
             # (the default) simulates identically to v7.
             # v9: added the panic exit — see vwap-upper-band-bounce v8. Rides the
             # shared run_session; 0 (the default) simulates identically to v8.
-            version="9",
+            # v10: added the big-lot participation size-up — see
+            # vwap-upper-band-bounce v9. Rides the shared run_session; 0 (the
+            # default) simulates identically to v9.
+            # v11: added reenter_after_stop_only — see vwap-upper-band-bounce
+            # v10. Rides the shared run_session; False (the default) simulates
+            # identically to v10.
+            # v12: added reentry_rearm_window_min — see vwap-upper-band-bounce
+            # v11. Rides the shared run_session; 0 (the default) simulates
+            # identically to v11.
+            # v13: added daily_loss_exit_open — see vwap-upper-band-bounce v13.
+            # Rides the shared run_session; False (the default) simulates
+            # identically to v12.
+            version="13",
             config_cls=GlobexBounceConfig,
             confluences=("volume_profile",),
             run_session=engine.run_session_globex,
@@ -213,7 +257,16 @@ STRATEGIES: dict[str, Strategy] = {
             # shared run_session (via run_session_short); on a short the shock is
             # a buy rip, the signed mirror. 0 (the default) simulates identically
             # to v6.
-            version="7",
+            # v8: added reenter_after_stop_only — see vwap-upper-band-bounce
+            # v10. Rides the shared run_session (via run_session_short); False
+            # (the default) simulates identically to v7.
+            # v9: added reentry_rearm_window_min — see vwap-upper-band-bounce
+            # v11. Rides the shared run_session (via run_session_short); 0 (the
+            # default) simulates identically to v8.
+            # v10: added daily_loss_exit_open — see vwap-upper-band-bounce v13.
+            # Rides the shared run_session (via run_session_short); False (the
+            # default) simulates identically to v9.
+            version="10",
             confluences=("volume_profile", "on_high", "gx_value"),
             run_session=engine.run_session_short,
         ),
@@ -259,15 +312,24 @@ STRATEGIES: dict[str, Strategy] = {
                 "upper_occupancy_cap on days already camped in the NY upper "
                 "channel, and gx_rescue_cap on days whose broken session bands "
                 "keep getting caught by the Globex band underneath — the floor "
-                "the fade would be selling into."
+                "the fade would be selling into. vwap_flat is the balance-day "
+                "gate — the caps' premise stated directly: it stands the fade "
+                "down from its checkpoint unless the NY VWAP grade there is "
+                "under its threshold in BOTH directions, keeping only the days "
+                "that haven't picked a side."
             ),
             # v2: added arm_stretch_side — the arming stretch may run INSIDE dev1
             # (the band broken and retested) instead of beyond it. "beyond" is v1's
             # rule exactly, but the knob is part of the config hash either way.
-            version="2",
+            # v3: added daily_loss_exit_open — the daily loss stop may now also
+            # flatten the open trade, not just refuse new entries. False (the
+            # default) simulates identically to v2, but the exit rides the base
+            # rule path, so v2 runs are quarantined rather than trusted.
+            version="3",
             config_cls=FadeConfig,
-            confluences=("volume_profile", "vwap_slope_cap",
-                         "upper_occupancy_cap", "gx_rescue_cap"),
+            confluences=("volume_profile", "vwap_slope_cap", "vwap_flat",
+                         "upper_occupancy_cap", "gx_rescue_cap", "ib_in_on",
+                         "ib_width"),
             run_session=engine.run_session_fade_short,
         ),
         Strategy(
@@ -299,13 +361,19 @@ STRATEGIES: dict[str, Strategy] = {
                 "steep DOWNWARD NY VWAP grade, upper_occupancy_cap on days "
                 "camped in the NY LOWER channel, and gx_rescue_cap on days whose "
                 "broken session −1σ keeps getting caught by the Globex −1σ "
-                "above it — the ceiling this fade would be buying into."
+                "above it — the ceiling this fade would be buying into. "
+                "vwap_flat needs no mirror at all: it stands the fade down "
+                "unless the grade is under its threshold in BOTH directions, "
+                "and flat is flat on either side of the market."
             ),
             # v2: arm_stretch_side, with the short — see vwap-dev1-fade-short.
-            version="2",
+            # v3: added daily_loss_exit_open, with the short — see
+            # vwap-dev1-fade-short v3.
+            version="3",
             config_cls=FadeConfig,
-            confluences=("volume_profile", "vwap_slope_cap",
-                         "upper_occupancy_cap", "gx_rescue_cap"),
+            confluences=("volume_profile", "vwap_slope_cap", "vwap_flat",
+                         "upper_occupancy_cap", "gx_rescue_cap", "ib_in_on",
+                         "ib_width"),
             run_session=engine.run_session_fade_long,
         ),
         Strategy(
@@ -359,13 +427,180 @@ STRATEGIES: dict[str, Strategy] = {
             # downtick off a 22-minute-old arm certified against the old
             # level, and a 10-second poke re-armed it. Both rules sit on the
             # base path; v3 runs are quarantined rather than trusted.
-            version="4",
+            # v5: added daily_loss_exit_open — the daily loss stop may now also
+            # flatten the open trade, not just refuse new entries. False (the
+            # default) simulates identically to v4, but the exit rides the base
+            # rule path, so v4 runs are quarantined rather than trusted.
+            version="5",
             config_cls=ProfilePullbackConfig,
             run_session=engine.run_session_profile_pullback,
             # Globex session: the overnight segment feeds the Globex developing
             # profile (and the charts); the NY bands and NY profile are still
             # anchored at the bell, and trading lives in RTH only.
             session="globex",
+        ),
+        Strategy(
+            slug="value-rotation",
+            name="Value Rotation",
+            description=(
+                "The rotation the loss studies kept finding from the other "
+                "side, traded on its own: price accepted OUTSIDE the "
+                "developing value area (an excursion more than "
+                "arm_beyond_ticks past the edge — the VAH on the short, the "
+                "VAL on the long), then re-accepted back inside by "
+                "accept_inside_bars consecutive bar closes — the edge has "
+                "failed — and the trade runs with the rotation toward the "
+                "developing POC. 85% of the upper-band bounce's stopped "
+                "losses completed exactly this rotation within 30 minutes. "
+                "Entry variant A rests a limit at the failed edge and fills "
+                "on the retest — only when price does the crossing; an edge "
+                "that relocates across the market disarms instead of filling "
+                "(profile-pullback's v3 lesson). Variant B stops into the "
+                "rotation, entry_stop_offset_ticks past the edge into value. "
+                "The target tracks the developing POC live (or the NY VWAP, "
+                "or an R-multiple); a POC that node-flips across price books "
+                "a market fill at the print, never a limit fill at a level "
+                "the market wasn't at. min_room_ticks is the trivial-rotation "
+                "guard — the POC must sit that far beyond the fill or the "
+                "touch is missed; ~40% of the Interaction Lab's POC "
+                "reversions were price already at or through the target. "
+                "invalidate_outside_bars exits at market when price is "
+                "re-accepted back outside the edge — the premise run "
+                "backwards — with the fixed stop as the hard backstop, and "
+                "nothing arms while the NY profile is younger than "
+                "level_warmup_min. The vwap_flat confluence stands the "
+                "strategy down from its checkpoint on days that have "
+                "established a VWAP grade in either direction — the "
+                "balance-day read this rotation presumed, which its first "
+                "A/B refuted (see vwap_flat's honesty clause) — "
+                "vwap_slope_cap only against the grade that fights the "
+                "trade's own direction, and vwap_slope demands the upward "
+                "grade the repo's every surviving edge leans on: on the "
+                "long, the rotation is then a dip below value bought on an "
+                "up-graded tape."
+            ),
+            # v2: added daily_loss_exit_open — the daily loss stop may now also
+            # flatten the open trade, not just refuse new entries. False (the
+            # default) simulates identically to v1, but the exit rides the base
+            # rule path, so v1 runs are quarantined rather than trusted.
+            version="2",
+            config_cls=ValueRotationConfig,
+            confluences=("vwap_flat", "vwap_slope_cap", "vwap_slope",
+                         "ib_in_on", "ib_width"),
+            run_session=engine.run_session_value_rotation,
+        ),
+        Strategy(
+            slug="orb-breakout",
+            name="Opening Range Breakout",
+            description=(
+                "One initiative trade off the session's opening window — the "
+                "first window_minutes from the bell — per the IB/ORB research "
+                "(docs/research/initial-balance-orb.md) and the Lab's IB "
+                "study. Three entry modes: 'candle' is the Zarattini rule — at "
+                "the window's close, enter in the window candle's direction at "
+                "the first print; 'break' stops in on the first crossing of "
+                "the window's high/low (+ entry_offset_ticks, Crabel's "
+                "stretch); 'second_break' waits for one extreme to break and "
+                "enters with the SECOND — on double-break days the close "
+                "landed on the second break's side 81% of the time (IB study, "
+                "n=53). One attempt per session, filled, vetoed or refused — "
+                "there is no re-arm. stop_mode 'range' puts the stop at the "
+                "window's opposite extreme (the paper's rule; the R-multiple "
+                "is measured against the risk actually taken, which varies "
+                "with the window), 'ticks' fixes it. The target is end-of-day "
+                "(the paper's exit) or an R-multiple, with the bounce's "
+                "optional trail. min/max_range_ticks skip the noise-floor and "
+                "exhausted-tail windows. The Lab read of the candle entry "
+                "WITHOUT the stop was mean R ~0 — the stop's asymmetry is the "
+                "claim being tested, not a detail. ib_in_on can stand the "
+                "breakout down on IB-inside-overnight days (they lean "
+                "rotational), ib_width on out-of-bounds IB widths, and "
+                "vwap_flat on days that established a grade."
+            ),
+            version="1",
+            config_cls=OrbConfig,
+            confluences=("ib_in_on", "ib_width", "vwap_flat"),
+            run_session=engine.run_session_orb,
+        ),
+        Strategy(
+            slug="drift-touch-fade",
+            name="Drift-Touch Fade",
+            description=(
+                "Fade a level that price drifted into rather than approached. A "
+                "drift touch is contact where, over the trailing "
+                "GAP_LOOKBACK_BARS bars, price's net move toward the level plus "
+                "the level's net move toward price is <= 0 (profile.gap_closer) "
+                "— price was already loitering by the level and wiggled into "
+                "contact, a slow re-test of a hugged zone. A fast approach is a "
+                "momentum test with no edge; a drift touch means the level has "
+                "already absorbed minutes of adjacent trade without breaking, so "
+                "contact without impulse has nothing to carry it through. The "
+                "candidate levels are developing NY and Globex POC/VAH/VAL and "
+                "the static session references (ONH/ONL, the prior day's "
+                "POC/VAH/VAL and close, the session open), per the config's "
+                "sources. A bar touches a level within touch_tol; a re-approach "
+                "is a fresh touch only after touch_gap_bars clear of the zone, "
+                "and min_level_stability_min skips a drift signal on a "
+                "developing level that only just relocated to its price. The "
+                "fade side is which side price hugged: above the level (support) "
+                "goes long, below it (resistance) short, filtered by side. Entry "
+                "variant A takes a market order on the drift-touch bar's close "
+                "(filled the next tick); variant B waits for a bar to close "
+                "confirm_ticks beyond the touch bar's extreme on the fade side "
+                "first. The stop sits stop_ticks behind the zone, measured from "
+                "the LEVEL not the fill; the target fades toward value — the NY "
+                "VWAP (tracked live, with the crossing discipline and the "
+                "min_room_ticks trivial-rotation guard), a fixed R multiple, or "
+                "a fixed distance. max_touches_per_zone caps fills to each "
+                "zone's first N touches. One position at a time; simultaneous "
+                "and while-in-trade drift touches ride the exit rules as "
+                "in_trade ghosts in the missed rows."
+            ),
+            version="1",
+            config_cls=DriftFadeConfig,
+            run_session=engine.run_session_drift_fade,
+            # Globex session: the overnight feeds the Globex developing profile
+            # and the ONH/ONL refs; the NY VWAP and NY profile anchor at the
+            # bell, and trading lives in RTH only.
+            session="globex",
+            # Gates are supported single-sided only (the schema refuses a gate on
+            # side="both"): each reads one signed session context. The idea must
+            # first stand alone, so none is on by default.
+            confluences=("regime", "vwap_slope", "vwap_slope_cap", "ib_in_on",
+                         "ib_width", "wk_ext", "chop", "structure_clarity"),
+        ),
+        Strategy(
+            slug="drift-touch-fade-entry-stop",
+            name="Drift-Touch Fade (Entry Stop)",
+            description=(
+                "The drift-touch fade with the stop measured from the FILL, not "
+                "the level. Same detection and entries as drift-touch-fade: a "
+                "drift touch is contact where, over the trailing "
+                "GAP_LOOKBACK_BARS bars, price's net move toward the level plus "
+                "the level's net move toward price is <= 0 (profile.gap_closer) "
+                "— price was already loitering by the level and wiggled into "
+                "contact. The level-stop original parks stop_ticks behind the "
+                "ZONE, so the risk actually taken varies with how far the "
+                "variant-B confirming close landed from the level (median ~2x "
+                "stop_ticks, range 1.3-8x in the Jul 2026 sweep); this variant "
+                "anchors the stop to the entry print instead — every trade "
+                "risks exactly stop_ticks, and the zone itself is allowed to "
+                "fail without ending the trade. The premise difference is the "
+                "invalidation: the original says 'the zone failing kills the "
+                "idea'; this one says 'adverse excursion from my price kills "
+                "it'. Everything else — sources, warmup, touch debounce, "
+                "stability guard, entry variants, targets, trail, daily "
+                "governor — reads identically to drift-touch-fade."
+            ),
+            version="1",
+            config_cls=DriftFadeConfig,
+            run_session=engine.run_session_drift_fade_entry_stop,
+            # Same data needs as the original: overnight feeds the Globex
+            # profile and ONH/ONL; trading lives in RTH only.
+            session="globex",
+            # Same single-sided-only gate support as the original.
+            confluences=("regime", "vwap_slope", "vwap_slope_cap", "ib_in_on",
+                         "ib_width", "wk_ext", "chop", "structure_clarity"),
         ),
     ]
 }

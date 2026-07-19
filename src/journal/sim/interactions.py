@@ -45,12 +45,14 @@ import pandas as pd
 
 from ..config import CACHE_DIR, ET_TZ, point_value, root_symbol, tick_size
 from . import bars as barmod
+from . import ib as ibmod
 from . import profile as profmod
 from . import ticks as tickmod
 from . import vwap as vwapmod
+from . import weekly as weeklymod
 from .regime import minute_bars
 
-INTERACTIONS_VERSION = 8  # v8: Globex (ON) VWAP band-occupancy aggregate
+INTERACTIONS_VERSION = 9  # v9: gap-closer attribution, VWAP mid + session refs touchable, snap classes/confluence, acceptance decay
 INTERACTIONS_DIR = CACHE_DIR / "interactions"
 
 # Outcome thresholds, in index points. A fade has to clear REJECT_MIN to count as
@@ -85,11 +87,22 @@ LEVEL_WARMUP_MIN = 15
 # config's primary window. A short window calls a V-reversal "accept" because the
 # bounce hadn't happened yet; the longer reads catch it.
 OUTCOME_HORIZONS_MIN = (10, 30, 60)
+# Who-closed-the-gap lookback: over this many bars before a touch, how much of
+# the closing distance came from price moving to the level vs the level moving
+# to price. A falling band chased by price is the level's touch, not a test. The
+# arithmetic now lives in profile.gap_closer so the engine's drift-touch-fade
+# reads the identical definition; this alias keeps the module's own references.
+GAP_LOOKBACK_BARS = profmod.GAP_LOOKBACK_BARS
+# A boundary jump at least this big is a node-flip (the value area re-seating on
+# a different volume node), anything smaller is boundary creep. The two are
+# different events — a 4-pt creep and a 195-pt flip both "snap", but only the
+# flip marks a wholesale re-pricing of value.
+SNAP_FLIP_PTS = 20.0
 
 DEFAULTS = {
     "bin_size": None,          # None -> the instrument tick grid (matches the chart)
     "va_pct": profmod.VALUE_AREA_PCT,
-    "sources": ["ny", "globex"],
+    "sources": ["ny", "globex", "session_refs"],
     "outcome_window_min": 10,
     "zone_cluster_pts": 10.0,
 }
@@ -158,14 +171,16 @@ class InteractionConfig:
 class _Series:
     """One touchable level as it develops across the RTH minutes."""
 
-    source: str          # "ny" | "globex"
-    kind: str            # "VAH" | "VAL" | "POC" | "+1σ" | "-1σ" | "+2σ" | "-2σ"
+    source: str          # "ny" | "globex" | "ref"
+    kind: str            # "VAH" | "VAL" | "POC" | "VWAP" | "±1σ/±2σ" | a ref name
     values: np.ndarray   # (n_min,), price per RTH minute (NaN before it exists)
     is_va: bool          # value-area boundary (can VA-snap) vs a VWAP band
     anchor_ts: int       # epoch seconds of the anchor's first bar — drives level age
 
     @property
     def label(self) -> str:
+        if self.source == "ref":
+            return self.kind  # "ONH", "pd POC", "Open" — self-describing
         return f"{'NY' if self.source == 'ny' else 'Globex'} {self.kind}"
 
 
@@ -250,15 +265,24 @@ def _minute_delta(rth: pd.DataFrame) -> pd.Series:
     return tmp.groupby("_m")["d"].sum()
 
 
-def _build_session(cfg: InteractionConfig, day: date, contract: str) -> _Session | None:
+def _build_session(
+    cfg: InteractionConfig, day: date, contract: str,
+    prev_ref: dict | None = None,
+) -> tuple[_Session | None, dict | None]:
+    """Build the day's frame plus its end-of-day reference levels.
+
+    Returns ``(session, ref)`` where ``ref`` holds this session's final NY
+    POC/VAH/VAL and close — the static "prior-day" levels for the *next*
+    session. ``prev_ref`` is the same dict from the previous cached session.
+    """
     rth = tickmod.cached_rth(contract, day)
     if rth is None or rth.empty:
-        return None
+        return None, None
     on = tickmod.cached_overnight(contract, day)
 
     bars_ny = minute_bars(rth)
     if bars_ny.empty:
-        return None
+        return None, None
     vwap_ny = _sample_bands(vwapmod.vwap_bands(rth), bars_ny)
     prof_ny = profmod.developing_profile(rth, bars_ny, cfg.bin_size, cfg.va_pct)
 
@@ -286,11 +310,38 @@ def _build_session(cfg: InteractionConfig, day: date, contract: str) -> _Session
         ]
     if "vwap_bands" in cfg.sources:
         sess.series += [
+            # The midline itself is touchable: it's the reversion target of every
+            # snap/fade study, so how price behaves ON it is its own question.
+            _Series("ny", "VWAP", sess.ny_mid, False, rth_t0),
             _Series("ny", "+1σ", sess.ny_up1, False, rth_t0),
             _Series("ny", "-1σ", sess.ny_lo1, False, rth_t0),
             _Series("ny", "+2σ", sess.ny_up2, False, rth_t0),
             _Series("ny", "-2σ", sess.ny_lo2, False, rth_t0),
         ]
+
+    n_min = len(minute_utc)
+    if "session_refs" in cfg.sources:
+        # Static references — the levels every trader has drawn before the bell.
+        # ONH/ONL are ~15h old at the open; prior-day levels are a day old; the
+        # session open anchors at the bell so LEVEL_WARMUP_MIN gates its first
+        # minutes (a "touch" of the open at 09:31 is the open itself).
+        def _static(kind: str, px: float | None, anchor: int) -> None:
+            if px is None or not np.isfinite(px):
+                return
+            sess.series.append(
+                _Series("ref", kind, np.full(n_min, float(px)), False, anchor))
+
+        _static("Open", float(rth["price"].iloc[0]), rth_t0)
+        if on is not None and not on.empty:
+            on_t0 = int(on["ts_utc"].iloc[0].value // 1_000_000_000)
+            _static("ONH", float(on["price"].max()), on_t0)
+            _static("ONL", float(on["price"].min()), on_t0)
+        if prev_ref is not None:
+            day_ago = rth_t0 - 86_400
+            _static("pd POC", prev_ref.get("poc"), day_ago)
+            _static("pd VAH", prev_ref.get("vah"), day_ago)
+            _static("pd VAL", prev_ref.get("val"), day_ago)
+            _static("pd Close", prev_ref.get("close"), day_ago)
 
     if "globex" in cfg.sources:
         glob = pd.concat([on, rth], ignore_index=True) if on is not None else rth
@@ -317,8 +368,18 @@ def _build_session(cfg: InteractionConfig, day: date, contract: str) -> _Session
             gxb["mid"].to_numpy(), gxb["up1"].to_numpy(), gxb["up2"].to_numpy(),
             gxb["lo1"].to_numpy(), gxb["lo2"].to_numpy(),
         )
+        if "vwap_bands" in cfg.sources:
+            sess.series.append(_Series("globex", "VWAP", sess.gx_mid, False, gx_t0))
 
-    return sess
+    # This session's closing reference levels, for the next session's `pd *`
+    # series. The final developing-profile bar IS the day's finished profile.
+    ref = None
+    if np.isfinite(prof_ny.poc[-1]):
+        ref = {
+            "poc": float(prof_ny.poc[-1]), "vah": float(prof_ny.vah[-1]),
+            "val": float(prof_ny.val[-1]), "close": float(sess.close[-1]),
+        }
+    return sess, ref
 
 
 # --- touch / snap detection -------------------------------------------------
@@ -436,6 +497,7 @@ def _detect(sess: _Session, cfg: InteractionConfig) -> tuple[list[dict], list[di
                         "hhmm": sess.et_time[i].strftime("%H:%M"),
                         "source": s.source, "level_type": s.kind,
                         "snap_dir": "up_over_price" if cur_side > 0 else "down_under_price",
+                        "snap_class": "node_flip" if abs(jump) >= SNAP_FLIP_PTS else "creep",
                         "level_jump_pts": round(float(jump), 2),
                         "level_age_min": int(age_min),
                         "excursion_bars_before": _excursion_before(s.values, sess.close, i),
@@ -482,6 +544,7 @@ def _detect(sess: _Session, cfg: InteractionConfig) -> tuple[list[dict], list[di
                 }
             nth = nth_seen.get(bucket_key, 0) + 1
             nth_seen[bucket_key] = nth
+            closed_by, price_closed, level_closed = _gap_closer(rep.values, sess.close, i)
             touches.append({
                 "day": sess.day.isoformat(), "ts": ts_i,
                 "hhmm": sess.et_time[i].strftime("%H:%M"),
@@ -490,6 +553,8 @@ def _detect(sess: _Session, cfg: InteractionConfig) -> tuple[list[dict], list[di
                 "sources": src_labels, "n_sources": n_sources,
                 "nearest_other_source_dist": _nearest_other(sess, i, grp_series, zone_px),
                 "nth_touch": nth, "approach": "below" if from_below else "above",
+                "closed_by": closed_by,
+                "price_closed_pts": price_closed, "level_closed_pts": level_closed,
                 "level_slope": _slope(rep.values, i),
                 "level_age_min": int((ts_i - rep.anchor_ts) // 60),
                 "touch_vol": int(sess.volume[i]), "signed_delta": int(sess.delta[i]),
@@ -500,7 +565,22 @@ def _detect(sess: _Session, cfg: InteractionConfig) -> tuple[list[dict], list[di
                 "reaction_min": react,
                 "outcomes": horizons,
             })
+
+    # Snap confluence: how many OTHER levels snapped in the same minute. Two
+    # boundaries re-seating together is one value-migration event, not two
+    # independent signals — the aggregate reads them apart.
+    per_min: dict[int, int] = {}
+    for s in snaps:
+        per_min[s["ts"]] = per_min.get(s["ts"], 0) + 1
+    for s in snaps:
+        s["co_snaps"] = per_min[s["ts"]] - 1
     return touches, snaps, band_state
+
+
+# The gap-closer attribution now lives in profile.gap_closer (the engine's
+# drift-touch-fade shares the exact arithmetic). Kept as a module-local alias so
+# every call site and test in this file is unchanged.
+_gap_closer = profmod.gap_closer
 
 
 def _nearest_other(sess: _Session, i: int, grp_series: list[int], zone_px: float) -> float | None:
@@ -681,6 +761,54 @@ def _upper_band_pullback_agg(touches: list[dict], band_state: list[dict]) -> lis
     return rows
 
 
+def _gap_closer_agg(touches: list[dict]) -> list[dict]:
+    """Touches cut by who closed the gap, scored at 30m against the null.
+
+    The suspicion this answers: level-led touches (a falling band chased by
+    price) score as fresh 1st touches but price tested nothing — if their row
+    sits at the null baseline while price-led touches don't, every touch
+    aggregate above is diluted by them. The 1st-touch sub-rows are the direct
+    read, since 1st-touch is where the touch edge (if any) lives.
+    """
+    if not touches:
+        return []
+    rows = []
+    for cls in ("price", "level", "both", "drift"):
+        grp = [t for t in touches if t["closed_by"] == cls]
+        if grp:
+            rows.append(_row_med30(f"closed by {cls}", grp))
+    for cls in ("price", "level"):
+        grp = [t for t in touches if t["closed_by"] == cls and t["nth_touch"] == 1]
+        if grp:
+            rows.append(_row_med30(f"{cls}-led · 1st touch", grp))
+    rows.append(dict(NULL_BASELINE_ROW))
+    return rows
+
+
+def _decay_bucket(n: int) -> str:
+    if n <= 3:
+        return ("1st", "2nd", "3rd")[n - 1]
+    return "4th-6th" if n <= 6 else "7th+"
+
+
+def _acceptance_decay_agg(touches: list[dict]) -> list[dict]:
+    """Reject rate and median excursions by how many times the zone was already
+    tested today — the pinning/acceptance-decay read. A POC touched 15 times
+    into the close with shrinking MFE has become fair price: the level still
+    "rejects" by the 3-pt threshold while the excursion decays toward nothing.
+    Read the MFE column down the rows; the reject rate alone hides the decay.
+    """
+    if not touches:
+        return []
+    order = ("1st", "2nd", "3rd", "4th-6th", "7th+")
+    buckets: dict[str, list[dict]] = {}
+    for t in touches:
+        buckets.setdefault(_decay_bucket(t["nth_touch"]), []).append(t)
+    rows = [_row_med30(b, buckets[b]) for b in order if b in buckets]
+    rows.append(dict(NULL_BASELINE_ROW))
+    return rows
+
+
 def _band_occupancy_agg(band_state: list[dict], key: str = "band") -> list[dict]:
     """Time price spent in each VWAP band, from the per-minute band_state stream.
 
@@ -718,13 +846,25 @@ def _band_occupancy_agg(band_state: list[dict], key: str = "band") -> list[dict]
     ]
 
 
-def _snap_buckets(snaps: list[dict]) -> dict[str, list[dict]]:
-    """(anchor, level_type, direction) buckets over the non-trivial snaps —
-    those with actual room to VWAP. Trivial ones are kept aside per label."""
+def _snap_level_label(s: dict) -> str:
+    anchor = "NY" if s["source"] == "ny" else "Globex"
+    return f"{anchor} {s['level_type']} {s['snap_dir']}"
+
+
+def _snap_class_label(s: dict) -> str:
+    return f"{s['snap_class']} {s['snap_dir']}"
+
+
+def _snap_conf_label(s: dict) -> str:
+    return f"{'multi-level' if s.get('co_snaps') else 'lone'} {s['snap_dir']}"
+
+
+def _snap_buckets(snaps: list[dict], labeler=_snap_level_label) -> dict[str, list[dict]]:
+    """Snap buckets under ``labeler`` — by (anchor, level_type, direction) by
+    default; the class/confluence aggregates pass their own cut."""
     buckets: dict[str, list[dict]] = {}
     for s in snaps:
-        anchor = "NY" if s["source"] == "ny" else "Globex"
-        buckets.setdefault(f"{anchor} {s['level_type']} {s['snap_dir']}", []).append(s)
+        buckets.setdefault(labeler(s), []).append(s)
     return buckets
 
 
@@ -732,8 +872,9 @@ def _live(grp: list[dict]) -> list[dict]:
     return [s for s in grp if (s.get("vwap_dist_pts") or 0) > 0]
 
 
-def _vasnap_agg(snaps: list[dict], sessions: dict) -> list[dict]:
-    """The fade-to-VWAP trade, by (anchor, level_type, direction).
+def _vasnap_agg(snaps: list[dict], labeler=_snap_level_label) -> list[dict]:
+    """The fade-to-VWAP trade, bucketed by ``labeler`` (default: anchor,
+    level_type, direction).
 
     Rates run over non-trivial snaps only — ``n_trivial`` counts the ones whose
     close was already at/through VWAP at the snap bar (reversion true at bar
@@ -741,7 +882,7 @@ def _vasnap_agg(snaps: list[dict], sessions: dict) -> list[dict]:
     30m/60m rates are the bounded reads; ``avg_adverse`` is the worst excursion
     against the fade before it reverted; ``avg_dist`` the room to VWAP at entry."""
     rows = []
-    for label, grp in _snap_buckets(snaps).items():
+    for label, grp in _snap_buckets(snaps, labeler).items():
         live = _live(grp)
         mins = [s.get("revert_min") for s in live]
         moves = [s["revert_move"] for s in live if s.get("revert_move") is not None]
@@ -854,12 +995,17 @@ def study(cfg: InteractionConfig) -> dict:
     day_index: dict[str, dict] = {}
     ran = 0
 
+    prev_ref: dict | None = None
     for day in requested:
         contract = tickmod.contract_for_cached(cfg.symbol, day)
         if contract is None:
             skipped.append(day.isoformat())
             continue
-        sess = _build_session(cfg, day, contract)
+        # prev_ref carries the last *cached* session's closing levels — across a
+        # skipped day it stays put, which is exactly the prior session a trader
+        # would have marked up.
+        sess, ref = _build_session(cfg, day, contract, prev_ref)
+        prev_ref = ref or prev_ref
         if sess is None:
             skipped.append(day.isoformat())
             continue
@@ -887,7 +1033,11 @@ def study(cfg: InteractionConfig) -> dict:
             "band_occupancy": _band_occupancy_agg(band_state, "band"),
             "band_occupancy_gx": _band_occupancy_agg(band_state, "gx_band"),
             "upper_band_pullback": _upper_band_pullback_agg(touches, band_state),
-            "vasnap_reversion": _vasnap_agg(snaps, {}),
+            "who_closed_gap": _gap_closer_agg(touches),
+            "acceptance_decay": _acceptance_decay_agg(touches),
+            "vasnap_reversion": _vasnap_agg(snaps),
+            "vasnap_by_class": _vasnap_agg(snaps, _snap_class_label),
+            "vasnap_confluence": _vasnap_agg(snaps, _snap_conf_label),
             "vasnap_continuation": _vasnap_cont_agg(snaps),
         },
         "day_index": day_index,
@@ -1006,6 +1156,10 @@ def _day_chart_tickbars(
         "profile_ny": [],
         "vwap_globex": [],
         "profile_globex": [],
+        "vwap_weekly": [],
+        # Initial Balance — same window as the IB study, so the drawn lines are
+        # the levels its break/extension stats were measured against.
+        "ib": ibmod.chart_overlay(rth, day, b_all["ts_utc"], times),
         "tick_size": tick_size(symbol),
         "point_value": point_value(symbol),
     }
@@ -1026,6 +1180,15 @@ def _day_chart_tickbars(
         result["vwap_globex"] = _vwap_pos_rows(vwapmod.vwap_bands(full), bar_pos, times)
         result["profile_globex"] = _profile_pos_rows(
             profmod.developing_profile(full, b_all, binsz, va_pct), times)
+
+    # Weekly anchor: the Globex accumulation seeded with the week's prior
+    # sessions. Context, not a study source — drawn whenever it can be built
+    # honestly (night on disk, no hole in the week), like the sim charts.
+    if rth_i0 > 0:
+        wk_seed = weeklymod.weekly_seed(symbol, day)
+        if wk_seed is not None:
+            result["vwap_weekly"] = _vwap_pos_rows(
+                vwapmod.vwap_bands(full, seed=wk_seed), bar_pos, times)
     return result
 
 
@@ -1115,6 +1278,10 @@ def day_chart(
         if "ny" in sources else [],
         "vwap_globex": [],
         "profile_globex": [],
+        "vwap_weekly": [],
+        # Initial Balance — same window as the IB study, so the drawn lines are
+        # the levels its break/extension stats were measured against.
+        "ib": ibmod.chart_overlay(rth, day, bars_draw["ts_utc"], t_draw),
         "tick_size": tick_size(symbol),
         "point_value": point_value(symbol),
     }
@@ -1127,6 +1294,15 @@ def day_chart(
         vwap_gx = _sample_bands(vwapmod.vwap_bands(glob), bars_draw)
         result["vwap_globex"] = vwap_rows(vwap_gx, t_draw)
         result["profile_globex"] = prof_rows(prof_gx, t_draw)
+
+    # Weekly anchor: the Globex accumulation seeded with the week's prior
+    # sessions. Context, not a study source — drawn whenever it can be built
+    # honestly (night on disk, no hole in the week), like the sim charts.
+    if has_on:
+        wk_seed = weeklymod.weekly_seed(symbol, day)
+        if wk_seed is not None:
+            result["vwap_weekly"] = vwap_rows(
+                _sample_bands(vwapmod.vwap_bands(glob, seed=wk_seed), bars_draw), t_draw)
     return result
 
 

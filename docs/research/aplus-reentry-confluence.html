@@ -1,0 +1,277 @@
+<title>A+ Confluence Study — Re-entry After a Stop</title>
+<style>
+  :root {
+    --bg: #F6F7F4; --ink: #232A27; --muted: #75807A; --accent: #347A5E;
+    --loss: #B4574F; --line: #DDE3DE; --card: #EDF0EC; --hl: #E4EFE8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151A18; --ink: #D8DED9; --muted: #8A948E; --accent: #4CA37F;
+            --loss: #C97A72; --line: #2A322E; --card: #1C2320; --hl: #1F2E27; }
+  }
+  :root[data-theme="dark"] { --bg: #151A18; --ink: #D8DED9; --muted: #8A948E;
+    --accent: #4CA37F; --loss: #C97A72; --line: #2A322E; --card: #1C2320; --hl: #1F2E27; }
+  :root[data-theme="light"] { --bg: #F6F7F4; --ink: #232A27; --muted: #75807A;
+    --accent: #347A5E; --loss: #B4574F; --line: #DDE3DE; --card: #EDF0EC; --hl: #E4EFE8; }
+
+  html { background: var(--bg); }
+  body { color: var(--ink); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+         margin: 0; padding: 3rem 1.25rem 5rem; }
+  main { max-width: 700px; margin: 0 auto; }
+  h1, h2 { font-family: Charter, Georgia, "Times New Roman", serif; line-height: 1.2;
+           text-wrap: balance; letter-spacing: -0.01em; }
+  h1 { font-size: 2rem; margin: 0.25rem 0 0.5rem; }
+  h2 { font-size: 1.35rem; margin: 2.75rem 0 0.75rem; }
+  h2 .no { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 0.5rem; }
+  .eyebrow { text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.72rem;
+             color: var(--muted); font-weight: 600; }
+  .lede { font-size: 1.05rem; color: var(--muted); margin-top: 0; }
+  p { margin: 0.8rem 0; }
+  .verdict { background: var(--hl); border-left: 3px solid var(--accent);
+             padding: 0.9rem 1.1rem; margin: 1.5rem 0; border-radius: 0 4px 4px 0; }
+  .verdict p { margin: 0.35rem 0; }
+  .tablewrap { overflow-x: auto; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%;
+          font: 0.82rem/1.5 ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+          font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th { text-align: left; font-weight: 600; color: var(--muted); font-size: 0.72rem;
+       text-transform: uppercase; letter-spacing: 0.06em; }
+  th, td { padding: 0.4rem 0.9rem 0.4rem 0; border-bottom: 1px solid var(--line); }
+  td.num, th.num { text-align: right; padding-right: 0; padding-left: 0.9rem; }
+  tr.hl td { background: var(--hl); }
+  .pos { color: var(--accent); font-weight: 600; }
+  .neg { color: var(--loss); }
+  .dim { color: var(--muted); }
+  ul { padding-left: 1.2rem; } li { margin: 0.35rem 0; }
+  .note { font-size: 0.85rem; color: var(--muted); }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.85em;
+         background: var(--card); padding: 0.1em 0.35em; border-radius: 3px; }
+  hr { border: none; border-top: 1px solid var(--line); margin: 2.5rem 0; }
+</style>
+<main>
+  <p class="eyebrow">Interactions Lab · vwap-upper-band-bounce · run 30badf94 · 2026-07-18</p>
+  <h1>Hunting A+ setups: the confluence is the re-entry</h1>
+  <p class="lede">Continuation of the big-trade order-flow study. The tape gave one signal
+  (big-lot participation); this pass screened 83 non-tape context features — day geometry,
+  VWAP/profile distances, overnight &amp; prior-day levels, regime checkpoints, trade
+  sequence — against the 28 A+ trades (r ≥ 2) that carry 131% of the run's net.</p>
+
+  <div class="verdict">
+    <p><strong>One confluence survives everything: re-entry after a same-session stop.</strong>
+    34 trades, 23.5% A+ rate vs 7.0% base, avgR +0.46 vs +0.15, permutation p = 0.0008,
+    consistent in both date halves and against a within-session control.</p>
+    <p><strong>Its mirror is just as useful:</strong> trades taken after a scratch or a win
+    (52% of all trades) are dead money — avgR ≈ 0, 3% A+ rate. The day's whole edge is the
+    first attempt plus the post-stop re-entry.</p>
+    <p><strong>And one veto:</strong> session CVD ≤ 0 at entry → 1 A+ in 68 trades (1.5%).</p>
+    <p><strong>Engine A/B (added after the study): the finding converts.</strong>
+    <code>reenter_after_stop_only</code> (v10, ghost-watch re-arm) beats the baseline on net
+    <em>and</em> every risk metric — $124.5k on 222 trades vs $122.5k on 398, PF 1.98 vs 1.46,
+    net/contract +82%, and 2× the baseline's net in the last 120 days. First knob in the
+    series to pass. Details in §6.</p>
+  </div>
+
+  <h2><span class="no">1</span>What was screened</h2>
+  <p>Per-trade features computed strictly as-of entry: time-of-day and trade sequence,
+  day geometry (run from open, HOD pullback, position in range), developing VWAP/POC/value-area
+  distances (normalized by band width), overnight range/travel and gap, prior-day
+  high/close/POC distances, relative volume pace, and all regime-v7 checkpoint features joined
+  at the last checkpoint before entry. All are rank-independent of the tape signal
+  (|ρ| ≤ 0.08 vs <code>bigpart60</code>), so anything that works is additive.</p>
+
+  <h2><span class="no">2</span>The finding: previous-trade outcome sorts the day</h2>
+  <div class="tablewrap"><table>
+    <tr><th>Previous trade (same session)</th><th class="num">n</th><th class="num">A+ %</th>
+        <th class="num">avgR</th><th class="num">net/trade</th><th class="num">win %</th></tr>
+    <tr class="hl"><td>Stopped out</td><td class="num">34</td><td class="num pos">23.5</td>
+        <td class="num pos">+0.46</td><td class="num pos">$990</td><td class="num">76</td></tr>
+    <tr><td>None — first trade of day</td><td class="num">158</td><td class="num">8.2</td>
+        <td class="num">+0.26</td><td class="num">$544</td><td class="num">75</td></tr>
+    <tr><td>Win (r ≥ 0.5)</td><td class="num">101</td><td class="num">4.0</td>
+        <td class="num dim">+0.04</td><td class="num dim">$39</td><td class="num">68</td></tr>
+    <tr><td>Scratch</td><td class="num">105</td><td class="num">2.9</td>
+        <td class="num dim">+0.01</td><td class="num neg">−$9</td><td class="num">64</td></tr>
+  </table></div>
+  <p>Verification the signal survived:</p>
+  <ul>
+    <li><strong>Permutation test:</strong> A+-rate lift p = 0.0008; avgR lift p = 0.039.</li>
+    <li><strong>Definition-insensitive:</strong> "prev r &lt; 0", "prev r ≤ −0.5", "prev r ≤ −0.9",
+        and "prev exit == stop" all converge on the same 34 trades.</li>
+    <li><strong>Not a day-type effect:</strong> on the same 27 sessions, the <em>other</em>
+        trades run 7.5% A+ — base rate. The lift belongs to the re-entry, not the day.</li>
+    <li><strong>Split-half:</strong> A+ rate 26.7% (H1) / 21.1% (H2). Positive net in 5 of 6
+        quarters; the soft spot is 2026Q2 (avgR ≈ 0 on 11 trades).</li>
+  </ul>
+  <p><strong>Mechanism.</strong> 85% of re-entries fill <em>higher</em> than the stopped entry
+  (median +11.5 pts, median wait 23 min): the first touch gets swept, and the reclaim is the
+  real acceptance. When the re-entry is higher, avgR = +0.57; on the 15% that re-enter lower,
+  avgR = −0.18. Fast re-entries are the cream — wait ≤ 15 min: avgR +0.83, 38% A+ (n = 13).
+  This independently corroborates the loser study's "59% of stops regain entry ≤ 15 min".</p>
+
+  <h2><span class="no">3</span>It stacks with the tape signal</h2>
+  <div class="tablewrap"><table>
+    <tr><th>Filter</th><th class="num">n</th><th class="num">A+ %</th>
+        <th class="num">avgR</th><th class="num">net/trade</th></tr>
+    <tr><td>Base — all trades</td><td class="num">398</td><td class="num">7.0</td>
+        <td class="num">+0.15</td><td class="num">$308</td></tr>
+    <tr><td>bigpart60 ≥ 0.034 (tape, known)</td><td class="num">101</td><td class="num">12.9</td>
+        <td class="num">+0.27</td><td class="num">$568</td></tr>
+    <tr><td>Re-entry after stop</td><td class="num">34</td><td class="num">23.5</td>
+        <td class="num">+0.46</td><td class="num">$990</td></tr>
+    <tr class="hl"><td>Both</td><td class="num">11</td><td class="num pos">54.5</td>
+        <td class="num pos">+1.19</td><td class="num pos">$2,635</td></tr>
+  </table></div>
+  <p>Six of the 11 double-confluence trades were A+, across 11 different sessions, consistent
+  in both halves (57% / 50%). This is the strongest A+ concentrate found in the whole study
+  series — but at ~0.6 trades/month it is a quality marker, not a sizing base.</p>
+
+  <h2><span class="no">4</span>The engine lever: re-arm only after stops</h2>
+  <p>Since after-scratch and after-win trades are collectively flat, an in-sample slice of
+  "first trade + post-stop re-entries only" (what a <code>rearm_after_stop_only</code> knob
+  would approximate):</p>
+  <div class="tablewrap"><table>
+    <tr><th>Slice</th><th class="num">n</th><th class="num">net</th>
+        <th class="num">avgR</th><th class="num">A+</th><th class="num">seq maxDD</th></tr>
+    <tr><td>Full run</td><td class="num">398</td><td class="num">$122,503</td>
+        <td class="num">+0.155</td><td class="num">28</td><td class="num">−$13,535</td></tr>
+    <tr class="hl"><td>First + after-stop only</td><td class="num">192</td>
+        <td class="num">$119,559</td><td class="num pos">+0.295</td><td class="num">21</td>
+        <td class="num pos">−$11,377</td></tr>
+    <tr><td>Cut: after scratch/win</td><td class="num">206</td><td class="num dim">$2,944</td>
+        <td class="num dim">+0.025</td><td class="num">7</td><td class="num neg">−$27,345</td></tr>
+  </table></div>
+  <p class="note">97.6% of the net on 48% of the trades, avgR nearly doubles. Caveat: the sim
+  is path-dependent (first-touch butterfly, see sim-fragility notes) — skipping entries can
+  shift later ones, so this slice is an estimate. The honest test is an engine A/B with a new
+  re-arm mode, and the study series' record on in-sample knobs is 0-for-7. The difference here:
+  this one has a mechanism, a within-session control, and an independent corroborating study.</p>
+
+  <h2><span class="no">5</span>The veto and the decayed tier</h2>
+  <ul>
+    <li><strong>Session CVD ≤ 0 at entry (veto):</strong> 1 of 68 trades reached A+ (1.5%);
+        27 of 28 A+ trades entered with positive session delta. Weak as a ranker (AUC 0.62)
+        but strong as a one-sided filter: A+ almost never happens against the session's delta.</li>
+    <li><strong>RTH trend confirmation (10:30+ checkpoints):</strong> <code>abr ≥ 0.85</code> /
+        <code>net_conviction ≥ 0.85</code> lift A+ to ~23% when stacked with tape (n = 30–34,
+        avgR +0.65 to +0.73) — but the second date-half fades (31% → 14%). Watch, don't act.</li>
+    <li><strong>Quiet overnight (compressed Globex):</strong> whole family points the same way
+        (low on_abr, low band-cross, flat ON slope, small travel — AUC 0.35–0.41 inverted) but
+        H2 decays to base. Same failure shape as previous day-level signals.</li>
+    <li><strong>Dead:</strong> relative volume pace, day-of-week, gap size, prior-day
+        high/close/POC distances, VWAP/POC/value-area geometry at entry, acceptance latency,
+        time-of-day (mild at best). Entry geometry is remarkably uninformative — consistent
+        with "losses are regime, not geometry" from the loss study.</li>
+  </ul>
+
+  <hr>
+  <h2><span class="no">6</span>Engine A/B: the first knob in the series to pass</h2>
+  <p><strong>The naive version fails structurally.</strong> A plain halt ("any non-stop exit
+  ends the day") produced 158 trades / $85.9k — it is exactly the first-trade-of-day cohort,
+  and it can never take a re-entry: at 3 contracts one full stop (≈ −$2,287) already trips the
+  $1,995 daily loss stop, so every re-armable stop in the baseline was cushioned by an earlier
+  win or scratch. Halt that earlier trade and the re-arming stop never happens.</p>
+  <p><strong>The shipped version watches instead of blinding.</strong>
+  <code>reenter_after_stop_only</code> (engine v10): after any non-stop exit the session stands
+  down, but would-be entries ride the full exit rules as <code>reentry_halt</code> ghosts in
+  the vetoed rows — and a ghost that stops out lifts the halt. Live-tradeable: the setup fired
+  without you and failed; the next acceptance is the re-entry. Control at v10 with the knob
+  off is byte-identical to 30badf94.</p>
+  <div class="tablewrap"><table>
+    <tr><th>Metric</th><th class="num">baseline 30badf94</th><th class="num">stop_only cdc07ca2</th></tr>
+    <tr><td>trades</td><td class="num">398</td><td class="num">222</td></tr>
+    <tr><td>net</td><td class="num">$122,503</td><td class="num pos">$124,508</td></tr>
+    <tr><td>net / trade</td><td class="num">$308</td><td class="num pos">$561</td></tr>
+    <tr><td>net / contract</td><td class="num">$102.6</td><td class="num pos">$186.9</td></tr>
+    <tr><td>profit factor</td><td class="num">1.46</td><td class="num pos">1.98</td></tr>
+    <tr><td>win rate</td><td class="num">68.8%</td><td class="num pos">73.0%</td></tr>
+    <tr><td>max drawdown</td><td class="num">−$13,535</td><td class="num pos">−$12,350</td></tr>
+    <tr><td>net / maxDD</td><td class="num">9.05</td><td class="num pos">10.08</td></tr>
+    <tr><td>Sharpe</td><td class="num">2.15</td><td class="num pos">2.68</td></tr>
+    <tr><td>commission</td><td class="num">$16,716</td><td class="num pos">$9,324</td></tr>
+    <tr><td>last 120 days, net</td><td class="num">$13,723</td><td class="num pos">$27,623</td></tr>
+  </table></div>
+  <ul>
+    <li><strong>The accounting closes.</strong> 359 ghosts were watched: 122 stopped
+        (re-arming the day), and the whole skipped cohort's would-be P&L is −$2,327 — the dead
+        money the study predicted. All 64 re-entries taken are stop-authorized (7 after a real
+        cushioned stop, 57 after a ghost stop, 0 unexplained); they made +$38.6k at avgR +0.29,
+        77% win, 8 A+.</li>
+    <li><strong>Quarterly: positive in all six</strong>, and it flips 2026Q1 from −$5.3k to
+        +$16.2k — the knob is strongest exactly where the baseline bled. Weakest delta:
+        2025Q1 ($3.6k vs $11.8k).</li>
+    <li><strong>Honesty caveat:</strong> the rule was discovered on this run, so the 120-day
+        window is not true out-of-sample for the <em>discovery</em> — but the confluence passed
+        split-half and within-session controls in the study, and unlike the seven failed
+        sizing/exit knobs, the A/B improves absolute net, every risk metric, and the recent
+        window simultaneously. True validation is forward data.</li>
+  </ul>
+
+  <h2><span class="no">7</span>Variant sweep: the plain knob is the right shape</h2>
+  <p>Nine arms at engine v11 (re-arm window knob added; all byte-identity controls pass).
+  The unlimited re-arm with the stock $1,995 governor beats every variant on net/maxDD:</p>
+  <div class="tablewrap"><table>
+    <tr><th>Arm</th><th class="num">n</th><th class="num">net</th><th class="num">net/tr</th>
+        <th class="num">PF</th><th class="num">maxDD</th><th class="num">net/DD</th>
+        <th class="num">Sharpe</th><th class="num">last 120d</th></tr>
+    <tr><td>baseline (knob off)</td><td class="num">398</td><td class="num">$122,503</td>
+        <td class="num">$308</td><td class="num">1.46</td><td class="num">−$13,535</td>
+        <td class="num">9.05</td><td class="num">2.15</td><td class="num">$13,723</td></tr>
+    <tr class="hl"><td>stop_only (no window)</td><td class="num">222</td>
+        <td class="num pos">$124,508</td><td class="num">$561</td><td class="num">1.98</td>
+        <td class="num pos">−$12,350</td><td class="num pos">10.08</td><td class="num">2.68</td>
+        <td class="num">$27,623</td></tr>
+    <tr><td>+ window 60 min</td><td class="num">209</td><td class="num">$119,169</td>
+        <td class="num">$570</td><td class="num">2.01</td><td class="num">−$12,350</td>
+        <td class="num">9.65</td><td class="num">2.71</td><td class="num">$29,952</td></tr>
+    <tr><td>+ window 30 min</td><td class="num">195</td><td class="num">$112,246</td>
+        <td class="num">$576</td><td class="num">2.04</td><td class="num">−$12,350</td>
+        <td class="num">9.09</td><td class="num">2.70</td><td class="num">$28,835</td></tr>
+    <tr><td>+ window 15 min</td><td class="num">183</td><td class="num">$108,621</td>
+        <td class="num">$594</td><td class="num">2.05</td><td class="num neg">−$13,533</td>
+        <td class="num">8.03</td><td class="num">2.62</td><td class="num">$22,995</td></tr>
+    <tr><td>+ daily stop $3,000</td><td class="num">255</td><td class="num">$117,603</td>
+        <td class="num">$461</td><td class="num">1.74</td><td class="num neg">−$15,857</td>
+        <td class="num">7.42</td><td class="num">2.38</td><td class="num">$38,862</td></tr>
+    <tr><td>+ daily stop off</td><td class="num">270</td><td class="num">$108,247</td>
+        <td class="num">$401</td><td class="num">1.62</td><td class="num neg">−$20,454</td>
+        <td class="num">5.29</td><td class="num">2.10</td><td class="num">$35,284</td></tr>
+    <tr><td>sibling 9b7f54c6, knob off</td><td class="num">279</td><td class="num">$111,015</td>
+        <td class="num">$398</td><td class="num">1.62</td><td class="num">−$13,535</td>
+        <td class="num">8.20</td><td class="num">2.61</td><td class="num dim">—</td></tr>
+    <tr><td>sibling 9b7f54c6, knob on</td><td class="num">158</td><td class="num">$99,106</td>
+        <td class="num">$627</td><td class="num">2.07</td><td class="num pos">−$11,321</td>
+        <td class="num pos">8.75</td><td class="num">2.86</td><td class="num dim">—</td></tr>
+  </table></div>
+  <ul>
+    <li><strong>Re-arm window: rejected.</strong> Net falls monotonically as the window
+        tightens ($124.5k → $108.6k) with no drawdown payoff — w15 even worsens maxDD. The
+        study's "≤ 15 min is the cream" meant the fast re-entries are the best trades, not
+        that the slow ones are bad: cutting them just costs money. Leave
+        <code>reentry_rearm_window_min = 0</code>.</li>
+    <li><strong>Daily loss stop: load-bearing, third confirmation.</strong> Loosening it to
+        unlock "first-trade stop → re-entry" re-opens the bleed: worse net, much worse DD.
+        (Both loose arms show bigger last-120d nets — a regime tease, not worth the
+        full-window risk.) Keep $1,995.</li>
+    <li><strong>Sibling config bounds the claim.</strong> On 9b7f54c6 (same family, different
+        parameterization, window ending Feb 2026) the knob improves every risk metric (PF 2.07,
+        DD −$11.3k, Sharpe 2.86, net/tr +58%) but costs 11% net. Decomposing the reference run
+        by year explains it: the knob costs ≈ $23k of net in 2025 and adds ≈ $25k in 2026 —
+        its absolute-net win lives where the baseline bleeds, which is the recent regime. The
+        guaranteed part of the edge is efficiency (half the trades, half the commission, ~2×
+        expectancy per trade, smaller DD); the net part is regime-dependent.</li>
+  </ul>
+
+  <h2>Next steps</h2>
+  <ul>
+    <li><strong>Adopt <code>reenter_after_stop_only=true</code>, window off, governor
+        unchanged</strong> (run cdc07ca2 / v11 twin 50e96fc3 is the reference). Re-check the
+        delta as forward months arrive — that is the true OOS test, and the 2025-vs-2026 split
+        says the knob matters most when the raw strategy struggles.</li>
+    <li><strong>Journal use:</strong> discretionary A+ checklist — long re-entry after a swept
+        stop, filling above the old entry, with big-lot participation ≥ 3.4% and positive
+        session CVD, is the highest-quality signature this system produces.</li>
+  </ul>
+  <p class="note">Artifacts: <code>context_features.parquet</code>,
+  <code>context_analyzed.parquet</code>, <code>extract_context.py</code>,
+  <code>analyze_context.py</code>, <code>stack_test.py</code>, <code>verify_reentry.py</code>
+  in this session's scratchpad; prior tape features reused from the big-trade study.</p>
+</main>

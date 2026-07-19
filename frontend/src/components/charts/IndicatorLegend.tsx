@@ -1,9 +1,12 @@
 export type IndicatorKey =
   | "vwapGlobex"
   | "vwapNy"
+  | "vwapWeekly"
   | "atr"
   | "cvd"
   | "levels"
+  | "initialBalance"
+  | "ibExtensions"
   | "volumeProfile"
   | "developingProfileGlobex"
   | "developingProfileNy"

@@ -191,6 +191,42 @@ def test_regime_resolves_the_roll_before_reading_the_cache(cache, monkeypatch):
     assert regmod.get_regime("NQ", date(2025, 1, 6)) is None
 
 
+def test_a_holiday_at_the_maps_leading_edge_is_closed_not_fatal(monkeypatch):
+    """The run that started this: a range beginning on New Year's Day, one weekday
+    before the first session the map ever recorded. The probe returns nothing for the
+    holiday and there is no prior session to carry forward, so it used to fall through
+    to contract_for and kill the whole run. It is a holiday contiguous with the map's
+    start, so it must resolve as closed (skippable) and carry the map's first contract
+    backward — the front month does not turn over New Year's."""
+    with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setattr(ticks, "TICK_CACHE_DIR", Path(tmp))
+        monkeypatch.setattr(ticks, "_ROLL_CACHE", {})
+        # A map that begins on 2 Jan (Thu); 1 Jan (Wed) is the holiday before it.
+        (Path(tmp) / "roll_NQ.json").write_text(json.dumps(
+            {"sessions": {"2025-01-02": "NQH5", "2025-01-03": "NQH5"}, "closed": []}))
+        # The probe only ever sees the holiday itself, and it is empty.
+        monkeypatch.setattr(ticks, "_probe_front_month", lambda *a: {})
+        new_years = date(2025, 1, 1)
+        ticks.ensure_roll_map("NQ", new_years, date(2025, 1, 3))
+        assert ticks.market_closed("NQ", new_years)          # the run skips it
+        assert ticks.contract_for("NQ", new_years) == "NQH5"  # ...and it never raises
+        written = json.loads((Path(tmp) / "roll_NQ.json").read_text())
+        assert written["closed"] == ["2025-01-01"]
+        assert written["sessions"]["2025-01-01"] == "NQH5"    # recorded, so no re-probe
+
+
+def test_a_day_well_before_the_map_still_raises(cache, monkeypatch):
+    """The leading-edge holiday rule must not swallow a real session far before the
+    map. 6 Jan is ~11 months before a December map — an unfetched trading day, not a
+    holiday — so it stays unresolved and contract_for raises rather than guessing the
+    December contract onto a January session."""
+    monkeypatch.setattr(ticks, "_probe_front_month", lambda *a: {})
+    ticks.ensure_roll_map("NQ", date(2025, 1, 6), date(2025, 1, 6))
+    assert not ticks.market_closed("NQ", date(2025, 1, 6))
+    with pytest.raises(RuntimeError, match="cannot resolve the front-month contract"):
+        ticks.contract_for("NQ", date(2025, 1, 6))
+
+
 def test_an_unresolvable_session_raises_rather_than_guessing(cache, monkeypatch):
     """No map entry and nothing before it to carry forward. Guessing a contract here
     would silently simulate the wrong instrument; a run that can't name what it traded

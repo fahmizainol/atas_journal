@@ -1,0 +1,325 @@
+<title>30badf94 — Loser Order Flow</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1b222c; --line:#26303c;
+    --ink:#d7dee7; --mut:#8a95a3; --dim:#5f6b7a;
+    --amber:#f0b429; --amber-dim:#8a6d20; --dot:#f0b429;
+    --green:#3fb950; --red:#e5534b; --blue:#4a9eff;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  @media (prefers-color-scheme:light){
+    :root{ --bg:#f4f6f9; --panel:#ffffff; --panel2:#f0f3f7; --line:#dde3ea;
+      --ink:#1a2029; --mut:#5a6675; --dim:#8a95a3; --amber-dim:#b98a12; --dot:#c08c0a; }
+  }
+  :root[data-theme="dark"]{ --bg:#0e1116; --panel:#161b22; --panel2:#1b222c; --line:#26303c;
+    --ink:#d7dee7; --mut:#8a95a3; --dim:#5f6b7a; --amber-dim:#8a6d20; --dot:#f0b429; }
+  :root[data-theme="light"]{ --bg:#f4f6f9; --panel:#ffffff; --panel2:#f0f3f7; --line:#dde3ea;
+    --ink:#1a2029; --mut:#5a6675; --dim:#8a95a3; --amber-dim:#b98a12; --dot:#c08c0a; }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:940px;margin:0 auto;padding:56px 24px 96px}
+  .mono{font-family:var(--mono)}
+
+  header{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:8px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--amber-dim);margin:0 0 14px}
+  h1{font-size:33px;line-height:1.12;margin:0 0 14px;font-weight:650;letter-spacing:-.02em;text-wrap:balance}
+  h1 b{color:var(--amber);font-weight:650}
+  .sub{color:var(--mut);font-size:15.5px;max-width:64ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:20px;font-family:var(--mono);font-size:12.5px;color:var(--dim)}
+  .meta b{color:var(--ink);font-weight:600}
+
+  section{margin-top:44px}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;
+    color:var(--mut);margin:0 0 4px;font-weight:600}
+  .lede{font-size:20px;line-height:1.35;margin:8px 0 22px;font-weight:550;letter-spacing:-.01em;text-wrap:balance}
+  p{margin:0 0 14px;font-size:15px;color:var(--ink)}
+  p.note{color:var(--mut);font-size:14px}
+  em{color:var(--amber);font-style:normal;font-weight:600}
+  .kill{color:var(--red);font-weight:600}
+  .ok{color:var(--blue);font-weight:600}
+
+  .verdict{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--amber);
+    border-radius:9px;padding:22px 24px;margin:22px 0}
+  .verdict h3{margin:0 0 10px;font-size:15px;letter-spacing:-.01em}
+  .verdict p{margin:0 0 10px}.verdict p:last-child{margin:0}
+
+  .grid{display:grid;gap:14px}
+  .cards{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin:20px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:16px 17px}
+  .card .n{font-family:var(--mono);font-size:26px;font-weight:600;letter-spacing:-.02em;line-height:1}
+  .card .l{color:var(--mut);font-size:12.5px;margin-top:8px}
+  .card .s{color:var(--dim);font-size:11.5px;margin-top:3px;font-family:var(--mono)}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:6px 0 4px}
+  th,td{text-align:right;padding:9px 12px;font-variant-numeric:tabular-nums;font-family:var(--mono)}
+  th:first-child,td:first-child{text-align:left;font-family:var(--sans)}
+  thead th{color:var(--mut);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;
+    border-bottom:1px solid var(--line);font-weight:600}
+  tbody td{border-bottom:1px solid var(--line)}
+  tbody tr:last-child td{border-bottom:none}
+  .tblwrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:6px 10px;margin:18px 0}
+
+  .fig{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:20px 18px 12px;margin:20px 0}
+  .fig .cap{font-size:13px;color:var(--mut);margin:10px 6px 6px;line-height:1.5}
+  .fig .cap b{color:var(--ink)}
+  svg{display:block;width:100%;height:auto}
+  svg text{font-family:var(--mono)}
+  .tip{position:fixed;pointer-events:none;background:var(--panel2);border:1px solid var(--line);
+    border-radius:7px;padding:8px 11px;font-family:var(--mono);font-size:12px;color:var(--ink);
+    opacity:0;transition:opacity .12s;max-width:280px;z-index:10;box-shadow:0 4px 18px rgba(0,0,0,.35)}
+  @media (prefers-reduced-motion:reduce){.tip{transition:none}}
+
+  footer{margin-top:56px;border-top:1px solid var(--line);padding-top:20px;color:var(--dim);
+    font-size:13px;line-height:1.7}
+  footer .mono{font-size:12px}
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">Order-flow study · Part 2 of 2 · run 30badf94</p>
+  <h1>The losers are invisible on the tape.<br><b>No signal at entry, underwater, or at the stop.</b></h1>
+  <p class="sub">Mirror of the big-trade study, pointed at the 116 stops (−$267k gross). Big prints, absorption,
+  seller exhaustion and CVD divergence were measured at every anchor a loser passes through — the fill, the
+  −0.25R/−0.40R/−0.70R underwater touches, and the stop print itself. Nothing separates a stop from a
+  pullback that recovers.</p>
+  <div class="meta">
+    <span>run <b>30badf94</b> · vwap-upper-band-bounce · 20250201–20260630-v8</span>
+    <span><b>398</b> trades, all Long</span>
+    <span><b>116</b> stops @ ≈−1R</span>
+    <span>stops = <b>−$267k</b> gross · run net <b>+$122.5k</b></span>
+  </div>
+</header>
+
+<div class="grid cards">
+  <div class="card"><div class="n" style="color:var(--red)">0.585</div><div class="l">best stop-vs-recover AUC</div><div class="s">noise band · vs 0.664 winners' signal</div></div>
+  <div class="card"><div class="n">1.02×</div><div class="l">tape intensity at the stop vs hold avg</div><div class="s">no capitulation — just drift</div></div>
+  <div class="card"><div class="n" style="color:var(--blue)">59%</div><div class="l">of stops regain full entry price ≤15 min</div><div class="s">median 206 s after the stop</div></div>
+  <div class="card"><div class="n">+1.23R</div><div class="l">median max bounce within 15 min of a stop</div><div class="s">but median further fall +0.73R too</div></div>
+</div>
+
+<section>
+  <h2>A · Entry time</h2>
+  <p class="lede">You cannot smell a stop at the fill — reproduced a third time.</p>
+  <p>Best STOP-vs-everything separator over 40+ pre-entry features is <span class="mono">pre60_runup</span> at
+  <em>AUC 0.582</em>: stops enter after a slightly bigger 60-second run-up into the fill (median 0.75 pt vs 0.25 pt)
+  in a slightly wider range — a mild <em>chasing</em> signature, not tradeable at this size. Every big-print feature
+  is ≤0.54. Stops even fill into marginally <i>less</i> pre-entry selling than winners (median 60s CVD −48 vs −67).
+  Big-lot participation — the winners-study signal — is 0.47 here: it marks <b>magnitude, not direction</b>,
+  exactly as Part 1 concluded.</p>
+</section>
+
+<section>
+  <h2>B · Underwater — the early-warning test</h2>
+  <p class="lede">At −0.40R, 116 trades died and 90 recovered to +0.55R avg. The tape can't tell them apart.</p>
+  <p>Each trade that touched −0.25R / −0.40R / −0.70R was snapshotted on the 60 seconds <i>into</i> that touch —
+  live-decidable information only: volume, CVD, big-print composition, absorption (sell lots per tick of downward
+  progress), seller exhaustion (sell rate last 20 s vs prior 40 s), and CVD divergence vs the hold low.</p>
+  <div class="fig">
+    <div id="aucChart"></div>
+    <div class="cap"><b>Every feature sits inside the noise band.</b> Dots = AUC of stop-vs-recover at each
+    underwater anchor (60 s tape into the touch). The one benchmark outside the band is Part 1's winners signal
+    (pre-entry big-lot participation, BIG vs SMALLWIN, 0.664) — shown for scale. Signs also flip across anchors
+    (seller exhaustion is "bullish" at −0.25R, "bearish" at −0.70R): classic noise. Split-half on the −0.40R top
+    features confirms — nothing holds (0.51–0.58).</div>
+  </div>
+  <p>The two honest scraps, both too small to act on: stops reach −0.40R <em>faster</em> (median 36 s vs 50 s
+  after entry), and recoverers show a hair more bullish CVD divergence at the touch — but at AUC 0.46/0.44 with
+  unstable halves, this is the same graveyard every mined in-trade signal ends up in. It squares with the
+  panic-exit A/B failure: there is no order-flow tell that a pullback is about to become a stop.</p>
+</section>
+
+<section>
+  <h2>C · The stop print and its aftermath</h2>
+  <p class="lede">Stops die of drift, not capitulation — and price whips violently around the corpse.</p>
+  <p>The final 60 seconds before the stop look like the rest of the hold: volume rate <em>1.02×</em> the hold
+  average, big-lot share 2.0% vs 2.1%. No flush, no climax. Selling is still <i>accelerating</i> when the stop
+  fires (exhaustion ratio 1.51 — vs 0.88 at BIG winners' trail exits, where selling has dried up) and absorption
+  is at its lowest (9.0 sell-lots per downtick vs <em>46</em> at BIG exits): price is falling easily, and the
+  engine is right to be gone. Post-stop tape is flat (60 s CVD +9.5, big-print delta −3.5) — <b>no institutional
+  buyer is eating our stops</b>.</p>
+  <div class="fig">
+    <div id="pathChart"></div>
+    <div class="cap"><b>Median post-stop path, in R of initial risk.</b> Blue = max bounce above the exit print,
+    red = max further fall below it, tick = where price sits at window end. Both sides grow together — 26% of
+    stops do <i>both</i> (>0.5R each way) within 5 minutes. It's churn, not a clean V.</div>
+  </div>
+  <p>The headline temptation: within 15 minutes the median stop has bounced +1.23R, 83% bounce >0.5R, only 9%
+  never bounce 0.25R, and <em>59% trade back through the full entry price</em> (median 206 s). But the same
+  window shows a median further fall of +0.73R and 63% falling another 0.5R first — a wider stop buys the
+  bounce only by eating that extra drawdown, and the end-of-window distribution is wide (25th pct −0.36R,
+  median +0.51R, 75th +1.41R). This is a <b>SimConfig A/B question</b> (<span class="mono">stop_ticks</span>
+  wider, or re-entry after stop with re-arm), not a conclusion.</p>
+  <p>One descriptive twist that fits Part 1's magnitude story: when the final 60 s of a stop-run <i>does</i>
+  carry heavy big-lot share, the flush is more terminal — post-stop bounce +0.85R vs +0.58R, further fall
+  0.44R vs 0.61R. Big prints end moves; they don't warn of them.</p>
+</section>
+
+<section>
+  <h2>D · Absorption &amp; exhaustion scorecard</h2>
+  <p class="lede">Dead at every anchor where you could still act.</p>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Axis</th><th>Anchor</th><th>AUC</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td>Absorption (sell vol / downtick)</td><td class="mono">pre-entry 60/180/300s</td><td>0.49–0.51</td><td class="kill">dead</td></tr>
+      <tr><td>Absorption into the touch</td><td class="mono">−0.25R…−0.70R</td><td>0.47–0.53</td><td class="kill">dead</td></tr>
+      <tr><td>Seller exhaustion into the touch</td><td class="mono">−0.25R…−0.70R</td><td>0.43–0.47 (sign flips)</td><td class="kill">dead</td></tr>
+      <tr><td>CVD divergence at the touch low</td><td class="mono">−0.40R</td><td>0.44 · halves 0.46/0.42</td><td class="kill">dead</td></tr>
+      <tr><td>Post-fill seller exhaustion</td><td class="mono">0–60 → 60–180s</td><td>0.50</td><td class="kill">dead</td></tr>
+      <tr><td>Exhaustion / absorption at the exit print</td><td class="mono">final 60s</td><td>— (descriptive)</td><td>tells the story, after you're out</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">The entry-anchored features that <i>do</i> light up (depth-to-low 0.85, sell-volume-to-low 0.80,
+  low-absorption 0.69) are mechanical: a stop by definition travels ~190 ticks down through sellers. They describe
+  the label, they don't predict it.</p>
+</section>
+
+<div class="verdict">
+  <h3>Verdict</h3>
+  <p><b>Losers carry no order-flow signature.</b> Not at entry (best AUC 0.582, a mild chase tell), not underwater
+  at matched depth (everything 0.43–0.59, unstable halves), not at the stop (1.02× ordinary tape). This is the
+  mirror-image confirmation of Part 1: big prints size the <i>winners</i>; nothing on the tape flags the losers.
+  Losses remain a regime cost, exactly as the CVD study on the sibling run concluded.</p>
+  <p><b>What survives as a lead:</b> stops are frequently near a local low — 59% regain entry within 15 min,
+  median bounce +1.23R — but the path there whips 0.73R further down first. If pursued, it's an engine A/B on
+  <span class="mono">stop_ticks</span> / post-stop re-entry with re-arm, never trade-math on this table. Given
+  that every early-exit knob A/B'd so far has lost money to the same asymmetry (the engine's patience is the
+  edge), the prior is that wider stops trade one whip for another.</p>
+</div>
+
+<footer>
+  <p><span class="mono">n = 398 trades / 158 sessions · touch cohorts: −0.25R 252 (116 stop / 136 rec) ·
+  −0.40R 206 (116/90) · −0.70R 143 (116/27) — the −0.70R recover column is thin.</span></p>
+  <p><span class="mono">Data ceiling: Databento prints only (ts, price, size, aggressor) — no book. Buy aggressor = 'B',
+  size cast int64. Windows are ts-based; touch anchors use only data ≤ the touch. Features/analysis:
+  extract_loser.py · analyze_loser.py · loser_analyzed.parquet.</span></p>
+</footer>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+(function(){
+  const css = v => `var(${v})`;   // resolved live by CSS so theme toggles recolor
+  const tip = document.getElementById('tip');
+  function hover(el, html){
+    el.addEventListener('mousemove', e => {
+      tip.innerHTML = html; tip.style.opacity = 1;
+      const w = tip.offsetWidth;
+      tip.style.left = Math.min(e.clientX + 14, innerWidth - w - 10) + 'px';
+      tip.style.top = (e.clientY + 14) + 'px';
+    });
+    el.addEventListener('mouseleave', () => tip.style.opacity = 0);
+  }
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (n, at) => { const e = document.createElementNS(NS, n);
+    for (const k in at) {
+      if (k === 'fill' || k === 'stroke') e.style[k] = at[k];  // via style so var() works
+      else e.setAttribute(k, at[k]);
+    } return e; };
+  const txt = (svg, x, y, s, fill, size, anchor, weight) => {
+    const t = el('text', {x, y, fill, 'font-size': size || 12, 'text-anchor': anchor || 'start'});
+    if (weight) t.setAttribute('font-weight', weight);
+    t.textContent = s; svg.appendChild(t); return t; };
+
+  /* ---------- Chart 1: AUC dot plot ---------- */
+  (function(){
+    const groups = [
+      {tag: '−0.25R touch', n: '116 stop / 136 recover', rows: [
+        ['big-print (≥20) volume', .585], ['big-print (≥20) share', .574], ['CVD (60s)', .565],
+        ['seller exhaustion', .431], ['absorption', .528], ['drop speed', .465]]},
+      {tag: '−0.40R touch', n: '116 / 90', rows: [
+        ['big-print (≥20) volume', .555], ['volume rate', .542], ['sell volume', .538],
+        ['secs to touch', .460], ['CVD divergence', .436], ['seller exhaustion', .474]]},
+      {tag: '−0.70R touch', n: '116 / 27', rows: [
+        ['sell volume', .585], ['CVD divergence', .577], ['volume rate', .568],
+        ['secs to touch', .434], ['big-lot sell share', .437], ['seller exhaustion', .439]]},
+    ];
+    const rowH = 24, gGap = 44, padT = 34, padB = 44, L = 240, R = 890;
+    let H = padT;
+    groups.forEach(g => H += gGap + g.rows.length * rowH);
+    H += padB;
+    const X = a => L + (a - .40) / .30 * (R - L);
+    const svg = el('svg', {viewBox: `0 0 940 ${H}`, role: 'img',
+      'aria-label': 'AUC dot plot: all stop-vs-recover features fall in the 0.45 to 0.55 noise band'});
+
+    const band = el('rect', {x: X(.45), y: padT - 8, width: X(.55) - X(.45), height: H - padT - padB + 16,
+      fill: css('--panel2'), rx: 4});
+    svg.appendChild(band);
+    [.40, .45, .50, .55, .60, .664, .70].forEach(v => {
+      const isb = v === .664;
+      svg.appendChild(el('line', {x1: X(v), y1: padT - 8, x2: X(v), y2: H - padB + 8,
+        stroke: isb ? css('--amber') : css('--line'), 'stroke-width': isb ? 1.5 : 1,
+        'stroke-dasharray': isb ? '4 4' : (v === .50 ? '' : '2 5')}));
+      txt(svg, X(v), H - padB + 26, v.toFixed(v === .664 ? 3 : 2),
+        isb ? css('--amber') : css('--dim'), 11.5, 'middle', isb ? 600 : 400);
+    });
+    txt(svg, X(.50), 16, 'no separation', css('--dim'), 11, 'middle');
+    txt(svg, X(.664), 16, "Part 1 winners' signal", css('--amber'), 11, 'middle', 600);
+
+    let y = padT;
+    groups.forEach(g => {
+      y += gGap;
+      txt(svg, 8, y - 24, g.tag, css('--ink'), 12.5, 'start', 600);
+      txt(svg, 8, y - 9, g.n, css('--dim'), 10.5);
+      g.rows.forEach(r => {
+        const cy = y + rowH / 2 - 4;
+        txt(svg, L - 12, cy + 4, r[0], css('--mut'), 11.5, 'end');
+        svg.appendChild(el('line', {x1: X(.50), y1: cy, x2: X(r[1]), y2: cy,
+          stroke: css('--dim'), 'stroke-width': 1, opacity: .55}));
+        const dot = el('circle', {cx: X(r[1]), cy, r: 5.5, fill: css('--dot'),
+          stroke: css('--panel'), 'stroke-width': 2});
+        svg.appendChild(dot);
+        const hit = el('circle', {cx: X(r[1]), cy, r: 13, fill: 'transparent'});
+        svg.appendChild(hit);
+        hover(hit, `<b>${r[0]}</b><br>${g.tag} · AUC ${r[1].toFixed(3)}<br>` +
+          `${r[1] > .5 ? 'higher in stops' : 'higher in recoverers'}`);
+        y += rowH;
+      });
+    });
+    document.getElementById('aucChart').appendChild(svg);
+  })();
+
+  /* ---------- Chart 2: post-stop path, diverging bars ---------- */
+  (function(){
+    const data = [
+      {w: '60 s',  up: .35, dn: .29, end: .08, pu: 35, pd: 33},
+      {w: '5 min', up: .65, dn: .55, end: .18, pu: 65, pd: 53},
+      {w: '15 min', up: 1.23, dn: .73, end: .51, pu: 83, pd: 63},
+    ];
+    const W = 940, H = 320, base = 175, L = 70, scale = 90; // px per R
+    const bw = 92, gap = 200;
+    const svg = el('svg', {viewBox: `0 0 ${W} ${H}`, role: 'img',
+      'aria-label': 'Median post-stop bounce and further fall at 60s, 5min, 15min'});
+    [1.5, 1, .5, 0, -.5, -1].forEach(v => {
+      const y = base - v * scale;
+      svg.appendChild(el('line', {x1: L, y1: y, x2: W - 20, y2: y, stroke: css('--line'),
+        'stroke-width': v === 0 ? 1.5 : 1, opacity: v === 0 ? 1 : .5}));
+      txt(svg, L - 10, y + 4, (v > 0 ? '+' : '') + v + 'R', css('--dim'), 11, 'end');
+    });
+    data.forEach((d, i) => {
+      const x = L + 70 + i * gap;
+      const upH = d.up * scale, dnH = d.dn * scale;
+      const up = el('rect', {x, y: base - upH, width: bw, height: upH - 1, rx: 4, fill: css('--blue')});
+      const dn = el('rect', {x, y: base + 1, width: bw, height: dnH - 1, rx: 4, fill: css('--red')});
+      svg.appendChild(up); svg.appendChild(dn);
+      hover(up, `<b>${d.w} after the stop</b><br>median max bounce +${d.up}R<br>${d.pu}% bounce &gt; 0.5R`);
+      hover(dn, `<b>${d.w} after the stop</b><br>median further fall +${d.dn}R<br>${d.pd}% fall another 0.5R`);
+      txt(svg, x + bw / 2, base - upH - 8, '+' + d.up + 'R', css('--blue'), 12.5, 'middle', 600);
+      txt(svg, x + bw / 2, base + dnH + 16, '−' + d.dn + 'R', css('--red'), 12.5, 'middle', 600);
+      // end-of-window marker
+      const ey = base - d.end * scale;
+      svg.appendChild(el('line', {x1: x - 8, y1: ey, x2: x + bw + 8, y2: ey,
+        stroke: css('--ink'), 'stroke-width': 2}));
+      txt(svg, x + bw + 14, ey + 4, 'end +' + d.end + 'R', css('--mut'), 11);
+      txt(svg, x + bw / 2, H - 12, d.w, css('--mut'), 12.5, 'middle');
+    });
+    txt(svg, L + 4, 24, 'max bounce above exit', css('--blue'), 12, 'start', 600);
+    txt(svg, L + 4, 40, 'max further fall below exit', css('--red'), 12, 'start', 600);
+    document.getElementById('pathChart').appendChild(svg);
+  })();
+})();
+</script>

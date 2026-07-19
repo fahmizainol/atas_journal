@@ -20,15 +20,22 @@ import pandas as pd
 BAND_COLS = ["mid", "std", "upper1", "upper2", "lower1", "lower2"]
 
 
-def vwap_bands(ticks: pd.DataFrame) -> pd.DataFrame:
+def vwap_bands(ticks: pd.DataFrame,
+               seed: tuple[float, float, float] | None = None) -> pd.DataFrame:
     """Running VWAP + 1σ/2σ bands, one row per tick, index-aligned to *ticks*.
 
     Accumulation starts at the first row, so the caller anchors the session by
-    slicing the tick frame (e.g. from the 09:30 ET open) before calling.
+    slicing the tick frame (e.g. from the 09:30 ET open) before calling. An
+    anchor that predates the frame — the weekly VWAP, anchored at the week's
+    Globex open but computed over one session's ticks — is expressed as *seed*:
+    the (Σv, Σpv, Σp²v) already accumulated between the anchor and the frame's
+    first tick (see ``weekly.weekly_seed``).
 
     The first few ticks have a near-zero sigma — the bands are degenerate until
     some volume has traded. That is honest rather than a bug: it is exactly what
     a live VWAP looks like seconds after the open. Rules must not lean on them.
+    (A seeded call starts with the anchor's volume behind it, so its bands are
+    real from the first tick.)
     """
     if ticks.empty:
         return pd.DataFrame(columns=BAND_COLS)
@@ -36,9 +43,10 @@ def vwap_bands(ticks: pd.DataFrame) -> pd.DataFrame:
     p = ticks["price"].to_numpy(dtype="float64")
     v = ticks["size"].to_numpy(dtype="float64")
 
-    cum_v = np.cumsum(v)
-    cum_pv = np.cumsum(p * v)
-    cum_p2v = np.cumsum(p * p * v)
+    sv, spv, sp2v = seed if seed is not None else (0.0, 0.0, 0.0)
+    cum_v = sv + np.cumsum(v)
+    cum_pv = spv + np.cumsum(p * v)
+    cum_p2v = sp2v + np.cumsum(p * p * v)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         mid = cum_pv / cum_v
@@ -54,3 +62,15 @@ def vwap_bands(ticks: pd.DataFrame) -> pd.DataFrame:
         "lower1": mid - std,
         "lower2": mid - 2 * std,
     }, index=ticks.index)
+
+
+def frame_sums(ticks: pd.DataFrame) -> tuple[float, float, float]:
+    """(Σv, Σpv, Σp²v) over a whole tick frame — one session's contribution to a
+    multi-session seed. Summing these across days and passing the total as
+    ``vwap_bands(seed=...)`` is exactly equivalent to accumulating over the
+    concatenated tick frames."""
+    if ticks.empty:
+        return (0.0, 0.0, 0.0)
+    p = ticks["price"].to_numpy(dtype="float64")
+    v = ticks["size"].to_numpy(dtype="float64")
+    return (float(v.sum()), float((p * v).sum()), float((p * p * v).sum()))

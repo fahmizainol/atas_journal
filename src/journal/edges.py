@@ -137,8 +137,44 @@ def _k_exit_reason(t: pd.DataFrame) -> pd.Series:
     return t["exit_reason"]
 
 
+def _k_entry_reason(t: pd.DataFrame) -> pd.Series:
+    """The reference level whose drift-touch triggered the entry ("Globex POC",
+    "NY VAH", "ONH", "pd VAL", ...). Only the drift-fade strategies write it; a
+    frame without the column can't be cut this way (see Cut.needs). Blank
+    attributions (legacy rows, non-attributing strategies) bucket as "(unknown)".
+    """
+    return t["entry_reason"].replace("", "(unknown)").fillna("(unknown)")
+
+
+STACKED_GATE = "(2+ gates)"
+
+
 def _k_gate(t: pd.DataFrame) -> pd.Series:
-    return t["gate"]
+    """Attribute each vetoed entry to the gate that would free it *alone*.
+
+    "Which gate vetoed it" is only actionable as "what does switching this one gate
+    off recover" — and an entry two gates both rejected is freed by neither on its
+    own. So a solo veto buckets under its gate, and a stacked veto (2+ gates) lands
+    in one ``(2+ gates)`` bucket instead of being credited to whichever gate fired
+    first. That first-match credit let a redundant gate look like it was saving P&L
+    it never had the chance to touch — the overlap-counted view (what each gate
+    catches regardless of the others) lives in ``confluence_breakdown`` alongside.
+    Legacy ledgers carry only the first-match ``gate`` and no ``gates`` set; there
+    we fall back to it (exact when one gate was enabled, first-match otherwise).
+    """
+    if "gates" not in t.columns:
+        return t["gate"]
+
+    def _solo(full: object, first: object) -> object:
+        parts = [g for g in str(full or "").split("|") if g]
+        if len(parts) == 1:
+            return parts[0]
+        if not parts:
+            return first  # empty set — trust the first-match column
+        return STACKED_GATE
+
+    return pd.Series([_solo(f, g) for f, g in zip(t["gates"], t["gate"])],
+                     index=t.index)
 
 
 def _k_band_width(t: pd.DataFrame) -> pd.Series:
@@ -199,6 +235,12 @@ CUTS: tuple[Cut, ...] = (
         knowable=False),
     Cut("by_exit_reason", "Exit reason", _k_exit_reason, ("exit_reason",), sort="net",
         knowable=False),
+    # Entry attribution: which reference level's drift-touch fired the entry. Ranked
+    # by net like the exit/gate name cuts, and knowable — the level identity was a
+    # fact at the touch, so a per-level split is one you could have traded (drop VAL,
+    # keep POC), and asking whether it beats a shuffle is a real question.
+    Cut("by_entry_reason", "Entry reference level", _k_entry_reason,
+        ("entry_reason",), sort="net"),
     Cut("by_gate", "Which gate vetoed it", _k_gate, ("gate",), sort="net"),
 )
 
@@ -301,15 +343,26 @@ def luck(trades: pd.DataFrame, name: str) -> float | None:
     return (beat + 1) / (PERMUTATIONS + 1)
 
 
-def luck_bar(names: tuple[str, ...]) -> float:
+def luck_bar(names: tuple[str, ...], trades: pd.DataFrame | None = None) -> float:
     """With this many cuts tested at once, one of them clearing a 1-in-20 bar is
     what noise hands you for free. Bonferroni — blunt, and it errs the safe way.
     Same bar, same reasoning as the regime leaderboard's.
 
     Counts only the cuts that are actually tested: the outcome cuts are never
-    scored, so charging the family for them would tighten the bar for nothing.
+    scored, so charging the family for them would tighten the bar for nothing. A
+    knowable cut whose column this book doesn't carry (by_entry_reason on a
+    non-drift-fade strategy) also can't be tested — luck() returns None for it —
+    so when a frame is given it too is left out of the family count.
     """
-    tested = sum(1 for n in names if BY_NAME[n].knowable)
+    def _testable(n: str) -> bool:
+        cut = BY_NAME[n]
+        if not cut.knowable:
+            return False
+        if trades is not None and any(c not in trades.columns for c in cut.needs):
+            return False
+        return True
+
+    tested = sum(1 for n in names if _testable(n))
     return 0.05 / max(1, tested)
 
 
@@ -317,7 +370,7 @@ def cuts(trades: pd.DataFrame, names: tuple[str, ...],
          with_luck: bool = True) -> dict[str, dict]:
     """Every named cut of one book, each with its own read on whether it means
     anything. The rows are the same records the plain frames produce."""
-    bar = luck_bar(names)
+    bar = luck_bar(names, trades)
     out: dict[str, dict] = {}
     for name in names:
         cut = BY_NAME[name]
@@ -336,21 +389,23 @@ def cuts(trades: pd.DataFrame, names: tuple[str, ...],
 def confluence_breakdown(vetoed: pd.DataFrame) -> pd.DataFrame:
     """Per-confluence veto stats over the ghost ledger, counting overlaps.
 
-    The ``by_gate`` cut partitions the vetoed book by the *first* gate that
-    rejected each entry — so a gate late in the check order only gets credit for
-    the entries the earlier ones let through, and you can't read what any single
-    stacked confluence is actually doing. This does not partition: each vetoed
-    entry carries the FULL set of gates that rejected it (``gates``, pipe-joined),
-    and here every gate in that set is scored on the entry. A trade two gates both
-    blocked counts once under EACH, so the ``trades`` column sums to more than the
-    ghost total — that overlap is the answer to "what does each gate independently
-    veto".
+    The ``by_gate`` cut buckets each vetoed entry under the gate that rejected it
+    *alone* — a disjoint partition, with everything two-or-more gates blocked
+    pooled into one ``(2+ gates)`` bucket, since no single toggle frees those. That
+    answers "what does switching this one gate off recover" but says nothing about
+    a gate that only ever fires stacked with others. This is its overlapping
+    complement: each vetoed entry carries the FULL set of gates that rejected it
+    (``gates``, pipe-joined), and here every gate in that set is scored on the
+    entry. A trade two gates both blocked counts once under EACH, so the ``trades``
+    column sums to more than the ghost total — that overlap is the answer to "what
+    does each gate independently veto".
 
     Columns mirror the cut frames (trades/net_pnl/win_rate/expectancy/avg_r; the
     bucket is the confluence name) with one addition: ``unique`` — how many of a
     gate's vetoes it caught *alone*, i.e. entries that would have traded had only
-    that gate been switched off. A high ``unique`` is a gate pulling its own
-    weight; a low one is redundant with the rest of the stack.
+    that gate been switched off — equivalently, that gate's own bucket count in the
+    disjoint ``by_gate`` cut. A high ``unique`` is a gate pulling its own weight; a
+    low one is redundant with the rest of the stack.
 
     A vetoed row's ``net_pnl`` is the would-be ghost P&L: positive means the gate
     cut a *winner*, negative means it saved the loss. Empty in -> empty out. Older
@@ -624,6 +679,123 @@ def winner_recovery(trades: pd.DataFrame) -> dict:
     return {
         "winners": int(len(w)),
         "median_recovery_s": float(np.median(rec)),
+        "buckets": buckets,
+    }
+
+
+def loser_collapse(trades: pd.DataFrame) -> dict:
+    """Of the losers that went green, how long they held it before collapsing — the
+    mirror of :func:`winner_recovery`.
+
+    ``giveback_s`` is measured by the engine: the seconds from a trade's highest
+    favorable tick back down to breakeven. This reads it over the losers that were
+    ever green (``mfe_r > 0``) — a loser that peaked and instantly reversed gave you
+    no window to scratch it, while one that sat green for minutes before rolling over
+    is an exit-timing miss, a flat (or better) trade the exit turned into a loss.
+    ``net_pnl`` per bucket is what that slice of losers cost — the loss you were most
+    plausibly in a position to avoid sits in the slow buckets.
+
+    Shares the time buckets of :func:`winner_recovery` so the two read on the same
+    scale. Needs the engine's ``giveback_s`` (runs predating it -> empty dict).
+    Zero-loser or no-green-loser books -> zero dict.
+
+    (:func:`underwater_survival` reads the total-dwell side of this — win rate by how
+    long a trade sat red — rather than the from-the-peak collapse time.)"""
+    need = ("giveback_s", "mfe_r", "net_pnl")
+    if trades is None or trades.empty or any(c not in trades.columns for c in need):
+        return {}
+    pnl = trades["net_pnl"].astype(float)
+    mfe = trades["mfe_r"].astype(float)
+    l = trades[(pnl <= 0) & (mfe > 0) & trades["giveback_s"].notna()]
+    if l.empty:
+        return {"losers": 0, "median_giveback_s": float("nan"), "buckets": []}
+    gb = l["giveback_s"].astype(float).to_numpy()
+    lp = l["net_pnl"].astype(float).to_numpy()
+    buckets = []
+    for label, lo, hi in RECOVERY_BINS:
+        if lo is None:
+            m = gb <= hi
+        elif hi is None:
+            m = gb > lo
+        else:
+            m = (gb > lo) & (gb <= hi)
+        buckets.append({
+            "bucket": label,
+            "trades": int(m.sum()),
+            "share": float(m.mean()),
+            "net_pnl": float(lp[m].sum()),
+        })
+    return {
+        "losers": int(len(l)),
+        "median_giveback_s": float(np.median(gb)),
+        "buckets": buckets,
+    }
+
+
+# --- does sitting underwater predict the loss --------------------------------
+
+# Half-open (lo, hi] on underwater seconds — total time below breakeven over the
+# whole path. Minute-scale because the question is minutes: does a trade that sat red
+# for five minutes end a loss more often than one that dipped for thirty seconds. The
+# first bin excludes zero (lo = 0.0), so the never-underwater trades fall out of the
+# buckets and are reported on their own.
+UNDERWATER_BINS: tuple[tuple[str, float, float | None], ...] = (
+    ("< 1m", 0.0, 60.0),
+    ("1 to 3m", 60.0, 180.0),
+    ("3 to 5m", 180.0, 300.0),
+    ("5 to 10m", 300.0, 600.0),
+    ("10m+", 600.0, None),
+)
+
+
+def underwater_survival(trades: pd.DataFrame) -> dict:
+    """Win rate as a function of how long the trade sat underwater — the direct read
+    of "a trade red for X minutes ends a loss how often".
+
+    ``underwater_s`` is measured by the engine: total seconds below breakeven summed
+    over the whole tick path, never NaN. Unlike :func:`winner_recovery` and
+    :func:`loser_collapse`, which condition on the outcome and on a from-the-extreme
+    crossing time, this buckets *every* trade by its dwell time and reads the win rate
+    in each bucket — including the losers that never recovered, which ``recovery_s``
+    drops to NaN. A win rate that falls as the bucket grows is the time-underwater →
+    loss signal; a flat one says dwell time carries no edge and the exit, not the
+    clock, is what decides.
+
+    ``never_underwater`` splits out the clean entries (``underwater_s == 0``) that
+    worked from the fill — their win rate is the ceiling the dwell buckets are read
+    against. ``net_pnl`` per bucket says where the money in each slice actually sits.
+
+    Needs the engine's ``underwater_s`` (runs predating it -> empty dict). Empty book
+    -> zero dict."""
+    need = ("underwater_s", "net_pnl")
+    if trades is None or trades.empty or any(c not in trades.columns for c in need):
+        return {}
+    valid = trades["underwater_s"].notna()
+    t = trades[valid]
+    if t.empty:
+        return {"trades": 0, "buckets": []}
+    uw = t["underwater_s"].astype(float).to_numpy()
+    won = (t["net_pnl"].astype(float) > 0).to_numpy()
+    pnl = t["net_pnl"].astype(float).to_numpy()
+
+    def _slice(m: np.ndarray) -> dict:
+        return {
+            "trades": int(m.sum()),
+            "win_rate": float(won[m].mean()) if m.any() else float("nan"),
+            "net_pnl": float(pnl[m].sum()),
+        }
+
+    buckets = []
+    for label, lo, hi in UNDERWATER_BINS:
+        m = uw > lo if hi is None else (uw > lo) & (uw <= hi)
+        buckets.append({"bucket": label, **_slice(m)})
+    pos = uw > 0
+    return {
+        "trades": int(len(t)),
+        "overall_win_rate": float(won.mean()),
+        "median_underwater_s": float(np.median(uw[pos])) if pos.any() else float("nan"),
+        # The clean entries that never dipped — the win-rate ceiling to read against.
+        "never_underwater": _slice(uw <= 0),
         "buckets": buckets,
     }
 

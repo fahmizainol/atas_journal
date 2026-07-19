@@ -30,6 +30,50 @@ import pandas as pd
 
 VALUE_AREA_PCT = 0.70
 
+# How many bars back the gap-closer attribution looks. Contact with a level is a
+# *drift* touch when, over this window, price's net move toward the level plus the
+# level's net move toward price is <= 0 — the two never actually converged, so the
+# touch came from tolerance/wiggle inside the zone rather than an approach. The
+# Interactions Lab (interactions.py) measures it per minute; the engine's
+# drift-touch-fade measures it per bar. Both call ``gap_closer`` so the definition
+# lives in exactly one place (the chart/study/engine agreement rule).
+GAP_LOOKBACK_BARS = 5
+
+
+def gap_closer(values: np.ndarray, close: np.ndarray, i: int,
+               lookback: int = GAP_LOOKBACK_BARS,
+               ) -> tuple[str, float | None, float | None]:
+    """Attribute a touch's closing distance: price's move toward the level vs the
+    level's move toward price, over the last ``lookback`` bars ending at ``i``.
+
+    ``values`` is the level's path (one entry per bar/minute) and ``close`` the
+    matching price closes. Returns ``(cls, price_closed, level_closed)``:
+
+    - ``"drift"`` — the two never converged over the window (their combined move
+      toward each other is <= 0). Price was already loitering by the level and
+      wiggled into contact: a slow re-test of a hugged zone, the fade signal.
+    - ``"level"`` — a falling band chased by price "touches" without price testing
+      anything; the level did the closing (share >= 0.6).
+    - ``"price"`` — price did the closing (share <= 0.4): a momentum test.
+    - ``"both"`` — they met in the middle.
+    - ``"unknown"`` — not enough history yet, or a NaN level in the window.
+
+    Lifted out of interactions._gap_closer so the Lab, the charts and the engine
+    all read the same arithmetic.
+    """
+    j = i - min(lookback, i)
+    if j >= i or np.isnan(values[j]) or np.isnan(values[i]):
+        return "unknown", None, None
+    toward = np.sign(values[j] - close[j])  # +1: level overhead, -1: level below
+    price_closed = float((close[i] - close[j]) * toward)
+    level_closed = float(-(values[i] - values[j]) * toward)
+    total = price_closed + level_closed
+    if total <= 0:
+        return "drift", round(price_closed, 2), round(level_closed, 2)
+    share = level_closed / total
+    cls = "level" if share >= 0.6 else "price" if share <= 0.4 else "both"
+    return cls, round(price_closed, 2), round(level_closed, 2)
+
 
 @dataclass(frozen=True)
 class DevelopingProfile:

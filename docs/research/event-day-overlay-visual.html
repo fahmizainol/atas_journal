@@ -1,0 +1,294 @@
+<title>Event-Day Overlay — a well-tested null</title>
+<style>
+  :root {
+    --bg: #FAFBFB;
+    --ink: #1B2228;
+    --muted: #5C6A73;
+    --accent: #0E7490;
+    --refuted: #9A5B24;
+    --rule: #E2E8EB;
+    --card: #F1F5F6;
+    --pos: #14724B;
+    --neg: #A83A32;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141A1E;
+      --ink: #DEE6EA;
+      --muted: #8C9AA3;
+      --accent: #4FB3CE;
+      --refuted: #D19A62;
+      --rule: #283238;
+      --card: #1B2329;
+      --pos: #4CB98A;
+      --neg: #E07A72;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141A1E; --ink: #DEE6EA; --muted: #8C9AA3; --accent: #4FB3CE;
+    --refuted: #D19A62; --rule: #283238; --card: #1B2329; --pos: #4CB98A; --neg: #E07A72;
+  }
+  :root[data-theme="light"] {
+    --bg: #FAFBFB; --ink: #1B2228; --muted: #5C6A73; --accent: #0E7490;
+    --refuted: #9A5B24; --rule: #E2E8EB; --card: #F1F5F6; --pos: #14724B; --neg: #A83A32;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: Charter, Georgia, 'Times New Roman', serif;
+    font-size: 1.0625rem;
+    line-height: 1.65;
+    margin: 0;
+    padding: 3.5rem 1.25rem 5rem;
+  }
+  .page { max-width: 46rem; margin: 0 auto; }
+  .eyebrow {
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.75rem;
+  }
+  h1 {
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-weight: 650;
+    font-size: 2rem;
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0 0 0.5rem;
+  }
+  .subtitle { color: var(--muted); font-size: 1.05rem; margin: 0 0 2rem; }
+  .meta {
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    color: var(--muted);
+    display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem;
+    padding: 0.9rem 0;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 2.5rem;
+  }
+  .verdict {
+    background: var(--card);
+    border-left: 3px solid var(--accent);
+    padding: 1.1rem 1.3rem;
+    margin: 0 0 2.5rem;
+    border-radius: 0 4px 4px 0;
+  }
+  .verdict p { margin: 0; }
+  .verdict strong { font-family: system-ui, -apple-system, sans-serif; font-weight: 650; }
+  h2 {
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-weight: 650;
+    font-size: 1.25rem;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 3rem 0 0.9rem;
+  }
+  h2 .num {
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+    display: block;
+    margin-bottom: 0.25rem;
+  }
+  h3 {
+    font-family: system-ui, -apple-system, sans-serif;
+    font-weight: 600;
+    font-size: 1rem;
+    margin: 1.8rem 0 0.5rem;
+  }
+  p { margin: 0 0 1rem; }
+  ul { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: 0.55rem; }
+  li::marker { color: var(--accent); }
+  .stat, code {
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    font-variant-numeric: tabular-nums;
+  }
+  code { background: var(--card); padding: 0.1em 0.35em; border-radius: 3px; }
+  .pos { color: var(--pos); }
+  .neg { color: var(--neg); }
+  .refuted-tag {
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--refuted);
+    border: 1px solid var(--refuted);
+    border-radius: 3px;
+    padding: 0.05rem 0.35rem;
+    white-space: nowrap;
+  }
+  .tablewrap { overflow-x: auto; margin: 1.2rem 0 1.6rem; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+  }
+  caption {
+    caption-side: top;
+    text-align: left;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--muted);
+    padding-bottom: 0.5rem;
+  }
+  th {
+    text-align: right;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    padding: 0.45rem 0.75rem;
+    border-bottom: 1.5px solid var(--rule);
+  }
+  th:first-child, td:first-child { text-align: left; padding-left: 0; }
+  th:last-child, td:last-child { padding-right: 0; }
+  td { text-align: right; padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--rule); }
+  tr.hl td { background: var(--card); }
+  .calendar dt {
+    font-family: system-ui, -apple-system, sans-serif;
+    font-weight: 600;
+    font-size: 0.9rem;
+    margin-top: 1rem;
+  }
+  .calendar dd {
+    margin: 0.25rem 0 0;
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.8rem;
+    line-height: 1.9;
+    color: var(--muted);
+  }
+  .footnote { color: var(--muted); font-size: 0.9rem; }
+  a { color: var(--accent); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .verdict { transition: border-color 0.2s ease; }
+  }
+</style>
+
+<div class="page">
+  <p class="eyebrow">atas-journal · lab research · backlog item 1</p>
+  <h1>Event-Day Overlay: macro releases, earnings, and strategy performance</h1>
+  <p class="subtitle">Do FOMC, CPI, NFP, PCE, GDP, or NQ-heavyweight earnings days move the sim strategies? Answer: no — and the null survived an out-of-sample test.</p>
+
+  <div class="meta">
+    <span>2026-07-19</span>
+    <span>window 2025-02-03 → 2026-06-30</span>
+    <span>upper-band baseline v10 · 398 trades</span>
+    <span>source: docs/research/event-day-overlay.md</span>
+  </div>
+
+  <div class="verdict">
+    <p><strong>Verdict: no event gate, no event sizing, no stay-flat veto.</strong> Event days show no significant effect on any strategy (<span class="stat">p = 0.58</span>), the first-pass in-sample leads reversed when three fresh months of data arrived, and post-earnings sessions are — if anything — slightly <em>better</em> than baseline. Backlog item 1 is closed; the reusable artifact is the verified release calendar at the bottom.</p>
+  </div>
+
+  <h2><span class="num">TL;DR</span>Five findings, one decision</h2>
+  <ul>
+    <li><strong>No macro event-day effect.</strong> Upper-band-bounce v10: <span class="stat">+0.091</span> R/trade on event days vs <span class="stat">+0.168</span> elsewhere — permutation <span class="stat">p = 0.579</span>. Win rate barely moves (<span class="stat">69.2%</span> vs <span class="stat">70.6%</span>).</li>
+    <li><strong>The in-sample leads died out of sample.</strong> On the v8 window NFP looked soft (<span class="stat neg">−0.032</span>) and event+post-day softness reached <span class="stat">p = 0.088</span>. Adding Mar–Jun 2026: NFP flipped to <span class="stat pos">+0.154</span>, and event+post washed out to <span class="stat">p = 0.304</span>. <span class="refuted-tag">refuted OOS</span></li>
+    <li><strong>No earnings damage.</strong> All six heavyweights report after the close, so the affected session is the <em>next</em> day — and those sessions run <span class="stat pos">+0.208</span> R/trade at <span class="stat">76.7%</span> win, slightly better than baseline.</li>
+    <li><strong>Pre-event days are fine</strong> (<span class="stat">+0.116</span>, <span class="stat">75%</span> win). There is no pre-event-chop story.</li>
+    <li><strong>FOMC exposure barely exists.</strong> Across 17 months the profitable strategies took 3 FOMC-day trades — all entered before the 14:00 statement. Only the losing strategies ever traded after it.</li>
+  </ul>
+
+  <h2><span class="num">§1</span>Method</h2>
+  <p>Each session date is tagged with any of {FOMC decision, CPI, NFP, PCE, GDP} from the verified calendar (§5); roughly 22% of trading days carry at least one tag. <code>pre</code> is the last traded day before an event day, <code>post</code> the first after, <code>between</code> both at once, <code>clean</code> none. Earnings tags: every report in the window was after-market-close, so <code>post-earnings</code> marks the next traded session and <code>report-day</code> the RTH session before the print. Tags join per-trade on <code>session</code>; significance is permutation-tested (20k shuffles, two-sided) on mean R/trade. The thin October-2025-only strategies are excluded — four to nine days each, no power.</p>
+
+  <h2><span class="num">§2</span>Results on current baselines</h2>
+
+  <div class="tablewrap">
+    <table>
+      <caption>Macro day-tags — vwap-upper-band-bounce v10 (n = 398)</caption>
+      <thead><tr><th>tag</th><th>days</th><th>trades</th><th>R/trade</th><th>win %</th><th>net $</th></tr></thead>
+      <tbody>
+        <tr class="hl"><td>clean</td><td>69</td><td>203</td><td class="pos">+0.244</td><td>70.9</td><td>+103,081</td></tr>
+        <tr><td>pre</td><td>28</td><td>64</td><td>+0.116</td><td>75.0</td><td>+14,074</td></tr>
+        <tr><td>event</td><td>30</td><td>65</td><td>+0.091</td><td>69.2</td><td>+10,647</td></tr>
+        <tr><td>post</td><td>25</td><td>51</td><td>+0.052</td><td>66.7</td><td>+3,776</td></tr>
+        <tr><td>between</td><td>6</td><td>15</td><td class="neg">−0.250</td><td>60.0</td><td>−9,075</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The clean-vs-tagged gradient looks tempting, but it is exactly what tail concentration produces by chance: event-day vs rest <span class="stat">p = 0.579</span>, event+post vs rest <span class="stat">p = 0.304</span>. Nothing survives testing.</p>
+
+  <div class="tablewrap">
+    <table>
+      <caption>By macro event type — upper-band v10</caption>
+      <thead><tr><th>event</th><th>days</th><th>trades</th><th>R/trade</th><th>win %</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>FOMC</td><td>2</td><td>3</td><td class="neg">−0.310</td><td>66.7</td><td>n=3, no read</td></tr>
+        <tr><td>CPI</td><td>10</td><td>17</td><td>+0.107</td><td>70.6</td><td></td></tr>
+        <tr><td>NFP</td><td>10</td><td>27</td><td class="pos">+0.154</td><td>70.4</td><td><span class="refuted-tag">was −0.03 in-sample</span></td></tr>
+        <tr><td>PCE</td><td>5</td><td>11</td><td>+0.160</td><td>72.7</td><td></td></tr>
+        <tr><td>GDP</td><td>6</td><td>11</td><td class="neg">−0.159</td><td>63.6</td><td>only residual negative</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <caption>Earnings tags — current baselines (trades in parentheses)</caption>
+      <thead><tr><th>strategy</th><th>other</th><th>report-day</th><th>post-earnings</th></tr></thead>
+      <tbody>
+        <tr><td>vwap-upper-band-bounce v10</td><td>+0.156</td><td>+0.100 (33)</td><td class="pos">+0.208 (30)</td></tr>
+        <tr><td>profile-pullback-long</td><td>+0.324</td><td>−0.382 (4)</td><td>+0.667 (3)</td></tr>
+        <tr><td>value-rotation</td><td class="neg">−0.047</td><td>+0.240 (15)</td><td class="pos">+0.513 (26)</td></tr>
+        <tr><td>vwap-dev1-fade-short</td><td class="neg">−0.079</td><td>+0.261 (7)</td><td>−0.001 (16)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>No damage anywhere; the after-close-report vol regime, if anything, suits these mean-reversion entries. The odd one out is value-rotation — dead money everywhere else, positive on earnings-adjacent days. Logged as a low-prior curiosity, n = 26.</p>
+
+  <h3>profile-pullback-long (n = 101)</h3>
+  <p class="footnote">clean <span class="stat pos">+0.530</span> / pre <span class="stat">−0.030</span> / event <span class="stat">−0.112</span> / post <span class="stat">+0.292</span> R/trade. Directionally soft around events, but at 14–18 trades per bucket a single −1R day flips any of them. Not significant, not actionable.</p>
+
+  <h3>FOMC statement-time alignment</h3>
+  <p>Upper-band and profile-pullback have <strong>zero</strong> entries after 14:00 ET on FOMC days. Post-statement trading exists only in value-rotation (<span class="stat">+0.36</span>, 12 trades) and dev1-fade (<span class="stat neg">−0.37</span>, 13). The one event that fires mid-session is one the profitable strategies structurally never trade into.</p>
+
+  <h2><span class="num">§3</span>Why the null is convincing</h2>
+  <ul>
+    <li><strong>A built-in out-of-sample test.</strong> The first pass ran on the v8 baseline (window ending 2026-02-20) and produced three leads: NFP soft, GDP soft, event+post softness at <span class="stat">p = 0.088</span>. The baseline then moved to v10, whose Mar–Jun 2026 tail was unseen when those hypotheses formed. The fresh data flipped NFP positive, shrank everything else, and washed the composite out — the same in-sample-mirage signature as the seven A/B-failed order-flow knobs.</li>
+    <li><strong>The mechanism check fails.</strong> If events were toxic, win rate should drop, or CPI — the biggest scheduled vol print — should be the worst bucket. Neither holds: win rates are flat across tags and CPI is positive in both samples.</li>
+    <li><strong>Tail concentration predicts exactly this.</strong> With ~20 trades carrying ≈100% of net, a binary tag over ~22% of days shows a "large" R/trade gap by chance roughly a third of the time. Day-level tagging cannot beat that noise floor at n ≈ 400.</li>
+  </ul>
+
+  <h2><span class="num">§4</span>First-pass numbers, for the record (v8, 279 trades)</h2>
+  <p class="footnote">Event vs clean: <span class="stat">+0.227</span> clean / <span class="stat">+0.060</span> event (<span class="stat">p = 0.294</span>). By type: CPI <span class="stat">+0.292</span>, NFP <span class="stat">−0.032</span>, GDP <span class="stat">−0.179</span>, PCE <span class="stat">+0.173</span>, FOMC <span class="stat">−0.310</span> (n = 3). Pre/post cut: clean <span class="stat">+0.291</span>, pre <span class="stat">+0.220</span>, event <span class="stat">+0.060</span>, post <span class="stat">+0.105</span>, between <span class="stat">−0.484</span>; event+post vs rest <span class="stat">−0.171</span>, <span class="stat">p = 0.088</span>. Every negative lead regressed or reversed on the extended sample.</p>
+
+  <h2><span class="num">§5</span>Verified release calendar, 2025-02 → 2026-06</h2>
+  <p>Cross-checked against BLS release-archive permalinks, BEA schedule notices and embargo headers, federalreserve.gov, company IR pages, and SEC 8-Ks. The late-2025 shutdown (Oct 1 – Nov 12) delayed several releases and <strong>canceled two outright</strong>: there is no October-2025-reference CPI and no standalone October jobs report. Dates below are actual release dates.</p>
+  <dl class="calendar">
+    <dt>FOMC decision days · 14:00 ET</dt>
+    <dd>2025: 01-29 · 03-19 · 05-07 · 06-18 · 07-30 · 09-17 · 10-29 · 12-10&ensp;|&ensp;2026: 01-28 · 03-18 · 04-29 · 06-17</dd>
+    <dt>CPI · 08:30 ET</dt>
+    <dd>2025: 02-12 · 03-12 · 04-10 · 05-13 · 06-11 · 07-15 · 08-12 · 09-11 · 10-24 (delayed) · 12-18 (delayed; Oct-ref canceled)&ensp;|&ensp;2026: 01-13 · 02-13 (delayed) · 03-11 · 04-10 · 05-12 · 06-10</dd>
+    <dt>NFP / Employment Situation · 08:30 ET</dt>
+    <dd>2025: 02-07 · 03-07 · 04-04 · 05-02 · 06-06 · 07-03 · 08-01 · 09-05 · 11-20 (Sept-ref, delayed) · 12-16 (Nov-ref + Oct payrolls)&ensp;|&ensp;2026: 01-09 · 02-11 (delayed, benchmark rev.) · 03-06 · 04-03 · 05-08 (2nd Friday) · 06-05</dd>
+    <dt>PCE · 08:30 ET unless noted</dt>
+    <dd>2025: 02-28 · 03-28 · 04-30 · 05-30 · 06-27 · 07-31 · 08-29 · 09-26 · 12-05 (10:00)&ensp;|&ensp;2026: 01-22 (Oct+Nov combined, 10:00) · 02-20 · 03-13 · 04-09 · 04-30 · 05-28 · 06-25</dd>
+    <dt>GDP · 08:30 ET</dt>
+    <dd>2025: 02-27 · 03-27 · 04-30 · 05-29 · 06-26 · 07-30 · 08-28 · 09-25 · 12-23 (Q3 "initial")&ensp;|&ensp;2026: 01-22 (Q3 "updated") · 02-20 (Q4 adv) · 03-13 · 04-09 · 04-30 (Q1'26 adv) · 05-28 · 06-25</dd>
+    <dt>Earnings · all after market close → affected session is the next trading day</dt>
+    <dd>NVDA 2025: 02-26 · 05-28 · 08-27 · 11-19 | 2026: 02-25 · 05-20<br>
+        AAPL 2025: 05-01 · 07-31 · 10-30 | 2026: 01-29 · 04-30<br>
+        MSFT 2025: 04-30 · 07-30 · 10-29 | 2026: 01-28 · 04-29<br>
+        AMZN 2025: 02-06 · 05-01 · 07-31 · 10-30 | 2026: 02-05 · 04-29<br>
+        META 2025: 04-30 · 07-30 · 10-29 | 2026: 01-28 · 04-29<br>
+        GOOGL 2025: 02-04 · 04-24 · 07-23 · 10-29 | 2026: 02-04 · 04-29</dd>
+  </dl>
+  <p class="footnote">Cluster days worth remembering: 2025-10-29 (FOMC + MSFT/META/GOOGL), 2026-04-29 (FOMC + MSFT/AMZN/META/GOOGL — the quadruple), 2026-04-30 (PCE + GDP + AAPL), 2025-07-30 (FOMC + GDP + MSFT/META).</p>
+
+  <h2><span class="num">§6</span>Disposition</h2>
+  <p>Backlog item 1 is closed: calendar assembled and verified, edge measured across day-of / pre / post / earnings / FOMC-time cuts, and the decision is <strong>neither a filter nor a signal</strong> — no gate, no sizing knob, no Lab tag UI. Revisit triggers, both low-prior: value-rotation's earnings-adjacent positivity if that strategy ever comes back, and GDP-day softness if it persists past ~25 trades.</p>
+</div>

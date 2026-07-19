@@ -299,10 +299,11 @@ export interface RunCut {
 }
 
 // One confluence's independent veto stats over the ghost ledger. Unlike the
-// by_gate cut (which credits only the FIRST gate to reject each entry), every
-// gate that would have vetoed a trade is scored on it here — so rows overlap and
-// `trades` sums to more than the vetoed total. `unique` is how many a gate caught
-// alone (nothing else stood between the entry and a real fill).
+// by_gate cut (which buckets each entry under the one gate that vetoed it alone,
+// with stacked vetoes pooled), every gate that would have vetoed a trade is scored
+// on it here — so rows overlap and `trades` sums to more than the vetoed total.
+// `unique` is how many a gate caught alone (nothing else stood between the entry
+// and a real fill) — the same count as that gate's bucket in the by_gate cut.
 export interface ConfluenceRow extends RunEdgeRow {
   bucket: string; // the confluence / gate name
   unique: number;
@@ -383,6 +384,47 @@ export interface WinnerRecovery {
   winners: number;
   median_recovery_s: number;
   buckets: WinnerRecoveryBin[];
+}
+
+// One collapse-time bucket of the green losers (bucket = "< 30s" … "5m+") — how long
+// they held their peak profit before collapsing back through breakeven into the
+// loss. The mirror of WinnerRecoveryBin. net_pnl is the loss riding on the slow ones.
+export interface LoserCollapseBin {
+  bucket: string;
+  trades: number;
+  share: number;
+  net_pnl: number;
+}
+
+// The green losers split by collapse time, plus the median. Needs the engine's
+// giveback_s — absent on runs predating it (re-run to populate). Zero losers / no
+// green losers -> empty buckets.
+export interface LoserCollapse {
+  losers: number;
+  median_giveback_s: number;
+  buckets: LoserCollapseBin[];
+}
+
+// One dwell bucket (bucket = "< 1m" … "10m+") of EVERY trade split by total time
+// underwater — win_rate is the fraction of that bucket that ended green, net_pnl the
+// money in it. A win_rate that falls as the bucket grows is the "sitting red predicts
+// the loss" signal.
+export interface UnderwaterBin {
+  bucket: string;
+  trades: number;
+  win_rate: number;
+  net_pnl: number;
+}
+
+// Win rate as a function of time underwater, over every trade (not conditioned on
+// outcome). never_underwater is the clean-entry ceiling to read the buckets against.
+// Needs the engine's underwater_s — absent on runs predating it (re-run to populate).
+export interface UnderwaterSurvival {
+  trades: number;
+  overall_win_rate: number;
+  median_underwater_s: number;
+  never_underwater: UnderwaterBin;
+  buckets: UnderwaterBin[];
 }
 
 // One side (bucket = "Winners" | "Losers") of the win/loss distribution the
@@ -490,10 +532,14 @@ export interface RunEdgeScope {
   daily?: DailyConcentration;
   // The losers split by how far they ever ran in favor. Absent on runs predating mfe_r.
   loser_giveback?: LoserGiveback;
+  // Of those green losers, how fast they collapsed back to breakeven. Absent pre-giveback_s.
+  loser_collapse?: LoserCollapse;
   // The mirror: winners split by the heat they took before working. Absent pre-mae_r.
   winner_heat?: WinnerHeat;
   // Of those underwater winners, how fast they recovered. Absent pre-recovery_s.
   winner_recovery?: WinnerRecovery;
+  // Win rate by total time underwater, over every trade. Absent pre-underwater_s.
+  underwater_survival?: UnderwaterSurvival;
   cuts: RunCut[];
   // Present only on the vetoed scope; empty on runs with no gates (or older runs
   // whose ledger predates the full gate set, where it falls back to first-match).

@@ -168,6 +168,14 @@ def _probe_front_month(root: str, start: date, end: date) -> dict[str, str]:
     return {d.isoformat(): sym[int(i)] for d, i in per_day.items() if int(i) in sym}
 
 
+def _next_weekday(d: date) -> date:
+    """The next Mon-Fri after ``d`` — the day that would carry a session if one ran."""
+    n = d + timedelta(days=1)
+    while n.weekday() >= 5:
+        n += timedelta(days=1)
+    return n
+
+
 def ensure_roll_map(contract: str, start: date, end: date) -> dict[str, str]:
     """Resolve and cache the front month for every session in [start, end].
 
@@ -192,15 +200,32 @@ def ensure_roll_map(contract: str, start: date, end: date) -> dict[str, str]:
     # a quiet day at the end of the probe could just be data not yet published, and
     # calling that "closed" would let a run silently skip a real session.
     last_seen = max(have) if have else None
+    first_seen = min(have) if have else None
     for d in want:
         k = d.isoformat()
         if k in have:
             continue
+        # A day sitting before a known session -> its empty probe is the calendar, not
+        # missing data, so it is closed. Decided independently of whether a contract
+        # can be put on it: closed means there was nothing to buy.
+        is_closed = bool(last_seen and k < last_seen)
         prior = [v for kk, v in sorted(have.items()) if kk < k]
-        if not prior:
+        if prior:
+            have[k] = prior[-1]
+        elif is_closed and first_seen and _next_weekday(d).isoformat() == first_seen:
+            # No prior session to carry forward, yet this is the weekday immediately
+            # before the first session ever probed and it came back empty — a holiday
+            # at the map's leading edge (New Year's Day before a Jan-2 map start). Carry
+            # the earliest known contract backward (the front month does not turn over a
+            # holiday) so the day resolves, is never re-probed, and the run skips it as
+            # closed instead of dying in contract_for. A day further back than one
+            # session stays unresolved on purpose — it could be a real session whose
+            # data we simply never fetched, and guessing a contract there would silently
+            # simulate the wrong instrument.
+            have[k] = have[first_seen]
+        else:
             continue
-        have[k] = prior[-1]
-        if last_seen and k < last_seen:
+        if is_closed:
             closed.add(k)
 
     TICK_CACHE_DIR.mkdir(parents=True, exist_ok=True)

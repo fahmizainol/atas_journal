@@ -19,6 +19,7 @@ from . import profile as profmod
 from . import regime as regmod
 from . import ticks as tickmod
 from . import vwap as vwapmod
+from . import weekly as weeklymod
 from .schema import Field
 
 if TYPE_CHECKING:
@@ -327,6 +328,113 @@ class VwapSlopeCapGate:
                  or {}).get("ny_vwap_slope_ppm")
         if slope is not None and u * slope < self.slope_max:
             self._blocked = None  # no runaway grade; the gate is inert today
+            return
+        self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class VwapFlatGate:
+    """Veto every entry after its checkpoint ET unless the day is FLAT — the NY
+    VWAP grade at the checkpoint under the threshold in BOTH directions.
+
+    The balance-day gate. The cap gates read one direction each: the slope cap
+    stands a fade down when the grade runs away from the mean it reverts to,
+    and is inert on a day grinding the other way. But the mean-reversion
+    premise — value is where it should be, the extremes are excursions — is a
+    claim about *balance*, not about the absence of one particular trend. This
+    gate states it directly: |slope| at or above ``grade_max`` is a day that
+    has picked a direction, and the fade stands down whichever way it points.
+
+    Against the slope cap it is strictly tighter on one side and new on the
+    other: with equal thresholds it vetoes every day the cap does, plus the
+    days graded toward the fade (where the fade rarely arms, but the fills it
+    does get are counter-trend entries on a directional tape).
+
+    Honesty clause: the 1.2 pts/min default is the flattest-tercile boundary
+    of |ny_vwap_slope_ppm| at 09:45 across the whole cached regime sample
+    (~825 days, boundary ≈ 1.16) — a distributional cut, not an outcome-fitted
+    one. At 10:30 the same boundary is ≈ 0.33 (the 30-minute window smooths
+    the open's impulse away) — a 10:30 read wants its own, much tighter
+    threshold, not this default.
+
+    And the A/B verdict, Aug 2025 – Jan 2026, fade-short: the gate LOST.
+    On the far-band-target baseline it vetoed ~$9k of net winners (the
+    opp_dev1 traversal needs a graded tape — the fade's paying days slope
+    DOWN, ~+$305/day, vs ~+$102 flat and −$248 up); and rebuilt as the
+    textbook balance trade (mid target, variant A limit at the band) the
+    flat-gated fade came out exactly breakeven, PF 1.00 over 249 trades.
+    The gate stays because "is this a balance-day edge?" keeps being asked,
+    and one enabled section answers it from the ghost ledger — not because
+    a profitable setting is known. Runs efe7d5fb / cf7c42c0 / 5c654ebc.
+
+    Same clock discipline as every checkpoint gate: entries before the
+    checkpoint pass untouched, and the gate reads the artifact's checkpoint —
+    never a fresher slope — so what it acts on is exactly what was knowable.
+
+    Config section::
+
+        {"vwap_flat": {"enabled": true, "grade_max": 1.2, "checkpoint": "09:45"}}
+
+    ``grade_max`` is the stand-down threshold in points per minute, read as a
+    magnitude: at or above it — either sign — no entries for the rest of the
+    session.
+
+    Blind days — no artifact, or a checkpoint too thin to carry a slope — are
+    vetoed after the checkpoint. "No data" must not read as "confirmed".
+    """
+
+    name = "vwap_flat"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Stand down unless the day is flat",
+              default=False,
+              help="After the checkpoint ET, vetoes every entry on a day whose "
+                   "NY VWAP slope at the checkpoint has reached the threshold "
+                   "in EITHER direction — the day has picked a grade, and the "
+                   "balance premise of the fade is gone."),
+        Field("grade_max", "float", name, "Max |NY VWAP slope| at the checkpoint",
+              unit="pts/min", min=0.0, max=5.0, default=1.2,
+              depends_on=("enabled", True),
+              help="Magnitude of the NY-anchored VWAP slope into the "
+                   "checkpoint, either sign. At or above this, the rest of the "
+                   "session is stood down. The default is the flattest-tercile "
+                   "boundary of the cached regime sample at 09:45; a 10:30 "
+                   "read wants a much tighter setting (its boundary is ≈0.33)."),
+        Field("checkpoint", "enum", name, "Checkpoint",
+              choices=_CHECKPOINT_CHOICES, default="09:45",
+              depends_on=("enabled", True),
+              help="When the slope is read, and from when the stand-down "
+                   "applies. 09:45 is the earliest read the NY anchor can "
+                   "carry — the only one that reaches the open-driven morning."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown vwap_flat knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        v = section.get("grade_max", 1.2)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 5.0:
+            raise ValueError(f"grade_max must be a number in [0, 5], got {v!r}")
+        self.grade_max = float(v)
+        self.checkpoint = _checkpoint(section, "09:45")
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        # A magnitude read needs no band frame: flat is flat on both sides, so
+        # the short and the long fade read the same number the same way.
+        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        slope = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
+                 or {}).get("ny_vwap_slope_ppm")
+        if slope is not None and abs(slope) < self.grade_max:
+            self._blocked = None  # the day is flat; the gate is inert today
             return
         self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
 
@@ -1474,3 +1582,573 @@ class UpperOccupancyCapGate:
 
     def allows(self, i: int, fill: float) -> bool:
         return self._blocked is None or not self._blocked[i]
+
+
+def _ib_extremes(ctx: "SessionCtx", ib_minutes: int) -> tuple[float, float] | None:
+    """The Initial Balance's high/low: RTH ticks in [09:30, 09:30+ib_minutes),
+    read off the ET wall clock so the same expression is correct on an RTH frame
+    and on a globex splice (overnight minutes never land inside the window).
+    None when the window holds no ticks — a session with no IB has no gate."""
+    et = ctx.ticks["ts_utc"].dt.tz_convert(ET_TZ)
+    mins = (et.dt.hour * 60 + et.dt.minute).to_numpy()
+    mask = (mins >= 570) & (mins < 570 + ib_minutes)
+    if not mask.any():
+        return None
+    px = ctx.ticks["price"].to_numpy(dtype="float64")[mask]
+    return float(px.max()), float(px.min())
+
+
+def _ib_minutes_knob(section: dict, name: str) -> int:
+    v = section.get("ib_minutes", 60)
+    if isinstance(v, bool) or not isinstance(v, int) or not 15 <= v <= 120:
+        raise ValueError(f"{name} ib_minutes must be an int in [15, 120], got {v!r}")
+    return v
+
+
+class IbInOnGate:
+    """Veto entries by whether the Initial Balance stayed inside the overnight
+    range — the rotation-day read, applied from the moment the IB completes.
+
+    The idea it enforces: an IB that never left the Globex range is a morning
+    that added no information — the night's balance is still intact, and the
+    day leans rotational. The IB study (NQ Feb 2025 – Jan 2026, 257 sessions)
+    found IB-inside-ON days break BOTH IB sides 35.2% of the time against a
+    20.6% base rate, while an IB that had already broken an ON extreme drops
+    to 14–19%: containment predicts rotation, escape predicts one-sidedness.
+    ``veto_inside`` stands a directional strategy down on the containment days;
+    ``require_inside`` is the mirror for a rotation strategy that wants ONLY
+    those days.
+
+    Honesty clause: a distributional cut of the IB study, not an outcome-
+    validated gate — both-break rate is a claim about structure, not P&L. This
+    exists to A/B the idea off the ghost ledger.
+
+    Clock discipline: the containment verdict does not exist until the IB is
+    complete, so entries before 09:30+ib_minutes pass untouched — the gate
+    never acts on information the session didn't have yet. Cache-only by
+    doctrine: a day with no cached overnight has no ON range, and every
+    post-IB entry is vetoed — "no data" must not read as "confirmed".
+
+    Config section::
+
+        {"ib_in_on": {"enabled": true, "mode": "veto_inside", "ib_minutes": 60}}
+    """
+
+    name = "ib_in_on"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Gate on IB-inside-overnight containment",
+              default=False,
+              help="From the moment the Initial Balance completes, vetoes "
+                   "entries by whether the IB stayed inside the overnight "
+                   "range. Containment days break both IB sides at ~1.7x the "
+                   "base rate (the IB study's strongest cut) — they lean "
+                   "rotational, not directional."),
+        Field("mode", "enum", name, "Mode",
+              choices=(("veto_inside", "Veto containment days — directional strategies"),
+                       ("require_inside", "Only containment days — rotation strategies")),
+              default="veto_inside", depends_on=("enabled", True),
+              help="veto_inside stands the strategy down when the IB stayed "
+                   "inside the overnight range; require_inside passes only "
+                   "then. Entries before the IB completes always pass — the "
+                   "verdict doesn't exist yet."),
+        Field("ib_minutes", "int", name, "IB window", unit="min", min=15,
+              max=120, default=60, depends_on=("enabled", True),
+              help="Length of the Initial Balance, from the 09:30 bell. 60 is "
+                   "the two-TPO convention; the study's numbers were measured "
+                   "there."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown ib_in_on knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        mode = section.get("mode", "veto_inside")
+        if mode not in ("veto_inside", "require_inside"):
+            raise ValueError(
+                f"mode must be 'veto_inside' or 'require_inside', got {mode!r}")
+        self.mode = mode
+        self.ib_minutes = _ib_minutes_knob(section, self.name)
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._blocked = None
+        after_ib = _veto_from(ctx, 570 + self.ib_minutes)
+        ib = _ib_extremes(ctx, self.ib_minutes)
+        contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
+        on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
+        if ib is None or on is None or on.empty:
+            self._blocked = after_ib  # blind: no IB or no overnight — veto post-IB
+            return
+        ib_hi, ib_lo = ib
+        inside = ib_hi <= float(on["price"].max()) and ib_lo >= float(on["price"].min())
+        if inside == (self.mode == "veto_inside"):
+            self._blocked = after_ib
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class IbWidthGate:
+    """Veto entries by the Initial Balance's width, from the moment it completes.
+
+    The IB study's conditioner: IB width (relative to recent daily range) is
+    monotonic on rotation — the narrow tercile broke both IB sides 33% of the
+    time, the wide tercile 8.6% (NQ Feb 2025 – Jan 2026). A directional
+    strategy may want the wide, contained days (``min_ticks``); a rotation
+    strategy the narrow, breakable ones (``max_ticks``). Thresholds are
+    absolute ticks — read the study's tercile boundaries (0.44x / 0.66x ADR)
+    against the window's own average day range to pick them.
+
+    Honesty clause: same as ib_in_on — a distributional cut, not an outcome-
+    validated gate, and part of the narrow-IB both-break lift is mechanical
+    (a narrow IB needs less absolute travel to be exceeded twice). A/B it off
+    the ghost ledger.
+
+    Same clock discipline as ib_in_on: before 09:30+ib_minutes the width isn't
+    knowable and entries pass untouched. Needs no overnight — the IB is read
+    off the session's own ticks.
+
+    Config section::
+
+        {"ib_width": {"enabled": true, "min_ticks": 0, "max_ticks": 0, "ib_minutes": 60}}
+    """
+
+    name = "ib_width"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Gate on Initial Balance width",
+              default=False,
+              help="From the moment the IB completes, vetoes entries when its "
+                   "high-low range falls outside the bounds. Narrow IBs lean "
+                   "rotational (both-break 33% vs 8.6% wide, in the IB "
+                   "study's ADR terciles); wide IBs lean contained."),
+        Field("min_ticks", "int", name, "Min IB range", unit="ticks", min=1,
+              zero_means_off=True, on_default=400, default=0,
+              depends_on=("enabled", True),
+              help="0 = no lower bound. Vetoes post-IB entries on days whose "
+                   "IB range is narrower than this — the rotational tail."),
+        Field("max_ticks", "int", name, "Max IB range", unit="ticks", min=1,
+              zero_means_off=True, on_default=800, default=0,
+              depends_on=("enabled", True),
+              help="0 = no upper bound. Vetoes post-IB entries on days whose "
+                   "IB range is wider than this — the exhausted tail."),
+        Field("ib_minutes", "int", name, "IB window", unit="min", min=15,
+              max=120, default=60, depends_on=("enabled", True),
+              help="Length of the Initial Balance, from the 09:30 bell."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown ib_width knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        for k in ("min_ticks", "max_ticks"):
+            v = section.get(k, 0)
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise ValueError(f"{k} must be a non-negative int, got {v!r}")
+        self.min_ticks = section.get("min_ticks", 0)
+        self.max_ticks = section.get("max_ticks", 0)
+        if self.min_ticks and self.max_ticks and self.min_ticks > self.max_ticks:
+            raise ValueError(
+                f"min_ticks ({self.min_ticks}) may not exceed "
+                f"max_ticks ({self.max_ticks})")
+        self.ib_minutes = _ib_minutes_knob(section, self.name)
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._blocked = None
+        ib = _ib_extremes(ctx, self.ib_minutes)
+        if ib is None:
+            self._blocked = _veto_from(ctx, 570 + self.ib_minutes)
+            return
+        width_t = (ib[0] - ib[1]) / tick_size(ctx.cfg.instrument)
+        narrow = self.min_ticks and width_t < self.min_ticks
+        wide = self.max_ticks and width_t > self.max_ticks
+        if narrow or wide:
+            self._blocked = _veto_from(ctx, 570 + self.ib_minutes)
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class WkExtGate:
+    """Veto entries filling stretched beyond the weekly VWAP envelope.
+
+    The idea it enforces: the weekly anchor (the week's first Globex open — see
+    ``weekly.py``) is a slow regime measure, and the weekly-VWAP study found its
+    +2σ edge is where the bounce's habitat ends. On the 398-trade v10 baseline,
+    entries above weekly mid + 2σ were −$14.5k across 48 trades at a 40% stop
+    rate, negative in 5 of 6 quarters; the session-level study independently
+    found >+2σ opens revert (median −56 pts). So the gate vetoes any fill more
+    than ``max_sigma`` weekly sigmas beyond the weekly mid on the setup's side.
+
+    Mirrored by band side like on_high: on a lower-band setup the veto is a
+    fill stretched *below* mid − max_sigma·σ.
+
+    The week's first session is INERT, not blind — a deliberate exception to
+    "no data must not read as confirmed": on that day the weekly anchor is by
+    definition the session's own Globex anchor (zero seed), "a week of
+    accumulated value" does not exist yet as a premise, and every live trader
+    knows it is Monday. The study's first-session subset is also the run's best
+    (win 74%, avg R +0.27), so vetoing it would be the gate trading on its own
+    absence. A *hole* — a prior session whose ticks were never bought, or a
+    session with no cached overnight — is genuinely missing data, and there the
+    gate is blind and vetoes everything, exactly like on_high.
+
+    Cache-only by doctrine (a gate must never spend at Databento). Splices the
+    cached overnight itself to seed today's accumulation, so it is only correct
+    on an RTH-frame strategy (same as gx_floor / on_high) — a globex frame
+    already holds the night and would double-count it.
+
+    Honesty clause: the post-hoc cut on the CURRENT v12 baseline (222 trades,
+    reenter_after_stop_only on) is far weaker — the reenter knob already
+    removed most of that pocket. This gate exists to A/B what remains off the
+    ghost ledger, not to enshrine the v10 numbers.
+
+    Config section::
+
+        {"wk_ext": {"enabled": true, "max_sigma": 2.0}}
+    """
+
+    name = "wk_ext"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Cap entries at the weekly envelope",
+              default=False,
+              help="Vetoes any entry filling more than max_sigma weekly sigmas "
+                   "beyond the weekly VWAP mid on the setup's side (below it, "
+                   "on a lower-band setup). Inert on the week's first session, "
+                   "where no weekly history exists yet."),
+        Field("max_sigma", "float", name, "Max weekly sigmas from the mid",
+              unit="σ", min=0.0, default=2.0, depends_on=("enabled", True),
+              help="How far beyond the weekly mid a fill may sit, in weekly "
+                   "band widths. 2.0 = the weekly dev2 edge, where the study "
+                   "found the bounce's habitat ends."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown wk_ext knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        s = section.get("max_sigma", 2.0)
+        if isinstance(s, bool) or not isinstance(s, (int, float)) or s < 0:
+            raise ValueError(f"max_sigma must be a non-negative number, got {s!r}")
+        self.max_sigma = float(s)
+        self._mid: np.ndarray | None = None
+        self._std: np.ndarray | None = None
+        self._inert = False
+        self._side = 1.0
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._mid = self._std = None
+        self._inert = False
+        self._side = 1.0 if ctx.band_side() == "upper" else -1.0
+        seed = weeklymod.weekly_seed(ctx.cfg.contract, ctx.day)
+        if seed is None:
+            return  # blind: the week has a hole — veto everything
+        if seed == (0.0, 0.0, 0.0):
+            self._inert = True  # the week's first session: no premise, no gate
+            return
+        contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
+        on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
+        if on is None or on.empty:
+            return  # blind: today's own night is missing from the accumulation
+        s_on = vwapmod.frame_sums(on)
+        w = vwapmod.vwap_bands(ctx.ticks, seed=(
+            seed[0] + s_on[0], seed[1] + s_on[1], seed[2] + s_on[2]))
+        self._mid = w["mid"].to_numpy()
+        self._std = w["std"].to_numpy()
+
+    def allows(self, i: int, fill: float) -> bool:
+        if self._inert:
+            return True
+        if self._mid is None:
+            return False
+        # How far the fill sits beyond the weekly mid on the setup's side, in
+        # points; passes while within max_sigma weekly bands. A fill on the
+        # mid's other side is a negative gap and always passes.
+        gap = self._side * (fill - self._mid[i])
+        return gap <= self.max_sigma * self._std[i] + 1e-9
+
+
+def _minute_bars(on: pd.DataFrame, ticks: pd.DataFrame) -> pd.DataFrame:
+    """1-min OHLC bars over the cached overnight spliced onto the RTH frame,
+    with each bar's END timestamp — the moment it becomes readable. The
+    market-structure gates read texture off these, not the engine's tick bars,
+    because the study's features were defined on wall-clock minutes."""
+    px = pd.concat([on["price"], ticks["price"]], ignore_index=True).astype(float)
+    ts = pd.DatetimeIndex(pd.concat(
+        [on["ts_utc"], ticks["ts_utc"]], ignore_index=True))
+    s = pd.Series(px.to_numpy(), index=ts)
+    bars = pd.DataFrame({
+        "h": s.resample("1min").max(),
+        "l": s.resample("1min").min(),
+    }).dropna()
+    bars["end"] = bars.index + pd.Timedelta(minutes=1)
+    return bars.reset_index(drop=True)
+
+
+def _last_closed_bar_at_tick(bar_end: np.ndarray, ticks: pd.DataFrame) -> np.ndarray:
+    """For each tick, the index of the last 1-min bar already CLOSED at that
+    tick's timestamp (-1 if none). Only closed bars are readable — a gate
+    peeking into the bar a fill prints in would be reading its own future."""
+    tick_ts = ticks["ts_utc"].to_numpy(dtype="datetime64[ns]")
+    return np.searchsorted(bar_end, tick_ts, side="right") - 1
+
+
+class ChopGate:
+    """Veto entries out of overlapping, directionless tape.
+
+    The idea it enforces: the bounce is a with-trend pullback buy, and the
+    market-structure study found the one structural feature that separates
+    stops from the rest at entry time — in both runs, all four cohorts, both
+    years, both halves of the day — is the bar-to-bar range overlap of the ten
+    1-min bars before entry (AUC 0.61–0.64, stable halves; choppiest quintile
+    stop rate 33–41% vs 9–21% cleanest). When the last ten minutes are
+    rotation, the "pullback" being bought has no impulse behind it. Even at
+    the −0.40R matched-depth anchor, where every tape feature died, this
+    entry-time number still separated stop from recover.
+
+    The measure: over the ten most recently closed 1-min bars, each consecutive
+    pair contributes (range intersection ÷ the pair's mean range), clipped to
+    [0, 1]; the gate reads the mean and vetoes above ``max_overlap``. High =
+    bars sitting on top of each other; low = bars marching. The window is fixed
+    at ten bars — the studied definition — on purpose: a width knob would be a
+    second axis to overfit.
+
+    Texture has no side: chop is chop above or below the market, so nothing
+    mirrors. The bars are wall-clock minutes spliced from the cached overnight
+    onto the engine's RTH frame (the study's frame), so the window is full even
+    at the bell. Cache-only by doctrine; a day with no cached overnight is
+    vetoed wholesale — "no data" must not read as "confirmed" — and the splice
+    means the gate is only correct on an RTH-frame strategy (same as gx_floor
+    / on_high / wk_ext). A window containing zero-range pairs only is likewise
+    blind, and vetoes.
+
+    Honesty clause: the study's static counterfactual (cut the choppiest
+    tercile, keep 79–95% of net) is a post-hoc cut that cannot see the
+    rearm/daily-loss-stop interactions — the weekly-VWAP gate looked this good
+    on paper and lost the A/B. This gate exists to run that A/B off the ghost
+    ledger, not to enshrine the cut.
+
+    Config section::
+
+        {"chop": {"enabled": true, "max_overlap": 0.60}}
+    """
+
+    name = "chop"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Veto entries out of choppy tape",
+              default=False,
+              help="Vetoes any entry when the ten 1-min bars just closed "
+                   "overlap each other more than max_overlap on average — "
+                   "rotation, not a pullback with impulse behind it."),
+        Field("max_overlap", "float", name, "Max mean bar overlap", min=0.0,
+              max=1.0, default=0.60, depends_on=("enabled", True),
+              help="Mean consecutive-bar range overlap (0 = bars never touch, "
+                   "1 = every bar inside the last) above which entries are "
+                   "vetoed. The study's tercile cut sits near 0.60; its "
+                   "choppiest-quintile edge near 0.65."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+    WINDOW = 10  # closed 1-min bars — the studied definition, not a knob
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown chop knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        v = section.get("max_overlap", 0.60)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
+            raise ValueError(f"max_overlap must be a number in [0, 1], got {v!r}")
+        self.max_overlap = float(v)
+        self._overlap_at_tick: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._overlap_at_tick = None
+        contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
+        on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
+        if on is None or on.empty:
+            return  # blind: no overnight, no full window at the bell — veto
+        bars = _minute_bars(on, ctx.ticks)
+        h, l = bars["h"].to_numpy(), bars["l"].to_numpy()
+        # Overlap of each consecutive closed-bar pair, then the trailing mean of
+        # the WINDOW-1 pairs inside each ten-bar window, stamped on the window's
+        # last bar. Zero-range pairs carry no texture and drop out of the mean.
+        inter = np.minimum(h[1:], h[:-1]) - np.maximum(l[1:], l[:-1])
+        rng = ((h[1:] - l[1:]) + (h[:-1] - l[:-1])) / 2.0
+        valid = rng > 0
+        pair = np.where(valid, np.clip(
+            np.divide(inter, rng, out=np.zeros_like(rng), where=valid), 0, 1), 0.0)
+        w = self.WINDOW - 1
+        kern = np.ones(w)
+        per_bar = np.full(len(bars), np.nan)
+        if len(pair) >= w:
+            sums = np.convolve(pair, kern, mode="valid")
+            counts = np.convolve(valid.astype(float), kern, mode="valid")
+            with np.errstate(invalid="ignore"):
+                means = np.where(counts > 0, sums / counts, np.nan)
+            per_bar[w:] = means  # window ends at bar j -> pairs j-9..j-1
+        bar_at = _last_closed_bar_at_tick(
+            bars["end"].to_numpy(dtype="datetime64[ns]"), ctx.ticks)
+        vals = np.full(len(bar_at), np.nan)
+        ok = bar_at >= 0
+        vals[ok] = per_bar[bar_at[ok]]
+        self._overlap_at_tick = vals
+
+    def allows(self, i: int, fill: float) -> bool:
+        if self._overlap_at_tick is None:
+            return False
+        v = self._overlap_at_tick[i]
+        if np.isnan(v):
+            return False  # blind window must not read as confirmed
+        return v <= self.max_overlap + 1e-9
+
+
+class StructureClarityGate:
+    """Veto entries taken while the swing structure is mixed.
+
+    The idea it enforces: the market-structure study's second robust cut —
+    trend CLARITY, not direction. Classify the causal zigzag's last confirmed
+    swings at entry: higher high + higher low is a confirmed uptrend, lower
+    high + lower low a confirmed downtrend, one of each is a market
+    mid-transition. Both confirmed states paid on both study runs; the mixed
+    state was the toxic one (−$19.2k across 115 trades on the 398-trade run,
+    $3.5k across 57 on the current baseline) — and it is near-independent of
+    the chop gate (r ≈ 0.09), so the two vetoes stack rather than alias.
+
+    The zigzag is causal: a running extreme becomes a confirmed pivot only
+    once price has retraced ``zz_ticks`` from it, and the gate reads only
+    pivots whose confirming retrace completed inside an already-closed 1-min
+    bar. No hindsight pivots — the state at tick ``i`` is the one a live
+    trader watching closed bars would have drawn.
+
+    Clarity has no side — mixed is mixed above or below the market — so
+    nothing mirrors; a confirmed DOWNTREND passes a long bounce on purpose
+    (the study's clear-down cell was profitable: V-day band bounces). Bars are
+    wall-clock minutes spliced from the cached overnight onto the RTH frame,
+    so the night's swings are on the map at the bell. Cache-only by doctrine;
+    no cached overnight vetoes the day wholesale, and fewer than two confirmed
+    highs and two lows also vetoes — "not enough structure to read" must not
+    read as "clear". RTH-frame strategies only (same as gx_floor / on_high).
+
+    Honesty clause: same as chop — the study's cell table is a post-hoc cut;
+    this gate exists to A/B it off the ghost ledger.
+
+    Config section::
+
+        {"structure_clarity": {"enabled": true, "zz_ticks": 40}}
+    """
+
+    name = "structure_clarity"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Require a confirmed swing trend",
+              default=False,
+              help="Vetoes any entry while the 1-min zigzag's last swings "
+                   "disagree (one higher extreme, one lower) — a market "
+                   "mid-transition. Confirmed uptrends AND downtrends both "
+                   "pass; ambiguity is what loses."),
+        Field("zz_ticks", "int", name, "Zigzag reversal threshold", unit="ticks",
+              min=1, default=40, depends_on=("enabled", True),
+              help="How far price must retrace from a running extreme before "
+                   "it becomes a confirmed swing pivot. 40 ticks (10 NQ "
+                   "points) is the studied threshold."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown structure_clarity knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        n = section.get("zz_ticks", 40)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            raise ValueError(f"zz_ticks must be a positive int, got {n!r}")
+        self.zz_ticks = n
+        self._clear_at_tick: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        self._clear_at_tick = None
+        contract = tickmod.contract_for_cached(ctx.cfg.contract, ctx.day)
+        on = None if contract is None else tickmod.cached_overnight(contract, ctx.day)
+        if on is None or on.empty:
+            return  # blind: the night's swings are half the map — veto
+        bars = _minute_bars(on, ctx.ticks)
+        h, l = bars["h"].to_numpy(), bars["l"].to_numpy()
+        thr = self.zz_ticks * tick_size(ctx.cfg.instrument)
+
+        # Causal zigzag: pivots in confirmation order, each stamped with the
+        # bar whose close made it official.
+        pivots: list[tuple[float, str, int]] = []  # (price, kind, confirm_bar)
+        direction, max_i, min_i = 0, 0, 0
+        for i in range(len(h)):
+            if h[i] >= h[max_i]:
+                max_i = i
+            if l[i] <= l[min_i]:
+                min_i = i
+            if direction >= 0 and h[max_i] - l[i] >= thr:
+                pivots.append((h[max_i], "H", i))
+                direction, min_i = -1, i
+            elif direction <= 0 and h[i] - l[min_i] >= thr:
+                pivots.append((l[min_i], "L", i))
+                direction, max_i = 1, i
+
+        # Per-bar clarity: walk pivots as they confirm, keep the last two of
+        # each kind, and stamp every bar with whether the state they spell is
+        # a confirmed trend. -1 = unreadable (not enough swings), 0 = mixed,
+        # 1 = clear (HH+HL or LH+LL).
+        state = np.full(len(bars), -1, dtype=np.int8)
+        highs: list[float] = []
+        lows: list[float] = []
+        pi = 0
+        cur = -1
+        for j in range(len(bars)):
+            while pi < len(pivots) and pivots[pi][2] <= j:
+                px, kind, _ = pivots[pi]
+                (highs if kind == "H" else lows).append(px)
+                pi += 1
+            if len(highs) >= 2 and len(lows) >= 2:
+                hh = highs[-1] > highs[-2]
+                hl = lows[-1] > lows[-2]
+                cur = 1 if hh == hl else 0
+            state[j] = cur
+
+        bar_at = _last_closed_bar_at_tick(
+            bars["end"].to_numpy(dtype="datetime64[ns]"), ctx.ticks)
+        vals = np.full(len(bar_at), -1, dtype=np.int8)
+        ok = bar_at >= 0
+        vals[ok] = state[bar_at[ok]]
+        self._clear_at_tick = vals
+
+    def allows(self, i: int, fill: float) -> bool:
+        if self._clear_at_tick is None:
+            return False
+        return self._clear_at_tick[i] == 1

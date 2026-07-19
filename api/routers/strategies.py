@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from journal import edges
 from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS
-from journal.sim import regime_pnl, registry, runner, schema, store
+from journal.sim import gate_audit, regime_pnl, registry, runner, schema, store
 from journal.sim import ticks as tickmod
 
 from .. import sim_charts
@@ -40,7 +40,7 @@ EXCURSION_COLS = ["bucket", "trades", "mfe_r", "mae_r", "capture",
 # count is the family the luck bar corrects for — adding a seventh cut here makes
 # the bar for all of them stricter, which is the point of a Bonferroni.
 TRADED_CUTS = ("by_hour_et", "by_weekday", "by_hold_time", "by_direction",
-               "by_exit_reason", "by_band_width")
+               "by_exit_reason", "by_band_width", "by_entry_reason")
 VETOED_CUTS = TRADED_CUTS + ("by_gate",)
 
 TRADE_COLS = [
@@ -149,7 +149,12 @@ def run_detail(slug: str, run_id: str) -> dict:
     days = [d.isoformat() for d in tickmod.session_dates(c.start_date, c.end_date)]
     return {"run_id": run_id, "config": cfg, "metrics": m, "trades": rows,
             "vetoed_trades": vetoed_rows, "session_days": days,
-            "meta": store.read_meta(slug, run_id), "state": state}
+            "meta": store.read_meta(slug, run_id), "state": state,
+            # Per-trade tags (trade_no -> [tag]) plus the strategy-wide vocab that
+            # feeds the tag editor's autocomplete. Both ride the run detail so the
+            # by-trade table can render badges and filter by tag with no extra call.
+            "trade_tags": store.read_trade_tags(slug, run_id),
+            "tag_vocab": store.strategy_tag_vocab(slug)}
 
 
 class ConfigIn(BaseModel):
@@ -195,14 +200,19 @@ def create_run(slug: str, body: ConfigIn, background: BackgroundTasks) -> dict:
             return {"run_id": rid, "status": "done", "already_existed": True}
         store.delete_run(slug, rid)  # failed: clear and retry
 
-    # Serialize runs box-wide: each fans out across a pool sized to all cores, so
-    # a second concurrent run oversubscribes them and can wedge both (that is how
-    # the orphaned runs get made). One at a time — the caller retries when it's free.
+    # Cap concurrent runs (SIM_MAX_CONCURRENT, default 2): each run's pool is sized
+    # to a 1/K share of the box (runner._worker_count), so up to K at once never
+    # oversubscribe the cores — which is what wedged both runs and made the orphans.
+    # Beyond that, refuse; the caller retries when a slot frees. (This on-disk scan
+    # is not atomic, so two simultaneous POSTs can briefly land K+1 runs; harmless
+    # at these small K — the pools still fit the box with one core to spare.)
+    limit = runner.max_concurrent_runs()
     inflight = store.running_runs()
-    if inflight:
+    if len(inflight) >= limit:
         raise HTTPException(
-            409, f"another run is already in progress ({inflight[0]}); "
-                 "wait for it to finish before starting another")
+            409, f"{len(inflight)} run(s) already in progress "
+                 f"({', '.join(inflight)}); max {limit} at once — "
+                 "wait for one to finish before starting another")
 
     try:
         rid = runner.start(strat, cfg)
@@ -226,6 +236,24 @@ def patch_meta(slug: str, run_id: str, body: MetaIn) -> dict:
     if store.read_state(slug, run_id) is None:
         raise HTTPException(404, f"No run {run_id}")
     return store.write_meta(slug, run_id, label=body.label, notes=body.notes)
+
+
+class TradeTagsIn(BaseModel):
+    tags: list[str] = []
+
+
+@router.patch("/strategies/{slug}/runs/{run_id}/trades/{trade_no}")
+def patch_trade_tags(slug: str, run_id: str, trade_no: int,
+                     body: TradeTagsIn) -> dict:
+    """Set the tags on one trade. Mirrors patch_meta: mutates a sidecar, never the
+    immutable trades.parquet, and 404s on an unknown run. Returns the run's full
+    trade->tags map plus the refreshed strategy vocab so a newly-coined tag is
+    immediately offered by the editor's autocomplete."""
+    _strategy(slug)
+    if store.read_state(slug, run_id) is None:
+        raise HTTPException(404, f"No run {run_id}")
+    tags = store.write_trade_tags(slug, run_id, trade_no, body.tags)
+    return {"trade_tags": tags, "tag_vocab": store.strategy_tag_vocab(slug)}
 
 
 @router.delete("/strategies/{slug}/runs/{run_id}")
@@ -359,6 +387,24 @@ def run_edges(slug: str, run_id: str, compare: str | None = Query(None)) -> dict
     }
 
 
+@router.get("/strategies/{slug}/runs/{run_id}/gate-audit")
+def run_gate_audit(slug: str, run_id: str) -> dict:
+    """The gate-robustness scorecard for this run's confluence stack.
+
+    Variant runs (gate deleted, parameter neighbors) are resolved by config
+    hash, never by name — so the audit follows any config it is pointed at and
+    reports variants that were never run as launchable configs rather than
+    holes. Computed on request: the inputs are immutable parquet artifacts and
+    the whole ladder is numpy over a few hundred trades. See
+    docs/research/gate-robustness.md for the methodology and verdict rules.
+    """
+    strat = _strategy(slug)
+    out = gate_audit.audit(strat, slug, run_id)
+    if out is None:
+        raise HTTPException(404, f"No completed run {run_id}")
+    return out
+
+
 def _edge_scopes(traded, vetoed, with_luck: bool) -> dict:
     """The cuts of one run's three books, wire-shaped.
 
@@ -377,6 +423,13 @@ def _edge_scopes(traded, vetoed, with_luck: bool) -> dict:
         if book is None or book.empty:
             out[scope] = None
             continue
+        # Only the cuts this book can actually produce: by_entry_reason needs the
+        # entry_reason column, which only the drift-fade strategies write, so on
+        # every other run it drops out rather than rendering an empty section (and
+        # never charges those runs' Bonferroni family for a cut it can't test).
+        names = tuple(
+            n for n in names
+            if all(c in book.columns for c in edges.BY_NAME[n].needs))
         cuts = edges.cuts(book, names, with_luck=with_luck)
         out[scope] = {
             "trades": int(len(book)),
@@ -398,10 +451,16 @@ def _edge_scopes(traded, vetoed, with_luck: bool) -> dict:
             # The losers split by how far they ever ran in favor — give-back vs
             # never-worked. Empty on runs predating mfe_r (same as excursions).
             "loser_giveback": edges.loser_giveback(book),
+            # Of those green losers, how fast they collapsed back to breakeven —
+            # the mirror of winner_recovery. Empty on runs predating giveback_s.
+            "loser_collapse": edges.loser_collapse(book),
             # The mirror: winners split by the heat they took before working.
             "winner_heat": edges.winner_heat(book),
             # Of those underwater winners, how fast they climbed back to breakeven.
             "winner_recovery": edges.winner_recovery(book),
+            # Win rate by total time underwater — does sitting red predict the loss.
+            # Every trade, bucketed by dwell; empty on runs predating underwater_s.
+            "underwater_survival": edges.underwater_survival(book),
             "cuts": [
                 {
                     "name": c["name"],
@@ -416,8 +475,8 @@ def _edge_scopes(traded, vetoed, with_luck: bool) -> dict:
         }
         # The vetoed book is the only one with a gate set per row, so it is the
         # only one that gets the per-confluence (overlap-counting) breakdown. The
-        # first-match ``by_gate`` cut above stays as-is next to it; the two answer
-        # different questions (who fired first vs. what each gate independently
+        # disjoint ``by_gate`` cut above sits next to it; the two answer different
+        # questions (what one toggle frees vs. what each gate independently
         # catches), and both are worth showing.
         if scope == "vetoed":
             out[scope]["confluences"] = records(

@@ -126,16 +126,75 @@ class SimConfig(_JsonMixin):
     # tight. A position that exits before the window closes is never read.
     # Ignored when panic_exit_delta is 0.
     panic_exit_window_s: int = 60
+    # 0 = off. One-shot read at underwater_stop_after_s seconds after the fill (the
+    # same single-read design the panic exit settled on, not a per-tick trigger): if
+    # the position is CURRENTLY underwater then, pull the stop in to this many ticks
+    # behind the entry. It caps the loss on a trade that hasn't worked without
+    # flattening it — a genuine deep-heat winner still has room to recover — and only
+    # ever tightens (never loosens, never past a trail that has already moved further).
+    # Targets the 60-180s dwell band the underwater study found the book bleeds in;
+    # tightened-stop exits book under their own reason, "uw_stop". Set it below
+    # stop_ticks or it can never bite.
+    underwater_stop_ticks: int = 0
+    # Seconds after the fill the one read is taken. Ignored when underwater_stop_ticks
+    # is 0. The dwell study put the bleed at 60-180s, so the read wants to sit at the
+    # front of that band — early enough to save the loss, late enough that the fast
+    # winners (the first-minute cohort that carries the book) have already resolved.
+    underwater_stop_after_s: int = 60
+    # 0 = off. N consecutive bar closes at least stop_below_mid_ticks past the NY
+    # session VWAP mid — anchored at the 09:30 bell, not the Globex open the bands
+    # ride — exit the position at market ("mid_exit"). Below the mid on a long,
+    # above on a short: a trade entered beyond the band that closes back through
+    # the day's mean has lost its premise. The profile-side twin of
+    # exit_below_vah_bars, and like it fills on the tick after the close. The
+    # a0512f69 counterfactual wanted this CONFIRMED and OFFSET (2-3 closes, a few
+    # ticks past): a bare touch of the mid clips the winners that pull back
+    # through it before running; a streak past it cuts the slow bleed losers
+    # without them.
+    stop_below_mid_bars: int = 0
+    # How far past the NY mid a close must sit to count toward the streak, in
+    # ticks. 0 = any close on the far side. The offset is the winner filter — it
+    # ignores the one-tick poke through the mean that recovers. Ignored when
+    # stop_below_mid_bars is 0.
+    stop_below_mid_ticks: int = 0
 
     # --- filters / lifecycle ---
     min_band_width_ticks: int = 0        # 0 = off. Skip entry if dev2-dev1 is tighter.
     invalidate_below_mid_bars: int = 5   # 0 = off. N consecutive closes below VWAP mid disarms.
     rearm_after_exit: bool = True        # any exit disarms; a fresh acceptance is required
+    # Only a stop re-arms the day: any exit other than a full stop-out (trail,
+    # target, time, panic, re-acceptance inside value) stands the session down.
+    # The stand-down watches rather than blinds: would-be entries ride the exit
+    # rules as "reentry_halt" ghosts in the missed rows, and a ghost that stops
+    # out lifts the halt — the setup failed without us, and the next acceptance
+    # is tradeable again. The premise: follow-ups to a booked win or scratch
+    # don't earn their commission, while the re-entry after a swept stop is
+    # where the outsized winners live.
+    reenter_after_stop_only: bool = False
+    # 0 = no clock: a stop (real or watched) re-arms the day until the next
+    # non-stop exit. Set, it is how many minutes the re-arm stays open — the
+    # study's re-entries decayed with the wait (≤15min avgR +0.83 vs +0.46
+    # overall), so the window trades coverage for concentration. The clock
+    # starts at the stop print; if no entry fills before it runs out, the day
+    # stands back down (a later watched stop starts a fresh window). Only read
+    # when reenter_after_stop_only is on.
+    reentry_rearm_window_min: int = 0
     # 0 = off. Once the session's *realized* net P&L (closed trades, commissions
     # included) is this many dollars in the red, no further entries that day. An
     # open position still runs to its normal exit — the governor halts new risk,
     # it never touches a trade already on.
     daily_loss_stop: float = 0.0
+    # False = off. Extends daily_loss_stop to the trade already ON: every tick,
+    # once the day's realized net plus the open position marked to the current
+    # print reaches the limit, the position leaves at market (reason
+    # "daily_loss"). The bare stop only refuses new ENTRIES after a close, so a
+    # single trade whose own stop sits wider than the whole daily limit blows
+    # straight through it — the exact hole this closes. Reads the same
+    # daily_loss_stop dollar figure (schema requires one set); a market order
+    # like the panic/vah exits, filled on the next print. Off (the default) never
+    # arms and rides the base rule path, so it simulates identically to a run
+    # without it.
+    daily_loss_exit_open: bool = False
 
     # --- size & cost ---
     contracts: int = 1
@@ -147,8 +206,9 @@ class SimConfig(_JsonMixin):
     # schema enforces it): the FIRST lot fills exactly as the base variant does
     # (variant A's limit at dev1, variant B's stop on the reclaim), and each later
     # lot rests a stop pyramid_step_ticks further in the trade's favour, off the
-    # first fill's grid — so size is added only as the move confirms, never against
-    # it. A lot whose trigger is never reached simply never fills: a trade that
+    # first fill's grid — so size is added only as the move confirms (or, with
+    # pyramid_direction "against", a limit one step further against it — averaging
+    # down). A lot whose trigger is never reached simply never fills: a trade that
     # rejects straight off dev1 keeps only its first lot, while one that runs
     # reaches full size. That asymmetry — small losers, big winners — is the whole
     # point of scaling in over an all-in fill, and it rides the base rule path, so
@@ -169,6 +229,49 @@ class SimConfig(_JsonMixin):
     #              larger adverse excursion on the lots added higher up.
     # Read only when pyramid_tranches > 1.
     pyramid_stop_mode: str = "blend"
+    # Which way the later lots' grid walks off the first fill:
+    #   "with"    — the scale-in above: each lot stops in one step further in the
+    #               trade's favour, size is added only as the move confirms.
+    #   "against" — averaging down: each lot rests a LIMIT one step further
+    #               against the trade (below the fill on a long), so size is added
+    #               into the pullback's depth and the blended basis improves as
+    #               the trade goes underwater. The landing-depth study's static
+    #               read of this (July 2026) cut net 26-52% — the shallow winners
+    #               that carry the PnL never reach the adds — so the knob exists
+    #               to let the engine A/B say it properly, not because it is
+    #               expected to win. With "anchor" the stop stays the first lot's
+    #               (later lots risk less than stop_ticks); "blend" re-strikes it
+    #               off the falling average, i.e. the stop WIDENS on every add —
+    #               a martingale, priced honestly but sized dangerously.
+    # Read only when pyramid_tranches > 1.
+    pyramid_direction: str = "with"
+
+    # --- big-lot participation size-up (order-flow study, run 30badf94) ---
+    # 0 = off. At each fill, measure big-lot PARTICIPATION over the trailing
+    # biglot_window_s: the share of that window's total traded volume printed in
+    # orders of biglot_min_size lots or more — side-agnostic, a composition read of
+    # the tape, not a signed delta. If the share is at least this fraction the entry
+    # is sized to size_up_contracts instead of the base `contracts`; below it the
+    # base size stands. The 30badf94 study found this the one entry-time separator
+    # of the run's 3R runners from its scratches (rank-AUC 0.66, split-half and
+    # within-session robust) — and a MAGNITUDE signal, not a win/loss one, so it
+    # sizes rather than gates. Rides the base rule path: 0 sizes every fill at
+    # `contracts` and simulates identically to a run without the knob. Not supported
+    # with the pyramid (the later lots would add at the base size) — the engine
+    # refuses the combo rather than size it wrong.
+    size_up_participation: float = 0.0
+    # The size a qualifying fill takes, in contracts. Read only when
+    # size_up_participation > 0; a positive whole number.
+    size_up_contracts: int = 0
+    # A print of this many lots or more counts toward the big-lot numerator — the
+    # study's definition of an institutional-size NQ print. Read only when
+    # size_up_participation > 0.
+    biglot_min_size: int = 10
+    # The trailing window the participation share is read over, in seconds ending at
+    # the fill. 60 is the study's window — the one-minute read was the split-half-
+    # robust one; the three- and five-minute reads leaned second-half. Read only
+    # when size_up_participation > 0.
+    biglot_window_s: int = 60
 
     # --- confluences (veto-only gates) ---
     # One namespaced section per gate, e.g. {"volume_profile": {"enabled": true, ...}}.
@@ -320,6 +423,340 @@ class ProfilePullbackConfig(_JsonMixin):
     # moved.
     min_level_stability_min: int = 0
     daily_loss_stop: float = 0.0     # 0 = off. Same governor as the bounce's.
+    # False = off. Also flatten the open trade at the daily loss stop — see
+    # SimConfig.daily_loss_exit_open. Needs a daily_loss_stop set.
+    daily_loss_exit_open: bool = False
+
+    # --- size & cost ---
+    contracts: int = 1
+    commission_per_side: float = 7.0
+
+    # --- confluences (veto-only gates) ---
+    confluences: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ValueRotationConfig(_JsonMixin):
+    """The value rotation's knobs: re-acceptance into value, traded to the POC.
+
+    The balance-day idea the loss studies kept pointing at from the other side:
+    85% of the upper-band bounce's stopped losses complete the rotation to the
+    developing POC within 30 minutes — losses are completed value rotations.
+    This trades the rotation itself: price is accepted OUTSIDE value (beyond
+    the developing VAH on the short, below the VAL on the long), then a bar
+    close re-accepts it back inside — the edge has failed — and the trade runs
+    with the rotation toward the developing POC.
+
+    Its own class because it shares no rules with the band strategies: no VWAP
+    band in the setup at all — the value-area edge arms it, bar closes inside
+    value confirm it, and the POC is the target. The Interactions Lab's two
+    deflation lessons are built in as knobs rather than remembered as caveats:
+    ``min_room_ticks`` refuses the trivial rotation (a POC already at the edge
+    — ~40% of the lab's POC "snap reversions" were price already at/through
+    the target), and the crossing discipline on the live POC target books a
+    node-flip across price as a market fill at the print, never as a limit
+    fill at a level the market wasn't at (profile-pullback's v3 lesson).
+
+    Knob names are written for the short off the VAH (the first direction
+    registered) and mean the mirror on the long off the VAL, exactly as the
+    fade's short-flavoured names do.
+    """
+
+    # --- scope ---
+    instrument: str = "NQ"
+    contract: str = "NQ"
+    start_date: date = date(2025, 10, 13)
+    end_date: date = date(2025, 10, 17)
+
+    # --- bars ---
+    ticks_per_bar: int = 500
+
+    # --- session (ET wall clock) ---
+    entry_open: time = time(9, 45)   # the NY profile's warm-up; earlier "edges" are the open print
+    entry_close: time = time(16, 0)
+    flat_by: time = time(16, 0)
+
+    # --- direction ---
+    # "short": price accepted above the developing VAH, re-accepted back inside,
+    #          sold toward the POC below.
+    # "long":  the mirror off the VAL — accepted below value, re-accepted back
+    #          inside, bought toward the POC above.
+    # A config knob (not a per-slug entry point) because one engine loop reads a
+    # signed frame and genuinely consumes it, like GlobexBounceConfig.side.
+    side: str = "short"
+
+    # --- arming (accepted outside value) ---
+    # The setup arms when price prints more than this far beyond the value-area
+    # edge — outside value, on the trade's side. Edge-triggered like the fade's
+    # stretch: a disarm is only undone by a fresh excursion, never by the old
+    # one still standing.
+    arm_beyond_ticks: int = 20
+    # An NY-anchored profile is degenerate while it is minutes old (POC=VAH=VAL
+    # ≈ the open print); the edge cannot arm and nothing may fill until the
+    # session is this old. entry_open already sits past the default; the knob
+    # exists so widening the window cannot silently trade the open print.
+    level_warmup_min: int = 15
+    # Re-acceptance: this many CONSECUTIVE bar closes back inside the edge
+    # confirm that value has taken price back — the rotation premise. 1 is the
+    # bare close; more demands the re-entry hold.
+    accept_inside_bars: int = 1
+
+    # --- entry ---
+    # "A": after the confirming close(s), rest a limit at the edge and fill on
+    #      the retest back up to it — the failed edge, sold from inside.
+    # "B": stop into the rotation: entry_stop_offset_ticks past the edge, into
+    #      value, triggered as price continues away from the edge.
+    entry_variant: str = "A"
+    entry_stop_offset_ticks: int = 10    # variant B only
+
+    # --- exit ---
+    stop_ticks: int = 60
+    # "poc" runs the rotation to the developing POC, tracked live with the
+    # crossing discipline above; "mid" targets the NY VWAP; "rr" is fixed at
+    # entry.
+    target: str = "poc"                  # "poc" | "mid" | "rr"
+    target_rr: float | None = None       # used when target == "rr"
+    # The trivial-rotation guard: at the would-be fill, the developing POC must
+    # sit at least this far beyond the fill in the trade's direction, or the
+    # touch is missed (not deferred). 0 measures the lab's deflation instead of
+    # respecting it.
+    min_room_ticks: int = 40
+    # 0 = off. N consecutive bar closes back OUTSIDE the edge exit the position
+    # at market — price has been re-accepted outside value again, which is this
+    # trade's premise run backwards. The fixed stop stays behind it as the hard
+    # backstop.
+    invalidate_outside_bars: int = 5
+    # The trail: same rule and same knobs as the bounce's (see SimConfig).
+    trail_stop_ticks: int = 0
+    trail_step_ticks: int = 0
+    trail_breakeven_ticks: int = 0
+    trail_breakeven_only: bool = False
+
+    # --- filters / lifecycle ---
+    rearm_after_exit: bool = True        # any exit disarms; a fresh excursion is required
+    daily_loss_stop: float = 0.0         # 0 = off. Same governor as the bounce's.
+    # False = off. Also flatten the open trade at the daily loss stop — see
+    # SimConfig.daily_loss_exit_open. Needs a daily_loss_stop set.
+    daily_loss_exit_open: bool = False
+
+    # --- size & cost ---
+    contracts: int = 1
+    commission_per_side: float = 7.0
+
+    # --- confluences (veto-only gates) ---
+    confluences: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DriftFadeConfig(_JsonMixin):
+    """The drift-touch fade's knobs: fade a level that price drifted into.
+
+    A *drift touch* is contact with a level that neither side approached — over
+    the trailing GAP_LOOKBACK_BARS bars, price's net move toward the level plus
+    the level's net move toward price is <= 0 (profile.gap_closer). Price was
+    already loitering by the level and wiggled into contact: a slow re-test of a
+    hugged zone. The Interactions Lab found this the first Lab lead to survive a
+    full monthly-robustness pass (docs/research/drift-touch-fade-spec.md).
+
+    The trade fades the level on that contact: enter away from it (long when
+    price hugged ABOVE and drifted down onto support, short when it hugged BELOW
+    and drifted up into resistance), fixed stop behind the zone, target toward
+    value. Its own class because it shares no rules with any band/profile
+    strategy: no acceptance candle, no arming stretch, no resting limit — the
+    drift classification at a bar close IS the setup, and the entry is a market
+    order (a resting limit would fill the price-led approaches, exactly the dead
+    class the drift cut removes).
+    """
+
+    # --- scope ---
+    instrument: str = "NQ"
+    contract: str = "NQ"
+    start_date: date = date(2025, 10, 13)
+    end_date: date = date(2025, 10, 17)
+
+    # --- bars ---
+    ticks_per_bar: int = 500
+
+    # --- session (ET wall clock) ---
+    entry_open: time = time(9, 45)   # 09:30-09:45 excluded (the flagship's pre-checkpoint leak lesson)
+    entry_close: time = time(15, 0)  # the drop-15:xx rule; 15:00+ scored at null in v9
+    flat_by: time = time(16, 0)
+
+    # --- sources (what a drift touch may land on) ---
+    # The studied population: developing NY value, developing Globex value, and
+    # the static session references. Each family is a switch; the developing ones
+    # additionally pick which value levels (POC/VAH/VAL) are candidates.
+    use_ny_levels: bool = True       # developing NY POC/VAH/VAL
+    use_globex_levels: bool = True   # developing Globex POC/VAH/VAL (mature by the bell)
+    use_session_refs: bool = True    # ONH/ONL, pd POC/VAH/VAL, pd Close, Open
+    trade_poc: bool = True
+    trade_vah: bool = True
+    trade_val: bool = True
+    # An NY-anchored profile is degenerate while minutes old (POC=VAH=VAL on the
+    # open print); its levels are not candidates until the anchor is this old.
+    # Globex levels are ~15h mature at the bell and the static refs are older
+    # still, so neither is gated by this. The session Open ref anchors at the bell
+    # and honors it too — a "touch" of the open at 09:31 is the open itself.
+    level_warmup_min: int = 15
+
+    # --- detection (the engine's translation of the Lab event) ---
+    # A bar touches a level when low - touch_tol <= level <= high + touch_tol.
+    touch_tol: float = 2.0
+    # Re-approach counts as a fresh touch only after this many bars clear of the
+    # zone — one rotation sitting on a level is one touch, not many (the Lab's
+    # TOUCH_GAP_BARS debounce).
+    touch_gap_bars: int = 3
+    # 0 = off. Skip a drift signal on a level that relocated more than
+    # stability_tol_ticks within the last this-many minutes: a drift touch on a
+    # freshly node-flipped level is a detection artifact (the profile chasing the
+    # market), not a hug. Static refs never move, so this only ever bites the
+    # developing levels. Default 5 min per the spec.
+    min_level_stability_min: int = 5
+    # How far a developing level may wander over the stability window and still
+    # count as "sat here", in ticks. Read only when min_level_stability_min > 0.
+    stability_tol_ticks: int = 8
+
+    # --- entry ---
+    # "A": market order on the close of the drift-touch bar (filled on the next
+    #      tick), direction = away from the level.
+    # "B": wait for the first bar to close at least confirm_ticks beyond the touch
+    #      bar's extreme on the fade side, then enter at market — later, but it
+    #      filters the instant-acceptance failures. The profile-pullback dwell
+    #      lesson sets the prior that A beats B; build both, measure.
+    entry_variant: str = "A"
+    confirm_ticks: int = 8               # variant B only
+    # Which direction the fade may trade. Drift is the repo's first near-symmetric
+    # edge, but the house prior is long-only, so the A/B reads sides separately
+    # before "both" ships as a baseline default.
+    side: str = "both"                   # "long" | "short" | "both"
+    # 0 = unlimited. Cap fills to each zone's first N touches. Acceptance decay
+    # shrinks MFE by the 7th touch, but the drift ratio held on re-tests, so this
+    # starts open and the nth-touch cut is measured in the edges panel first.
+    max_touches_per_zone: int = 0
+
+    # --- exit ---
+    # stop_ticks is measured from the LEVEL, not the fill — the zone is the
+    # invalidation, not the entry print. Default mid of the spec's 120-200 sweep.
+    stop_ticks: int = 160
+    # "ny_vwap": fade to the NY VWAP (a POC-magnet cousin), tracked live with the
+    #            crossing discipline (a reference that node-flips across price
+    #            books a market fill at the print, never a limit at a level the
+    #            market wasn't at). "r_multiple": fixed R at entry. "fixed_ticks":
+    #            fixed distance at entry.
+    target_mode: str = "ny_vwap"         # "ny_vwap" | "r_multiple" | "fixed_ticks"
+    target_rr: float | None = 1.5        # used when target_mode == "r_multiple"
+    target_ticks: int = 120              # used when target_mode == "fixed_ticks"
+    # The trivial-rotation guard, ny_vwap target only: at the would-be fill the
+    # VWAP must sit at least this far beyond the fill in the trade's direction, or
+    # the signal is skipped (a target already inside the stop distance is no trade).
+    min_room_ticks: int = 40
+    # The trail: same rule and same knobs as the bounce's (see SimConfig).
+    trail_stop_ticks: int = 0
+    trail_step_ticks: int = 0
+    trail_breakeven_ticks: int = 0
+    trail_breakeven_only: bool = False
+    # 0 = off. Flatten the open trade at market once it has been held this many
+    # minutes, target unmet — the "give up on a grind" exit. The behavioral read:
+    # winners on this strategy snap back fast (median ~4.5 min to target) while
+    # losers grind underwater (median ~11 min to the stop), so a hold cap is a
+    # candidate loser filter. The A/B has to weigh that against the slow-but-real
+    # winners (the 15-20 min pocket ran 94% wins), which a cap cuts too.
+    max_hold_min: int = 0
+
+    # --- filters / lifecycle ---
+    daily_loss_stop: float = 0.0         # 0 = off. Same governor as the bounce's.
+    # False = off. Also flatten the open trade at the daily loss stop — see
+    # SimConfig.daily_loss_exit_open. Needs a daily_loss_stop set.
+    daily_loss_exit_open: bool = False
+
+    # --- size & cost ---
+    contracts: int = 1
+    commission_per_side: float = 7.0
+
+    # --- confluences (veto-only gates) ---
+    confluences: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OrbConfig(_JsonMixin):
+    """The opening-range breakout's knobs: one initiative trade off the session's
+    opening window.
+
+    Built from the IB/ORB research (docs/research/initial-balance-orb.md) and
+    the Lab's IB study. Three entry modes, because the literature and the study
+    point at three distinct reads of the same window:
+
+      - "candle"       — the Zarattini rule: at the window's close, enter in the
+                         window candle's direction. The study's Lab read (NQ
+                         Feb 2025 – Jan 2026): 56% follow-through at 5m, mean R
+                         ~0 WITHOUT the stop — the paper's whole edge is the
+                         enforced stop's asymmetry, which is exactly what this
+                         engine adds over the Lab.
+      - "break"        — the classic ORB: stop in on the first crossing of the
+                         window's high/low (+ entry_offset_ticks).
+      - "second_break" — the IB study's double-break read: on days that break
+                         one side of the window and then the other, enter with
+                         the SECOND break — the close landed on its side on 81%
+                         of double-break days (n=53).
+
+    One trade per session, by design — the research strategies are one-shot
+    daily rules, and a re-entering variant would be a different idea. Its own
+    class because it shares no rules with any band or profile strategy: no
+    acceptance, no arming stretch, no level in force — the window itself is
+    the setup.
+    """
+
+    # --- scope ---
+    instrument: str = "NQ"
+    contract: str = "NQ"
+    start_date: date = date(2025, 10, 13)
+    end_date: date = date(2025, 10, 17)
+
+    # --- bars ---
+    ticks_per_bar: int = 500
+
+    # --- session (ET wall clock) ---
+    entry_open: time = time(9, 30)
+    entry_close: time = time(16, 0)  # break modes can trigger any time before this
+    flat_by: time = time(16, 0)      # the Zarattini exit: end of day
+
+    # --- setup (the opening window) ---
+    # Minutes from the 09:30 bell the window spans. 5 is the Zarattini window
+    # (and the only one that carried the paper's stock edge); 60 is the classic
+    # Initial Balance, the natural window for second_break.
+    window_minutes: int = 5
+    entry_mode: str = "candle"       # "candle" | "break" | "second_break"
+    # Which breakout directions may trade. "both" is the base rule; the study's
+    # documented futures filter is the opening candle itself (the candle mode),
+    # not the gap, so the one-sided settings exist for A/B rather than belief.
+    direction: str = "both"          # "both" | "long_only" | "short_only"
+    # break mode only: the entry stop rests this many ticks beyond the window
+    # extreme (Crabel's stretch, fixed rather than ATR-derived).
+    entry_offset_ticks: int = 0
+
+    # --- exit ---
+    # "range": the stop sits at the window's opposite extreme — the Zarattini
+    #          stop for the candle mode, the classic ORB stop for the breaks.
+    # "ticks": a fixed stop_ticks stop, for divorcing risk from window size.
+    stop_mode: str = "range"
+    stop_ticks: int = 100            # used when stop_mode == "ticks"
+    # "eod" holds to flat_by (the paper's baseline); "rr" fixes a target at
+    # entry, in multiples of the actual risk (range stop -> range multiples).
+    target: str = "eod"              # "eod" | "rr"
+    target_rr: float | None = None   # used when target == "rr"
+    # The trail: same rule and same knobs as the bounce's (see SimConfig).
+    trail_stop_ticks: int = 0
+    trail_step_ticks: int = 0
+    trail_breakeven_ticks: int = 0
+    trail_breakeven_only: bool = False
+
+    # --- filters ---
+    # 0 = off. Skip the day when the window's high-low range is narrower /
+    # wider than these — the noise floor and the exhausted tail. On a range
+    # stop, min_range_ticks is also the risk floor: the stop distance IS the
+    # range (plus the candle's close-to-extreme geometry, in candle mode).
+    min_range_ticks: int = 0
+    max_range_ticks: int = 0
 
     # --- size & cost ---
     contracts: int = 1
@@ -430,6 +867,9 @@ class FadeConfig(_JsonMixin):
     min_band_width_ticks: int = 0        # 0 = off. Skip entry if dev2-dev1 is tighter.
     rearm_after_exit: bool = True        # any exit disarms; a fresh stretch is required
     daily_loss_stop: float = 0.0         # 0 = off. Same governor as the bounce's.
+    # False = off. Also flatten the open trade at the daily loss stop — see
+    # SimConfig.daily_loss_exit_open. Needs a daily_loss_stop set.
+    daily_loss_exit_open: bool = False
 
     # --- size & cost ---
     contracts: int = 1

@@ -14,14 +14,20 @@ export interface Touch {
   ts: number; // UTC epoch seconds (chart axis)
   hhmm: string; // ET label
   zone_px: number;
-  source: string; // "ny" | "globex"
-  level_type: string; // VAH | VAL | POC | ±1σ | ±2σ
+  source: string; // "ny" | "globex" | "ref"
+  level_type: string; // VAH | VAL | POC | VWAP | ±1σ | ±2σ | a session ref (ONH, pd POC, …)
   label: string; // e.g. "Globex VAL"
   sources: string[]; // every source label in the clustered zone
   n_sources: number;
   nearest_other_source_dist: number | null;
   nth_touch: number;
   approach: "below" | "above";
+  // Who closed the gap over the last bars before the touch: price moving to the
+  // level, the level moving to price (a falling band chased by price tests
+  // nothing), both, or drift (they never actually converged).
+  closed_by: "price" | "level" | "both" | "drift" | "unknown";
+  price_closed_pts: number | null;
+  level_closed_pts: number | null;
   level_slope: "rising" | "flat" | "falling";
   level_age_min: number; // minutes since the level's anchor started
   touch_vol: number;
@@ -41,11 +47,13 @@ export interface VaSnap {
   source: string;
   level_type: string;
   snap_dir: "up_over_price" | "down_under_price";
+  snap_class: "creep" | "node_flip"; // boundary creep vs the VA re-seating on another node
   level_jump_pts: number;
   level_age_min: number;
   excursion_bars_before: number;
   band_at_snap: string | null;
   px: number;
+  co_snaps: number; // other levels that snapped in the same minute
   reverted?: boolean;
   revert_min?: number | null; // minutes until close first reached NY VWAP; null = never
   revert_move?: number | null; // max favorable excursion to session end
@@ -139,7 +147,11 @@ export interface InteractionResult {
     band_occupancy: BandOccupancyRow[]; // NY VWAP
     band_occupancy_gx: BandOccupancyRow[]; // Globex (ON) VWAP; empty if no globex source
     upper_band_pullback: BandContextRow[];
+    who_closed_gap: BandContextRow[]; // gap-closer attribution vs the null baseline
+    acceptance_decay: BandContextRow[]; // nth-touch decay — is the level becoming fair price
     vasnap_reversion: VaSnapAggRow[];
+    vasnap_by_class: VaSnapAggRow[]; // creep vs node_flip
+    vasnap_confluence: VaSnapAggRow[]; // lone vs same-minute multi-level snaps
     vasnap_continuation: VaSnapContRow[];
   };
   day_index: Record<string, { n_touches: number; n_snaps: number }>;
@@ -174,6 +186,220 @@ export interface SavedRun {
   n_touches: number;
   n_snaps: number;
   saved_at: number; // file mtime, epoch seconds
+}
+
+// --- Initial Balance / ORB study (GET /api/interactions/ib) -----------------
+// Mirrors journal.sim.ib — session structure only, no touch events.
+
+export interface IbBreak {
+  side: "up" | "down";
+  hhmm: string;
+  min_after_open: number;
+}
+
+export interface IbOrbWindow {
+  window: number;
+  high: number;
+  low: number;
+  range: number;
+  dir: 1 | -1 | 0;
+  follow: boolean | null; // null on a doji window (no trade)
+  move_pts: number | null; // signed favourable move, entry = window close
+  r_mult: number | null; // move over the stop distance (candle's opposite extreme)
+}
+
+export interface IbDay {
+  day: string;
+  open: number;
+  close: number;
+  ib_high: number;
+  ib_low: number;
+  ib_mid: number;
+  ib_range: number;
+  day_high: number;
+  day_low: number;
+  day_range: number;
+  ib_pct_of_day: number;
+  broke_up: boolean;
+  broke_down: boolean;
+  broke_both: boolean;
+  first_break: IbBreak | null;
+  second_break: IbBreak | null; // only on double-break days
+  ext_up_x: number;
+  ext_dn_x: number;
+  max_ext_x: number;
+  range_x: number; // day range in IB multiples (day-type driver)
+  close_pos: number; // close's position in the day range, 0..1
+  day_type: "normal" | "normal_variation" | "trend" | "neutral_center" | "neutral_extreme";
+  close_beyond_break: boolean | null; // single-break days: did the break hold
+  gap_pts: number | null;
+  gap_x: number | null; // gap over adr14
+  adr14: number | null; // prior-14-session average day range
+  ib_vs_adr: number | null;
+  on_high: number | null;
+  on_low: number | null;
+  on_range: number | null;
+  open_vs_on: "inside" | "above" | "below" | null;
+  ib_vs_on: "inside" | "broke_high" | "broke_low" | "engulfed" | null;
+  orb: Record<string, IbOrbWindow | null>; // keyed "5" | "15" | "30"
+}
+
+// {label, n, pct} with `of` the denominator when it isn't the whole run.
+export interface IbRateRow {
+  label: string;
+  n: number;
+  pct: number | null;
+  of?: number;
+}
+
+// Extension distribution: quantile rows carry `value` (×IB), milestone rows `pct`.
+export interface IbExtRow {
+  label: string;
+  n: number;
+  value: number | null;
+  pct: number | null;
+}
+
+// A conditioning cut (IB-width tercile, Globex relation, weekday) read through
+// how directional its days turned out.
+export interface IbCutRow {
+  label: string;
+  n: number;
+  trend_rate: number | null;
+  both_rate: number | null;
+  med_ext_x: number | null;
+  med_range_x: number | null;
+}
+
+// The Zarattini-style ORB score per window (and per gap cut).
+export interface IbOrbRow {
+  label: string;
+  n: number;
+  follow_rate: number | null;
+  avg_r: number | null;
+  med_r: number | null;
+  med_move_pts: number | null;
+}
+
+export interface IbResult {
+  ib_version: number;
+  symbol: string;
+  start: string;
+  end: string;
+  ib_minutes: number;
+  orb_windows: number[];
+  coverage: { requested_days: number; ran_days: number; skipped: string[] };
+  days: IbDay[];
+  aggregates: {
+    break_rates: IbRateRow[];
+    ext_distribution: IbExtRow[];
+    day_types: IbRateRow[];
+    break_epilogue: IbRateRow[];
+    ib_width_terciles: IbCutRow[];
+    globex_cuts: IbCutRow[];
+    orb_follow: IbOrbRow[];
+    gap_cuts: IbOrbRow[];
+    weekday: IbCutRow[];
+  };
+}
+
+export interface IbParams {
+  symbol: string;
+  start: string;
+  end: string;
+  ib_minutes?: number;
+}
+
+// --- Weekly VWAP study (GET /api/interactions/weekly-vwap) -------------------
+// Mirrors journal.sim.weekly_vwap — keep in sync with weekly_vwap.py's result
+// dict. Weekly-anchored VWAP envelope: where the open prints in it, which side
+// of the mid the day trades, and what first band touches do.
+
+// One weekly level's touch record for a session. The optional fields only
+// appear once `touched` is true (band rows carry the fade extras).
+export interface WeeklyVwapTouch {
+  name: string;
+  touched: boolean;
+  min_after_open?: number;
+  level?: number;
+  toward_pts?: number; // excursion back toward the weekly mid after the touch
+  beyond_pts?: number; // excursion through the band away from the mid
+  hit_mid?: boolean;
+}
+
+export interface WeeklyVwapDay {
+  day: string;
+  first_session: boolean; // week's first session — envelope is still seasoning
+  open: number;
+  close: number;
+  wk_mid_open: number; // weekly VWAP at the bell
+  wk_std_open: number;
+  wk_mid_close: number;
+  open_dist_pts: number;
+  open_dist_sigma: number | null; // null while the envelope has no σ yet
+  close_dist_sigma: number | null;
+  side: "above" | "below";
+  drift_pts: number; // open → close, signed
+  drift_with_side: boolean | null; // did the day drift away from the mid
+  touches: WeeklyVwapTouch[];
+}
+
+// Open-position, side and weekday cuts share one row shape: days conditioned on
+// the open's place in the envelope, read through how they drifted.
+export interface WeeklyVwapPosRow {
+  label: string;
+  n: number;
+  med_drift_pts: number | null;
+  with_side_rate: number | null;
+  med_close_dist_sigma: number | null;
+}
+
+// Touch rate per weekly level, counted only on approaches from the mid's side.
+export interface WeeklyVwapTouchRateRow {
+  label: string;
+  n: number;
+  of: number; // eligible days (the denominator)
+  touch_rate: number | null;
+  med_min_after_open: number | null;
+}
+
+// First band touch: fade back to the weekly mid vs break on through.
+export interface WeeklyVwapFadeRow {
+  label: string;
+  n: number;
+  hit_mid_rate: number | null;
+  med_toward_pts: number | null;
+  med_beyond_pts: number | null;
+  med_edge_pts: number | null; // toward − beyond
+}
+
+export interface WeeklyVwapResult {
+  weekly_vwap_version: number;
+  symbol: string;
+  start: string;
+  end: string;
+  outcome_window_min: number;
+  coverage: {
+    requested_days: number;
+    ran_days: number;
+    seasoned_days: number; // non-first sessions — the rows the cuts trust
+    skipped: { day: string; why: string }[];
+  };
+  days: WeeklyVwapDay[];
+  aggregates: {
+    open_position: WeeklyVwapPosRow[];
+    side: WeeklyVwapPosRow[];
+    touch_rates: WeeklyVwapTouchRateRow[];
+    band_fades: WeeklyVwapFadeRow[];
+    weekday: WeeklyVwapPosRow[];
+  };
+}
+
+export interface WeeklyVwapParams {
+  symbol: string;
+  start: string;
+  end: string;
+  outcome_window_min?: number;
 }
 
 // The run config the config-bar commits on "Run". Optional fields fall back to

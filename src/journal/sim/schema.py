@@ -37,7 +37,10 @@ from dataclasses import dataclass, replace
 from datetime import date, time
 
 from ..config import CONTRACT_SPECS
-from .rules import FadeConfig, GlobexBounceConfig, ProfilePullbackConfig, SimConfig
+from .rules import (
+    DriftFadeConfig, FadeConfig, GlobexBounceConfig, OrbConfig,
+    ProfilePullbackConfig, SimConfig, ValueRotationConfig,
+)
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,31 @@ FIELDS: tuple[Field, ...] = (
                "price has paid most of the stop — so it stays tight. A position "
                "that exits before the window closes is never read. Ignored when "
                "the panic exit is off."),
+    Field("underwater_stop_ticks", "int", "exit", "Tighten the stop if still underwater",
+          unit="ticks", min=1, zero_means_off=True, on_default=80,
+          help="One read when the fill is a set age: if the trade is still below "
+               "breakeven then, pull the stop in to this many ticks behind the entry. "
+               "It caps the loss on a fill that hasn't worked without flattening it, "
+               "so a deep-heat winner still has room, and only ever tightens. Set it "
+               "below the stop distance or it can never bite. Its own exit reason, "
+               "'uw_stop'."),
+    Field("underwater_stop_after_s", "int", "exit", "Underwater read at", unit="s", min=1,
+          help="Seconds after the fill the one read is taken. The dwell study put the "
+               "bleed at 60-180s, so it sits at the front of that band — late enough "
+               "that the first-minute winners have resolved, early enough to still save "
+               "the loss. Ignored when the tighten is off."),
+    Field("stop_below_mid_bars", "int", "exit", "Exit past the NY session mid",
+          unit="bar closes", min=0, zero_means_off=True, on_default=3,
+          help="Exit at market after this many consecutive closes past the NY session "
+               "VWAP mid — the 09:30-anchored mean, not the Globex mid the bands ride. "
+               "A trade entered beyond the band that closes back through the day's mean "
+               "has lost its premise. Pair it with an offset — a bare touch clips the "
+               "winners that dip through the mean and recover."),
+    Field("stop_below_mid_ticks", "int", "exit", "Mid-exit offset", unit="ticks",
+          min=0,
+          help="How far past the mid a close must sit to count toward the streak. 0 "
+               "counts any close on the far side; a few ticks past ignores the one-tick "
+               "poke through the mean. Ignored when the mid exit is off."),
 
     # --- filters / lifecycle ---
     Field("min_band_width_ticks", "int", "filters", "Minimum band width",
@@ -185,11 +213,34 @@ FIELDS: tuple[Field, ...] = (
                "setup; a fresh acceptance is then required."),
     Field("rearm_after_exit", "bool", "filters", "Re-arm after every exit",
           help="Any exit disarms the setup — one trade per acceptance."),
+    Field("reenter_after_stop_only", "bool", "filters",
+          "Re-enter only after a stop",
+          help="Any exit other than a full stop-out stands the session down. "
+               "Skipped entries are tracked as reentry_halt rows in missed "
+               "trades, and one of them stopping out re-arms the day — the "
+               "setup failed without you, so the next acceptance trades. A "
+               "trail exit counts as an exit, not a stop, even when red."),
+    Field("reentry_rearm_window_min", "int", "filters", "Re-arm window",
+          unit="min", min=0, zero_means_off=True, on_default=30,
+          depends_on=("reenter_after_stop_only", True),
+          help="How long a stop (real or watched) keeps the day open. Off, the "
+               "re-arm lasts until the next non-stop exit; set, the day stands "
+               "back down if no entry fills within this many minutes of the "
+               "stop print. A later watched stop starts a fresh window."),
     Field("daily_loss_stop", "float", "filters", "Daily loss stop",
           unit="$", min=0.01, zero_means_off=True, on_default=1000.0,
           help="Stand down for the rest of the session once realized net P&L "
                "(closed trades, commissions included) is this far in the red. "
-               "An open position still runs to its normal exit."),
+               "An open position still runs to its normal exit, unless the "
+               "companion exit below is on."),
+    Field("daily_loss_exit_open", "bool", "filters",
+          "Also flatten the open trade at the loss stop",
+          help="Extends the loss stop to the position already on: once realized "
+               "net P&L plus the open trade marked to the current price reaches "
+               "the stop, exit it at market (reason 'daily_loss'). Off, the stop "
+               "only refuses new entries — a single trade whose own stop sits "
+               "wider than the whole limit still blows through it. Needs a daily "
+               "loss stop set."),
 
     # --- scope ---
     Field("instrument", "enum", "scope", "Instrument",
@@ -214,6 +265,25 @@ FIELDS: tuple[Field, ...] = (
 
     # --- size & cost ---
     Field("contracts", "int", "size", "Contracts", min=1),
+    Field("size_up_participation", "float", "size",
+          "Size up on big-lot participation", unit="fraction", min=0, max=1,
+          zero_means_off=True, on_default=0.041,
+          help="One read of the tape at each fill: the share of the trailing "
+               "window's total volume printed in big lots (side-agnostic). When it "
+               "is at least this fraction the entry is sized to the sized-up "
+               "contracts instead of the base — the 30badf94 study's one entry-time "
+               "separator of 3R runners, a magnitude signal so it sizes, never "
+               "gates. 0 sizes every fill at the base contracts."),
+    Field("size_up_contracts", "int", "size", "Sized-up contracts",
+          unit="contracts", min=1, zero_means_off=True, on_default=5,
+          help="The size a qualifying fill takes. Ignored when the size-up is off."),
+    Field("biglot_min_size", "int", "size", "Big-lot threshold", unit="lots", min=1,
+          help="A print of this many lots or more counts as a big lot — the study's "
+               "institutional-size NQ print. Ignored when the size-up is off."),
+    Field("biglot_window_s", "int", "size", "Participation window", unit="s", min=1,
+          help="The trailing window the participation share is read over, ending at "
+               "the fill. The study's split-half-robust read was 60s. Ignored when "
+               "the size-up is off."),
     Field("commission_per_side", "float", "size", "Commission per side",
           unit="$ / contract", min=0,
           help="Charged on entry and on exit, per contract."),
@@ -233,6 +303,14 @@ FIELDS: tuple[Field, ...] = (
                "average (total risk grows with size). Anchor leaves the stop and "
                "target where the first lot set them — later lots ride the initial "
                "risk. Read only with 2+ lots."),
+    Field("pyramid_direction", "enum", "size", "Scale-in direction",
+          choices=(("with", "With — add as the move confirms"),
+                   ("against", "Against — average down into the pullback")),
+          help="With rests each later lot one step further in the trade's favour "
+               "(the classic scale-in). Against rests it one step further against "
+               "— a limit below the fill on a long — so size is added into the "
+               "dip and the average entry improves as the trade goes underwater. "
+               "Read only with 2+ lots."),
 )
 
 BY_NAME: dict[str, Field] = {f.name: f for f in FIELDS}
@@ -357,7 +435,7 @@ FADE_FIELDS: tuple[Field, ...] = (
     Field("rearm_after_exit", "bool", "filters", "Re-arm after every exit",
           help="Any exit disarms the setup — a fresh stretch (and a fresh mid "
                "touch, when required) must build before the next trade."),
-    BY_NAME["daily_loss_stop"],
+    BY_NAME["daily_loss_stop"], BY_NAME["daily_loss_exit_open"],
 
     # --- scope / bars / session / size ---
     BY_NAME["instrument"], BY_NAME["contract"],
@@ -460,7 +538,7 @@ PULLBACK_FIELDS: tuple[Field, ...] = (
                "the market, not a level anyone defended — measured in-sample, "
                "fills on just-relocated levels lost while stable-level fills "
                "carried the edge."),
-    BY_NAME["daily_loss_stop"],
+    BY_NAME["daily_loss_stop"], BY_NAME["daily_loss_exit_open"],
 
     # --- scope / bars / session / size ---
     BY_NAME["instrument"], BY_NAME["contract"],
@@ -479,6 +557,351 @@ PULLBACK_FIELDS: tuple[Field, ...] = (
 PULLBACK_BY_NAME: dict[str, Field] = {f.name: f for f in PULLBACK_FIELDS}
 
 
+# --- the value rotation's table -------------------------------------------------
+# ValueRotationConfig's descriptors. No VWAP band anywhere in the setup: the
+# value-area edge arms it, bar closes back inside confirm it, and the POC is
+# the target — so the arming group describes the excursion outside value.
+
+ROTATION_GROUPS: tuple[dict, ...] = (
+    {"key": "window", "title": "Window", "collapsed": False},
+    {"key": "direction", "title": "Direction", "collapsed": False},
+    {"key": "arming", "title": "Arming", "collapsed": False},
+    {"key": "entry", "title": "Entry", "collapsed": False},
+    {"key": "exit", "title": "Exit", "collapsed": False},
+    {"key": "filters", "title": "Filters & lifecycle", "collapsed": False},
+    {"key": "scope", "title": "Instrument", "collapsed": True},
+    {"key": "bars", "title": "Bars", "collapsed": True},
+    {"key": "session", "title": "Session times (ET)", "collapsed": True},
+    {"key": "size", "title": "Size & cost", "collapsed": True},
+)
+
+ROTATION_FIELDS: tuple[Field, ...] = (
+    # --- window ---
+    BY_NAME["start_date"], BY_NAME["end_date"],
+
+    # --- direction ---
+    Field("side", "enum", "direction", "Direction",
+          choices=(("short", "Short — accepted above the VAH, sold back to the POC"),
+                   ("long", "Long — accepted below the VAL, bought back to the POC")),
+          help="Which value-area edge the rotation is read off. The knob names "
+               "are written for the short and mean the mirror on the long: "
+               "closes back inside the edge are closes back ABOVE the VAL, and "
+               "the POC sits above the fill instead of below it."),
+
+    # --- arming (accepted outside value) ---
+    Field("arm_beyond_ticks", "int", "arming", "Arming excursion",
+          unit="ticks", min=1,
+          help="The setup arms when price prints more than this far beyond the "
+               "developing value-area edge — outside value, on the trade's "
+               "side. Re-arming needs a fresh excursion: price must first come "
+               "back within this distance of the edge."),
+    Field("level_warmup_min", "int", "arming", "NY profile warm-up",
+          unit="min", min=0,
+          help="An NY-anchored profile minutes old has POC=VAH=VAL on the open "
+               "print; nothing arms and nothing fills until the session is "
+               "this old."),
+    Field("accept_inside_bars", "int", "arming", "Confirming closes inside",
+          unit="bar closes", min=1,
+          help="This many CONSECUTIVE bar closes back inside the edge confirm "
+               "the re-acceptance — value has taken price back, and the "
+               "rotation may be entered. 1 is the bare close."),
+
+    # --- entry ---
+    Field("entry_variant", "enum", "entry", "Entry variant",
+          choices=(("A", "A — rest a limit at the failed edge"),
+                   ("B", "B — stop into the rotation")),
+          help="A rests a limit at the edge after the confirming close and "
+               "fills on the retest back to it; an edge that relocates across "
+               "the market disarms instead of filling. B enters as price "
+               "continues away from the edge, into value."),
+    Field("entry_stop_offset_ticks", "int", "entry", "Stop-entry offset",
+          unit="ticks", min=0, depends_on=("entry_variant", "B"),
+          help="How far past the edge, into value, the entry stop sits after "
+               "the confirming close."),
+
+    # --- exit ---
+    BY_NAME["stop_ticks"],
+    Field("target", "enum", "exit", "Target",
+          choices=(("poc", "The developing POC"),
+                   ("mid", "The NY VWAP"),
+                   ("rr", "A fixed R multiple")),
+          help="poc and mid are tracked live. A POC that node-flips across "
+               "price books a market fill at the print, never a limit fill at "
+               "a level the market wasn't at; only price crossing the level "
+               "fills at the level."),
+    BY_NAME["target_rr"],
+    Field("min_room_ticks", "int", "exit", "Minimum room to the POC",
+          unit="ticks", min=1, zero_means_off=True, on_default=40,
+          help="At the would-be fill, the developing POC must sit at least "
+               "this far beyond the fill in the trade's direction, or the "
+               "touch is missed. The trivial-rotation guard: ~40% of the "
+               "lab's POC reversions were price already at or through the "
+               "target — a rotation with nothing left to pay."),
+    Field("invalidate_outside_bars", "int", "exit",
+          "Exit when price is re-accepted outside the edge",
+          unit="bar closes", min=0, zero_means_off=True, on_default=5,
+          help="Exit at market after this many consecutive closes back "
+               "outside the value-area edge — the premise run backwards. The "
+               "fixed stop stays behind it as the hard backstop."),
+    BY_NAME["trail_stop_ticks"], BY_NAME["trail_step_ticks"],
+    BY_NAME["trail_breakeven_ticks"], BY_NAME["trail_breakeven_only"],
+
+    # --- filters / lifecycle ---
+    Field("rearm_after_exit", "bool", "filters", "Re-arm after every exit",
+          help="Any exit disarms the setup — a fresh excursion outside value "
+               "and fresh confirming closes must build before the next trade."),
+    BY_NAME["daily_loss_stop"], BY_NAME["daily_loss_exit_open"],
+
+    # --- scope / bars / session / size ---
+    BY_NAME["instrument"], BY_NAME["contract"],
+    BY_NAME["ticks_per_bar"],
+    Field("entry_open", "time", "session", "Entry window opens",
+          help="No entries before this. The default matches the NY profile "
+               "warm-up — an earlier edge is the open print, not a level."),
+    BY_NAME["entry_close"], BY_NAME["flat_by"],
+    BY_NAME["contracts"], BY_NAME["commission_per_side"],
+)
+
+ROTATION_BY_NAME: dict[str, Field] = {f.name: f for f in ROTATION_FIELDS}
+
+
+ORB_GROUPS: tuple[dict, ...] = (
+    {"key": "window", "title": "Window", "collapsed": False},
+    {"key": "setup", "title": "Opening range", "collapsed": False},
+    {"key": "exit", "title": "Exit", "collapsed": False},
+    {"key": "filters", "title": "Filters", "collapsed": False},
+    {"key": "scope", "title": "Instrument", "collapsed": True},
+    {"key": "bars", "title": "Bars", "collapsed": True},
+    {"key": "session", "title": "Session times (ET)", "collapsed": True},
+    {"key": "size", "title": "Size & cost", "collapsed": True},
+)
+
+ORB_FIELDS: tuple[Field, ...] = (
+    # --- window ---
+    BY_NAME["start_date"], BY_NAME["end_date"],
+
+    # --- setup (the opening range) ---
+    Field("window_minutes", "int", "setup", "Opening window", unit="min",
+          min=1, max=120,
+          help="Minutes from the 09:30 bell the opening range spans. 5 is the "
+               "Zarattini window (the one that carried the paper's edge); 60 "
+               "is the classic Initial Balance, the natural window for the "
+               "second-break mode."),
+    Field("entry_mode", "enum", "setup", "Entry mode",
+          choices=(("candle", "Candle — enter with the window candle's direction at its close"),
+                   ("break", "Break — stop in on the first crossing of an extreme"),
+                   ("second_break", "Second break — enter with the second side broken")),
+          help="candle is the Zarattini rule: one market entry at the first "
+               "print after the window, in its candle's direction. break stops "
+               "in on the window high/low. second_break waits for one extreme "
+               "to break and trades the OTHER — the close landed on the second "
+               "break's side on 81% of double-break days (IB study, n=53). One "
+               "attempt per session in every mode."),
+    Field("direction", "enum", "setup", "Direction",
+          choices=(("both", "Both — trade whichever direction sets up"),
+                   ("long_only", "Long only"),
+                   ("short_only", "Short only")),
+          help="Which breakout directions may trade. The documented futures "
+               "filter is the opening candle itself, not the gap — the "
+               "one-sided settings exist for A/B, not belief."),
+    Field("entry_offset_ticks", "int", "setup", "Break offset", unit="ticks",
+          min=0, depends_on=("entry_mode", "break"),
+          help="The entry stop rests this many ticks beyond the window "
+               "extreme (Crabel's stretch, fixed rather than ATR-derived). "
+               "0 triggers on the extreme itself."),
+
+    # --- exit ---
+    Field("stop_mode", "enum", "exit", "Stop",
+          choices=(("range", "Range — the window's opposite extreme"),
+                   ("ticks", "Fixed ticks from the fill")),
+          help="range is the paper's stop: the window's other side, so risk "
+               "varies day by day with the window and every R is measured "
+               "against the risk actually taken. ticks divorces risk from "
+               "window size."),
+    Field("stop_ticks", "int", "exit", "Initial stop", unit="ticks", min=1,
+          depends_on=("stop_mode", "ticks"),
+          help="Fixed distance from the fill, when the stop mode is ticks."),
+    Field("target", "enum", "exit", "Target",
+          choices=(("eod", "End of day — hold to the session close"),
+                   ("rr", "A fixed R multiple")),
+          help="eod is the paper's exit: no target, the trade runs to flat_by "
+               "with only the stop (and the optional trail) behind it. rr "
+               "fixes a target at entry, in multiples of the actual risk."),
+    BY_NAME["target_rr"],
+    BY_NAME["trail_stop_ticks"], BY_NAME["trail_step_ticks"],
+    BY_NAME["trail_breakeven_ticks"], BY_NAME["trail_breakeven_only"],
+
+    # --- filters ---
+    Field("min_range_ticks", "int", "filters", "Min window range", unit="ticks",
+          min=1, zero_means_off=True, on_default=40,
+          help="Skip the day when the opening range is narrower than this — "
+               "the noise floor. On a range stop this is also the risk floor."),
+    Field("max_range_ticks", "int", "filters", "Max window range", unit="ticks",
+          min=1, zero_means_off=True, on_default=800,
+          help="Skip the day when the opening range is wider than this — the "
+               "window already spent the day's travel."),
+
+    # --- scope / bars / session / size ---
+    BY_NAME["instrument"], BY_NAME["contract"],
+    BY_NAME["ticks_per_bar"],
+    BY_NAME["entry_open"],
+    Field("entry_close", "time", "session", "Entry window closes",
+          help="No new entries at or after this. The candle mode enters right "
+               "at the window's end regardless; this caps how late the break "
+               "modes may trigger."),
+    BY_NAME["flat_by"],
+    BY_NAME["contracts"], BY_NAME["commission_per_side"],
+)
+
+ORB_BY_NAME: dict[str, Field] = {f.name: f for f in ORB_FIELDS}
+
+
+# --- the drift-touch fade's table ---------------------------------------------
+# DriftFadeConfig's descriptors. No acceptance, no arming stretch, no resting
+# limit — the drift classification at a bar close is the setup — so the sources
+# group describes what a touch may land on and the detection group how a touch
+# becomes a drift signal.
+
+DRIFT_GROUPS: tuple[dict, ...] = (
+    {"key": "window", "title": "Window", "collapsed": False},
+    {"key": "sources", "title": "Sources", "collapsed": False},
+    {"key": "detection", "title": "Detection", "collapsed": False},
+    {"key": "entry", "title": "Entry", "collapsed": False},
+    {"key": "exit", "title": "Exit", "collapsed": False},
+    {"key": "filters", "title": "Filters & lifecycle", "collapsed": False},
+    {"key": "scope", "title": "Instrument", "collapsed": True},
+    {"key": "bars", "title": "Bars", "collapsed": True},
+    {"key": "session", "title": "Session times (ET)", "collapsed": True},
+    {"key": "size", "title": "Size & cost", "collapsed": True},
+)
+
+DRIFT_FIELDS: tuple[Field, ...] = (
+    # --- window ---
+    BY_NAME["start_date"], BY_NAME["end_date"],
+
+    # --- sources (what a drift touch may land on) ---
+    Field("use_ny_levels", "bool", "sources", "NY developing value",
+          help="Developing NY POC/VAH/VAL, anchored at the bell. Degenerate for "
+               "the first minutes — see the warm-up."),
+    Field("use_globex_levels", "bool", "sources", "Globex developing value",
+          help="Developing Globex POC/VAH/VAL, anchored at 18:00 ET the previous "
+               "evening — ~15 hours mature by the open."),
+    Field("use_session_refs", "bool", "sources", "Static session references",
+          help="ONH/ONL, the prior day's POC/VAH/VAL and close, and the session "
+               "open — the levels every trader has drawn before the bell."),
+    Field("trade_poc", "bool", "sources", "POC",
+          help="Include the POC of each enabled developing profile."),
+    Field("trade_vah", "bool", "sources", "VAH",
+          help="Include the VAH of each enabled developing profile."),
+    Field("trade_val", "bool", "sources", "VAL",
+          help="Include the VAL of each enabled developing profile."),
+    Field("level_warmup_min", "int", "sources", "NY level warm-up",
+          unit="min", min=0,
+          help="An NY-anchored profile minutes old has POC=VAH=VAL on the open "
+               "print; its levels (and the session-open ref) are not candidates "
+               "until the anchor is this old. Globex levels and the prior-day "
+               "refs are mature and never gated by this."),
+
+    # --- detection ---
+    Field("touch_tol", "float", "detection", "Touch tolerance", unit="pts",
+          min=0.0,
+          help="A bar touches a level when its low−tol ≤ level ≤ high+tol."),
+    Field("touch_gap_bars", "int", "detection", "Touch gap", unit="bars", min=0,
+          help="A re-approach counts as a fresh touch only after this many bars "
+               "clear of the zone — one rotation sitting on a level is one "
+               "touch, not many."),
+    Field("min_level_stability_min", "int", "detection", "Minimum level stability",
+          unit="min", min=1, zero_means_off=True, on_default=5,
+          help="Skip a drift signal on a developing level that relocated more "
+               "than the stability tolerance within this window — a drift touch "
+               "on a freshly node-flipped level is the profile chasing the "
+               "market, not a hug. Static refs never move."),
+    Field("stability_tol_ticks", "int", "detection", "Stability tolerance",
+          unit="ticks", min=1,
+          help="How far a developing level may wander over the stability window "
+               "and still count as having sat in place. Read only when the "
+               "stability window is on."),
+
+    # --- entry ---
+    Field("entry_variant", "enum", "entry", "Entry variant",
+          choices=(("A", "A — market on the drift-touch bar's close"),
+                   ("B", "B — confirm beyond the touch extreme, then enter")),
+          help="A enters at market on the next tick after the drift-touch bar "
+               "closes, away from the level. B waits for a bar to close at least "
+               "confirm_ticks beyond the touch bar's extreme on the fade side "
+               "first — later, but it filters the instant-acceptance failures."),
+    Field("confirm_ticks", "int", "entry", "Confirmation distance", unit="ticks",
+          min=1, depends_on=("entry_variant", "B"),
+          help="Variant B only: a bar must close at least this far beyond the "
+               "touch bar's extreme, on the fade side, before the entry fires."),
+    Field("side", "enum", "entry", "Direction",
+          choices=(("both", "Both — fade whichever side price hugged"),
+                   ("long", "Long only — price hugged above, fade to support"),
+                   ("short", "Short only — price hugged below, fade to resistance")),
+          help="Drift is the repo's first near-symmetric edge, but the house "
+               "prior is long-only, so the A/B reads the sides separately before "
+               "'both' ships as a baseline default."),
+    Field("max_touches_per_zone", "int", "entry", "Touches per zone",
+          unit="touches", min=1, zero_means_off=True, on_default=1,
+          help="Cap fills to each zone's first N touches. The drift ratio held "
+               "on re-tests, so this starts off (unlimited); the nth-touch cut "
+               "is measured in the edges panel first."),
+
+    # --- exit ---
+    Field("stop_ticks", "int", "exit", "Initial stop", unit="ticks", min=1,
+          help="Measured from the LEVEL, not the fill — the zone is the "
+               "invalidation, not the entry print. The spec's sweep is 120-200 "
+               "ticks (median drift-rejection MAE ≈ 26 pts, p75 ≈ 45)."),
+    Field("target_mode", "enum", "exit", "Target",
+          choices=(("ny_vwap", "The NY VWAP — the fade-to-value target"),
+                   ("r_multiple", "A fixed R multiple"),
+                   ("fixed_ticks", "A fixed distance")),
+          help="ny_vwap is tracked live: a VWAP that node-flips across price "
+               "books a market fill at the print, never a limit at a level the "
+               "market wasn't at. r_multiple and fixed_ticks are struck at entry."),
+    # This strategy's target switch is target_mode, not the bounce's `target`, so
+    # the R field depends on target_mode == "r_multiple" (else the form disables
+    # it whenever r_multiple is chosen).
+    replace(BY_NAME["target_rr"], depends_on=("target_mode", "r_multiple")),
+    Field("target_ticks", "int", "exit", "Target distance", unit="ticks", min=1,
+          depends_on=("target_mode", "fixed_ticks"),
+          help="A fixed take-profit distance from the fill."),
+    Field("min_room_ticks", "int", "exit", "Minimum room to the VWAP",
+          unit="ticks", min=1, zero_means_off=True, on_default=40,
+          help="ny_vwap target only: at the would-be fill the VWAP must sit at "
+               "least this far beyond the fill in the trade's direction, or the "
+               "signal is skipped — a target already inside the stop is no trade."),
+    BY_NAME["trail_stop_ticks"], BY_NAME["trail_step_ticks"],
+    BY_NAME["trail_breakeven_ticks"], BY_NAME["trail_breakeven_only"],
+    Field("max_hold_min", "int", "exit", "Max hold", unit="min", min=1,
+          zero_means_off=True, on_default=15,
+          help="Flatten the open trade at market once it has been held this "
+               "many minutes without hitting its target — the give-up-on-a-grind "
+               "exit. Winners snap back fast and losers grind underwater, so a "
+               "hold cap is a candidate loser filter; it also cuts the slow-but-"
+               "real winners, which is what the A/B has to weigh. Off by default."),
+
+    # --- filters / lifecycle ---
+    BY_NAME["daily_loss_stop"], BY_NAME["daily_loss_exit_open"],
+
+    # --- scope / bars / session / size ---
+    BY_NAME["instrument"], BY_NAME["contract"],
+    BY_NAME["ticks_per_bar"],
+    Field("entry_open", "time", "session", "Entry window opens",
+          help="No entries before this. The default (09:45) matches the NY level "
+               "warm-up and excludes the open's impulse — 09:30-09:45 is dropped "
+               "by the flagship's pre-checkpoint leak lesson."),
+    Field("entry_close", "time", "session", "Entry window closes",
+          help="No new entries after this; open positions are left to run. The "
+               "default (15:00) drops the last hour, whose touches scored at the "
+               "null baseline."),
+    BY_NAME["flat_by"],
+    BY_NAME["contracts"], BY_NAME["commission_per_side"],
+)
+
+DRIFT_BY_NAME: dict[str, Field] = {f.name: f for f in DRIFT_FIELDS}
+
+
 # config class -> (groups, fields, by-name index). The registry's config_cls is
 # the key, so parsing, validation and the served form blueprint all follow from
 # one declaration on the strategy.
@@ -487,6 +910,9 @@ _TABLES: dict[type, tuple[tuple[dict, ...], tuple[Field, ...], dict[str, Field]]
     GlobexBounceConfig: (GLOBEX_GROUPS, GLOBEX_FIELDS, GLOBEX_BY_NAME),
     FadeConfig: (FADE_GROUPS, FADE_FIELDS, FADE_BY_NAME),
     ProfilePullbackConfig: (PULLBACK_GROUPS, PULLBACK_FIELDS, PULLBACK_BY_NAME),
+    ValueRotationConfig: (ROTATION_GROUPS, ROTATION_FIELDS, ROTATION_BY_NAME),
+    OrbConfig: (ORB_GROUPS, ORB_FIELDS, ORB_BY_NAME),
+    DriftFadeConfig: (DRIFT_GROUPS, DRIFT_FIELDS, DRIFT_BY_NAME),
 }
 
 # `confluences` is the one field with no descriptor: it is an open-ended dict of
@@ -571,13 +997,23 @@ def _check_range(f: Field, v: object) -> None:
 def _check_cross_field(cfg) -> None:
     """Rules that read more than one knob. Each of these is a config the engine
     accepts and then quietly does something other than what it says."""
-    if cfg.target == "rr" and not cfg.target_rr:
+    if getattr(cfg, "target", None) == "rr" and not cfg.target_rr:
         # Engine: `if cfg.target == "rr" and cfg.target_rr` — a null here trades
         # the live target (dev2, or the fade's mid) while claiming an R target.
+        # getattr: the drift fade names its target knob target_mode (checked below).
         raise ValueError("target 'rr' needs a target_rr")
     if cfg.start_date > cfg.end_date:
         raise ValueError(
             f"start_date {cfg.start_date} is after end_date {cfg.end_date}")
+    if getattr(cfg, "daily_loss_exit_open", False) and not cfg.daily_loss_stop:
+        # The flatten trips against the daily loss stop's dollar figure; with no
+        # stop set it has no threshold and would be a silent no-op — a config that
+        # looks like it caps the open trade but never does. (getattr: OrbConfig
+        # has neither knob.)
+        raise ValueError(
+            "daily_loss_exit_open needs a daily_loss_stop set: it flattens the "
+            "open trade against that limit, and without one there is nothing to "
+            "trip on")
     if isinstance(cfg, SimConfig):
         if (cfg.entry_variant == "A"
                 and cfg.entry_limit_offset_ticks > cfg.acceptance_min_ticks):
@@ -598,6 +1034,17 @@ def _check_cross_field(cfg) -> None:
             raise ValueError(
                 f"contracts ({cfg.contracts}) must divide evenly by pyramid_tranches "
                 f"({cfg.pyramid_tranches}): each scale-in lot is an equal whole slice")
+        if (cfg.pyramid_tranches > 1 and cfg.pyramid_direction == "against"
+                and (cfg.pyramid_tranches - 1) * cfg.pyramid_step_ticks
+                >= cfg.stop_ticks):
+            # The deepest add would rest at or past the stop itself: it could only
+            # ever fill on the print that kills the trade, booking a lot whose
+            # entire life is its own stop-out.
+            raise ValueError(
+                f"averaging down {cfg.pyramid_tranches} lots every "
+                f"{cfg.pyramid_step_ticks} ticks puts the last add "
+                f"{(cfg.pyramid_tranches - 1) * cfg.pyramid_step_ticks} ticks under "
+                f"the entry, at or past the {cfg.stop_ticks}-tick stop")
     if isinstance(cfg, GlobexBounceConfig) and cfg.invert:
         # Inverting reverts toward the mid, so dev2 sits BEHIND the entry — a
         # dev2 target fills instantly at a loss, and an acceptance capped at dev2
@@ -624,6 +1071,43 @@ def _check_cross_field(cfg) -> None:
             # as "the idea never sets up" rather than "this config is inert".
             raise ValueError(
                 "require_confluence_pts needs at least two candidate level series")
+    if isinstance(cfg, OrbConfig):
+        if (cfg.min_range_ticks and cfg.max_range_ticks
+                and cfg.min_range_ticks > cfg.max_range_ticks):
+            # The two bounds would exclude every day; the engine would run
+            # green and take zero trades forever, reading as "never sets up".
+            raise ValueError(
+                f"min_range_ticks ({cfg.min_range_ticks}) may not exceed "
+                f"max_range_ticks ({cfg.max_range_ticks})")
+    if isinstance(cfg, DriftFadeConfig):
+        if cfg.target_mode == "r_multiple" and not cfg.target_rr:
+            # The engine trades the live VWAP target when target_rr is null, so a
+            # config claiming an R target with no multiple would silently fade to
+            # value instead of the R it says.
+            raise ValueError("target_mode 'r_multiple' needs a target_rr")
+        if not (cfg.use_ny_levels or cfg.use_globex_levels or cfg.use_session_refs):
+            raise ValueError(
+                "enable at least one source (NY, Globex or session refs)")
+        if ((cfg.use_ny_levels or cfg.use_globex_levels)
+                and not (cfg.trade_poc or cfg.trade_vah or cfg.trade_val)):
+            # A developing source with no level type selected contributes no
+            # candidates; if it is the ONLY source the run takes zero trades
+            # forever, reading as "the idea never sets up".
+            raise ValueError(
+                "a developing source (NY or Globex) needs at least one level "
+                "type (POC, VAH or VAL)")
+        if cfg.side == "both" and any(
+                s.get("enabled") for s in (cfg.confluences or {}).values()):
+            # A gate reads one signed session context (SessionCtx.side); a
+            # both-sided run has no single side to hand it. Gate experiments run
+            # per-side by design (the spec's A/B reads the sides separately), so
+            # an ENABLED gate on a both-sided run is refused rather than
+            # mis-scored. Disabled sections don't count — the run form
+            # materializes one per gate whether ticked or not, and they collapse
+            # to absence in canonicalize; only an armed gate needs a side.
+            raise ValueError(
+                "a confluence gate needs a single side: set side to 'long' or "
+                "'short' (gates are scored against one signed context)")
     if isinstance(cfg, FadeConfig):
         if (cfg.entry_variant == "A"
                 and cfg.entry_limit_offset_ticks > cfg.arm_extension_ticks):

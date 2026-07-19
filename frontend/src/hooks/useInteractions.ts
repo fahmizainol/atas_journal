@@ -3,9 +3,13 @@ import { apiGet } from "../lib/api";
 import type { DayChartData } from "../lib/chartTypes";
 import type {
   Coverage,
+  IbParams,
+  IbResult,
   InteractionParams,
   InteractionResult,
   SavedRun,
+  WeeklyVwapParams,
+  WeeklyVwapResult,
 } from "../lib/interactionTypes";
 
 // The interaction study is market structure over the tick cache, not trades — so
@@ -19,6 +23,32 @@ export function useInteractions(params: InteractionParams | null) {
   return useQuery({
     queryKey: ["interactions", "run", params],
     queryFn: () => apiGet<InteractionResult>("/interactions", { ...params }),
+    enabled: !!params,
+    retry: false,
+  });
+}
+
+// The Initial Balance / ORB study — session structure only (minute bars, no
+// per-level scan), so a fresh range computes in well under the touch study's
+// time. Deferred until the user hits its Run button, cached server-side by the
+// same config-hash contract.
+export function useIbStudy(params: IbParams | null) {
+  return useQuery({
+    queryKey: ["interactions", "ib", params],
+    queryFn: () => apiGet<IbResult>("/interactions/ib", { ...params }),
+    enabled: !!params,
+    retry: false,
+  });
+}
+
+// The weekly VWAP study — where the open prints in the weekly envelope and how
+// the day resolves from there. Session structure only (no per-level scan), so a
+// fresh range is cheap. Deferred until its own Run button, cached server-side
+// by the same config-hash contract.
+export function useWeeklyVwapStudy(params: WeeklyVwapParams | null) {
+  return useQuery({
+    queryKey: ["interactions", "weekly-vwap", params],
+    queryFn: () => apiGet<WeeklyVwapResult>("/interactions/weekly-vwap", { ...params }),
     enabled: !!params,
     retry: false,
   });

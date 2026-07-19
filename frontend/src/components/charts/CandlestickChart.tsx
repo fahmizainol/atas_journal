@@ -11,7 +11,7 @@ import {
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
-import { palette, profilePalette, regimePalette, vwapPalette } from "../../theme";
+import { ibPalette, palette, profilePalette, regimePalette, vwapPalette } from "../../theme";
 import { TradeRectanglePrimitive } from "./TradeRectanglePrimitive";
 import { RulerPrimitive } from "./RulerPrimitive";
 import { MarkerPrimitive } from "./MarkerPrimitive";
@@ -36,6 +36,7 @@ import type {
   ChartMarker,
   CvdPoint,
   Footprint,
+  IbOverlay,
   PriceLineSpec,
   ProfilePoint,
   TradeRect,
@@ -47,6 +48,9 @@ interface Props {
   bars: Bar[];
   vwapGlobex?: VwapPoint[];
   vwapNy?: VwapPoint[];
+  /** Weekly anchor (the week's first Globex open) — context only, no engine
+   * trades it. Absent when the week's prior sessions aren't all on disk. */
+  vwapWeekly?: VwapPoint[];
   /**
    * Developing value areas (POC/VAH/VAL as of each bar's close), one per VWAP
    * anchor: `profileGlobex` accumulates from the 18:00 open, `profileNy` from the
@@ -71,7 +75,26 @@ interface Props {
   vaSnaps?: VaSnap[];
   priceLines?: PriceLineSpec[];
   levels?: PriceLineSpec[];
+  /**
+   * Initial Balance (first 60 min of RTH): high/low drawn as flat segments from
+   * the bell to the close, plus faint 1×/1.5×/2× extension guides from where the
+   * IB completes. Only the sim/Lab charts send it. See lib/chartTypes.IbOverlay.
+   */
+  ib?: IbOverlay | null;
   tradeRects?: TradeRect[];
+  /**
+   * Open zoomed in on the (first) trade rectangle rather than fitting the whole
+   * session — the by-trade view wants the trade filling the chart, with a little
+   * context on either side. Ignored when there's no rect. The user can still zoom
+   * back out; this only sets the initial range.
+   */
+  focusOnTrade?: boolean;
+  /**
+   * Overlay a live readout of the current zoom (padding bars / ratio relative to
+   * the trade span) — a scratchpad for tuning the `focusOnTrade` framing. No
+   * effect without `focusOnTrade`.
+   */
+  debugZoom?: boolean;
   /**
    * Real volume-at-price per bar. When supplied (the sim's charts), the volume
    * profile is computed from the actual tape; without it (the journal's Databento
@@ -108,6 +131,15 @@ const HANDLE_PX = 6;
 
 const VOL_UP = "rgba(33,192,122,0.5)";
 const VOL_DOWN = "rgba(245,69,95,0.5)";
+
+// --- `focusOnTrade` framing (the by-trade view's default zoom) ---
+// A fixed window centred on the trade: FOCUS_BARS wide and FOCUS_TICKS tall. If
+// the trade itself is larger than the window, the window expands to fit it plus a
+// small margin so it's never clipped. Tune the two window sizes to taste.
+const FOCUS_BARS = 508;
+const FOCUS_TICKS = 549;
+const FOCUS_MARGIN_BARS = 12;
+const FOCUS_MARGIN_TICKS = 8;
 
 const fmtDur = (s: number): string => {
   if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
@@ -146,6 +178,7 @@ export function CandlestickChart({
   bars,
   vwapGlobex,
   vwapNy,
+  vwapWeekly,
   profileGlobex,
   profileNy,
   atrPoints,
@@ -155,7 +188,10 @@ export function CandlestickChart({
   vaSnaps,
   priceLines,
   levels,
+  ib,
   tradeRects,
+  focusOnTrade,
+  debugZoom,
   footprint,
   regimeStates,
   tickSize,
@@ -165,6 +201,7 @@ export function CandlestickChart({
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
+  const debugRef = useRef<HTMLDivElement>(null);
   // Ref, not an effect dep: a new callback identity must not rebuild the chart
   // (that would lose the user's zoom/scroll), same reason as applyRef above.
   const onTradeClickRef = useRef(onTradeClick);
@@ -276,6 +313,9 @@ export function CandlestickChart({
 
   useEffect(() => {
     if (!ref.current || bars.length === 0) return;
+    // Handle for the debug-readout animation loop (focusOnTrade + debugZoom only),
+    // cancelled on teardown.
+    let debugRaf = 0;
     const chart: IChartApi = createChart(ref.current, {
       width: ref.current.clientWidth,
       height,
@@ -519,6 +559,8 @@ export function CandlestickChart({
     const globex =
       vwapGlobex && vwapGlobex.length > 0 ? addVwap(vwapGlobex, vwapPalette.globex) : null;
     const ny = vwapNy && vwapNy.length > 0 ? addVwap(vwapNy, vwapPalette.ny) : null;
+    const weekly =
+      vwapWeekly && vwapWeekly.length > 0 ? addVwap(vwapWeekly, vwapPalette.weekly) : null;
 
     // Developing value areas, one per anchor: VAH and VAL solid (they are the
     // levels the rules actually test against), POC dashed between them, each in its
@@ -587,6 +629,48 @@ export function CandlestickChart({
         title: lv.title,
       }),
     );
+
+    // Initial Balance: high/low as flat segments spanning the bell → the close —
+    // line series rather than price lines, because an IB doesn't exist over the
+    // overnight candles and a full-pane line would draw it there. The extension
+    // guides (±1×/1.5×/2× of the IB range beyond each edge, the study's ext_x
+    // units) start where the IB completes, and are excluded from autoscale: on a
+    // narrow-IB day they sit far outside the traded range, and toggling them on
+    // must not crush the candles.
+    const ibSeries: ISeriesApi<"Line">[] = [];
+    const ibExtSeries: ISeriesApi<"Line">[] = [];
+    if (ib) {
+      const ibSeg = (
+        price: number,
+        from: number,
+        into: ISeriesApi<"Line">[],
+        opts: { color: string; style: 0 | 2; guide?: boolean },
+      ) => {
+        if (ib.end <= from) return; // degenerate session: nothing to span
+        const s_ = chart.addSeries(LineSeries, {
+          color: opts.color,
+          lineWidth: 1,
+          lineStyle: opts.style,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+          ...(opts.guide ? { autoscaleInfoProvider: () => null } : {}),
+        });
+        s_.setData([
+          { time: from as Time, value: price },
+          { time: ib.end as Time, value: price },
+        ]);
+        into.push(s_);
+      };
+      ibSeg(ib.high, ib.start, ibSeries, { color: ibPalette.line, style: 0 });
+      ibSeg(ib.low, ib.start, ibSeries, { color: ibPalette.line, style: 0 });
+      const ibRange = ib.high - ib.low;
+      for (const m of [1, 1.5, 2]) {
+        for (const p of [ib.high + m * ibRange, ib.low - m * ibRange]) {
+          ibSeg(p, ib.formed, ibExtSeries, { color: ibPalette.ext, style: 2, guide: true });
+        }
+      }
+    }
 
     // Every profile on this chart — the viewport-following one and each
     // fixed-range one — is a slice of bars, so they all resolve through here.
@@ -925,9 +1009,13 @@ export function CandlestickChart({
       globex?.band.setVisible(v.vwapGlobex);
       for (const s of ny?.series ?? []) s.applyOptions({ visible: v.vwapNy });
       ny?.band.setVisible(v.vwapNy);
+      for (const s of weekly?.series ?? []) s.applyOptions({ visible: v.vwapWeekly });
+      weekly?.band.setVisible(v.vwapWeekly);
       for (const s of profileGlobexSeries) s.applyOptions({ visible: v.developingProfileGlobex });
       for (const s of profileNySeries) s.applyOptions({ visible: v.developingProfileNy });
       for (const l of levelLines) l.applyOptions({ lineVisible: v.levels, axisLabelVisible: v.levels });
+      for (const s of ibSeries) s.applyOptions({ visible: v.initialBalance });
+      for (const s of ibExtSeries) s.applyOptions({ visible: v.ibExtensions });
       interactionPrim.setVisibility(v.touches, v.va_snaps);
       if (atrPoints && atrPoints.length > 0) {
         if (v.atr && !atrSeries) addAtr();
@@ -1031,7 +1119,72 @@ export function CandlestickChart({
       }
     }
 
-    chart.timeScale().fitContent();
+    // The by-trade view opens zoomed onto the trade: frame the entry→exit span
+    // with roughly its own width of context on each side (a floor so a scratch
+    // trade of a couple of bars still gets breathing room). Logical range takes
+    // fractional / past-the-end values, so the padding needs no clamping — it
+    // just shows empty gutter at the ends of the session. Everything else fits
+    // the whole loaded window as before.
+    if (focusOnTrade && tradeRects && tradeRects.length > 0) {
+      const r = tradeRects[0];
+      const i0 = nearestIdx(r.entry_time);
+      const i1 = nearestIdx(r.exit_time);
+      const lo = Math.min(i0, i1);
+      const hi = Math.max(i0, i1);
+      const tk = tickSize ?? 0.25;
+
+      // Horizontal (time): a FOCUS_BARS-wide window centred on the trade, widened
+      // to the trade + margin if the trade is wider than the window.
+      const cx = (lo + hi) / 2;
+      const halfB = Math.max(FOCUS_BARS / 2, (hi - lo) / 2 + FOCUS_MARGIN_BARS);
+      chart.timeScale().setVisibleLogicalRange({ from: cx - halfB, to: cx + halfB });
+
+      // Vertical (price): a FOCUS_TICKS-tall window centred on the trade's price
+      // action — the high/low of its own bars plus its entry / exit / stop levels,
+      // same expand-to-fit rule. Uses the price scale's own range setter (v5),
+      // which pins the vertical zoom; the user can still drag the price axis, and
+      // double-click resets it to autoscale.
+      let pMin = Infinity;
+      let pMax = -Infinity;
+      for (let i = lo; i <= hi; i++) {
+        if (bars[i].low < pMin) pMin = bars[i].low;
+        if (bars[i].high > pMax) pMax = bars[i].high;
+      }
+      for (const p of [r.entry_price, r.exit_price, r.stats?.stop_price]) {
+        if (p == null) continue;
+        if (p < pMin) pMin = p;
+        if (p > pMax) pMax = p;
+      }
+      if (pMin <= pMax) {
+        const cy = (pMin + pMax) / 2;
+        const halfP = Math.max((FOCUS_TICKS * tk) / 2, (pMax - pMin) / 2 + FOCUS_MARGIN_TICKS * tk);
+        chart.priceScale("right").setVisibleRange({ from: cy - halfP, to: cy + halfP });
+      }
+
+      // Zoom-tuning readout: the visible width (bars) and height (points/ticks) —
+      // the two numbers that map straight to FOCUS_BARS / FOCUS_TICKS. Driven by
+      // requestAnimationFrame so dragging the price axis updates it too (there's no
+      // price-scale change event). Only runs when `debugZoom` is on.
+      if (debugZoom) {
+        const priceScale = chart.priceScale("right");
+        const showDebug = () => {
+          const el = debugRef.current;
+          if (el) {
+            const vr = chart.timeScale().getVisibleLogicalRange();
+            const pr = priceScale.getVisibleRange();
+            const xPart = vr ? `x: ${Math.round(vr.to - vr.from)} bars` : "x: —";
+            const yPart = pr
+              ? `y: ${(pr.to - pr.from).toFixed(1)}pt / ${Math.round((pr.to - pr.from) / tk)}t`
+              : "y: —";
+            el.textContent = `${xPart}  |  ${yPart}`;
+          }
+          debugRaf = requestAnimationFrame(showDebug);
+        };
+        debugRaf = requestAnimationFrame(showDebug);
+      }
+    } else {
+      chart.timeScale().fitContent();
+    }
 
     const ro = new ResizeObserver(() => {
       if (ref.current) chart.applyOptions({ width: ref.current.clientWidth });
@@ -1039,6 +1192,7 @@ export function CandlestickChart({
     ro.observe(ref.current);
 
     return () => {
+      if (debugRaf) cancelAnimationFrame(debugRaf);
       applyRef.current = null;
       armApplyRef.current = null;
       rulerApplyRef.current = null;
@@ -1056,6 +1210,7 @@ export function CandlestickChart({
     bars,
     vwapGlobex,
     vwapNy,
+    vwapWeekly,
     profileGlobex,
     profileNy,
     atrPoints,
@@ -1065,7 +1220,10 @@ export function CandlestickChart({
     vaSnaps,
     priceLines,
     levels,
+    ib,
     tradeRects,
+    focusOnTrade,
+    debugZoom,
     footprint,
     regimeStates,
     tickSize,
@@ -1086,6 +1244,12 @@ export function CandlestickChart({
       label: "VWAP · NY ±1σ ±2σ",
       color: vwapPalette.ny.middle,
     });
+  if (vwapWeekly && vwapWeekly.length > 0)
+    legendItems.push({
+      key: "vwapWeekly",
+      label: "VWAP · Weekly ±1σ ±2σ",
+      color: vwapPalette.weekly.middle,
+    });
   if (profileGlobex && profileGlobex.length > 0)
     legendItems.push({
       key: "developingProfileGlobex",
@@ -1104,6 +1268,18 @@ export function CandlestickChart({
     legendItems.push({ key: "cvd", label: "CVD · cumulative delta", color: palette.blue });
   if (levels && levels.length > 0)
     legendItems.push({ key: "levels", label: "Session levels", color: palette.blue });
+  if (ib) {
+    legendItems.push({
+      key: "initialBalance",
+      label: "Initial Balance · first 60m H/L",
+      color: ibPalette.line,
+    });
+    legendItems.push({
+      key: "ibExtensions",
+      label: "IB extensions · 1×/1.5×/2×",
+      color: ibPalette.ext,
+    });
+  }
   if (touches && touches.length > 0)
     legendItems.push({ key: "touches", label: "Interactions · touches", color: palette.green });
   if (vaSnaps && vaSnaps.length > 0)
@@ -1155,6 +1331,25 @@ export function CandlestickChart({
         )}
       </div>
       <div ref={ref} style={{ width: "100%" }} />
+      {debugZoom && (
+        <div
+          ref={debugRef}
+          style={{
+            position: "absolute",
+            top: 8,
+            left: 8,
+            zIndex: 10,
+            pointerEvents: "none",
+            background: palette.card,
+            border: `1px solid ${palette.cardBorder}`,
+            borderRadius: 6,
+            padding: "4px 8px",
+            font: "11px/1.4 ui-monospace, monospace",
+            color: palette.text,
+            whiteSpace: "nowrap",
+          }}
+        />
+      )}
       <div
         ref={tipRef}
         style={{

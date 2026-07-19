@@ -12,6 +12,7 @@ A sim run is a disposable artifact — delete the folder and it is gone.
             meta.json                 # mutable: label + notes, editable after the fact
             trades.parquet            # written when the run completes
             vetoed.parquet            # entries confluence gates rejected (if any)
+            missed.parquet            # entries blocked only by an open position (if any)
             metrics.json
             regime_pnl.json           # derived: the regime-vs-P&L study (journal.sim.regime_pnl)
 
@@ -110,12 +111,15 @@ def update_progress(slug: str, rid: str, sessions_done: int) -> None:
 
 
 def finish_run(slug: str, rid: str, trades: pd.DataFrame,
-               vetoed: pd.DataFrame, metrics: dict) -> None:
+               vetoed: pd.DataFrame, metrics: dict,
+               missed: pd.DataFrame | None = None) -> None:
     d = _dir(slug, rid)
     _write(d / "metrics.json", metrics)
     trades.to_parquet(d / "trades.parquet", index=False)
     if vetoed is not None and not vetoed.empty:
         vetoed.to_parquet(d / "vetoed.parquet", index=False)
+    if missed is not None and not missed.empty:
+        missed.to_parquet(d / "missed.parquet", index=False)
     st = _read(d / "state.json") or {}
     st["status"] = "done"
     st["sessions_done"] = st.get("sessions_total", 0)
@@ -203,6 +207,14 @@ def read_vetoed(slug: str, rid: str) -> pd.DataFrame:
     return pd.read_parquet(vp) if vp.exists() else pd.DataFrame()
 
 
+def read_missed(slug: str, rid: str) -> pd.DataFrame:
+    """Entries the engine went blind to while a position was open ("in_trade"
+    ghosts). Empty for runs that predate the artifact — absence means "re-run
+    to populate", not "nothing was missed"."""
+    mp = _dir(slug, rid) / "missed.parquet"
+    return pd.read_parquet(mp) if mp.exists() else pd.DataFrame()
+
+
 def write_regime_pnl(slug: str, rid: str, study: dict) -> None:
     _write(_dir(slug, rid) / "regime_pnl.json", study)
 
@@ -226,6 +238,68 @@ def read_regime_pnl(slug: str, rid: str) -> dict | None:
 
 def read_meta(slug: str, rid: str) -> dict:
     return _read(_dir(slug, rid) / "meta.json") or {"label": "", "notes": ""}
+
+
+# --- per-trade tags ----------------------------------------------------------
+#
+# Free-text labels the user hangs on individual trades to skim and filter by
+# (e.g. "chased-entry", "news-spike"). Kept in a sidecar for the same reason
+# meta.json is: trades.parquet records what the engine did and participates in
+# nothing mutable, so an annotation must live beside it, never inside it. The key
+# is the trade_no as a string — unique only within this run, which is exactly the
+# scope of the sidecar; tags do not (and cannot) follow a trade across a re-run
+# that renumbers it under a new run_id.
+
+def _clean_tags(tags: list[str]) -> list[str]:
+    """Trim, drop empties, and de-dupe case-insensitively while keeping the first
+    casing seen and the input order — the same shape BadgeInput commits on the
+    client, enforced again here so a hand-rolled request cannot store junk."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in tags:
+        t = (t or "").strip()
+        low = t.lower()
+        if t and low not in seen:
+            seen.add(low)
+            out.append(t)
+    return out
+
+
+def read_trade_tags(slug: str, rid: str) -> dict[str, list[str]]:
+    """{trade_no (str) -> [tag, ...]} for a run; empty when nothing is tagged."""
+    return _read(_dir(slug, rid) / "trade_tags.json") or {}
+
+
+def write_trade_tags(slug: str, rid: str, trade_no: int,
+                     tags: list[str]) -> dict[str, list[str]]:
+    """Set one trade's tags. An empty list clears the entry entirely rather than
+    storing ``[]``, so the sidecar only ever holds trades that carry tags."""
+    m = read_trade_tags(slug, rid)
+    clean = _clean_tags(tags)
+    key = str(trade_no)
+    if clean:
+        m[key] = clean
+    else:
+        m.pop(key, None)
+    _write(_dir(slug, rid) / "trade_tags.json", m)
+    return m
+
+
+def strategy_tag_vocab(slug: str) -> list[str]:
+    """Every distinct tag used across all of a strategy's runs, for the tag
+    editor's autocomplete — so the same idea gets the same spelling run to run.
+    Case-folded to de-dupe, first casing wins, sorted for a stable dropdown."""
+    sd = SIMS_DIR / slug
+    if not sd.exists():
+        return []
+    seen: dict[str, str] = {}
+    for d in sd.iterdir():
+        if not d.is_dir():
+            continue
+        for tags in (_read(d / "trade_tags.json") or {}).values():
+            for t in tags:
+                seen.setdefault(t.lower(), t)
+    return sorted(seen.values(), key=str.lower)
 
 
 def read_state(slug: str, rid: str) -> dict | None:

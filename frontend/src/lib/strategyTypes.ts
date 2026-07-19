@@ -67,6 +67,10 @@ export interface SimConfig {
   rearm_after_exit: boolean;
   /** Stand down for the session once realized net P&L is this far in the red. 0 = off. */
   daily_loss_stop?: number;
+  /** Extend the daily loss stop to the open trade: flatten it at market once
+   * realized net plus the open position marked to price reaches the stop. Needs
+   * daily_loss_stop set. */
+  daily_loss_exit_open?: boolean;
   contracts: number;
   commission_per_side: number;
   confluences: Confluences;
@@ -147,6 +151,21 @@ export interface SimMetrics {
   band_width_min_ticks?: number;
   exit_reasons?: Record<string, number>;
   vetoed?: { count: number; net_pnl: number; by_gate: Record<string, number> };
+  /** Entries the engine went blind to because a position was already open —
+   * the capacity cost of the one-trade-at-a-time state machine. Absent on runs
+   * that predate the missed artifact (re-run to populate). ``net_pnl`` is the
+   * standalone sum of every ghost and overstates the cost: the ghosts overlap
+   * real positions (up to ``max_concurrent`` deep), so you could never have held
+   * them all. ``realizable_net``/``realizable_count`` keep the real book fixed and
+   * count only the ghosts that fit its gaps — the money actually left on the
+   * table. The realizable fields are absent on runs made before this split. */
+  missed?: {
+    count: number;
+    net_pnl: number;
+    realizable_net?: number;
+    realizable_count?: number;
+    max_concurrent?: number;
+  };
 }
 
 export interface SimTrade {
@@ -167,8 +186,22 @@ export interface SimTrade {
    * "dev1" = the fade's mirror: re-accepted back beyond dev1 (invalidate_beyond_dev1_bars).
    * "trail" = stopped out on a ratcheted stop (breakeven or better), not the initial one.
    * "panic" = the flow-shock market exit: the tape ran panic_exit_delta contracts
-   * against the trade inside the panic window. */
-  exit_reason: "target" | "stop" | "time" | "vah" | "dev1" | "trail" | "panic";
+   * against the trade inside the panic window.
+   * "uw_stop" = the underwater tighten: still red at underwater_stop_after_s, so the
+   * stop was pulled in to underwater_stop_ticks behind the entry and then hit.
+   * "daily_loss" = the daily-loss flatten: realized net plus the open trade marked
+   * to price reached the daily loss stop, so the position left at market
+   * (daily_loss_exit_open). */
+  exit_reason:
+    | "target"
+    | "stop"
+    | "time"
+    | "vah"
+    | "dev1"
+    | "trail"
+    | "panic"
+    | "uw_stop"
+    | "daily_loss";
   points: number;
   r_multiple: number;
   band_width_ticks: number;
@@ -236,6 +269,10 @@ export interface RunDetail {
   session_days: string[];
   meta: RunMeta;
   state: RunState;
+  /** Per-trade tags, keyed by trade_no as a string. Only tagged trades appear. */
+  trade_tags: Record<string, string[]>;
+  /** Every distinct tag used across this strategy's runs — autocomplete source. */
+  tag_vocab: string[];
 }
 
 export interface Preflight {
@@ -261,3 +298,87 @@ export function comparableToBaseline(run: StrategyRun, base: StrategyRun): boole
 
 /** Below this many trades a run's stats are noise; the UI badges it. */
 export const THIN_SAMPLE = 30;
+
+// ---- gate-robustness audit (GET .../runs/{id}/gate-audit) -------------------
+// The scorecard from docs/research/gate-robustness.md computed for one run's
+// confluence stack. Variant runs are resolved by config hash server-side; a
+// variant that was never run arrives as state "missing" with its ready-to-POST
+// config so the panel can launch it through the normal create-run endpoint.
+
+export interface GateAuditVariant {
+  run_id: string;
+  state: "done" | "running" | "error" | "missing";
+  config: SimConfig;
+  label?: string;
+  net?: number;
+  pf?: number;
+  maxdd?: number;
+  trades?: number;
+  net_ex_top20?: number;
+}
+
+export type GateVerdict = "real" | "partial" | "weak" | "fail" | "unscored";
+
+export interface GateAuditGate {
+  gate: string;
+  params: Record<string, unknown>;
+  verdict: GateVerdict;
+  /** null = the test's inputs (variant runs / ghost ledger) don't exist yet. */
+  checks: {
+    tail: boolean | null;
+    halves: boolean | null;
+    plateau: boolean | null;
+    selection: boolean | null;
+  };
+  marginal: {
+    off_trades: number;
+    off_net: number;
+    off_pf: number;
+    off_maxdd: number;
+    off_sharpe: number;
+    d_net: number;
+    d_pf: number;
+    d_maxdd: number;
+    d_sharpe: number;
+  } | null;
+  months: { months: number; better: number; p: number } | null;
+  bootstrap: { delta: number; ci_lo: number; ci_hi: number; blocks: number } | null;
+  tail: { d_net_ex_top20: number; d_net_winsor_p95: number; off_ex_top20: number } | null;
+  halves: { h1_label: string; h2_label: string; d_h1: number; d_h2: number } | null;
+  selection: {
+    n_universe: number;
+    n_kept: number;
+    win_pctile: number;
+    mean_r_pctile: number;
+  } | null;
+  cohort: {
+    n_ghost: number;
+    ghost_net: number;
+    auc: number;
+    p: number;
+    kept_stop: number;
+    ghost_stop: number;
+  } | null;
+  /** Ghost dollars positive while the in-stack marginal is positive too — the
+   * composition-gate mirage (gx_overhang, twice): never read ghost net as the
+   * gate's value. */
+  mirage: boolean;
+  off: GateAuditVariant;
+  neighbors: GateAuditVariant[];
+}
+
+export interface GateAudit {
+  run_id: string;
+  baseline: {
+    trades: number;
+    net: number;
+    pf: number;
+    maxdd: number;
+    sharpe: number;
+    net_ex_top20: number;
+  };
+  /** False when this run predates the per-veto `gates` column — the ghost-frame
+   * tests (selection/cohort) are unavailable and render as em-dashes. */
+  has_ghost_frame: boolean;
+  gates: GateAuditGate[];
+}

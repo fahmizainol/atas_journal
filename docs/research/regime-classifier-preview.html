@@ -1,0 +1,386 @@
+<title>Regime classifier preview — current vs proposed</title>
+<style>
+  :root {
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
+    --muted: #898781; --grid: #e1e0d9; --border: rgba(11,11,11,0.10);
+    --up: #008300; --down: #d03b3b; --bal: #2a78d6; --mix: #c98500;
+    --park: #4a3aa7; --unk: #898781;
+    --tooltip-bg: #1a1a19; --tooltip-ink: #ffffff; --tooltip-ink2: #c3c2b7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
+      --muted: #898781; --grid: #2c2c2a; --border: rgba(255,255,255,0.10);
+      --up: #1baf7a; --down: #f5455f; --bal: #3b82f6; --mix: #c98500;
+      --park: #9085e9; --unk: #898781;
+      --tooltip-bg: #fcfcfb; --tooltip-ink: #0b0b0b; --tooltip-ink2: #52514e;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
+    --muted: #898781; --grid: #2c2c2a; --border: rgba(255,255,255,0.10);
+    --up: #1baf7a; --down: #f5455f; --bal: #3b82f6; --mix: #c98500;
+    --park: #9085e9; --unk: #898781;
+    --tooltip-bg: #fcfcfb; --tooltip-ink: #0b0b0b; --tooltip-ink2: #52514e;
+  }
+  :root[data-theme="light"] {
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
+    --muted: #898781; --grid: #e1e0d9; --border: rgba(11,11,11,0.10);
+    --up: #008300; --down: #d03b3b; --bal: #2a78d6; --mix: #c98500;
+    --park: #4a3aa7; --unk: #898781;
+    --tooltip-bg: #1a1a19; --tooltip-ink: #ffffff; --tooltip-ink2: #c3c2b7;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 40px 24px 72px; }
+
+  header h1 { font-size: 26px; font-weight: 650; margin: 0 0 6px; text-wrap: balance; }
+  header .sub { color: var(--ink-2); max-width: 68ch; margin: 0; }
+  header .meta { color: var(--muted); font-size: 13px; margin-top: 10px;
+    text-transform: uppercase; letter-spacing: 0.06em; }
+
+  section { margin-top: 44px; }
+  h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
+  .lede { color: var(--ink-2); font-size: 14px; margin: 0 0 18px; max-width: 74ch; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; }
+  .tile .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .tile .v { font-size: 28px; font-weight: 650; margin-top: 4px; }
+  .tile .v .dim { color: var(--muted); font-weight: 400; font-size: 20px; }
+  .tile .n { font-size: 13px; color: var(--ink-2); margin-top: 2px; }
+
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+
+  /* composition bars */
+  .comp-row { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 14px; margin: 10px 0; }
+  .comp-row .lbl { font-size: 13px; color: var(--ink-2); text-align: right; }
+  .comp-bar { display: flex; height: 30px; gap: 2px; }
+  .comp-seg { border-radius: 4px; position: relative; min-width: 2px; cursor: default; }
+  .comp-seg span {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden;
+    font-variant-numeric: tabular-nums;
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px 20px; margin-top: 16px; font-size: 13px; color: var(--ink-2); }
+  .legend .it { display: flex; align-items: center; gap: 7px; }
+  .sw { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .gl { font-size: 11px; color: var(--muted); }
+
+  /* rule cards */
+  .rules { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 760px) { .rules { grid-template-columns: 1fr; } }
+  .rule { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; }
+  .rule h3 { margin: 0 0 10px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+  .rule ol { margin: 0; padding-left: 20px; font-size: 14px; color: var(--ink-2); }
+  .rule li { margin: 7px 0; }
+  .rule .cls { font-weight: 650; color: var(--ink); }
+  .rule code { font: 13px/1.4 ui-monospace, "Cascadia Mono", Menlo, monospace;
+    background: var(--page); border: 1px solid var(--grid); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+  .why { font-size: 13px; color: var(--ink-2); border-top: 1px solid var(--grid); margin-top: 12px; padding-top: 10px; }
+
+  /* calendar */
+  .cal-note { font-size: 13px; color: var(--ink-2); margin: 0 0 14px; }
+  .months { display: grid; grid-template-columns: repeat(auto-fill, minmax(218px, 1fr)); gap: 18px; }
+  .month h4 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+  .mgrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+  .dow { font-size: 10px; color: var(--muted); text-align: center; text-transform: uppercase; letter-spacing: 0.05em; }
+  .day { height: 34px; border-radius: 5px; overflow: hidden; display: flex; flex-direction: column; gap: 2px;
+    background: transparent; cursor: default; }
+  .day .half { flex: 1; border-radius: 3px; position: relative; }
+  .day .half .g { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 8px; color: rgba(255,255,255,0.9); }
+  .day.blank { visibility: hidden; }
+  .day:hover { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+  /* matrix + tables */
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: right; padding: 7px 12px; border-bottom: 1px solid var(--grid);
+    font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  th:first-child, td:first-child { text-align: left; }
+  td.zero { color: var(--muted); }
+  td.hot { font-weight: 650; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .reason { text-align: left; color: var(--ink-2); font-size: 13px; max-width: 46ch; }
+  .scroll { overflow-x: auto; }
+
+  /* tooltip */
+  #tip { position: fixed; z-index: 10; pointer-events: none; display: none;
+    background: var(--tooltip-bg); color: var(--tooltip-ink); border-radius: 7px;
+    padding: 10px 13px; font-size: 12.5px; line-height: 1.5; max-width: 280px;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.35); }
+  #tip .t { font-weight: 650; margin-bottom: 3px; }
+  #tip .r { display: flex; justify-content: space-between; gap: 18px; color: var(--tooltip-ink2); }
+  #tip .r b { color: var(--tooltip-ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  footer { margin-top: 48px; border-top: 1px solid var(--grid); padding-top: 18px;
+    font-size: 13px; color: var(--ink-2); max-width: 76ch; }
+  footer p { margin: 8px 0; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Regime classifier preview: current vs proposed</h1>
+    <p class="sub">Every cached session re-classified under the proposed rule — net conviction
+      instead of two separate occupancy thresholds, side-changes instead of raw quadrant flips,
+      and a net-travel gate that splits real trends from gap-and-park days. Nothing here is
+      written back; this is a dry run over the existing v5 artifacts.</p>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <section>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section>
+    <h2>Where the days land</h2>
+    <p class="lede">The current rule files over half of all days as <b>mixed</b>. The proposed rule
+      re-reads most of them: strongly one-sided days blocked only by shallow churn become trends,
+      and one-sided days that never travelled become <b>parked</b> — a class the current rule can't see.</p>
+    <div class="panel">
+      <div id="comp"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The two rules</h2>
+    <div class="rules">
+      <div class="rule">
+        <h3>Current — classify()</h3>
+        <ol>
+          <li><span class="cls">trend_up</span> if <code>abr ≥ 0.7</code> and <code>transitions ≤ 2/hr</code></li>
+          <li><span class="cls">trend_down</span> if <code>bbr ≥ 0.7</code> and <code>transitions ≤ 2/hr</code></li>
+          <li><span class="cls">balance</span> if <code>abr &lt; 0.6</code> and <code>bbr &lt; 0.6</code> and <code>ny vwap crosses ≥ 2/hr</code></li>
+          <li><span class="cls">mixed</span> otherwise</li>
+        </ol>
+        <div class="why">The transitions gate counts <i>every</i> quadrant flip — including shallow
+          dips through one anchor that never change sides. 63 of the 97 mixed days were one-sided
+          days blocked by that gate; 43 of them changed sides at most once an hour.</div>
+      </div>
+      <div class="rule">
+        <h3>Proposed</h3>
+        <ol>
+          <li>net conviction <code>nc = abr − bbr</code>; deep flips = side changes only (above-both ↔ below-both); net travel <code>ntr = (close − open) ÷ range</code></li>
+          <li><span class="cls">trend_up / trend_down</span> if <code>|nc| ≥ 0.5</code> and <code>deep flips ≤ 1.5/hr</code> and <code>|ntr| ≥ 0.3</code></li>
+          <li><span class="cls">parked</span> if one-sided as above but <code>|ntr| &lt; 0.3</code> — held one side of both anchors yet went nowhere</li>
+          <li><span class="cls">balance</span> if <code>|nc| &lt; 0.3</code> and (<code>vwap crosses ≥ 2/hr</code> or <code>deep flips ≥ 2/hr</code>)</li>
+          <li><span class="cls">mixed</span> otherwise</li>
+        </ol>
+        <div class="why">One conviction number removes the [0.6, 0.7) dead zone. Deep flips come
+          from the ribbon the artifact already stores; net travel needs one new KPI, calibrated on
+          this data (trend days sit at 0.65+, parked days at 0.21 median).</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Every session, side by side</h2>
+    <p class="cal-note">Top strip = current class, bottom strip = proposed. Hover a day for its numbers.
+      Glyphs mark the class so the split reads without color: ▲ trend up · ▼ trend down · ● balance · ◆ mixed · ■ parked.</p>
+    <div class="months" id="cal"></div>
+  </section>
+
+  <section>
+    <h2>How the days moved</h2>
+    <p class="lede">Rows are the current class, columns the proposed one. The diagonal is agreement;
+      the big off-diagonal cells are the story — mixed days re-read as trends or parked.</p>
+    <div class="panel scroll"><table id="matrix"></table></div>
+  </section>
+
+  <section>
+    <h2>Days worth eyeballing</h2>
+    <p class="lede">The clearest reclassifications — check these against their charts before trusting
+      the rule. Transitions/hr is the gate that blocked them; deep flips and net travel are what the
+      proposed rule reads instead.</p>
+    <div class="panel scroll">
+      <table id="examples">
+        <thead><tr>
+          <th>Session</th><th>Current</th><th>Proposed</th><th>abr</th><th>bbr</th>
+          <th>Trans/hr</th><th>Deep/hr</th><th>Net travel</th><th class="reason">Read</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <p><b>Caveats.</b> Thresholds (0.5 conviction, 1.5 deep flips, 0.3 travel) were calibrated on
+      these same 173 sessions — treat them as a starting point, not a fit. The real acceptance test
+      is whether the classes separate per-regime P&amp;L better than the current ones; that join is
+      the next step, not part of this preview.</p>
+    <p>Intraday stability is roughly unchanged (51% of days show their eod class by 12:00, vs 53%
+      under the current rule) — a hard label is simply not knowable at noon, which is the argument
+      for storing the class per checkpoint and the conviction score alongside it.</p>
+  </footer>
+</div>
+
+<div id="tip"></div>
+
+<script>
+const DATA = [{"d":"2025-12-17","sym":"NQH6","o":"trend_down","n":"trend_down","nc":-0.974,"deep":0.15,"sh":0.46,"ntr":-0.995,"abr":0.0026,"bbr":0.9769,"tr":1.2308,"vx":1.0769},{"d":"2025-12-18","sym":"NQH6","o":"mixed","n":"parked","nc":0.523,"deep":0.77,"sh":1.54,"ntr":-0.247,"abr":0.6359,"bbr":0.1128,"tr":4.6154,"vx":2.3077},{"d":"2025-12-19","sym":"NQH6","o":"trend_up","n":"trend_up","nc":0.931,"deep":0.0,"sh":0.92,"ntr":0.926,"abr":0.9308,"bbr":0.0,"tr":1.8462,"vx":1.8462},{"d":"2025-12-22","sym":"NQH6","o":"mixed","n":"mixed","nc":-0.567,"deep":2.62,"sh":0.62,"ntr":-0.498,"abr":0.2051,"bbr":0.7718,"tr":4.3077,"vx":3.6923},{"d":"2025-12-23","sym":"NQH6","o":"trend_up","n":"trend_up","nc":0.808,"deep":0.31,"sh":0.46,"ntr":0.505,"abr":0.8949,"bbr":0.0872,"tr":1.5385,"vx":0.6154},{"d":"2025-12-24","sym":"NQH6","o":"mixed","n":"mixed","nc":0.813,"deep":2.4,"sh":0.53,"ntr":0.617,"abr":0.8978,"bbr":0.0844,"tr":3.7333,"vx":3.4667},{"d":"2025-12-26","sym":"NQH6","o":"mixed","n":"mixed","nc":-0.351,"deep":2.46,"sh":0.92,"ntr":-0.099,"abr":0.3077,"bbr":0.659,"tr":5.0769,"vx":3.0769},{"d":"2025-12-29","sym":"NQH6","o":"mixed","n":"mixed","nc":-0.408,"deep":0.92,"sh":0.46,"ntr":0.328,"abr":0.2462,"bbr":0.6538,"tr":2.6154,"vx":1.2308},{"d":"2025-12-30","sym":"NQH6","o":"balance","n":"balance","nc":-0.01,"deep":3.08,"sh":0.31,"ntr":-0.346,"abr":0.4795,"bbr":0.4897,"tr":4.9231,"vx":3.2308},{"d":"2025-12-31","sym":"NQH6","o":"mixed","n":"trend_down","nc":-0.723,"deep":0.46,"sh":0.92,"ntr":-1.0,"abr":0.1026,"bbr":0.8256,"tr":2.7692,"vx":2.0},{"d":"2026-01-02","sym":"NQH6","o":"trend_down","n":"trend_down","nc":-0.836,"deep":0.77,"sh":0.0,"ntr":-0.641,"abr":0.0667,"bbr":0.9026,"tr":1.3846,"vx":0.7692},{"d":"2026-01-05","sym":"NQH6","o":"mixed","n":"mixed","nc":0.064,"deep":0.15,"sh":1.54,"ntr":-0.471,"abr":0.3821,"bbr":0.3179,"tr":3.3846,"vx":1.0769},{"d":"2026-01-06","sym":"NQH6","o":"mixed","n":"trend_up","nc":0.723,"deep":0.62,"sh":1.23,"ntr":0.665,"abr":0.7897,"bbr":0.0667,"tr":3.6923,"vx":0.9231},{"d":"2026-01-07","sym":"NQH6","o":"mixed","n":"parked","nc":0.71,"deep":0.31,"sh":1.23,"ntr":0.265,"abr":0.8308,"bbr":0.1205,"tr":2.9231,"vx":2.4615},{"d":"2026-01-08","sym":"NQH6","o":"mixed","n":"trend_down","nc":-0.569,"deep":0.46,"sh":3.08,"ntr":-0.433,"abr":0.0872,"bbr":0.6564,"tr":7.0769,"vx":5.3846},{"d":"2026-01-09","sym":"NQH6","o":"mixed","n":"mixed","nc":0.892,"deep":1.69,"sh":0.15,"ntr":0.73,"abr":0.9436,"bbr":0.0513,"tr":2.1538,"vx":2.0},{"d":"2026-01-12","sym":"NQH6","o":"trend_up","n":"trend_up","nc":0.997,"deep":0.0,"sh":0.15,"ntr":0.709,"abr":0.9974,"bbr":0.0,"tr":0.3077,"vx":0.3077},{"d":"2026-01-13","sym":"NQH6","o":"mixed","n":"mixed","nc":-0.482,"deep":1.08,"sh":0.77,"ntr":-0.296,"abr":0.2385,"bbr":0.7205,"tr":3.0769,"vx":2.3077},{"d":"2026-01-14","sym":"NQH6","o":"mixed","n":"parked","nc":-0.808,"deep":0.15,"sh":0.92,"ntr":-0.271,"abr":0.0462,"bbr":0.8538,"tr":2.1538,"vx":1.6923},{"d":"2026-01-15","sym":"NQH6","o":"balance","n":"balance","nc":0.079,"deep":0.46,"sh":1.85,"ntr":-0.847,"abr":0.3923,"bbr":0.3128,"tr":4.7692,"vx":3.6923},{"d":"2026-01-16","sym":"NQH6","o":"mixed","n":"trend_down","nc":-0.813,"deep":0.46,"sh":2.92,"ntr":-0.685,"abr":0.0205,"bbr":0.8333,"tr":6.7692,"vx":6.0},{"d":"2026-01-19","sym":"NQH6","o":"mixed","n":"mixed","nc":0.409,"deep":0.29,"sh":0.57,"ntr":0.683,"abr":0.5,"bbr":0.0905,"tr":1.7143,"vx":0.2857},{"d":"2026-01-20","sym":"NQH6","o":"balance","n":"balance","nc":-0.159,"deep":1.08,"sh":1.54,"ntr":-0.473,"abr":0.3821,"bbr":0.541,"tr":4.6154,"vx":2.9231},{"d":"2026-01-21","sym":"NQH6","o":"mixed","n":"mixed","nc":0.195,"deep":1.23,"sh":0.31,"ntr":0.51,"abr":0.5487,"bbr":0.3538,"tr":2.7692,"vx":1.2308},{"d":"2026-01-22","sym":"NQH6","o":"mixed","n":"mixed","nc":0.49,"deep":1.85,"sh":0.46,"ntr":-0.112,"abr":0.7256,"bbr":0.2359,"tr":3.5385,"vx":2.6154},{"d":"2026-01-23","sym":"NQH6","o":"mixed","n":"mixed","nc":0.672,"deep":1.69,"sh":2.46,"ntr":0.425,"abr":0.759,"bbr":0.0872,"tr":7.6923,"vx":5.3846},{"d":"2026-01-26","sym":"NQH6","o":"trend_up","n":"trend_up","nc":0.977,"deep":0.0,"sh":0.15,"ntr":0.609,"abr":0.9769,"bbr":0.0,"tr":0.6154,"vx":0.6154},{"d":"2026-01-27","sym":"NQH6","o":"trend_up","n":"trend_up","nc":0.936,"deep":0.31,"sh":0.31,"ntr":0.488,"abr":0.9641,"bbr":0.0282,"tr":1.0769,"vx":0.6154},{"d":"2026-01-28","sym":"NQH6","o":"mixed","n":"trend_down","nc":-0.849,"deep":0.77,"sh":0.62,"ntr":-0.559,"abr":0.0462,"bbr":0.8949,"tr":2.1538,"vx":2.0},{"d":"2026-01-29","sym":"NQH6","o":"mixed","n":"mixed","nc":-0.256,"deep":0.15,"sh":1.54,"ntr":-0.247,"abr":0.1897,"bbr":0.4462,"tr":3.3846,"vx":0.4615},{"d":"2026-01-30","sym":"NQH6","o":"mixed","n":"trend_down","nc":-0.682,"deep":1.08,"sh":1.08,"ntr":-0.627,"abr":0.1308,"bbr":0.8128,"tr":4.0,"vx":2.3077},{"d":"2025-06-02","sym":"NQM5","o":"trend_up","n":"trend_up","nc":0.882,"deep":0.31,"sh":0.46,"ntr":0.699,"abr":0.9026,"bbr":0.0205,"tr":1.5385,"vx":0.6154},{"d":"2025-06-03","sym":"NQM5","o":"trend_up","n":"trend_up","nc":0.959,"deep":0.0,"sh":0.77,"ntr":0.502,"abr":0.959,"bbr":0.0,"tr":1.5385,"vx":1.5385},{"d":"2025-06-04","sym":"NQM5","o":"mixed","n":"mixed","nc":0.644,"deep":1.54,"sh":1.54,"ntr":0.122,"abr":0.7692,"bbr":0.1256,"tr":6.0,"vx":2.4615},{"d":"2025-06-05","sym":"NQM5","o":"mixed","n":"mixed","nc":-0.274,"deep":1.08,"sh":0.31,"ntr":-0.611,"abr":0.3462,"bbr":0.6205,"tr":2.3077,"vx":1.6923},{"d":"2025-06-06","sym":"NQM5","o":"balance","n":"mixed","nc":0.451,"deep":0.31,"sh":2.77,"ntr":-0.009,"abr":0.5077,"bbr":0.0564,"tr":6.4615,"vx":4.9231},{"d":"2025-06-09","sym":"NQM5","o":"mixed","n":"parked","nc":0.874,"deep":0.46,"sh":2.0,"ntr":0.082,"abr":0.8923,"bbr":0.0179,"tr":4.9231,"vx":3.8462},{"d":"2025-06-10","sym":"NQM5","o":"mixed","n":"mixed","nc":0.731,"deep":1.85,"sh":1.23,"ntr":0.512,"abr":0.841,"bbr":0.1103,"tr":4.6154,"vx":4.0},{"d":"2025-06-11","sym":"NQM5","o":"balance","n":"balance","nc":-0.128,"deep":1.69,"sh":0.77,"ntr":-0.496,"abr":0.3872,"bbr":0.5154,"tr":4.3077,"vx":2.6154},{"d":"2025-06-12","sym":"NQM5","o":"mixed","n":"trend_up","nc":0.89,"deep":0.0,"sh":2.0,"ntr":0.569,"abr":0.8897,"bbr":0.0,"tr":4.0,"vx":4.0},{"d":"2025-06-13","sym":"NQM5","o":"mixed","n":"mixed","nc":0.292,"deep":0.46,"sh":0.92,"ntr":-0.288,"abr":0.559,"bbr":0.2667,"tr":2.7692,"vx":1.3846},{"d":"2025-06-16","sym":"NQM5","o":"mixed","n":"trend_up","nc":0.828,"deep":0.0,"sh":2.92,"ntr":0.702,"abr":0.8282,"bbr":0.0,"tr":5.8462,"vx":5.8462},{"d":"2025-06-17","sym":"NQM5","o":"balance","n":"balance","nc":-0.092,"deep":0.77,"sh":0.92,"ntr":-0.697,"abr":0.4231,"bbr":0.5154,"tr":2.9231,"vx":2.6154},{"d":"2025-06-18","sym":"NQU5","o":"balance","n":"balance","nc":0.162,"deep":1.54,"sh":2.15,"ntr":-0.172,"abr":0.5103,"bbr":0.3487,"tr":7.0769,"vx":4.4615},{"d":"2025-06-19","sym":"NQU5","o":"balance","n":"mixed","nc":-0.429,"deep":0.0,"sh":2.86,"ntr":-0.598,"abr":0.0,"bbr":0.4286,"tr":5.7143,"vx":5.7143},{"d":"2025-06-20","sym":"NQU5","o":"trend_down","n":"trend_down","nc":-0.844,"deep":0.15,"sh":0.77,"ntr":-0.699,"abr":0.0333,"bbr":0.8769,"tr":1.8462,"vx":0.7692},{"d":"2025-06-23","sym":"NQU5","o":"mixed","n":"trend_up","nc":0.723,"deep":0.46,"sh":1.08,"ntr":0.692,"abr":0.8179,"bbr":0.0949,"tr":3.0769,"vx":1.3846},{"d":"2025-06-24","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.944,"deep":0.31,"sh":0.46,"ntr":0.737,"abr":0.9462,"bbr":0.0026,"tr":1.5385,"vx":1.3846},{"d":"2025-06-25","sym":"NQU5","o":"mixed","n":"parked","nc":-0.726,"deep":0.46,"sh":0.77,"ntr":-0.258,"abr":0.0615,"bbr":0.7872,"tr":2.6154,"vx":1.0769},{"d":"2025-06-26","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.885,"deep":0.31,"sh":0.0,"ntr":0.554,"abr":0.9359,"bbr":0.0513,"tr":0.6154,"vx":0.3077},{"d":"2025-06-27","sym":"NQU5","o":"balance","n":"balance","nc":0.22,"deep":0.77,"sh":1.08,"ntr":0.173,"abr":0.5615,"bbr":0.341,"tr":3.5385,"vx":3.0769},{"d":"2025-06-30","sym":"NQU5","o":"balance","n":"balance","nc":-0.118,"deep":1.23,"sh":2.77,"ntr":0.109,"abr":0.3436,"bbr":0.4615,"tr":7.8462,"vx":5.2308},{"d":"2025-07-01","sym":"NQU5","o":"mixed","n":"trend_down","nc":-0.574,"deep":0.92,"sh":2.62,"ntr":-0.467,"abr":0.0487,"bbr":0.6231,"tr":7.0769,"vx":4.6154},{"d":"2025-07-02","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.98,"deep":0.15,"sh":0.15,"ntr":0.926,"abr":0.9846,"bbr":0.0051,"tr":0.7692,"vx":0.6154},{"d":"2025-07-03","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.951,"deep":0.0,"sh":0.8,"ntr":0.571,"abr":0.9511,"bbr":0.0,"tr":1.6,"vx":1.6},{"d":"2025-07-04","sym":"NQU5","o":"balance","n":"balance","nc":-0.229,"deep":0.0,"sh":1.43,"ntr":-0.237,"abr":0.0,"bbr":0.2286,"tr":3.1429,"vx":3.1429},{"d":"2025-07-07","sym":"NQU5","o":"mixed","n":"trend_down","nc":-0.795,"deep":1.08,"sh":0.62,"ntr":-0.474,"abr":0.0795,"bbr":0.8744,"tr":3.0769,"vx":2.0},{"d":"2025-07-08","sym":"NQU5","o":"balance","n":"balance","nc":-0.095,"deep":3.54,"sh":2.15,"ntr":-0.364,"abr":0.4077,"bbr":0.5026,"tr":9.2308,"vx":6.6154},{"d":"2025-07-09","sym":"NQU5","o":"mixed","n":"mixed","nc":-0.033,"deep":0.31,"sh":1.23,"ntr":0.263,"abr":0.4308,"bbr":0.4641,"tr":3.0769,"vx":0.6154},{"d":"2025-07-10","sym":"NQU5","o":"mixed","n":"mixed","nc":0.38,"deep":0.62,"sh":1.85,"ntr":-0.344,"abr":0.6462,"bbr":0.2667,"tr":4.9231,"vx":1.5385},{"d":"2025-07-11","sym":"NQU5","o":"mixed","n":"parked","nc":0.826,"deep":1.08,"sh":0.92,"ntr":0.098,"abr":0.8821,"bbr":0.0564,"tr":3.6923,"vx":2.6154},{"d":"2025-07-14","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.926,"deep":0.31,"sh":0.46,"ntr":0.397,"abr":0.941,"bbr":0.0154,"tr":1.5385,"vx":1.2308},{"d":"2025-07-15","sym":"NQU5","o":"balance","n":"balance","nc":-0.233,"deep":2.15,"sh":1.85,"ntr":-1.0,"abr":0.2923,"bbr":0.5256,"tr":7.8462,"vx":4.0},{"d":"2025-07-16","sym":"NQU5","o":"mixed","n":"mixed","nc":0.364,"deep":2.92,"sh":0.92,"ntr":0.032,"abr":0.6385,"bbr":0.2744,"tr":6.0,"vx":3.5385},{"d":"2025-07-17","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.954,"deep":0.31,"sh":0.15,"ntr":0.754,"abr":0.9744,"bbr":0.0205,"tr":0.7692,"vx":0.6154},{"d":"2025-07-18","sym":"NQU5","o":"mixed","n":"trend_down","nc":-0.882,"deep":0.92,"sh":0.46,"ntr":-0.393,"abr":0.0256,"bbr":0.9077,"tr":2.6154,"vx":2.0},{"d":"2025-07-21","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.777,"deep":0.15,"sh":0.62,"ntr":0.451,"abr":0.8205,"bbr":0.0436,"tr":1.5385,"vx":1.3846},{"d":"2025-07-22","sym":"NQU5","o":"balance","n":"balance","nc":-0.064,"deep":0.77,"sh":1.54,"ntr":-0.49,"abr":0.2641,"bbr":0.3282,"tr":4.7692,"vx":3.5385},{"d":"2025-07-23","sym":"NQU5","o":"mixed","n":"mixed","nc":0.403,"deep":0.77,"sh":1.38,"ntr":0.576,"abr":0.6077,"bbr":0.2051,"tr":4.3077,"vx":2.3077},{"d":"2025-07-24","sym":"NQU5","o":"mixed","n":"mixed","nc":0.508,"deep":1.85,"sh":1.08,"ntr":-0.118,"abr":0.7077,"bbr":0.2,"tr":5.2308,"vx":3.3846},{"d":"2025-07-25","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.931,"deep":0.15,"sh":0.31,"ntr":0.471,"abr":0.9487,"bbr":0.0179,"tr":1.0769,"vx":0.9231},{"d":"2025-07-28","sym":"NQU5","o":"mixed","n":"parked","nc":-0.697,"deep":1.38,"sh":1.54,"ntr":0.047,"abr":0.0667,"bbr":0.7641,"tr":6.1538,"vx":3.3846},{"d":"2025-07-29","sym":"NQU5","o":"trend_down","n":"trend_down","nc":-0.918,"deep":0.15,"sh":0.0,"ntr":-0.736,"abr":0.0333,"bbr":0.9513,"tr":0.3077,"vx":0.1538},{"d":"2025-07-30","sym":"NQU5","o":"mixed","n":"mixed","nc":0.346,"deep":1.54,"sh":0.62,"ntr":0.071,"abr":0.6641,"bbr":0.3179,"tr":3.0769,"vx":1.8462},{"d":"2025-07-31","sym":"NQU5","o":"trend_down","n":"trend_down","nc":-0.939,"deep":0.0,"sh":0.77,"ntr":-0.895,"abr":0.0,"bbr":0.9385,"tr":1.5385,"vx":1.5385},{"d":"2025-08-01","sym":"NQU5","o":"mixed","n":"trend_down","nc":-0.713,"deep":0.31,"sh":1.54,"ntr":-0.559,"abr":0.0077,"bbr":0.7205,"tr":3.6923,"vx":3.0769},{"d":"2025-08-04","sym":"NQU5","o":"mixed","n":"trend_up","nc":0.956,"deep":0.0,"sh":1.08,"ntr":0.955,"abr":0.9564,"bbr":0.0,"tr":2.3077,"vx":2.3077},{"d":"2025-08-05","sym":"NQU5","o":"mixed","n":"trend_down","nc":-0.826,"deep":0.31,"sh":0.92,"ntr":-0.618,"abr":0.059,"bbr":0.8846,"tr":2.3077,"vx":2.1538},{"d":"2025-08-06","sym":"NQU5","o":"mixed","n":"trend_up","nc":0.918,"deep":0.62,"sh":0.46,"ntr":0.885,"abr":0.9359,"bbr":0.0179,"tr":2.1538,"vx":1.2308},{"d":"2025-08-07","sym":"NQU5","o":"mixed","n":"parked","nc":-0.772,"deep":0.15,"sh":0.92,"ntr":-0.277,"abr":0.0769,"bbr":0.8487,"tr":2.3077,"vx":1.2308},{"d":"2025-08-08","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.956,"deep":0.31,"sh":0.15,"ntr":0.87,"abr":0.959,"bbr":0.0026,"tr":0.7692,"vx":0.6154},{"d":"2025-08-11","sym":"NQU5","o":"balance","n":"balance","nc":-0.067,"deep":2.46,"sh":0.92,"ntr":-0.384,"abr":0.4436,"bbr":0.5103,"tr":5.3846,"vx":3.3846},{"d":"2025-08-12","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.851,"deep":0.31,"sh":0.46,"ntr":0.619,"abr":0.9154,"bbr":0.0641,"tr":1.3846,"vx":0.9231},{"d":"2025-08-13","sym":"NQU5","o":"trend_down","n":"trend_down","nc":-0.885,"deep":0.15,"sh":0.62,"ntr":-0.515,"abr":0.0385,"bbr":0.9231,"tr":1.6923,"vx":0.9231},{"d":"2025-08-14","sym":"NQU5","o":"mixed","n":"mixed","nc":0.382,"deep":1.08,"sh":2.77,"ntr":0.483,"abr":0.6231,"bbr":0.241,"tr":7.8462,"vx":4.9231},{"d":"2025-08-15","sym":"NQU5","o":"mixed","n":"trend_down","nc":-0.738,"deep":0.62,"sh":2.46,"ntr":-0.41,"abr":0.0231,"bbr":0.7615,"tr":6.1538,"vx":5.2308},{"d":"2025-08-18","sym":"NQU5","o":"mixed","n":"mixed","nc":-0.338,"deep":1.85,"sh":2.0,"ntr":-0.047,"abr":0.2667,"bbr":0.6051,"tr":7.0769,"vx":5.5385},{"d":"2025-08-19","sym":"NQU5","o":"trend_down","n":"trend_down","nc":-0.926,"deep":0.31,"sh":0.62,"ntr":-0.869,"abr":0.0026,"bbr":0.9282,"tr":1.8462,"vx":1.5385},{"d":"2025-08-20","sym":"NQU5","o":"mixed","n":"mixed","nc":0.187,"deep":0.77,"sh":1.69,"ntr":-0.169,"abr":0.4923,"bbr":0.3051,"tr":4.9231,"vx":1.0769},{"d":"2025-08-21","sym":"NQU5","o":"mixed","n":"mixed","nc":-0.444,"deep":2.15,"sh":1.54,"ntr":0.077,"abr":0.2026,"bbr":0.6462,"tr":7.2308,"vx":3.6923},{"d":"2025-08-22","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.977,"deep":0.15,"sh":0.46,"ntr":0.814,"abr":0.9795,"bbr":0.0026,"tr":1.2308,"vx":1.0769},{"d":"2025-08-25","sym":"NQU5","o":"mixed","n":"parked","nc":0.787,"deep":0.31,"sh":1.54,"ntr":-0.012,"abr":0.8564,"bbr":0.0692,"tr":3.6923,"vx":2.4615},{"d":"2025-08-26","sym":"NQU5","o":"mixed","n":"trend_up","nc":0.869,"deep":0.62,"sh":1.08,"ntr":0.742,"abr":0.8923,"bbr":0.0231,"tr":3.3846,"vx":2.6154},{"d":"2025-08-27","sym":"NQU5","o":"mixed","n":"trend_up","nc":0.71,"deep":0.77,"sh":1.23,"ntr":0.554,"abr":0.8205,"bbr":0.1103,"tr":3.5385,"vx":2.9231},{"d":"2025-08-28","sym":"NQU5","o":"mixed","n":"parked","nc":0.818,"deep":0.62,"sh":1.38,"ntr":0.279,"abr":0.8641,"bbr":0.0462,"tr":4.0,"vx":2.7692},{"d":"2025-08-29","sym":"NQU5","o":"trend_down","n":"trend_down","nc":-0.995,"deep":0.0,"sh":0.31,"ntr":-0.713,"abr":0.0,"bbr":0.9949,"tr":0.6154,"vx":0.6154},{"d":"2025-09-01","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.924,"deep":0.29,"sh":0.57,"ntr":0.689,"abr":0.9429,"bbr":0.019,"tr":1.7143,"vx":1.4286},{"d":"2025-09-02","sym":"NQU5","o":"mixed","n":"mixed","nc":-0.059,"deep":0.46,"sh":1.23,"ntr":0.853,"abr":0.359,"bbr":0.4179,"tr":3.3846,"vx":0.4615},{"d":"2025-09-03","sym":"NQU5","o":"balance","n":"balance","nc":-0.164,"deep":2.15,"sh":1.69,"ntr":0.198,"abr":0.3205,"bbr":0.4846,"tr":6.7692,"vx":3.2308},{"d":"2025-09-04","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.759,"deep":1.08,"sh":0.31,"ntr":0.746,"abr":0.8744,"bbr":0.1154,"tr":2.0,"vx":1.3846},{"d":"2025-09-05","sym":"NQU5","o":"mixed","n":"trend_down","nc":-0.862,"deep":0.15,"sh":1.08,"ntr":-0.427,"abr":0.0256,"bbr":0.8872,"tr":2.7692,"vx":2.0},{"d":"2025-09-08","sym":"NQU5","o":"balance","n":"balance","nc":-0.172,"deep":0.15,"sh":1.38,"ntr":0.131,"abr":0.3641,"bbr":0.5359,"tr":3.2308,"vx":2.4615},{"d":"2025-09-09","sym":"NQU5","o":"mixed","n":"balance","nc":0.272,"deep":2.0,"sh":0.62,"ntr":0.268,"abr":0.6128,"bbr":0.341,"tr":4.3077,"vx":2.9231},{"d":"2025-09-10","sym":"NQU5","o":"mixed","n":"mixed","nc":-0.513,"deep":1.85,"sh":0.0,"ntr":-0.347,"abr":0.2385,"bbr":0.7513,"tr":2.4615,"vx":1.8462},{"d":"2025-09-11","sym":"NQU5","o":"mixed","n":"parked","nc":0.908,"deep":0.31,"sh":0.92,"ntr":0.245,"abr":0.9231,"bbr":0.0154,"tr":2.6154,"vx":2.0},{"d":"2025-09-12","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.913,"deep":0.77,"sh":0.15,"ntr":0.418,"abr":0.941,"bbr":0.0282,"tr":1.5385,"vx":1.0769},{"d":"2025-09-15","sym":"NQU5","o":"trend_up","n":"trend_up","nc":0.99,"deep":0.0,"sh":0.46,"ntr":1.0,"abr":0.9897,"bbr":0.0,"tr":0.9231,"vx":0.9231},{"d":"2025-09-16","sym":"NQU5","o":"mixed","n":"trend_down","nc":-0.7,"deep":0.62,"sh":2.15,"ntr":-0.637,"abr":0.0462,"bbr":0.7462,"tr":5.5385,"vx":3.6923},{"d":"2025-09-17","sym":"NQU5","o":"mixed","n":"parked","nc":-0.636,"deep":0.77,"sh":0.31,"ntr":-0.207,"abr":0.1615,"bbr":0.7974,"tr":2.1538,"vx":1.0769},{"d":"2025-09-18","sym":"NQZ5","o":"mixed","n":"parked","nc":0.669,"deep":0.92,"sh":2.31,"ntr":0.217,"abr":0.7718,"bbr":0.1026,"tr":5.8462,"vx":4.6154},{"d":"2025-09-19","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.613,"deep":0.62,"sh":1.08,"ntr":0.54,"abr":0.7538,"bbr":0.141,"tr":3.5385,"vx":2.3077},{"d":"2025-09-22","sym":"NQZ5","o":"trend_up","n":"trend_up","nc":0.99,"deep":0.0,"sh":0.31,"ntr":0.869,"abr":0.9897,"bbr":0.0,"tr":0.6154,"vx":0.6154},{"d":"2025-09-23","sym":"NQZ5","o":"trend_down","n":"trend_down","nc":-0.949,"deep":0.31,"sh":0.77,"ntr":-0.76,"abr":0.0026,"bbr":0.9513,"tr":2.0,"vx":1.8462},{"d":"2025-09-24","sym":"NQZ5","o":"trend_down","n":"trend_down","nc":-0.99,"deep":0.0,"sh":0.46,"ntr":-0.545,"abr":0.0,"bbr":0.9897,"tr":0.9231,"vx":0.9231},{"d":"2025-09-25","sym":"NQZ5","o":"mixed","n":"mixed","nc":0.472,"deep":0.46,"sh":1.08,"ntr":0.338,"abr":0.6923,"bbr":0.2205,"tr":3.0769,"vx":2.0},{"d":"2025-09-26","sym":"NQZ5","o":"mixed","n":"mixed","nc":0.333,"deep":1.08,"sh":0.46,"ntr":0.583,"abr":0.6513,"bbr":0.3179,"tr":2.9231,"vx":2.0},{"d":"2025-09-29","sym":"NQZ5","o":"trend_down","n":"mixed","nc":-0.49,"deep":0.15,"sh":0.15,"ntr":-0.097,"abr":0.2436,"bbr":0.7333,"tr":0.7692,"vx":0.6154},{"d":"2025-09-30","sym":"NQZ5","o":"balance","n":"balance","nc":0.177,"deep":2.92,"sh":1.85,"ntr":0.512,"abr":0.5282,"bbr":0.3513,"tr":8.4615,"vx":4.7692},{"d":"2025-10-01","sym":"NQZ5","o":"trend_up","n":"trend_up","nc":0.954,"deep":0.46,"sh":0.15,"ntr":0.893,"abr":0.9667,"bbr":0.0128,"tr":1.0769,"vx":0.7692},{"d":"2025-10-02","sym":"NQZ5","o":"balance","n":"balance","nc":0.131,"deep":1.38,"sh":2.0,"ntr":-0.217,"abr":0.4949,"bbr":0.3641,"tr":6.7692,"vx":4.4615},{"d":"2025-10-03","sym":"NQZ5","o":"mixed","n":"mixed","nc":-0.385,"deep":1.54,"sh":1.38,"ntr":-0.559,"abr":0.2359,"bbr":0.6205,"tr":5.3846,"vx":3.3846},{"d":"2025-10-06","sym":"NQZ5","o":"mixed","n":"parked","nc":0.708,"deep":1.23,"sh":0.62,"ntr":-0.11,"abr":0.7949,"bbr":0.0872,"tr":3.8462,"vx":1.5385},{"d":"2025-10-07","sym":"NQZ5","o":"mixed","n":"trend_down","nc":-0.764,"deep":0.15,"sh":1.54,"ntr":-0.687,"abr":0.0769,"bbr":0.841,"tr":3.3846,"vx":2.6154},{"d":"2025-10-08","sym":"NQZ5","o":"trend_up","n":"trend_up","nc":1.0,"deep":0.0,"sh":0.0,"ntr":0.961,"abr":1.0,"bbr":0.0,"tr":0.0,"vx":0.0},{"d":"2025-10-09","sym":"NQZ5","o":"mixed","n":"parked","nc":-0.649,"deep":0.15,"sh":1.23,"ntr":-0.162,"abr":0.1077,"bbr":0.7564,"tr":2.9231,"vx":2.7692},{"d":"2025-10-10","sym":"NQZ5","o":"mixed","n":"trend_down","nc":-0.715,"deep":1.38,"sh":0.92,"ntr":-0.916,"abr":0.0923,"bbr":0.8077,"tr":4.3077,"vx":3.2308},{"d":"2025-10-13","sym":"NQZ5","o":"mixed","n":"mixed","nc":0.79,"deep":1.54,"sh":0.31,"ntr":0.436,"abr":0.8872,"bbr":0.0974,"tr":2.6154,"vx":1.6923},{"d":"2025-10-14","sym":"NQZ5","o":"trend_up","n":"parked","nc":0.785,"deep":0.77,"sh":0.31,"ntr":0.299,"abr":0.8538,"bbr":0.0692,"tr":1.5385,"vx":1.0769},{"d":"2025-10-15","sym":"NQZ5","o":"balance","n":"balance","nc":-0.277,"deep":1.38,"sh":1.08,"ntr":-0.115,"abr":0.3205,"bbr":0.5974,"tr":4.6154,"vx":3.0769},{"d":"2025-10-16","sym":"NQZ5","o":"mixed","n":"trend_down","nc":-0.51,"deep":0.46,"sh":1.23,"ntr":-0.464,"abr":0.1949,"bbr":0.7051,"tr":3.3846,"vx":2.3077},{"d":"2025-10-17","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.8,"deep":0.31,"sh":1.23,"ntr":0.786,"abr":0.8359,"bbr":0.0359,"tr":3.2308,"vx":2.3077},{"d":"2025-10-20","sym":"NQZ5","o":"trend_up","n":"trend_up","nc":0.997,"deep":0.0,"sh":0.15,"ntr":0.711,"abr":0.9974,"bbr":0.0,"tr":0.3077,"vx":0.3077},{"d":"2025-10-21","sym":"NQZ5","o":"mixed","n":"parked","nc":0.541,"deep":1.38,"sh":1.54,"ntr":0.034,"abr":0.7154,"bbr":0.1744,"tr":5.5385,"vx":2.3077},{"d":"2025-10-22","sym":"NQZ5","o":"trend_down","n":"trend_down","nc":-0.846,"deep":0.31,"sh":0.62,"ntr":-0.375,"abr":0.0615,"bbr":0.9077,"tr":1.8462,"vx":0.9231},{"d":"2025-10-23","sym":"NQZ5","o":"trend_up","n":"trend_up","nc":0.985,"deep":0.0,"sh":0.31,"ntr":0.881,"abr":0.9846,"bbr":0.0,"tr":0.7692,"vx":0.6154},{"d":"2025-10-24","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.882,"deep":0.31,"sh":0.92,"ntr":0.563,"abr":0.8846,"bbr":0.0026,"tr":2.7692,"vx":2.4615},{"d":"2025-10-27","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.949,"deep":0.0,"sh":1.38,"ntr":0.669,"abr":0.9487,"bbr":0.0,"tr":2.7692,"vx":2.7692},{"d":"2025-10-28","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.664,"deep":0.62,"sh":1.54,"ntr":0.412,"abr":0.6949,"bbr":0.0308,"tr":4.3077,"vx":3.3846},{"d":"2025-10-29","sym":"NQZ5","o":"mixed","n":"parked","nc":-0.531,"deep":1.23,"sh":3.23,"ntr":0.048,"abr":0.1667,"bbr":0.6974,"tr":8.1538,"vx":4.4615},{"d":"2025-10-30","sym":"NQZ5","o":"mixed","n":"trend_down","nc":-0.649,"deep":0.0,"sh":2.62,"ntr":-0.763,"abr":0.0,"bbr":0.6487,"tr":5.2308,"vx":5.2308},{"d":"2025-10-31","sym":"NQZ5","o":"mixed","n":"trend_down","nc":-0.587,"deep":0.62,"sh":0.62,"ntr":-0.65,"abr":0.1564,"bbr":0.7436,"tr":2.4615,"vx":0.9231},{"d":"2025-11-03","sym":"NQZ5","o":"mixed","n":"mixed","nc":-0.326,"deep":2.31,"sh":0.46,"ntr":-0.589,"abr":0.3026,"bbr":0.6282,"tr":4.3077,"vx":3.2308},{"d":"2025-11-04","sym":"NQZ5","o":"trend_down","n":"trend_down","nc":-0.623,"deep":0.62,"sh":0.15,"ntr":-0.457,"abr":0.1718,"bbr":0.7949,"tr":1.2308,"vx":1.0769},{"d":"2025-11-05","sym":"NQZ5","o":"trend_up","n":"trend_up","nc":0.977,"deep":0.0,"sh":0.46,"ntr":0.449,"abr":0.9769,"bbr":0.0,"tr":0.9231,"vx":0.9231},{"d":"2025-11-06","sym":"NQZ5","o":"mixed","n":"trend_down","nc":-0.867,"deep":0.0,"sh":1.69,"ntr":-0.854,"abr":0.0,"bbr":0.8667,"tr":3.3846,"vx":3.3846},{"d":"2025-11-07","sym":"NQZ5","o":"balance","n":"mixed","nc":-0.323,"deep":0.15,"sh":0.92,"ntr":0.257,"abr":0.2308,"bbr":0.5538,"tr":2.1538,"vx":2.0},{"d":"2025-11-10","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.541,"deep":0.62,"sh":0.77,"ntr":0.508,"abr":0.7308,"bbr":0.1897,"tr":2.7692,"vx":1.5385},{"d":"2025-11-11","sym":"NQZ5","o":"balance","n":"balance","nc":0.136,"deep":0.46,"sh":1.08,"ntr":0.133,"abr":0.4974,"bbr":0.3615,"tr":3.2308,"vx":2.4615},{"d":"2025-11-12","sym":"NQZ5","o":"mixed","n":"trend_down","nc":-0.608,"deep":0.46,"sh":2.62,"ntr":-0.463,"abr":0.0462,"bbr":0.6538,"tr":6.1538,"vx":4.1538},{"d":"2025-11-13","sym":"NQZ5","o":"trend_down","n":"trend_down","nc":-0.923,"deep":0.0,"sh":0.62,"ntr":-0.768,"abr":0.0,"bbr":0.9231,"tr":1.2308,"vx":1.2308},{"d":"2025-11-14","sym":"NQZ5","o":"trend_up","n":"trend_up","nc":0.941,"deep":0.15,"sh":0.15,"ntr":0.624,"abr":0.9538,"bbr":0.0128,"tr":0.6154,"vx":0.1538},{"d":"2025-11-17","sym":"NQZ5","o":"mixed","n":"parked","nc":-0.518,"deep":0.62,"sh":1.23,"ntr":-0.158,"abr":0.2051,"bbr":0.7231,"tr":3.5385,"vx":2.1538},{"d":"2025-11-18","sym":"NQZ5","o":"balance","n":"balance","nc":0.249,"deep":1.54,"sh":1.54,"ntr":-0.374,"abr":0.5641,"bbr":0.3154,"tr":5.6923,"vx":2.1538},{"d":"2025-11-19","sym":"NQZ5","o":"mixed","n":"mixed","nc":-0.339,"deep":0.77,"sh":0.46,"ntr":0.265,"abr":0.2974,"bbr":0.6359,"tr":2.4615,"vx":0.9231},{"d":"2025-11-20","sym":"NQZ5","o":"mixed","n":"trend_down","nc":-0.636,"deep":0.46,"sh":1.23,"ntr":-0.863,"abr":0.1462,"bbr":0.7821,"tr":3.5385,"vx":2.7692},{"d":"2025-11-21","sym":"NQZ5","o":"mixed","n":"parked","nc":0.526,"deep":0.92,"sh":1.23,"ntr":0.102,"abr":0.7333,"bbr":0.2077,"tr":4.1538,"vx":2.7692},{"d":"2025-11-24","sym":"NQZ5","o":"trend_up","n":"trend_up","nc":0.98,"deep":0.0,"sh":0.77,"ntr":0.897,"abr":0.9795,"bbr":0.0,"tr":1.5385,"vx":1.5385},{"d":"2025-11-25","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.667,"deep":0.15,"sh":2.15,"ntr":0.501,"abr":0.7615,"bbr":0.0949,"tr":4.6154,"vx":2.6154},{"d":"2025-11-26","sym":"NQZ5","o":"trend_up","n":"parked","nc":0.818,"deep":0.31,"sh":0.46,"ntr":0.24,"abr":0.8846,"bbr":0.0667,"tr":1.5385,"vx":0.6154},{"d":"2025-11-27","sym":"NQZ5","o":"balance","n":"trend_down","nc":-0.586,"deep":0.29,"sh":3.71,"ntr":-0.321,"abr":0.0048,"bbr":0.5905,"tr":8.5714,"vx":8.0},{"d":"2025-11-28","sym":"NQZ5","o":"mixed","n":"mixed","nc":0.773,"deep":2.13,"sh":2.13,"ntr":0.782,"abr":0.8356,"bbr":0.0622,"tr":8.2667,"vx":5.3333},{"d":"2025-12-01","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.895,"deep":1.08,"sh":1.23,"ntr":0.446,"abr":0.9256,"bbr":0.0308,"tr":4.0,"vx":3.3846},{"d":"2025-12-02","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.503,"deep":0.92,"sh":1.38,"ntr":0.504,"abr":0.6667,"bbr":0.1641,"tr":4.7692,"vx":2.6154},{"d":"2025-12-03","sym":"NQZ5","o":"mixed","n":"trend_up","nc":0.772,"deep":0.46,"sh":1.69,"ntr":0.753,"abr":0.8256,"bbr":0.0538,"tr":4.3077,"vx":2.0},{"d":"2025-12-04","sym":"NQZ5","o":"balance","n":"balance","nc":-0.2,"deep":2.0,"sh":2.92,"ntr":-0.242,"abr":0.2897,"bbr":0.4897,"tr":9.8462,"vx":4.7692},{"d":"2025-12-05","sym":"NQZ5","o":"mixed","n":"mixed","nc":-0.487,"deep":1.08,"sh":2.0,"ntr":-0.032,"abr":0.2103,"bbr":0.6974,"tr":6.0,"vx":1.6923},{"d":"2025-12-08","sym":"NQZ5","o":"trend_down","n":"trend_down","nc":-0.946,"deep":0.15,"sh":0.15,"ntr":-0.578,"abr":0.0154,"bbr":0.9615,"tr":0.6154,"vx":0.1538},{"d":"2025-12-09","sym":"NQZ5","o":"trend_up","n":"trend_up","nc":0.849,"deep":0.15,"sh":0.77,"ntr":0.618,"abr":0.8641,"bbr":0.0154,"tr":1.8462,"vx":0.4615},{"d":"2025-12-10","sym":"NQZ5","o":"balance","n":"mixed","nc":0.339,"deep":1.08,"sh":3.38,"ntr":0.48,"abr":0.5462,"bbr":0.2077,"tr":8.7692,"vx":3.5385},{"d":"2025-12-11","sym":"NQZ5","o":"mixed","n":"mixed","nc":0.459,"deep":2.0,"sh":0.62,"ntr":0.393,"abr":0.6923,"bbr":0.2333,"tr":4.6154,"vx":2.9231},{"d":"2025-12-12","sym":"NQZ5","o":"trend_down","n":"trend_down","nc":-0.936,"deep":0.0,"sh":0.92,"ntr":-0.703,"abr":0.0,"bbr":0.9359,"tr":2.0,"vx":2.0},{"d":"2025-12-15","sym":"NQZ5","o":"mixed","n":"trend_down","nc":-0.892,"deep":0.46,"sh":0.62,"ntr":-0.916,"abr":0.0333,"bbr":0.9256,"tr":2.3077,"vx":0.6154},{"d":"2025-12-16","sym":"NQZ5","o":"balance","n":"balance","nc":0.167,"deep":1.54,"sh":2.62,"ntr":0.327,"abr":0.5,"bbr":0.3333,"tr":8.3077,"vx":3.6923}];
+
+const CLASSES = ["trend_up", "trend_down", "balance", "mixed", "parked", "unknown"];
+const META = {
+  trend_up:  { label: "Trend up",   color: "var(--up)",   glyph: "▲" },
+  trend_down:{ label: "Trend down", color: "var(--down)", glyph: "▼" },
+  balance:   { label: "Balance",    color: "var(--bal)",  glyph: "●" },
+  mixed:     { label: "Mixed",      color: "var(--mix)",  glyph: "◆" },
+  parked:    { label: "Parked",     color: "var(--park)", glyph: "■" },
+  unknown:   { label: "Unknown",    color: "var(--unk)",  glyph: "·" },
+};
+const fmt = (x, d=2) => x == null ? "—" : Number(x).toFixed(d);
+
+// ---- meta line
+const dates = DATA.map(r => r.d).sort();
+document.getElementById("meta").textContent =
+  `${DATA.length} sessions · NQ · ${dates[0]} → ${dates[dates.length-1]} · regime artifacts v5, eod checkpoint`;
+
+// ---- counts
+const cnt = key => {
+  const c = {};
+  for (const r of DATA) c[r[key]] = (c[r[key]] || 0) + 1;
+  return c;
+};
+const oldC = cnt("o"), newC = cnt("n");
+const moved = DATA.filter(r => r.o !== r.n).length;
+const rescued = DATA.filter(r => r.o === "mixed" && (r.n === "trend_up" || r.n === "trend_down")).length;
+
+// ---- tiles
+const tiles = [
+  { k: "Mixed share", v: `${Math.round(100*(oldC.mixed||0)/DATA.length)}% <span class="dim">→</span> ${Math.round(100*(newC.mixed||0)/DATA.length)}%`,
+    n: `${oldC.mixed||0} days → ${newC.mixed||0} days` },
+  { k: "Trend days", v: `${(oldC.trend_up||0)+(oldC.trend_down||0)} <span class="dim">→</span> ${(newC.trend_up||0)+(newC.trend_down||0)}`,
+    n: `${rescued} rescued out of mixed` },
+  { k: "Parked (new class)", v: `${newC.parked||0}`, n: "one-sided, went nowhere" },
+  { k: "Days that change label", v: `${moved} <span class="dim">/ ${DATA.length}</span>`,
+    n: `${Math.round(100*moved/DATA.length)}% of sessions` },
+];
+document.getElementById("tiles").innerHTML = tiles.map(t =>
+  `<div class="tile"><div class="k">${t.k}</div><div class="v">${t.v}</div><div class="n">${t.n}</div></div>`).join("");
+
+// ---- composition bars
+function bar(counts) {
+  const total = DATA.length;
+  return `<div class="comp-bar">` + CLASSES.filter(c => counts[c]).map(c => {
+    const n = counts[c], pct = 100 * n / total;
+    const label = pct >= 7 ? `<span>${n}</span>` : "";
+    return `<div class="comp-seg" style="flex:${n};background:${META[c].color}"
+      data-tip="${META[c].label}: ${n} days (${pct.toFixed(0)}%)">${label}</div>`;
+  }).join("") + `</div>`;
+}
+document.getElementById("comp").innerHTML =
+  `<div class="comp-row"><div class="lbl">Current</div>${bar(oldC)}</div>` +
+  `<div class="comp-row"><div class="lbl">Proposed</div>${bar(newC)}</div>`;
+document.getElementById("legend").innerHTML = CLASSES.filter(c => oldC[c] || newC[c]).map(c =>
+  `<div class="it"><div class="sw" style="background:${META[c].color}"></div>${META[c].label}
+   <span class="gl">${META[c].glyph}</span></div>`).join("");
+
+// ---- calendar
+const byDate = Object.fromEntries(DATA.map(r => [r.d, r]));
+const months = [...new Set(DATA.map(r => r.d.slice(0, 7)))].sort();
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const calEl = document.getElementById("cal");
+calEl.innerHTML = months.map(m => {
+  const [y, mo] = m.split("-").map(Number);
+  const daysIn = new Date(y, mo, 0).getDate();
+  let cells = `<div class="dow">M</div><div class="dow">T</div><div class="dow">W</div><div class="dow">T</div><div class="dow">F</div>`;
+  // pad to the weekday of the 1st (Mon=0..Fri=4); weekends skipped
+  const first = new Date(y, mo - 1, 1).getDay(); // 0=Sun
+  let pad = first === 0 || first === 6 ? 0 : first - 1;
+  for (let i = 0; i < pad; i++) cells += `<div class="day blank"></div>`;
+  for (let d = 1; d <= daysIn; d++) {
+    const dow = new Date(y, mo - 1, d).getDay();
+    if (dow === 0 || dow === 6) continue;
+    const iso = `${m}-${String(d).padStart(2, "0")}`;
+    const r = byDate[iso];
+    if (!r) { cells += `<div class="day blank"></div>`; continue; }
+    cells += `<div class="day" data-d="${iso}">
+      <div class="half" style="background:${META[r.o].color}"><div class="g">${META[r.o].glyph}</div></div>
+      <div class="half" style="background:${META[r.n].color}"><div class="g">${META[r.n].glyph}</div></div>
+    </div>`;
+  }
+  return `<div class="month"><h4>${MONTH_NAMES[mo-1]} ${y}</h4><div class="mgrid">${cells}</div></div>`;
+}).join("");
+
+// ---- movement matrix
+const oldOrder = CLASSES.filter(c => oldC[c]);
+const newOrder = CLASSES.filter(c => newC[c]);
+const mx = {};
+for (const r of DATA) { mx[r.o] = mx[r.o] || {}; mx[r.o][r.n] = (mx[r.o][r.n] || 0) + 1; }
+let mhtml = `<thead><tr><th>Current ↓ Proposed →</th>` +
+  newOrder.map(c => `<th><span class="chip"><span class="sw" style="background:${META[c].color}"></span>${META[c].label}</span></th>`).join("") +
+  `<th>Total</th></tr></thead><tbody>`;
+for (const o of oldOrder) {
+  mhtml += `<tr><td><span class="chip"><span class="sw" style="background:${META[o].color}"></span>${META[o].label}</span></td>`;
+  for (const n of newOrder) {
+    const v = (mx[o] && mx[o][n]) || 0;
+    const cls = v === 0 ? "zero" : (o !== n && v >= 10 ? "hot" : "");
+    mhtml += `<td class="${cls}">${v || "·"}</td>`;
+  }
+  mhtml += `<td>${oldC[o]}</td></tr>`;
+}
+mhtml += `</tbody>`;
+document.getElementById("matrix").innerHTML = mhtml;
+
+// ---- example days
+const EXAMPLES = [
+  ["2025-08-04", "96% of closes above both anchors, ran 96% of its range — filed mixed because shallow flips hit 2.3/hr; it never changed sides once."],
+  ["2025-12-15", "The mirror case short: 94% below both, −0.92 net travel, blocked by the same gate."],
+  ["2025-08-06", "94% above both, 0.89 net travel; 2.2 transitions/hr but only 0.6 side changes."],
+  ["2025-12-01", "93% above both with real churn (4 flips/hr) — but only 1.1 deep; the rest was anchor-straddling noise."],
+  ["2025-08-25", "79% conviction above both yet −0.01 net travel: gapped up and parked. Current rule: mixed. It was never a trend."],
+  ["2025-07-28", "70% below both, 0.05 travel — drifted under the anchors all day without going anywhere."],
+  ["2025-10-21", "54% conviction, 0.03 travel: held one side, dead tape."],
+];
+document.querySelector("#examples tbody").innerHTML = EXAMPLES.map(([d, why]) => {
+  const r = byDate[d];
+  if (!r) return "";
+  return `<tr>
+    <td>${d}</td>
+    <td><span class="chip"><span class="sw" style="background:${META[r.o].color}"></span>${META[r.o].label}</span></td>
+    <td><span class="chip"><span class="sw" style="background:${META[r.n].color}"></span>${META[r.n].label}</span></td>
+    <td>${fmt(r.abr)}</td><td>${fmt(r.bbr)}</td><td>${fmt(r.tr, 1)}</td><td>${fmt(r.deep, 1)}</td>
+    <td>${fmt(r.ntr)}</td><td class="reason">${why}</td>
+  </tr>`;
+}).join("");
+
+// ---- tooltip
+const tip = document.getElementById("tip");
+function showTip(html, x, y) {
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let left = x + 14, top = y + 14;
+  if (left + w > innerWidth - 8) left = x - w - 14;
+  if (top + h > innerHeight - 8) top = y - h - 14;
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
+}
+document.addEventListener("mousemove", e => {
+  const seg = e.target.closest(".comp-seg");
+  if (seg) { showTip(`<div class="t">${seg.dataset.tip}</div>`, e.clientX, e.clientY); return; }
+  const day = e.target.closest(".day[data-d]");
+  if (day) {
+    const r = byDate[day.dataset.d];
+    const row = (k, v) => `<div class="r">${k}<b>${v}</b></div>`;
+    showTip(
+      `<div class="t">${r.d} · ${r.sym}</div>` +
+      row("current → proposed", `${META[r.o].label} → ${META[r.n].label}`) +
+      row("above / below both", `${fmt(r.abr)} / ${fmt(r.bbr)}`) +
+      row("net conviction", fmt(r.nc)) +
+      row("transitions /hr (old gate)", fmt(r.tr, 1)) +
+      row("deep · shallow flips /hr", `${fmt(r.deep, 1)} · ${fmt(r.sh, 1)}`) +
+      row("net travel (close−open ÷ range)", fmt(r.ntr)) +
+      row("ny vwap crosses /hr", fmt(r.vx, 1)),
+      e.clientX, e.clientY);
+    return;
+  }
+  tip.style.display = "none";
+});
+</script>

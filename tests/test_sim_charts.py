@@ -161,7 +161,8 @@ def test_session_chart_draws_the_night_without_moving_the_engines_candles():
     with _cache(n_on=1100, n_rth=2000) as cfg:
         t = tickmod.get_day_ticks(cfg.contract, DAY)   # the engine's own ticks
         eng = barmod.tick_bars(t, PER_BAR)             # the engine's own bars
-        full, bars, gx, ny, prof_gx, prof_ny, _, fp = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+        (full, bars, gx, ny, wk, prof_gx, prof_ny, _, ib, fp,
+         _cvd_rows) = _session_frame(cfg, DAY, ET_TZ, overnight=False)
 
     lead = len(bars) - len(eng)
     assert lead == 2 and len(eng) == 4, (lead, len(eng))
@@ -171,15 +172,21 @@ def test_session_chart_draws_the_night_without_moving_the_engines_candles():
             eng["open"][k], eng["high"][k], eng["low"][k], eng["close"][k]
         ), f"engine candle {k} was redrawn with different boundaries"
 
-    # Both anchors, each starting where it is anchored.
+    # Each anchor starting where it is anchored.
     assert len(gx) == len(bars), "the Globex VWAP must span the night too"
     assert len(ny) == len(eng), "the NY VWAP cannot start before the bell"
+    # DAY is a Monday: the weekly anchor IS this session's Globex open, so the
+    # weekly line exists, spans the night, and coincides with the Globex one.
+    assert wk == gx, "on the week's first session the weekly anchor is the Globex anchor"
     # Two developing value areas, mirroring the two VWAP anchors: the Globex one
     # spans the night, the NY one cannot start before the bell.
     assert len(prof_gx) == len(bars), "the Globex value area must span the night too"
     assert len(prof_ny) == len(eng), "the NY value area cannot start before the bell"
     # The footprint is binned over every drawn candle, night included.
     assert len(fp) == len(bars)
+    # The fixture's RTH is ~3 minutes of ticks — the IB window (60 min) never
+    # completes, so the overlay is absent rather than a made-up IB.
+    assert ib is None, "an IB was drawn for a session whose data ends inside the window"
 
 
 def test_profile_is_drawn_even_when_no_rule_read_it():
@@ -187,7 +194,7 @@ def test_profile_is_drawn_even_when_no_rule_read_it():
     looking at it is the run's config, not the picture."""
     with _cache(n_on=1000, n_rth=2000) as cfg:
         assert not confmod.needs_profile(cfg), "the fixture must be a run that ignores the profile"
-        _, _, _, _, prof_gx, prof_ny, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+        _, _, _, _, _, prof_gx, prof_ny, _, _, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
     assert prof_gx and prof_ny, "a value area was withheld from a run that did not read it"
 
 
@@ -199,10 +206,12 @@ def test_session_chart_survives_a_missing_night():
         tickmod._read_day_parquet.cache_clear()
         t = tickmod.get_day_ticks(cfg.contract, DAY)
         eng = barmod.tick_bars(t, PER_BAR)
-        _, bars, gx, ny, prof_gx, prof_ny, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+        (_, bars, gx, ny, wk, prof_gx, prof_ny, _, _ib, _,
+         _cvd_rows) = _session_frame(cfg, DAY, ET_TZ, overnight=False)
 
     assert len(bars) == len(eng)
     assert gx == [], "no night on disk, so there is no Globex anchor to draw"
+    assert wk == [], "no night on disk, so no weekly anchor either — absent, not approximated"
     assert prof_gx == [], "no night on disk, so there is no Globex value area either"
     assert len(ny) == len(eng)
     assert len(prof_ny) == len(eng)

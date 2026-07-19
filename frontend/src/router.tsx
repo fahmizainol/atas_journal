@@ -18,6 +18,7 @@ const StrategyDetail = lazy(() =>
   import("./pages/StrategyDetail").then((m) => ({ default: m.StrategyDetail })),
 );
 const AiReview = lazy(() => import("./pages/AiReview").then((m) => ({ default: m.AiReview })));
+const Research = lazy(() => import("./pages/Research").then((m) => ({ default: m.Research })));
 const CrossCheck = lazy(() => import("./pages/CrossCheck").then((m) => ({ default: m.CrossCheck })));
 
 export const router = createBrowserRouter([
@@ -36,6 +37,8 @@ export const router = createBrowserRouter([
       { path: "backtests", element: <Backtests /> },
       { path: "strategies", element: <Strategies /> },
       { path: "strategies/:slug", element: <StrategyDetail /> },
+      { path: "research", element: <Research /> },
+      { path: "research/:slug", element: <Research /> },
       // The Auto-Backtest Demo grew into Strategies; keep old links working.
       { path: "auto-backtest", element: <Navigate to="/strategies" replace /> },
       { path: "ai", element: <AiReview /> },

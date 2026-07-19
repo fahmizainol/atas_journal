@@ -68,4 +68,6 @@ export const qk = {
   aiPeriod: (scope: FilterScope) => ["ai-period", scope] as const,
   settings: (key: string) => ["settings", key] as const,
   video: (sourceFile: string) => ["video", sourceFile] as const,
+  researchList: ["research-list"] as const,
+  researchDoc: (slug: string) => ["research-doc", slug] as const,
 };

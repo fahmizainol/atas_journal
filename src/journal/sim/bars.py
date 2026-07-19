@@ -40,7 +40,11 @@ def tick_bars(ticks: pd.DataFrame, n: int = 500) -> pd.DataFrame:
     used = n_bars * n
     price = ticks["price"].to_numpy()[:used].reshape(n_bars, n)
     size = ticks["size"].to_numpy()[:used].reshape(n_bars, n)
-    ts = ticks["ts_utc"].to_numpy()[:used].reshape(n_bars, n)
+    # ``.values`` keeps the tz-aware column as datetime64[ns] (UTC wall time);
+    # ``.to_numpy()`` would box every tick into a Python Timestamp — an O(ticks)
+    # object conversion for a column we only sample every ``n``-th row of. The
+    # naive ns values ARE the UTC instants, and ``utc=True`` below re-localizes.
+    ts = ticks["ts_utc"].values[:used].reshape(n_bars, n)
     starts = np.arange(n_bars) * n
 
     return pd.DataFrame({

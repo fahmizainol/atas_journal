@@ -34,6 +34,7 @@ export function DaySessionChart({
         bars={data.bars}
         vwapGlobex={data.vwap_globex}
         vwapNy={data.vwap_ny}
+        vwapWeekly={data.vwap_weekly}
         atrPoints={data.atr_points}
         markers={data.markers}
         levels={data.levels}

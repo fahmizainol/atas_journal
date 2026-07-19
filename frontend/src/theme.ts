@@ -15,13 +15,26 @@ export const palette = {
   grid: "#2a2e38",
 } as const;
 
-// The two anchored VWAPs. Each fades outward from its mid line so the ±2σ band
-// reads as the outer envelope at a glance: Globex in white→grey, NY in purple.
+// The anchored VWAPs. Each fades outward from its mid line so the ±2σ band
+// reads as the outer envelope at a glance: Globex in white→grey, NY in purple,
+// weekly in orange (context-only — no engine trades it).
 // `fill` is the shaded region between ±1σ and ±2σ (see VwapBandPrimitive) — an
 // "r, g, b" triplet because the renderer composes its own alpha.
 export const vwapPalette = {
   globex: { middle: "#ffffff", band1: "#9aa1ad", band2: "#565d6b", fill: "154, 161, 173" },
   ny: { middle: "#c4b5fd", band1: "#8b5cf6", band2: "#5b3fb8", fill: "139, 92, 246" },
+  weekly: { middle: "#fb923c", band1: "#f97316", band2: "#c2410c", fill: "249, 115, 22" },
+} as const;
+
+// Initial Balance (first 60 min of RTH). Session structure rather than an
+// anchor family, so it gets its own hue — lime, which nothing else on the chart
+// uses — instead of a shade of an existing one. `ext` is the faint dashed
+// 1×/1.5×/2× extension guides: platform convention with no efficacy claim
+// (docs/research/initial-balance-orb.md), so they must read as reference marks,
+// not levels.
+export const ibPalette = {
+  line: "#a3e635",
+  ext: "rgba(163, 230, 53, 0.45)",
 } as const;
 
 // Developing value areas — one per VWAP anchor, drawn together. Each borrows its

@@ -10,10 +10,12 @@ import type {
   Discriminator,
   DiscriminatorRow,
   ExcursionRow,
+  LoserCollapse,
   LoserGiveback,
   RHistBin,
   WinnerHeat,
   WinnerRecovery,
+  UnderwaterSurvival,
   RunCut,
   RunEdgeRow,
   RunEdgeScope,
@@ -156,12 +158,20 @@ function Body({ slug, runId }: { slug: string; runId: string }) {
         <LoserGivebackBreakdown lg={shown.loser_giveback} />
       )}
 
+      {shown.loser_collapse?.buckets && shown.loser_collapse.buckets.length > 0 && (
+        <LoserCollapseBreakdown lc={shown.loser_collapse} />
+      )}
+
       {shown.winner_heat?.buckets && shown.winner_heat.buckets.length > 0 && (
         <WinnerHeatBreakdown wh={shown.winner_heat} />
       )}
 
       {shown.winner_recovery?.buckets && shown.winner_recovery.buckets.length > 0 && (
         <WinnerRecoveryBreakdown wr={shown.winner_recovery} />
+      )}
+
+      {shown.underwater_survival?.buckets && shown.underwater_survival.buckets.length > 0 && (
+        <UnderwaterSurvivalBreakdown us={shown.underwater_survival} />
       )}
 
       {scope === "vetoed" && shown.confluences && shown.confluences.length > 0 && (
@@ -753,11 +763,148 @@ function WinnerRecoveryBreakdown({ wr }: { wr: WinnerRecovery }) {
   );
 }
 
+// The mirror of the winner-recovery table: of the losers that went green, how long
+// they held their peak before collapsing back through breakeven into the loss. A
+// fast collapse gave no window to bail; a slow one sat green for a genuine stretch —
+// a flat-or-better trade the exit turned into a loss. The net beside the slow buckets
+// is the loss you were most plausibly in a position to avoid.
+function LoserCollapseBreakdown({ lc }: { lc: LoserCollapse }) {
+  const maxShare = Math.max(...lc.buckets.map((b) => b.share), 0.0001);
+  return (
+    <div className="panel">
+      <div className="section-cap">Green losers: how long before they collapsed?</div>
+      <div style={{ fontSize: 12, margin: "2px 0 8px" }}>
+        Median collapse <strong className="neg">{fmtHold(lc.median_giveback_s)}</strong> across the{" "}
+        {fmtInt(lc.losers)} losers that went green — from their peak profit back to breakeven.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, margin: "4px 0" }}>
+        {lc.buckets.map((b) => (
+          <div key={b.bucket} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+            <span style={{ width: 84, textAlign: "right", flexShrink: 0 }}>{b.bucket}</span>
+            <div style={{ flex: 1, background: "var(--panel-2, #1a1a1a)", borderRadius: 3, height: 16 }}>
+              <div
+                style={{
+                  width: `${(b.share / maxShare) * 100}%`,
+                  height: "100%",
+                  borderRadius: 3,
+                  background: "var(--neg, #f85149)",
+                  // Fast collapses gave no window to act — dim them; the slow buckets
+                  // (a flat trade there was time to save) get the fuller red.
+                  opacity: b.bucket === "< 30s" ? 0.35 : 0.7,
+                  minWidth: b.trades > 0 ? 2 : 0,
+                }}
+              />
+            </div>
+            <span style={{ width: 92, flexShrink: 0 }}>
+              {fmtInt(b.trades)} <span className="muted">({fmtPct(b.share * 100, 0)})</span>
+            </span>
+            <span style={{ width: 88, textAlign: "right", flexShrink: 0 }} className="neg">
+              {fmt(b.net_pnl)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="section-cap" style={{ marginTop: 6 }}>
+        For each loser that went green, the seconds from its peak profit back to breakeven.{" "}
+        <strong>&lt; 30s</strong> (dimmed) collapsed instantly — there was no realistic window to bail
+        at green, the loss was structural. The slower buckets sat in profit for a genuine stretch
+        before rolling over: the net beside each is the loss you were most plausibly positioned to
+        avoid, so a wall out at <strong>2 to 5m</strong> is flat-or-better trades the exit let turn
+        into losses. Pair it with the give-back table above — high peak <em>and</em> slow collapse is
+        the loss you most clearly left on the table.
+      </div>
+    </div>
+  );
+}
+
+// The direct read of "does sitting underwater predict the loss": every trade bucketed
+// by total time below breakeven, win rate per bucket. Unlike the recovery/collapse
+// tables above this conditions on nothing — it counts the losers that never came back
+// too. A win rate that steps down as the dwell grows is the signal a time-based rule
+// could act on; a flat one says the clock carries no edge and the exit is what decides.
+function UnderwaterSurvivalBreakdown({ us }: { us: UnderwaterSurvival }) {
+  const overall = us.overall_win_rate;
+  const rows = [
+    { ...us.never_underwater, bucket: "never red", clean: true },
+    ...us.buckets.map((b) => ({ ...b, clean: false })),
+  ];
+  return (
+    <div className="panel">
+      <div className="section-cap">Does sitting underwater predict the loss?</div>
+      <div style={{ fontSize: 12, margin: "2px 0 8px" }}>
+        Win rate by total time underwater across all {fmtInt(us.trades)} trades — overall{" "}
+        <strong>{fmtPct(overall * 100, 0)}</strong>, median dwell{" "}
+        <strong>{fmtHold(us.median_underwater_s)}</strong> for the trades that went red at all.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, margin: "4px 0" }}>
+        {rows.map((b) => {
+          // Above the book's overall win rate reads green, below it red — the eye
+          // wants to see the rate step down as the dwell grows.
+          const better = b.win_rate >= overall;
+          return (
+            <div key={b.bucket} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+              <span style={{ width: 84, textAlign: "right", flexShrink: 0 }}>{b.bucket}</span>
+              <div style={{ flex: 1, position: "relative", background: "var(--panel-2, #1a1a1a)", borderRadius: 3, height: 16 }}>
+                <div
+                  style={{
+                    width: `${(Number.isFinite(b.win_rate) ? b.win_rate : 0) * 100}%`,
+                    height: "100%",
+                    borderRadius: 3,
+                    background: better ? "var(--pos, #3fb950)" : "var(--neg, #f85149)",
+                    opacity: b.clean ? 0.35 : 0.7,
+                    minWidth: b.trades > 0 && b.win_rate > 0 ? 2 : 0,
+                  }}
+                />
+                {/* The overall win rate: the line each bucket is read against. */}
+                <div
+                  style={{
+                    position: "absolute",
+                    left: `${overall * 100}%`,
+                    top: 0,
+                    bottom: 0,
+                    width: 1,
+                    background: "var(--fg, #ddd)",
+                    opacity: 0.5,
+                  }}
+                />
+              </div>
+              <span style={{ width: 64, flexShrink: 0 }}>
+                {fmtInt(b.trades)} <span className="muted">tr</span>
+              </span>
+              <span
+                style={{ width: 52, textAlign: "right", flexShrink: 0 }}
+                className={better ? "pos" : "neg"}
+              >
+                {b.trades > 0 ? fmtPct(b.win_rate * 100, 0) : "—"}
+              </span>
+              <span
+                style={{ width: 88, textAlign: "right", flexShrink: 0 }}
+                className={b.net_pnl >= 0 ? "pos" : "neg"}
+              >
+                {fmt(b.net_pnl)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="section-cap" style={{ marginTop: 6 }}>
+        Every trade bucketed by how many seconds it spent below breakeven in total (the whole path,
+        not from the low), win rate per bucket. The vertical line is the book&apos;s overall win rate;
+        bars right of it (green) beat the book, left (red) trail it. <strong>never red</strong> (dimmed)
+        is the clean entries that worked from the fill — the ceiling. If the rate steps <em>down</em> as
+        the dwell grows, time underwater predicts the loss and a time-stop has something to bite on; if
+        it stays flat, the clock is noise and the exit rule is what decides the outcome.
+      </div>
+    </div>
+  );
+}
+
 // The per-confluence veto breakdown — the answer to "what is each gate actually
 // doing" when several are stacked. Every gate that would have rejected a ghost
-// entry is scored on it (not just the first to fire, as by_gate does), so the
-// rows overlap: a trade two gates both blocked counts under each, and the Vetoed
-// column sums to more than the ghost total. Unique = caught alone.
+// entry is scored on it (unlike the disjoint by_gate cut, which buckets an entry
+// only under the gate that vetoed it alone), so the rows overlap: a trade two
+// gates both blocked counts under each, and the Vetoed column sums to more than
+// the ghost total. Unique = caught alone.
 const confluenceColumns: ColumnDef<ConfluenceRow, any>[] = [
   { accessorKey: "bucket", header: "Confluence", cell: (c) => String(c.getValue()) },
   { accessorKey: "trades", header: "Vetoed", cell: (c) => fmtInt(c.getValue() as number) },
@@ -798,10 +945,12 @@ function ConfluenceBreakdown({ rows }: { rows: ConfluenceRow[] }) {
       columns={confluenceColumns}
       caption={
         <span>
-          What each gate would veto <strong>on its own</strong>, not just the entries earlier gates
-          let through (that's the <em>Which gate vetoed it</em> cut below). Rows overlap — a trade
-          two gates both blocked counts under each, so <strong>Vetoed</strong> sums past the ghost
-          total. <strong>Unique</strong> is how many a gate caught alone: high means it earns its
+          What each gate would veto <strong>on its own</strong>, counting every ghost it rejected
+          even when another gate rejected it too. Rows overlap — a trade two gates both blocked
+          counts under each, so <strong>Vetoed</strong> sums past the ghost total. (The{" "}
+          <em>Which gate vetoed it</em> cut below is the disjoint view: each entry under the one gate
+          that vetoed it <em>alone</em>, with stacked vetoes pooled into <code>(2+ gates)</code>.){" "}
+          <strong>Unique</strong> is how many a gate caught alone: high means it earns its
           slot, low means it's redundant with the stack. <strong>Ghost net</strong> is the would-be
           P&amp;L of those cut trades — <span className="pos">positive</span> means the gate filtered
           winners, <span className="neg">negative</span> means it saved you the loss.

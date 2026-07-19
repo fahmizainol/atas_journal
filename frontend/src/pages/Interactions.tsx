@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { type ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "../components/DataTable";
+import { InitialBalancePanel } from "../components/InitialBalancePanel";
+import { WeeklyVwapPanel } from "../components/WeeklyVwapPanel";
 import { CandlestickChart } from "../components/charts/CandlestickChart";
 import {
   useInteractions,
@@ -53,8 +55,10 @@ function DayChart({
       bars={data.bars}
       vwapGlobex={data.vwap_globex}
       vwapNy={data.vwap_ny}
+      vwapWeekly={data.vwap_weekly}
       profileGlobex={data.profile_globex}
       profileNy={data.profile_ny}
+      ib={data.ib}
       touches={touches}
       vaSnaps={vaSnaps}
       tickSize={data.tick_size}
@@ -74,6 +78,7 @@ const ALL_SOURCES = [
   { key: "ny", label: "NY profile" },
   { key: "globex", label: "Globex profile" },
   { key: "vwap_bands", label: "VWAP bands" },
+  { key: "session_refs", label: "Session refs" },
 ];
 
 // The interactions API sends rates as fractions (0.714), but fmtPct expects an
@@ -313,6 +318,14 @@ const touchColumns: ColumnDef<Touch, any>[] = [
   { accessorKey: "zone_px", header: "Price", cell: (c) => fmt(c.getValue() as number, false) },
   { accessorKey: "approach", header: "Appr", cell: (c) => String(c.getValue()) },
   { accessorKey: "nth_touch", header: "Nth", cell: (c) => fmtInt(c.getValue() as number) },
+  {
+    accessorKey: "closed_by",
+    header: "Gap by",
+    cell: (c) => {
+      const v = String(c.getValue());
+      return v === "level" ? <span className="neg">{v}</span> : v === "price" ? v : <span className="muted">{v}</span>;
+    },
+  },
   { accessorKey: "level_age_min", header: "Age", cell: (c) => fmtInt(c.getValue() as number) },
   { accessorKey: "outcome", header: "Outcome", cell: (c) => outcomeSpan(String(c.getValue())) },
   {
@@ -343,7 +356,23 @@ const snapColumns: ColumnDef<VaSnap, any>[] = [
     cell: (c) => String(c.getValue()),
   },
   { accessorKey: "snap_dir", header: "Direction", cell: (c) => String(c.getValue()) },
+  {
+    accessorKey: "snap_class",
+    header: "Class",
+    cell: (c) => {
+      const v = String(c.getValue());
+      return v === "node_flip" ? <span className="neg">{v}</span> : <span className="muted">{v}</span>;
+    },
+  },
   { accessorKey: "level_jump_pts", header: "Jump", cell: (c) => fmt(c.getValue() as number, false) },
+  {
+    accessorKey: "co_snaps",
+    header: "Co",
+    cell: (c) => {
+      const v = (c.getValue() as number) ?? 0;
+      return v === 0 ? <span className="muted">—</span> : fmtInt(v);
+    },
+  },
   { accessorKey: "excursion_bars_before", header: "Excursion (bars)", cell: (c) => fmtInt(c.getValue() as number) },
   { accessorKey: "band_at_snap", header: "Band", cell: (c) => String(c.getValue() ?? "—") },
   {
@@ -369,7 +398,7 @@ export function Interactions() {
   const [start, setStart] = useState("2025-08-01");
   const [end, setEnd] = useState("2025-08-31");
   const [binSize, setBinSize] = useState("");
-  const [sources, setSources] = useState<string[]>(["ny", "globex"]);
+  const [sources, setSources] = useState<string[]>(["ny", "globex", "session_refs"]);
   const [windowMin, setWindowMin] = useState("10");
   const [committed, setCommitted] = useState<InteractionParams | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
@@ -585,6 +614,14 @@ export function Interactions() {
         </div>
       )}
 
+      {/* Initial Balance & ORB — independent of the touch study; shares the
+          symbol/date inputs above but commits its own (much cheaper) run. */}
+      <InitialBalancePanel symbol={symbol} start={start} end={end} />
+
+      {/* Weekly VWAP envelope — same contract as the IB panel: shares the
+          symbol/date inputs above, commits its own (cheap) run. */}
+      <WeeklyVwapPanel symbol={symbol} start={start} end={end} />
+
       {run.isError && <div className="notice">Run failed: {String((run.error as Error)?.message)}</div>}
       {!committed && <div className="notice">Pick a range and hit Run tracking.</div>}
       {run.isFetching && <div className="notice">Computing interactions…</div>}
@@ -618,6 +655,22 @@ export function Interactions() {
               columns={bandContextColumns}
               keepOrder
               caption="All touches grouped by where price sat in the NY VWAP bands, per approach side — the same level means different things in different bands."
+            />
+          </div>
+          <div className="grid-2">
+            <AggTable
+              title="Who closed the gap"
+              data={data.aggregates.who_closed_gap ?? []}
+              columns={bandContextColumns}
+              keepOrder
+              caption="Over the last 5 bars before each touch: did price move to the level, or the level to price? A falling band chased by price scores as a fresh 1st touch while price tested nothing — if level-led rows sit at the null, they dilute every touch table."
+            />
+            <AggTable
+              title="Acceptance decay"
+              data={data.aggregates.acceptance_decay ?? []}
+              columns={bandContextColumns}
+              keepOrder
+              caption="The same touches by how many times the zone was already tested today. Read Med MFE down the rows — a level touched again and again with shrinking excursion has become fair price, even while it still 'rejects' by the 3-pt threshold."
             />
           </div>
           <div className="grid-2">
@@ -661,6 +714,20 @@ export function Interactions() {
                 caption="The same snaps traded with the snap direction, stop = a close through NY VWAP. Hold % = never stopped within the window; run = excursion before the stop."
               />
             </div>
+          </div>
+          <div className="grid-2">
+            <AggTable
+              title="VA-snap by class"
+              data={data.aggregates.vasnap_by_class ?? []}
+              columns={vasnapColumns}
+              caption="The reversion trade cut by snap class: boundary creep (jump < 20 pts) vs node-flip (the value area re-seating on a different volume node). A 4-pt creep and a 195-pt flip are different events."
+            />
+            <AggTable
+              title="VA-snap confluence"
+              data={data.aggregates.vasnap_confluence ?? []}
+              columns={vasnapColumns}
+              caption="Lone snaps vs same-minute multi-level snaps. Two boundaries re-seating in the same minute is one value-migration event, not two independent signals."
+            />
           </div>
 
           <div className="grid-2">

@@ -29,7 +29,8 @@ from journal.sim import engine, ticks  # noqa: E402
 from journal.sim import profile as profmod  # noqa: E402
 from journal.sim import vwap as vwapmod  # noqa: E402
 from journal.sim.rules import (  # noqa: E402
-    FadeConfig, GlobexBounceConfig, ProfilePullbackConfig, SimConfig)
+    DriftFadeConfig, FadeConfig, GlobexBounceConfig, ProfilePullbackConfig,
+    SimConfig)
 
 TICK = 0.25
 DAY = date(2025, 10, 13)
@@ -130,6 +131,17 @@ def test_overnight_segment_splices_in_front_of_rth():
 
 def _have_ticks() -> bool:
     return ticks._cache_path("NQZ5", DAY).exists()
+
+
+def _same_trades(a: list[dict], b: list[dict]) -> bool:
+    """Plain == on trade rows broke the day the excursion timers learned to say
+    NaN ("never recovered"): NaN != NaN, so two byte-identical runs compared
+    unequal. Same-key NaNs are equal here; everything else is still ==."""
+    def _eq(x, y):
+        return (x != x and y != y) or x == y
+    return len(a) == len(b) and all(
+        r.keys() == q.keys() and all(_eq(r[k], q[k]) for k in r)
+        for r, q in zip(a, b))
 
 
 def _session(variant: str):
@@ -258,6 +270,25 @@ def test_engine_rearms_only_on_a_fresh_acceptance():
         )
 
 
+def test_engine_in_trade_ghosts_lie_inside_a_real_trade():
+    """The shadow machine only sees what an open position hid: every "in_trade"
+    ghost must have filled strictly inside one real trade's ticks, off an
+    acceptance that formed at or after that trade's entry — anything else was a
+    setup the live machine could have seen for itself."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    for variant in ("A", "B"):
+        cfg = SimConfig(entry_variant=variant)
+        trades, vetoed, _, _ = engine.run_session(cfg, DAY)
+        ghosts = [v for v in vetoed if v["gate"] == "in_trade"]
+        for g in ghosts:
+            hosts = [tr for tr in trades
+                     if tr["entry_idx"] < g["entry_idx"] < tr["exit_idx"]]
+            assert hosts, f"in_trade ghost at idx {g['entry_idx']} fell outside every trade"
+            assert g["acceptance_ts"] >= hosts[0]["entry_ts_utc"]
+
+
 def test_engine_variant_b_enters_above_dev1():
     """B is a reclaim: the buy stop sits above dev1, so fills are never below it."""
     if not _have_ticks():
@@ -282,7 +313,7 @@ def test_limit_offset_off_changes_nothing():
         return
     base, _, _, _ = engine.run_session(SimConfig(), DAY)
     off, _, _, _ = engine.run_session(SimConfig(entry_limit_offset_ticks=0), DAY)
-    assert base == off
+    assert _same_trades(base, off)
 
 
 def test_limit_offset_fills_in_front_of_dev1():
@@ -343,6 +374,71 @@ def test_limit_offset_entries_are_earlier_and_never_cheaper():
         if a["acceptance_ts"] == b["acceptance_ts"]:
             assert a["entry_idx"] <= b["entry_idx"], "the closer limit filled later"
             assert a["avg_entry"] >= b["avg_entry"] - 1e-9, "paid less than at dev1"
+
+
+# --- averaging down (pyramid_direction="against") ---------------------------
+
+def _avg_down_session(stop_mode: str):
+    cfg = SimConfig(contracts=3, stop_ticks=150,
+                    pyramid_tranches=3, pyramid_step_ticks=40,
+                    pyramid_direction="against", pyramid_stop_mode=stop_mode)
+    trades, _, _, _ = engine.run_session(cfg, DAY)
+    t = ticks.get_day_ticks("NQZ5", DAY)
+    w = vwapmod.vwap_bands(t)
+    return cfg, trades, t, w
+
+
+def test_avg_down_adds_fill_at_their_limit_levels():
+    """An against-grid lot is a resting limit: it books at its own level, so the
+    average entry is exactly the blend of the grid levels the tape reached — and
+    only those. The tape must really have traded at (or through) every level
+    that filled, and never at the first level that didn't."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    cfg, trades, t, w = _avg_down_session("anchor")
+    assert trades
+    step = cfg.pyramid_step_ticks * TICK
+    lot = cfg.contracts // cfg.pyramid_tranches
+    seen_adds = False
+    for tr in trades:
+        first = w["upper1"].iloc[tr["entry_idx"]]
+        k = tr["max_contracts"] // lot
+        assert abs(tr["avg_entry"] - (first - step * (k - 1) / 2)) < 1e-9, tr
+        # anchor: the stop (and the risk booked) stays the FIRST lot's
+        assert abs((first - tr["stop_price"]) - cfg.stop_ticks * TICK) < 1e-9
+        lo = t["price"].iloc[tr["entry_idx"] + 1: tr["exit_idx"] + 1].min()
+        assert lo <= first - (k - 1) * step + 1e-9, tr
+        if k < cfg.pyramid_tranches:
+            assert lo > first - k * step - 1e-9, tr
+        seen_adds = seen_adds or k > 1
+    assert seen_adds, "the session never exercised the grid — assertions were vacuous"
+
+
+def test_avg_down_blend_restrikes_off_the_average():
+    """Blend keeps the stop stop_ticks behind the running average, so every add
+    into the dip WIDENS the stop — the martingale, priced as configured."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    cfg, trades, _, _ = _avg_down_session("blend")
+    assert trades
+    for tr in trades:
+        assert abs((tr["avg_entry"] - tr["stop_price"]) - cfg.stop_ticks * TICK) < 1e-9
+
+
+def test_avg_down_grid_may_not_reach_the_stop():
+    """The deepest add resting at or past the stop could only ever fill on the
+    print that kills the trade; the schema refuses the config outright."""
+    from journal.sim import schema
+    ok = dict(contracts=3, stop_ticks=150, pyramid_tranches=3,
+              pyramid_direction="against", pyramid_step_ticks=74)
+    schema.parse(dict(ok))
+    try:
+        schema.parse(dict(ok, pyramid_step_ticks=75))
+        raise AssertionError("a grid ending on the stop must be refused")
+    except ValueError:
+        pass
 
 
 # --- developing volume profile ---------------------------------------------
@@ -418,6 +514,8 @@ def test_gate_takes_only_fills_strictly_above_vah():
         assert not np.isnan(v), "an entry was taken before any profile existed"
         assert tr["avg_entry"] > v, f"took a fill at {tr['avg_entry']} inside value (VAH {v})"
     for tr in vetoed:
+        if tr["gate"] == "in_trade":
+            continue  # blocked by an open position, not by the gate
         v = vah[tr["entry_idx"]]
         assert tr["gate"] == "volume_profile"
         assert np.isnan(v) or tr["avg_entry"] <= v, "vetoed an entry that was above VAH"
@@ -668,7 +766,7 @@ def test_invert_off_is_byte_identical_to_the_bounce():
     with _globex_cache(ON_SQUARE, 100, rth, 1) as cfg:
         explicit, _, _, _ = engine.run_session_globex(
             replace(cfg, side="long", invert=False), DAY)
-    assert plain == explicit
+    assert _same_trades(plain, explicit)
     assert plain and plain[0]["direction"] == "Long"
 
 
@@ -794,6 +892,8 @@ def test_short_gate_takes_only_fills_strictly_below_val():
         assert not np.isnan(v), "an entry was taken before any profile existed"
         assert tr["avg_entry"] < v, f"took a fill at {tr['avg_entry']} inside value (VAL {v})"
     for tr in vetoed:
+        if tr["gate"] == "in_trade":
+            continue  # blocked by an open position, not by the gate
         v = val[tr["entry_idx"]]
         assert tr["gate"] == "volume_profile"
         assert np.isnan(v) or tr["avg_entry"] >= v, "vetoed an entry that was below VAL"
@@ -1158,7 +1258,7 @@ def test_daily_loss_stop_off_changes_nothing():
     base, _, _, _ = engine.run_session(SimConfig(), DAY)
     off, _, _, _ = engine.run_session(SimConfig(daily_loss_stop=0.0), DAY)
     huge, _, _, _ = engine.run_session(SimConfig(daily_loss_stop=1e9), DAY)
-    assert base == off == huge
+    assert _same_trades(base, off) and _same_trades(off, huge)
 
 
 def test_daily_loss_stop_halts_the_rest_of_the_session():
@@ -1178,7 +1278,53 @@ def test_daily_loss_stop_halts_the_rest_of_the_session():
     assert trip < len(base) - 1, "the trip must not be the last trade — proves nothing"
     assert cum[-1] > -limit, "the base run must recover — proves nothing"
     halted, _, _, _ = engine.run_session(SimConfig(daily_loss_stop=limit), day, side="short")
-    assert halted == base[: trip + 1]
+    assert _same_trades(halted, base[: trip + 1])
+
+
+def test_daily_loss_exit_open_off_or_unreachable_changes_nothing():
+    """The regression guard the version bump is really about: the flatten arms
+    nothing when it can't trip, so a run whose limit is never reached (or the knob
+    off) must simulate exactly as it did before the exit existed."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    base, _, _, _ = engine.run_session(SimConfig(daily_loss_stop=1e9), DAY)
+    on, _, _, _ = engine.run_session(
+        SimConfig(daily_loss_stop=1e9, daily_loss_exit_open=True), DAY)
+    assert _same_trades(base, on)
+
+
+def test_daily_loss_exit_flattens_the_open_trade_before_its_stop():
+    """The hole the knob closes: a single trade whose own stop sits wider than the
+    whole daily limit. Fill the dev1 limit at 20030, then drift the long down
+    against itself past the point where its open loss breaches a small daily stop
+    but BEFORE it reaches the 75-tick stop (20011.25). Off, the trade rides to the
+    time exit deep in the red; on, it leaves at market under 'daily_loss', a
+    smaller loss, earlier, and above its own stop."""
+    rth = _grid((20000, 20050, 100), (20050, 20030, 100),
+                (20030, 20016, 300), (20016, 20016, 300))
+    with _globex_cache(ON_SQUARE, 100, rth, 1) as cfg:
+        base = replace(cfg, daily_loss_stop=250.0, daily_loss_exit_open=False)
+        on = replace(cfg, daily_loss_stop=250.0, daily_loss_exit_open=True)
+        b_tr, _, _, _ = engine.run_session_globex(base, DAY)
+        e_tr, _, _, _ = engine.run_session_globex(on, DAY)
+    assert len(b_tr) == 1 and len(e_tr) == 1, (b_tr, e_tr)
+    b, e = b_tr[0], e_tr[0]
+    # The fixture must exercise the hole: off, the trade never stops out — it rides
+    # its whole giveback to the forced time exit.
+    assert b["exit_reason"] == "time", b
+    assert abs(b["avg_entry"] - 20030) < 0.5 and abs(e["avg_entry"] - 20030) < 0.5
+    # On, the flatten fires: its own reason, a real loss, and a fill still above
+    # the initial stop (so it left on the drawdown, not the stop).
+    assert e["exit_reason"] == "daily_loss", e
+    assert e["net_pnl"] < 0
+    assert e["avg_exit"] > e["stop_price"], "must exit before the hard stop"
+    # It caps the loss: less red, and earlier, than riding it out.
+    assert e["net_pnl"] > b["net_pnl"]
+    assert e["exit_idx"] < b["exit_idx"]
+    # And it bites near the limit, not miles past it (one market order, next-print
+    # fill, so a little overshoot is expected — but not a whole stop's worth).
+    assert -400 < e["net_pnl"] <= -250
 
 
 # --- the dev1 fade -------------------------------------------------------------
@@ -1304,7 +1450,7 @@ def test_fade_mid_cross_requirement_blocks_the_second_setup():
     assert len(both) == 2, both
     assert all(abs(tr["avg_exit"] - (tr["avg_entry"] - 12.5)) < 1e-9 for tr in both)
     assert len(gated) == 1, gated
-    assert gated[0] == both[0], "the first setup is untouched by the gate"
+    assert _same_trades(gated, both[:1]), "the first setup is untouched by the gate"
 
 
 def test_fade_dev2_cap_stands_the_setup_down():
@@ -1488,7 +1634,7 @@ def test_pullback_stability_reads_through_the_warmup_mask():
     if not _have_pb_ticks():
         print("   (skipped: tick cache cold)")
         return
-    assert _pullback(2) == _pullback(0)
+    assert _same_trades(_pullback(2), _pullback(0))
 
 
 def test_pullback_stability_vetoes_a_level_that_just_relocated():
@@ -1496,6 +1642,260 @@ def test_pullback_stability_vetoes_a_level_that_just_relocated():
         print("   (skipped: tick cache cold)")
         return
     assert _pullback(5) == []
+
+
+# --- the value rotation ------------------------------------------------------
+
+class _rotation_cache:
+    """One synthetic RTH session with hand-built volume, served through the real
+    tick cache, so the developing profile is exactly the histogram the test
+    computed by hand. ``base`` reflects the tape (price -> base - price) for the
+    long/short mirror test; the volume rides along, so the profile mirrors too."""
+
+    def __init__(self, prices, sizes, base: float = 0.0):
+        self.prices = [float(base - p if base else p) for p in prices]
+        self.sizes = list(sizes)
+
+    def __enter__(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = ticks.TICK_CACHE_DIR
+        ticks.TICK_CACHE_DIR = Path(self._tmp.name)
+        ticks._read_day_parquet.cache_clear()
+        ticks.TICK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({
+            "ts_utc": pd.date_range(RTH_OPEN_UTC, periods=len(self.prices), freq="s", tz="UTC"),
+            "price": self.prices,
+            "size": self.sizes,
+            "side": ["A"] * len(self.prices),
+        }).to_parquet(ticks._cache_path("TEST", DAY, "rth"), index=False)
+        from journal.sim.rules import ValueRotationConfig
+        return ValueRotationConfig(
+            contract="TEST", ticks_per_bar=5, level_warmup_min=0,
+            entry_open=time(9, 30), arm_beyond_ticks=2, stop_ticks=8,
+            min_room_ticks=4)
+
+    def __exit__(self, *exc):
+        ticks.TICK_CACHE_DIR = self._old
+        ticks._read_day_parquet.cache_clear()
+        self._tmp.cleanup()
+
+
+# Bar 1 builds the profile by hand: POC 99 (80 lots), VAH 100, VAL 99 — the
+# value area annexes 99.75+100 as one pair. Bar 2 is the excursion above the
+# VAH (100.75 > 100 + 0.5 arming line) closing back inside at 99.75 — armed,
+# then confirmed. Bar 3 is the retest to the failed edge and the rotation down
+# through the POC.
+ROT_PRICES = ([99, 99.75, 100, 99.75, 99]
+              + [100.75, 100.75, 100.75, 99.75, 99.75]
+              + [99.75, 100, 99.5, 99.25, 99])
+ROT_SIZES = [40, 20, 25, 15, 40] + [1] * 10
+
+
+def test_rotation_arms_confirms_and_rides_to_the_poc():
+    with _rotation_cache(ROT_PRICES, ROT_SIZES) as cfg:
+        trades, vetoed, _, _ = engine.run_session_value_rotation(cfg, DAY)
+    assert len(trades) == 1 and vetoed == [], trades
+    tr = trades[0]
+    assert tr["direction"] == "Short"
+    assert abs(tr["avg_entry"] - 100.0) < 1e-9, "the limit rests on the failed VAH"
+    assert tr["exit_reason"] == "target"
+    assert abs(tr["avg_exit"] - 99.0) < 1e-9, "the POC target, tracked live"
+    assert abs(tr["band_width_ticks"] - 4) < 1e-9, "POC room at entry, in ticks"
+    assert abs((tr["stop_price"] - tr["avg_entry"]) - cfg.stop_ticks * TICK) < 1e-9
+    # The arming stamp is the excursion print — before the confirming close.
+    assert tr["acceptance_ts"] == RTH_OPEN_UTC + pd.Timedelta(seconds=5)
+    assert tr["acceptance_ts"] < tr["entry_ts_utc"]
+
+
+def test_rotation_without_room_to_the_poc_never_fills():
+    """The trivial-rotation guard: the same tape with one more tick of required
+    room takes no trade — and books no ghost, a miss is not a veto."""
+    with _rotation_cache(ROT_PRICES, ROT_SIZES) as cfg:
+        trades, vetoed, _, _ = engine.run_session_value_rotation(
+            replace(cfg, min_room_ticks=5), DAY)
+    assert trades == [] and vetoed == []
+
+
+def test_rotation_variant_b_stops_into_the_rotation():
+    with _rotation_cache(ROT_PRICES, ROT_SIZES) as cfg:
+        a_trades, _, _, _ = engine.run_session_value_rotation(cfg, DAY)
+        b_trades, _, _, _ = engine.run_session_value_rotation(
+            replace(cfg, entry_variant="B", entry_stop_offset_ticks=2,
+                    min_room_ticks=2), DAY)
+    assert len(a_trades) == len(b_trades) == 1
+    assert abs(b_trades[0]["avg_entry"] - 99.5) < 1e-9, "B fills past the offset, at market"
+    assert b_trades[0]["entry_idx"] > a_trades[0]["entry_idx"]
+    assert b_trades[0]["exit_reason"] == "target"
+    assert abs(b_trades[0]["avg_exit"] - 99.0) < 1e-9
+
+
+def test_rotation_edge_snapping_across_price_disarms_instead_of_filling():
+    """A VA rebuild that relocates the VAH below a standing print must NOT book
+    a limit fill at the relocated edge (profile-pullback's v3 phantom): price
+    never did the crossing, so the confirmed setup dies instead."""
+    prices = ROT_PRICES[:10] + [98] * 5 + [99] * 5
+    sizes = ROT_SIZES[:10] + [500] * 5 + [1] * 5
+    with _rotation_cache(prices, sizes) as cfg:
+        trades, vetoed, _, _ = engine.run_session_value_rotation(cfg, DAY)
+    assert trades == [] and vetoed == [], trades
+
+
+def test_rotation_long_is_the_short_reflected():
+    """Reflect the tape (and so the profile) about a constant: the long off the
+    VAL must reproduce the short's trade exactly, reflected — the one test a
+    sign error anywhere in the u/s frame cannot survive."""
+    with _rotation_cache(ROT_PRICES, ROT_SIZES) as cfg:
+        short, _, _, _ = engine.run_session_value_rotation(cfg, DAY)
+    with _rotation_cache(ROT_PRICES, ROT_SIZES, base=200.0) as cfg:
+        long_, _, _, _ = engine.run_session_value_rotation(
+            replace(cfg, side="long"), DAY)
+    assert len(short) == len(long_) == 1
+    s_, l_ = short[0], long_[0]
+    assert l_["direction"] == "Long"
+    assert (s_["entry_idx"], s_["exit_idx"]) == (l_["entry_idx"], l_["exit_idx"])
+    assert s_["exit_reason"] == l_["exit_reason"]
+    assert abs(l_["avg_entry"] - (200 - s_["avg_entry"])) < 1e-6
+    assert abs(l_["avg_exit"] - (200 - s_["avg_exit"])) < 1e-6
+    assert abs(l_["net_pnl"] - s_["net_pnl"]) < 1e-6
+
+
+# --- drift-touch fade -------------------------------------------------------
+#
+# The shared gap-closer is hand-computable; the engine invariants run over the
+# real cached session, like every other engine test here.
+
+def test_gap_closer_flags_a_drift_touch():
+    """A level price wiggled into (net move away over the window, level static)
+    is a drift; a level price moved toward is not."""
+    lvl = np.full(6, 100.0)                     # a static level, e.g. a session ref
+    # Price hugs just above the level and drifts UP away from it: close rises from
+    # 100.5 to 102, so over the window price moved AWAY. total <= 0 -> drift.
+    away = np.array([100.5, 100.75, 101.0, 101.25, 101.5, 102.0])
+    cls, price_closed, _ = profmod.gap_closer(lvl, away, 5)
+    assert cls == "drift", (cls, price_closed)
+    assert price_closed <= 0
+    # Price approaches the level (falls toward it): price closed the gap, not drift.
+    toward = np.array([104.0, 103.0, 102.0, 101.0, 100.5, 100.0])
+    assert profmod.gap_closer(lvl, toward, 5)[0] == "price"
+    # No history yet -> unknown, never a false drift.
+    assert profmod.gap_closer(lvl, away, 0)[0] == "unknown"
+
+
+def _drift(**over):
+    """One real-session drift-fade run with test-friendly gates off."""
+    cfg = DriftFadeConfig(instrument="NQ", contract="NQ",
+                          start_date=DAY, end_date=DAY, **over)
+    trades, vetoed, _, _ = engine.run_session_drift_fade(cfg, DAY)
+    return cfg, trades, vetoed
+
+
+def test_drift_stop_is_measured_from_the_level_not_the_fill():
+    """The zone is the invalidation: stop_ticks sits behind the LEVEL, so the
+    distance from the fill varies and the R booked on a stop-out reflects it."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    cfg, trades, _ = _drift()
+    assert trades, "the fixture must actually trade"
+    for tr in trades:
+        s = 1.0 if tr["direction"] == "Long" else -1.0
+        level = tr["stop_price"] + s * cfg.stop_ticks * TICK  # invert stop = level - s*risk
+        # The fill is a market order near the level, never the level itself.
+        assert abs(tr["avg_entry"] - level) < cfg.stop_ticks * TICK
+        # R is always measured against the nominal stop distance, not the fill's.
+        assert abs(tr["r_multiple"] - tr["points"] / (cfg.stop_ticks * TICK)) < 1e-9
+
+
+def test_drift_entry_stop_variant_anchors_risk_to_the_fill():
+    """The entry-stop strategy trades the same signals but every trade risks
+    exactly stop_ticks from the entry print — the varying fill-to-level distance
+    must not leak into the initial stop."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    cfg = DriftFadeConfig(instrument="NQ", contract="NQ",
+                          start_date=DAY, end_date=DAY)
+    trades, _, _, _ = engine.run_session_drift_fade_entry_stop(cfg, DAY)
+    assert trades, "the fixture must actually trade"
+    for tr in trades:
+        s = 1.0 if tr["direction"] == "Long" else -1.0
+        assert abs((tr["avg_entry"] - tr["stop_price"]) - s * cfg.stop_ticks * TICK) < 1e-9
+    # Same detection: the first fill matches the level-stop original (later
+    # trades may diverge — different exits re-time the one-position slot).
+    base, _, _, _ = engine.run_session_drift_fade(cfg, DAY)
+    assert trades[0]["avg_entry"] == base[0]["avg_entry"]
+    assert trades[0]["stop_price"] != base[0]["stop_price"]
+
+
+def test_drift_entries_stay_inside_the_window_and_name_a_side():
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    _, trades, _ = _drift()
+    assert trades
+    for tr in trades:
+        et = tr["entry_ts_utc"].tz_convert("America/New_York")
+        assert time(9, 45) <= et.time() < time(15, 0), et
+        assert tr["direction"] in ("Long", "Short")
+
+
+def test_drift_entry_names_the_reference_level_it_faded():
+    """Every fill records which candidate zone's drift-touch triggered it, by the
+    same human name the engine builds the level under — the entry attribution the
+    by_entry_reason edges cut slices on. A blank or off-vocabulary reason means the
+    name was dropped somewhere on the best_signal -> pending -> _Pos -> _row path."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    vocab = {"Globex POC", "Globex VAH", "Globex VAL",
+             "NY POC", "NY VAH", "NY VAL", "Open", "ONH", "ONL",
+             "pd POC", "pd VAH", "pd VAL", "pd Close"}
+    _, trades, _ = _drift()
+    assert trades
+    seen = {tr["entry_reason"] for tr in trades}
+    assert seen, "trades must carry an entry_reason"
+    assert seen <= vocab, f"off-vocabulary entry reasons: {seen - vocab}"
+    assert all(tr["entry_reason"] for tr in trades), "no fill may have a blank reason"
+
+
+def test_drift_side_filter_partitions_direction():
+    """long-only takes only the support fades, short-only only the resistance
+    ones — a sign error in the hugged-side read would cross them."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    _, longs, _ = _drift(side="long")
+    _, shorts, _ = _drift(side="short")
+    assert all(t["direction"] == "Long" for t in longs)
+    assert all(t["direction"] == "Short" for t in shorts)
+    assert longs or shorts, "at least one side must set up in the session"
+
+
+def test_drift_is_deterministic():
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    _, a, _ = _drift()
+    _, b, _ = _drift()
+    assert _same_trades(a, b)
+
+
+def test_drift_r_multiple_target_is_a_fixed_distance():
+    """With an R target the exit on a 'target' fill is exactly target_rr behind
+    the fill in the trade's direction — no live tracking."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    cfg, trades, _ = _drift(target_mode="r_multiple", target_rr=1.5)
+    hit = [t for t in trades if t["exit_reason"] == "target"]
+    if not hit:
+        print("   (no target fills in the fixture — vacuously ok)")
+        return
+    for tr in hit:
+        s = 1.0 if tr["direction"] == "Long" else -1.0
+        want = tr["avg_entry"] + s * 1.5 * cfg.stop_ticks * TICK
+        assert abs(tr["avg_exit"] - want) < 1e-6, (tr["avg_exit"], want)
 
 
 if __name__ == "__main__":

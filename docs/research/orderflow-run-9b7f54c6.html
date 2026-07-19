@@ -1,0 +1,242 @@
+<title>Order flow — run 9b7f54c6</title>
+<style>
+:root{
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --win:#2a78d6; --loss:#e34948; --dot:#2a78d6;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+    --win:#3987e5; --loss:#e66767; --dot:#3987e5; }
+}
+:root[data-theme="dark"]{ --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --win:#3987e5; --loss:#e66767; --dot:#3987e5; }
+:root[data-theme="light"]{ --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --win:#2a78d6; --loss:#e34948; --dot:#2a78d6; }
+
+body{ background:var(--page); color:var(--ink);
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; margin:0; }
+main{ max-width:960px; margin:0 auto; padding:40px 24px 72px; }
+h1{ font-size:26px; line-height:1.2; margin:0 0 6px; text-wrap:balance; letter-spacing:-.01em; }
+h2{ font-size:17px; margin:44px 0 4px; letter-spacing:-.005em; }
+p{ color:var(--ink-2); max-width:65ch; margin:6px 0 14px; }
+.sub{ color:var(--muted); font-size:13px; }
+code{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em; }
+
+.tiles{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:22px 0 8px; }
+.tile{ background:var(--surface); border:1px solid var(--ring); border-radius:6px; padding:12px 14px; }
+.tile .v{ font-size:22px; font-weight:650; letter-spacing:-.01em; }
+.tile .k{ font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-top:2px; }
+.tile .v small{ font-size:13px; font-weight:500; color:var(--ink-2); }
+
+figure{ background:var(--surface); border:1px solid var(--ring); border-radius:6px;
+  margin:14px 0 0; padding:16px 16px 10px; overflow-x:auto; }
+figcaption{ font-size:13px; color:var(--muted); padding:8px 2px 4px; }
+svg text{ font:11.5px system-ui,-apple-system,"Segoe UI",sans-serif; fill:var(--ink-2); }
+svg .num{ font-variant-numeric:tabular-nums; }
+svg .axisline{ stroke:var(--axis); }
+svg .gridline{ stroke:var(--grid); }
+.legend{ display:flex; gap:18px; font-size:12.5px; color:var(--ink-2); padding:2px 2px 10px; }
+.legend span{ display:inline-flex; align-items:center; gap:7px; }
+.sw{ width:10px; height:10px; border-radius:2px; display:inline-block; }
+
+.hists{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+@media (max-width:760px){ .hists{ grid-template-columns:1fr; } }
+
+table{ border-collapse:collapse; width:100%; font-size:13.5px; }
+th,td{ padding:7px 10px; text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+th{ font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:600;
+  border-bottom:1px solid var(--axis); }
+td:first-child, th:first-child{ text-align:left; }
+tbody tr{ border-bottom:1px solid var(--grid); }
+tbody tr:last-child{ border-bottom:none; }
+tr.grp td{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--muted); padding-top:18px; border-bottom:1px solid var(--axis); }
+.iqr{ color:var(--muted); font-size:12px; }
+.aucbar{ display:inline-block; vertical-align:middle; width:84px; height:8px; position:relative; margin-left:8px; }
+.aucbar .mid{ position:absolute; left:50%; top:-2px; width:1px; height:12px; background:var(--axis); }
+.aucbar .fill{ position:absolute; top:0; height:8px; border-radius:2px; background:var(--dot); opacity:.85; }
+
+#tip{ position:fixed; pointer-events:none; background:var(--surface); border:1px solid var(--ring);
+  border-radius:5px; padding:7px 10px; font-size:12.5px; color:var(--ink);
+  box-shadow:0 2px 10px rgba(0,0,0,.12); display:none; z-index:10; max-width:260px; }
+#tip .t{ font-weight:600; } #tip .s{ color:var(--ink-2); }
+.note{ font-size:13px; color:var(--muted); max-width:72ch; margin-top:10px; }
+</style>
+
+<main>
+<h1>Order flow at the entry: losers vs winners</h1>
+<p class="sub">Run <code>20250201-20260221-v6-9b7f54c6</code> · vwap-upper-band-bounce · 279 trades
+(197 winners / 82 losers) · CVD from the tick tape, Databento aggressor side (B&nbsp;=&nbsp;buy,&nbsp;+size).</p>
+
+<div class="tiles">
+  <div class="tile"><div class="v">0.455</div><div class="k">CV AUC, all 34 features at entry</div></div>
+  <div class="tile"><div class="v">0.55</div><div class="k">Best single pre-entry AUC</div></div>
+  <div class="tile"><div class="v">0.19</div><div class="k">3-min post-fill CVD AUC</div></div>
+  <div class="tile"><div class="v">2.8<small> min</small></div><div class="k">Median stop-out lifetime</div></div>
+</div>
+
+<h2>Separation per feature</h2>
+<p>Each dot is P(random loser’s value &gt; random winner’s). 0.5 means the two groups are
+indistinguishable on that feature. Everything knowable <em>before</em> the fill hugs 0.5;
+the flow <em>after</em> the fill separates hard — but by then you’re in the trade.</p>
+<figure><div id="auc"></div></figure>
+
+<h2>Same tape, before and after the fill</h2>
+<p>Distributions as % of each group. Before entry the loser and winner tapes overlap almost
+completely; three minutes after the fill they’ve split.</p>
+<div class="legend"><span><span class="sw" style="background:var(--win)"></span>Winners (197)</span>
+<span><span class="sw" style="background:var(--loss)"></span>Losers (82)</span></div>
+<div class="hists">
+  <figure><div id="h_pre"></div><figcaption>CVD Δ over the 5 min before entry — AUC 0.52</figcaption></figure>
+  <figure><div id="h_post"></div><figcaption>CVD Δ over the 3 min after the fill — AUC 0.19</figcaption></figure>
+</div>
+
+<h2>All order-flow features</h2>
+<figure><div style="min-width:640px"><table id="tbl">
+<thead><tr><th>Feature</th><th>Losers, median</th><th>Winners, median</th><th>AUC · deviation from 0.5</th></tr></thead>
+<tbody></tbody></table></div></figure>
+<p class="note">Medians with interquartile ranges in gray. Δ = signed aggressor volume (contracts).
+Big lot ≥ 10, huge ≥ 20 contracts. “Pullback” = from the session high before entry to the fill.
+Post-fill windows overlap the trade’s life; with a 2.8-min median stop-out they partly observe the
+death itself — which is why they separate and why they’re still not tradable
+(all nine early-exit rules built on them tested net-negative).</p>
+</main>
+<div id="tip"></div>
+
+<script>
+const D = {"rows":[{"key":"d1m","label":"CVD \u0394 last 1 min","l_q1":-143.0,"l_med":-74.0,"l_q3":109.75,"w_q1":-178.0,"w_med":-73.0,"w_q3":26.0,"auc":0.548068589822954,"group":"pre"},{"key":"d3m","label":"CVD \u0394 last 3 min","l_q1":-149.5,"l_med":-5.0,"l_q3":243.5,"w_q1":-191.0,"w_med":-11.0,"w_q3":267.0,"auc":0.5161569889810573,"group":"pre"},{"key":"d5m","label":"CVD \u0394 last 5 min","l_q1":-173.25,"l_med":17.5,"l_q3":372.0,"w_q1":-221.0,"w_med":37.0,"w_q3":374.0,"auc":0.5191902934257768,"group":"pre"},{"key":"d15m","label":"CVD \u0394 last 15 min","l_q1":-123.75,"l_med":232.0,"l_q3":668.0,"w_q1":-94.0,"w_med":254.0,"w_q3":671.0,"auc":0.4876191655317568,"group":"pre"},{"key":"sess_delta","label":"Session CVD at entry","l_q1":190.75,"l_med":767.5,"l_q3":1719.25,"w_q1":231.0,"w_med":971.0,"w_q3":1951.0,"auc":0.47093599108579914,"group":"pre"},{"key":"pull_delta","label":"\u0394 during pullback from high","l_q1":-633.25,"l_med":-247.5,"l_q3":-110.5,"w_q1":-543.0,"w_med":-330.0,"w_q3":-152.0,"auc":0.5169307911353225,"group":"pre"},{"key":"pull_delta_ratio","label":"Pullback \u0394 / volume","l_q1":-0.12924869517443457,"l_med":-0.07162463793462207,"l_q3":-0.02728862257818909,"w_q1":-0.13211488250652742,"w_med":-0.0803776878520987,"w_q3":-0.03585576434738446,"auc":0.5310758945152904,"group":"pre"},{"key":"big_d3m","label":"Big-lot (\u226510) \u0394 3 min","l_q1":-21.0,"l_med":12.0,"l_q3":75.0,"w_q1":-23.0,"w_med":8.0,"w_q3":74.0,"auc":0.5241116751269036,"group":"pre"},{"key":"big_d5m","label":"Big-lot (\u226510) \u0394 5 min","l_q1":-19.25,"l_med":30.5,"l_q3":122.75,"w_q1":-30.0,"w_med":35.0,"w_q3":107.0,"auc":0.5254426148322396,"group":"pre"},{"key":"huge_d5m","label":"Huge-lot (\u226520) \u0394 5 min","l_q1":0.0,"l_med":5.5,"l_q3":79.5,"w_q1":-8.0,"w_med":0.0,"w_q3":59.0,"auc":0.5459948000495234,"group":"pre"},{"key":"big_pull","label":"Big-lot \u0394 in pullback","l_q1":-68.5,"l_med":-10.0,"l_q3":1.5,"w_q1":-47.0,"w_med":-11.0,"w_q3":13.0,"auc":0.48065494614337007,"group":"pre"},{"key":"big_sell_3m","label":"Big sell prints 3 min","l_q1":1.0,"l_med":3.0,"l_q3":4.75,"w_q1":1.0,"w_med":3.0,"w_q3":4.0,"auc":0.5257211836077751,"group":"pre"},{"key":"big_buy_3m","label":"Big buy prints 3 min","l_q1":2.0,"l_med":4.0,"l_q3":6.0,"w_q1":1.0,"w_med":4.0,"w_q3":7.0,"auc":0.5073975485947753,"group":"pre"},{"key":"cvd_gap","label":"CVD below its session max","l_q1":-696.75,"l_med":-390.0,"l_q3":-192.75,"w_q1":-735.0,"w_med":-457.0,"w_q3":-205.0,"auc":0.5287854401386654,"group":"pre"},{"key":"leg_delta","label":"\u0394 acceptance\u2192entry leg","l_q1":-237.25,"l_med":-128.5,"l_q3":-72.25,"w_q1":-257.0,"w_med":-152.0,"w_q3":-84.0,"auc":0.5378234493004829,"group":"pre"},{"key":"d1m_post","label":"CVD \u0394 1 min AFTER fill","l_q1":-222.25,"l_med":-100.5,"l_q3":-20.0,"w_q1":-109.0,"w_med":-22.0,"w_q3":47.0,"auc":0.33041351987123935,"group":"post"},{"key":"d2m_post","label":"CVD \u0394 2 min AFTER fill","l_q1":-263.5,"l_med":-158.5,"l_q3":-59.25,"w_q1":-116.0,"w_med":-3.0,"w_q3":137.0,"auc":0.23768106970409808,"group":"post"},{"key":"d3m_post","label":"CVD \u0394 3 min AFTER fill","l_q1":-435.5,"l_med":-218.0,"l_q3":-113.25,"w_q1":-114.0,"w_med":36.0,"w_q3":181.0,"auc":0.1891791506747555,"group":"post"},{"key":"d5m_post","label":"CVD \u0394 5 min AFTER fill","l_q1":-547.25,"l_med":-344.5,"l_q3":-93.5,"w_q1":-164.0,"w_med":34.0,"w_q3":285.0,"auc":0.23142874829763527,"group":"post"},{"key":"big_d3m_post","label":"Big-lot \u0394 3 min AFTER fill","l_q1":-71.75,"l_med":-23.5,"l_q3":0.0,"w_q1":-24.0,"w_med":9.0,"w_q3":50.0,"auc":0.29274483100160953,"group":"post"}],"hist":{"d5m":{"losers":[-279,-264,1062,-394,243,-239,778,161,302,288,346,3,262,550,-127,-246,-103,-255,615,28,-42,172,757,-255,-564,148,295,88,-93,-268,-423,1256,-650,-158,527,7,-94,-114,204,296,-229,-275,261,-8,360,2176,376,-295,-4,1108,268,684,-223,223,-175,-82,-206,-34,-168,849,-534,-789,-49,-840,-92,421,150,267,144,-142,1765,407,415,-152,-205,635,834,-115,1643,565,503,-80],"winners":[35,-421,-573,-147,1005,221,9,-356,-90,-222,-431,622,1074,113,-625,46,634,-80,-112,329,196,-39,-33,-48,190,233,984,-813,150,125,655,-599,-290,538,721,-463,-62,255,-72,148,-9,-632,-319,-211,-525,975,266,33,52,-231,330,755,231,-1001,265,-330,81,-54,-185,-477,-310,-257,-388,37,-78,273,46,390,-126,-41,131,533,-221,231,333,398,-8,-406,-262,-202,385,17,530,-235,-181,-90,-612,925,-342,-294,437,169,718,-411,305,348,372,-820,666,198,54,107,-212,310,-159,368,60,445,-430,18,-166,287,1017,-326,-244,-105,-211,27,351,400,509,-195,-299,-21,20,504,270,327,63,563,103,-33,417,-342,-7,425,210,2543,284,556,-533,465,520,591,-410,-198,-53,712,330,-310,374,-153,995,-48,-225,751,-135,330,-546,-466,-315,1190,390,256,416,-612,-230,-400,-69,382,-383,-209,1332,496,599,664,533,346,-159,503,-143,287,289,-601,-53,511,1333,-247,-156,357,438,-353,-338,601,72,-171,-330]},"d3m_post":{"losers":[-182,-119,-356,15,-568,-351,-777,-828,-381,-160,-289,-436,-126,-529,-1073,-554,-243,-747,769,-323,-514,-891,143,-237,-45,-113,-930,-500,-364,76,-153,-30,116,-186,-460,-72,18,58,38,-512,-433,-182,-170,-559,-673,-147,-114,-326,-674,-208,-65,-35,-567,-228,-284,43,-131,9,-175,-506,-6,-184,-164,-375,-607,-181,-189,-240,641,-364,-62,-157,-358,-134,-182,-360,-434,-306,24,-640,-331,11],"winners":[-531,418,96,213,7,-53,86,186,-117,-195,-442,-207,-126,65,-258,114,334,-84,63,160,77,-135,-354,28,486,239,462,51,300,-495,-152,124,-105,-79,174,-69,178,-65,-42,-135,142,-303,67,-3,181,287,277,76,723,-42,552,70,-246,617,-182,-101,134,488,6,-49,-325,248,240,74,-16,66,-94,-231,-51,-213,198,-169,-81,-54,-273,4,-284,209,109,379,685,-79,-13,-117,105,-53,-3,795,27,-396,89,564,-114,-232,9,380,290,-10,72,110,200,-134,11,176,147,-69,-274,-138,159,11,48,73,562,195,-178,-249,174,326,-87,70,291,-97,788,616,1,307,101,143,-98,466,-437,-55,176,351,-264,-232,-14,399,-193,175,7,128,-389,311,211,44,36,286,75,75,-237,23,-154,208,164,-357,-307,-271,-109,164,331,-104,9,-185,-280,-19,354,100,140,-34,199,93,121,-19,221,246,314,-4,-194,1309,-528,-131,25,105,37,1547,-138,-156,18,296,-164,424,56,46,-138,-231,-102]}}};
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmt = v => Math.abs(v)>=1000 ? (v/1000).toFixed(1).replace(/\.0$/,'')+'k'
+                : (Math.abs(v)<10 && v%1!==0 ? v.toFixed(2) : Math.round(v).toLocaleString());
+const tip = document.getElementById('tip');
+function showTip(ev, html){ tip.innerHTML = html; tip.style.display='block';
+  const x = Math.min(ev.clientX+14, innerWidth-280), y = ev.clientY+14;
+  tip.style.left=x+'px'; tip.style.top=y+'px'; }
+function hideTip(){ tip.style.display='none'; }
+
+/* ---- AUC dot plot ---- */
+(function(){
+  const rows = D.rows, W = 900, LM = 210, RM = 30, rh = 24, gap = 14;
+  const pre = rows.filter(r=>r.group==='pre'), post = rows.filter(r=>r.group==='post');
+  const H = (rows.length)*rh + gap + 46;
+  const x0 = 0.10, x1 = 0.90, X = v => LM + (v-x0)/(x1-x0)*(W-LM-RM);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="AUC per feature">`;
+  // gridlines + axis
+  for (const t of [0.2,0.3,0.4,0.5,0.6,0.7,0.8]){
+    const cls = t===0.5 ? 'axisline' : 'gridline';
+    s += `<line class="${cls}" x1="${X(t)}" y1="20" x2="${X(t)}" y2="${H-26}"/>`;
+    s += `<text class="num" x="${X(t)}" y="${H-10}" text-anchor="middle">${t.toFixed(1)}</text>`;
+  }
+  s += `<text x="${X(0.5)}" y="14" text-anchor="middle" fill="var(--muted)">0.5 = indistinguishable</text>`;
+  let y = 30;
+  const row = (r) => {
+    const cy = y + rh/2 - 4;
+    s += `<text x="${LM-10}" y="${cy+4}" text-anchor="end">${r.label}</text>`;
+    s += `<line x1="${X(0.5)}" y1="${cy}" x2="${X(r.auc)}" y2="${cy}" stroke="var(--dot)" stroke-width="2" opacity=".55"/>`;
+    s += `<circle class="pt" cx="${X(r.auc)}" cy="${cy}" r="5.5" fill="var(--dot)"
+      data-l="${r.label}" data-a="${r.auc.toFixed(3)}" data-lm="${fmt(r.l_med)}" data-wm="${fmt(r.w_med)}"/>`;
+    s += `<circle cx="${X(r.auc)}" cy="${cy}" r="12" fill="transparent" class="hit"
+      data-l="${r.label}" data-a="${r.auc.toFixed(3)}" data-lm="${fmt(r.l_med)}" data-wm="${fmt(r.w_med)}"/>`;
+    y += rh;
+  };
+  s += `<text x="0" y="${y+2}" font-weight="600" fill="var(--muted)" style="text-transform:uppercase;letter-spacing:.06em;font-size:10.5px">Before entry</text>`;
+  y += 10; pre.forEach(row);
+  y += gap;
+  s += `<text x="0" y="${y+2}" font-weight="600" fill="var(--muted)" style="text-transform:uppercase;letter-spacing:.06em;font-size:10.5px">After the fill</text>`;
+  y += 10; post.forEach(row);
+  s += '</svg>';
+  const el = document.getElementById('auc'); el.innerHTML = s;
+  el.querySelectorAll('.hit').forEach(c=>{
+    c.addEventListener('mousemove', ev=>showTip(ev,
+      `<div class="t">${c.dataset.l}</div><div class="s">AUC ${c.dataset.a}</div>`+
+      `<div class="s">losers med ${c.dataset.lm} · winners med ${c.dataset.wm}</div>`));
+    c.addEventListener('mouseleave', hideTip);
+  });
+})();
+
+/* ---- histograms ---- */
+function hist(elId, data, xlabel){
+  const all = data.losers.concat(data.winners).slice().sort((a,b)=>a-b);
+  const q = p => all[Math.floor(p*(all.length-1))];
+  const lo = q(0.02), hi = q(0.98), nb = 22, bw = (hi-lo)/nb;
+  const bins = series => {
+    const b = new Array(nb).fill(0);
+    let clipped = 0;
+    for (const v of series){
+      if (v<lo || v>hi){ clipped++; continue; }
+      b[Math.min(nb-1, Math.floor((v-lo)/bw))]++;
+    }
+    return { pct: b.map(c=>c/series.length*100), clipped };
+  };
+  const L = bins(data.losers), Wn = bins(data.winners);
+  const ymax = Math.max(...L.pct, ...Wn.pct)*1.15;
+  const W=430, H=240, ML=34, MB=30, MT=12, MR=8;
+  const X = i => ML + i/nb*(W-ML-MR);
+  const Y = v => H-MB - v/ymax*(H-MB-MT);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${xlabel}">`;
+  for (let g=0; g<=4; g++){
+    const v = ymax*g/4;
+    s += `<line class="gridline" x1="${ML}" y1="${Y(v)}" x2="${W-MR}" y2="${Y(v)}"/>`;
+    s += `<text class="num" x="${ML-5}" y="${Y(v)+4}" text-anchor="end">${Math.round(v)}%</text>`;
+  }
+  const path = (pct) => {
+    let p = `M ${X(0)} ${Y(0)}`;
+    for (let i=0;i<nb;i++) p += ` L ${X(i)} ${Y(pct[i])} L ${X(i+1)} ${Y(pct[i])}`;
+    return p + ` L ${X(nb)} ${Y(0)}`;
+  };
+  s += `<path d="${path(Wn.pct)}" fill="var(--win)" opacity=".28"/>`;
+  s += `<path d="${path(Wn.pct)}" fill="none" stroke="var(--win)" stroke-width="2"/>`;
+  s += `<path d="${path(L.pct)}" fill="var(--loss)" opacity=".28"/>`;
+  s += `<path d="${path(L.pct)}" fill="none" stroke="var(--loss)" stroke-width="2"/>`;
+  s += `<line class="axisline" x1="${ML}" y1="${Y(0)}" x2="${W-MR}" y2="${Y(0)}"/>`;
+  // zero marker if in range
+  if (lo<0 && hi>0){
+    const xz = ML + (0-lo)/(hi-lo)*(W-ML-MR);
+    s += `<line x1="${xz}" y1="${MT}" x2="${xz}" y2="${Y(0)}" stroke="var(--axis)" stroke-dasharray="3 3"/>`;
+    s += `<text class="num" x="${xz}" y="${H-8}" text-anchor="middle">0</text>`;
+  }
+  s += `<text class="num" x="${ML}" y="${H-8}" text-anchor="start">${fmt(lo)}</text>`;
+  s += `<text class="num" x="${W-MR}" y="${H-8}" text-anchor="end">${fmt(hi)}</text>`;
+  // hover strips
+  for (let i=0;i<nb;i++){
+    s += `<rect class="hit" x="${X(i)}" y="${MT}" width="${X(i+1)-X(i)}" height="${H-MB-MT}" fill="transparent"
+      data-r="${fmt(lo+i*bw)} … ${fmt(lo+(i+1)*bw)}" data-w="${Wn.pct[i].toFixed(1)}" data-l="${L.pct[i].toFixed(1)}"/>`;
+  }
+  s += '</svg>';
+  const el = document.getElementById(elId); el.innerHTML = s;
+  el.querySelectorAll('.hit').forEach(r=>{
+    r.addEventListener('mousemove', ev=>showTip(ev,
+      `<div class="t">${r.dataset.r} contracts</div>`+
+      `<div class="s">winners ${r.dataset.w}% · losers ${r.dataset.l}%</div>`));
+    r.addEventListener('mouseleave', hideTip);
+  });
+}
+hist('h_pre', D.hist.d5m, 'CVD delta 5 min before entry');
+hist('h_post', D.hist.d3m_post, 'CVD delta 3 min after fill');
+
+/* ---- table ---- */
+(function(){
+  const tb = document.querySelector('#tbl tbody');
+  const grp = (name) => { const tr = document.createElement('tr'); tr.className='grp';
+    tr.innerHTML = `<td colspan="4">${name}</td>`; tb.appendChild(tr); };
+  const add = (r) => {
+    const dev = (r.auc-0.5), w = Math.min(42, Math.abs(dev)/0.35*42);
+    const left = dev<0 ? 42-w : 42;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${r.label}</td>
+      <td>${fmt(r.l_med)} <span class="iqr">${fmt(r.l_q1)}…${fmt(r.l_q3)}</span></td>
+      <td>${fmt(r.w_med)} <span class="iqr">${fmt(r.w_q1)}…${fmt(r.w_q3)}</span></td>
+      <td>${r.auc.toFixed(2)}<span class="aucbar"><span class="mid"></span>
+        <span class="fill" style="left:${left}px;width:${w}px"></span></span></td>`;
+    tb.appendChild(tr);
+  };
+  grp('Before entry — nothing separates');
+  D.rows.filter(r=>r.group==='pre').forEach(add);
+  grp('After the fill — separation arrives too late');
+  D.rows.filter(r=>r.group==='post').forEach(add);
+})();
+</script>

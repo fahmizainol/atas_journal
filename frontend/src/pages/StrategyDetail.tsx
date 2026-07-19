@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
+import { BadgeInput, BadgeList } from "../components/BadgeInput";
 import { CandlestickChart } from "../components/charts/CandlestickChart";
 import { DataTable } from "../components/DataTable";
 import { KpiGrid } from "../components/KpiGrid";
@@ -10,6 +11,7 @@ import {
   useCreateRun,
   useDeleteRun,
   usePatchRunMeta,
+  usePatchTradeTags,
   usePinBaseline,
   usePreflight,
   useRerunBaseline,
@@ -19,8 +21,15 @@ import {
   useStrategyDetail,
 } from "../hooks/useStrategies";
 import { ConfigForm } from "../components/strategies/ConfigForm";
+import { GateAuditPanel } from "../components/strategies/GateAuditPanel";
 import { RegimePnlPanel } from "../components/strategies/RegimePnlPanel";
 import { RunEdgesPanel } from "../components/strategies/RunEdgesPanel";
+import {
+  EMPTY_TRADE_FILTER,
+  filterTrades,
+  TradeFilterBar,
+  type TradeFilter,
+} from "../components/strategies/TradeFilterBar";
 import { RunRegimeCalendar } from "../components/strategies/RunRegimeCalendar";
 import { useRegimeDay } from "../hooks/useRegime";
 import { CLASS_LABEL, type RegimeDay } from "../lib/regimeTypes";
@@ -83,8 +92,8 @@ const isGlobexChart = (d: { vwap_anchor?: "globex" | "ny" }) => d.vwap_anchor ==
 
 const vwapCaption = (globex: boolean) =>
   globex
-    ? "Tick candles from the 18:00 ET Globex open through the bell. The engine traded the gray Globex-anchored VWAP ±1σ (dev1) and ±2σ (dev2), computed from ticks — those are the bands the rules fired on. The purple NY-anchored VWAP is drawn for context only (it starts at the bell) and no rule reads it. The overnight bars feed the bands and the profile only; acceptance and the invalidations are read from RTH closes alone."
-    : "Tick candles from the 18:00 ET Globex open through the bell, shown whenever the overnight ticks are cached. The engine traded the purple NY-anchored VWAP ±1σ (dev1) and ±2σ (dev2), computed from ticks — those are the bands the rules fired on, and only the RTH candles are the ones it closed on (the overnight leg is context, built separately so the session's own candle boundaries stay exactly as the engine saw them). The gray Globex-anchored VWAP is drawn for context only and no rule reads it. Toggle either off in the legend.";
+    ? "Tick candles from the 18:00 ET Globex open through the bell. The engine traded the gray Globex-anchored VWAP ±1σ (dev1) and ±2σ (dev2), computed from ticks — those are the bands the rules fired on. The purple NY-anchored VWAP is drawn for context only (it starts at the bell) and no rule reads it, as is the orange weekly-anchored VWAP (anchored at the week's first Globex open; drawn only when the whole week's ticks are cached). The overnight bars feed the bands and the profile only; acceptance and the invalidations are read from RTH closes alone."
+    : "Tick candles from the 18:00 ET Globex open through the bell, shown whenever the overnight ticks are cached. The engine traded the purple NY-anchored VWAP ±1σ (dev1) and ±2σ (dev2), computed from ticks — those are the bands the rules fired on, and only the RTH candles are the ones it closed on (the overnight leg is context, built separately so the session's own candle boundaries stay exactly as the engine saw them). The gray Globex-anchored VWAP and the orange weekly-anchored VWAP (anchored at the week's first Globex open) are drawn for context only and no rule reads them. Toggle any off in the legend.";
 
 // Chart for one simulated trade. Same CandlestickChart the journal uses for real
 // trades — the sim just feeds it tick bars and tick-derived VWAP instead.
@@ -103,6 +112,7 @@ function RunTradeChart({ slug, runId, tradeNo }: { slug: string; runId: string; 
         bars={data.bars}
         vwapGlobex={data.vwap_globex}
         vwapNy={data.vwap_ny}
+        vwapWeekly={data.vwap_weekly}
         profileGlobex={data.profile_globex}
         profileNy={data.profile_ny}
         atrPoints={[]}
@@ -110,7 +120,10 @@ function RunTradeChart({ slug, runId, tradeNo }: { slug: string; runId: string; 
         markers={data.markers}
         priceLines={data.price_lines}
         levels={[]}
+        ib={data.ib}
         tradeRects={rects}
+        focusOnTrade
+        debugZoom
         footprint={data.footprint}
         tickSize={data.tick_size}
         pointValue={data.point_value}
@@ -127,6 +140,14 @@ function RunTradeChart({ slug, runId, tradeNo }: { slug: string; runId: string; 
             The developing value areas (VAH / VAL solid, POC dashed) show each bar's close-of-bar
             value area: fuchsia anchored at the NY open, icy-cyan at the Globex open. Both are drawn
             on every chart — whether a rule actually read one is the run's config, not the picture.
+          </>
+        )}
+        {data.ib && (
+          <>
+            {" "}
+            Lime lines = the Initial Balance (first-hour high/low, 09:30–10:30 ET), drawn from the
+            bell to the close; the 1×/1.5×/2× extension guides (legend, off by default) are platform
+            convention, not a measured edge.
           </>
         )}
       </div>
@@ -228,6 +249,7 @@ function RunDayChart({
           bars={data.bars}
           vwapGlobex={data.vwap_globex}
           vwapNy={data.vwap_ny}
+          vwapWeekly={data.vwap_weekly}
           profileGlobex={data.profile_globex}
           profileNy={data.profile_ny}
           atrPoints={[]}
@@ -235,6 +257,7 @@ function RunDayChart({
           markers={data.markers}
           priceLines={[]}
           levels={[]}
+          ib={data.ib}
           tradeRects={data.trades}
           footprint={data.footprint}
           regimeStates={regime?.ribbon}
@@ -252,6 +275,13 @@ function RunDayChart({
               {" "}
               The session starts at the 18:00 ET Globex open, where this strategy's gray VWAP is
               anchored — trades are still confined to RTH.
+            </>
+          )}
+          {data.ib && (
+            <>
+              {" "}
+              Lime lines = the Initial Balance (first-hour high/low, 09:30–10:30 ET); the 1×/1.5×/2×
+              extension guides (legend, off by default) are platform convention, not a measured edge.
             </>
           )}
           {regime && (
@@ -302,6 +332,28 @@ function MetaEditor({ slug, runId, label, notes }: {
         onBlur={() => n !== notes && patch.mutate({ runId, notes: n })}
       />
     </div>
+  );
+}
+
+// Tags for the open trade. Free-text, per-run (trade_no is only unique within a
+// run); autocomplete is seeded from every tag used across the strategy so the
+// same idea keeps one spelling. Each add/remove PATCHes the sidecar and the run
+// detail refetches, so `tags` is always the server's copy — no local mirror.
+function TradeTagEditor({ slug, runId, tradeNo, tags, vocab }: {
+  slug: string;
+  runId: string;
+  tradeNo: number;
+  tags: string[];
+  vocab: string[];
+}) {
+  const patch = usePatchTradeTags(slug);
+  return (
+    <BadgeInput
+      value={tags}
+      onChange={(next) => patch.mutate({ runId, tradeNo, tags: next })}
+      suggestions={vocab}
+      placeholder="tag this trade…"
+    />
   );
 }
 
@@ -732,6 +784,23 @@ function RunView({
     [setParam],
   );
 
+  // Client-side filter over the by-trade list (entry/exit time, exit reason, R).
+  // Deliberately not in the URL: it's a skimming aid, not navigable state.
+  const [tradeFilter, setTradeFilter] = useState<TradeFilter>(EMPTY_TRADE_FILTER);
+  const allTrades = detail?.trades ?? [];
+  const tagsByNo = detail?.trade_tags ?? {};
+  const tagVocab = detail?.tag_vocab ?? [];
+  // The tags actually present in this run — the filter chip row. Distinct from
+  // tagVocab (the whole strategy's tags), which seeds the editor's autocomplete.
+  const tagOptions = useMemo(
+    () => [...new Set(Object.values(tagsByNo).flat())].sort(),
+    [tagsByNo],
+  );
+  const shownTrades = useMemo(
+    () => filterTrades(allTrades, tradeFilter, tagsByNo),
+    [allTrades, tradeFilter, tagsByNo],
+  );
+
   const tickSize = 0.25; // NQ
   const columns = useMemo<ColumnDef<SimTrade, any>[]>(
     () => [
@@ -778,8 +847,15 @@ function RunView({
           return <span className={tone(v)}>{fmt(v)}</span>;
         },
       },
+      {
+        id: "tags",
+        header: "Tags",
+        // Read-only badges here; editing lives in the open-trade slot below. Kept
+        // last so the tag list can grow without shoving the numeric columns around.
+        cell: (c) => <BadgeList items={tagsByNo[String(c.row.original.trade_no)] ?? []} />,
+      },
     ],
-    [],
+    [tagsByNo],
   );
 
   const vetoedColumns = useMemo<ColumnDef<VetoedTrade, any>[]>(
@@ -859,11 +935,46 @@ function RunView({
         </div>
       )}
 
+      {m.missed && (
+        <div className="notice" style={{ marginTop: 12 }}>
+          Being in a trade hid <strong>{m.missed.count}</strong> setups that armed and touched
+          while a position was open.{" "}
+          {m.missed.realizable_net !== undefined ? (
+            <>
+              One contract at a time, only <strong>{m.missed.realizable_count}</strong> of them fit
+              the gaps in the real book — worth{" "}
+              <span className={tone(m.missed.realizable_net)}>{fmt(m.missed.realizable_net)}</span>{" "}
+              net. That is the actual capacity cost. The raw sum of all {m.missed.count} is{" "}
+              <span className={tone(m.missed.net_pnl)}>{fmt(m.missed.net_pnl)}</span>, but it
+              double-counts: the ghosts overlap real positions{" "}
+              {m.missed.max_concurrent !== undefined && (
+                <>up to <strong>{m.missed.max_concurrent}</strong> deep</>
+              )}
+              , so it is not P&amp;L you could have held.
+            </>
+          ) : (
+            <>
+              The raw sum of them is{" "}
+              <span className={tone(m.missed.net_pnl)}>{fmt(m.missed.net_pnl)}</span> net, but that
+              stacks ghosts that overlap real positions and each other, so it overstates the
+              realizable cost — re-run to compute the one-at-a-time figure.
+            </>
+          )}{" "}
+          Either way this is why small config tweaks reshuffle the rest of a day: a different first
+          trade hides a different set of these.
+        </div>
+      )}
+
       {/* Scores nothing itself: the study is computed server-side and read back
           from the run's own snapshot, so the panel only needs to say which run. */}
       <RegimePnlPanel slug={slug} runId={run.run_id} />
 
       <RunEdgesPanel slug={slug} runId={run.run_id} />
+
+      {/* Real-edge-or-luck scorecard for this run's confluence stack. Variant
+          runs resolve by config hash server-side, so the panel works on any
+          run and offers to launch whatever part of the ladder is missing. */}
+      <GateAuditPanel slug={slug} runId={run.run_id} />
 
       <div className="tabs" style={{ marginTop: 20 }}>
         <button
@@ -941,24 +1052,47 @@ function RunView({
       ) : (
         <>
           <h3 style={{ marginTop: 12 }}>Trades — click one to see it on the chart</h3>
-          {/* A long window runs to hundreds of trades, and the table is the last
-              thing on the page — without a cap the run's chart and metrics scroll
-              away and every other run is a page-length flick apart. maxHeight, not
-              height: a 6-trade run should not sit in 600px of empty box. The
-              expanded chart lives inside the scroller, and DataTable's
-              scrollOnExpand pulls the clicked row to the top of it. */}
-          <div className="table-scroll" style={{ maxHeight: 600, overflow: "auto" }}>
+          <TradeFilterBar
+            trades={allTrades}
+            shown={shownTrades.length}
+            filter={tradeFilter}
+            onChange={setTradeFilter}
+            tagOptions={tagOptions}
+          />
+          {/* A long window runs to hundreds of trades, so the list is capped at a
+              scannable height and the chart for the clicked trade renders once in a
+              fixed slot below it (master–detail). Selecting a row never reflows the
+              list, so you can skim trades and inspect one at the same time — unlike
+              an inline accordion, which shoves every trade below the open one away. */}
+          <div className="table-scroll" style={{ maxHeight: 340, overflow: "auto" }}>
             <DataTable
-              data={detail?.trades ?? []}
+              data={shownTrades}
               columns={columns}
               rowKey={(r) => r.trade_no}
-              expandedKey={openTrade}
-              onExpandedChange={setOpenTrade}
-              renderExpanded={(r) => (
-                <RunTradeChart slug={slug} runId={run.run_id} tradeNo={r.trade_no} />
-              )}
+              selectedKey={openTrade}
+              onRowClick={(r) => setOpenTrade(r.trade_no === openTrade ? null : r.trade_no)}
             />
           </div>
+          {openTrade != null && (
+            <div className="trade-detail-slot">
+              <div className="trade-detail-head">
+                <span>Trade #{openTrade}</span>
+                <div style={{ flex: 1, margin: "0 12px", fontWeight: 400 }}>
+                  <TradeTagEditor
+                    slug={slug}
+                    runId={run.run_id}
+                    tradeNo={openTrade}
+                    tags={tagsByNo[String(openTrade)] ?? []}
+                    vocab={tagVocab}
+                  />
+                </div>
+                <button type="button" className="link-btn" onClick={() => setOpenTrade(null)}>
+                  Close ✕
+                </button>
+              </div>
+              <RunTradeChart slug={slug} runId={run.run_id} tradeNo={openTrade} />
+            </div>
+          )}
           {(detail?.vetoed_trades?.length ?? 0) > 0 && (
             <>
               <h3 style={{ marginTop: 20 }}>Vetoed by confluences</h3>

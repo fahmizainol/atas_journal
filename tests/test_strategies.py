@@ -184,7 +184,9 @@ def test_vetoed_entries_become_ghost_trades():
     confmod.GATE_FACTORIES["test_veto"] = lambda section: _VetoAll()
     try:
         base_trades, base_vetoed, _, _ = engine.run_session(SimConfig(), DAY)
-        assert base_trades and not base_vetoed
+        # A gateless run can still ghost: setups that formed while a position
+        # was open ride along as "in_trade" rows. Only gate vetoes must be absent.
+        assert base_trades and all(v["gate"] == "in_trade" for v in base_vetoed)
 
         cfg = SimConfig(confluences={"test_veto": {"enabled": True}})
         trades, vetoed, _, _ = engine.run_session(cfg, DAY)
@@ -198,7 +200,8 @@ def test_vetoed_entries_become_ghost_trades():
         # enabled:false is inert — identical trades to the gateless run.
         off = SimConfig(confluences={"test_veto": {"enabled": False}})
         off_trades, off_vetoed, _, _ = engine.run_session(off, DAY)
-        assert len(off_trades) == len(base_trades) and not off_vetoed
+        assert len(off_trades) == len(base_trades)
+        assert all(v["gate"] == "in_trade" for v in off_vetoed)
     finally:
         confmod.GATE_FACTORIES.pop("test_veto", None)
 
@@ -516,6 +519,75 @@ def test_vwap_slope_cap_gate_stands_down_against_a_steep_upward_grade():
                 {"enabled": True, "checkpoint": "11:00"}):
         try:
             gatesmod.VwapSlopeCapGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_vwap_flat_gate_stands_down_on_a_graded_day_either_way():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": 2.0}}}
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+        g = gatesmod.VwapFlatGate({"enabled": True, "grade_max": 1.2})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0), "pre-checkpoint entries pass"
+        assert not any(g.allows(i, 0.0) for i in (1, 2, 3)), "stood down from 09:45"
+
+        # The grade is a magnitude: a steep DOWNWARD day stands down too — the
+        # side the slope cap can never touch on the short.
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": -2.0}}}
+        g = gatesmod.VwapFlatGate({"enabled": True, "grade_max": 1.2})
+        g.prepare(_regime_ctx())
+        assert not g.allows(2, 0.0)
+
+        # A slope exactly at the threshold stands down: the knob is "at or above".
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": -1.2}}}
+        g = gatesmod.VwapFlatGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert not g.allows(2, 0.0)
+
+        # A flat day — either sign under the threshold — leaves the gate inert.
+        for flat in (0.4, -1.1):
+            art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": flat}}}
+            g = gatesmod.VwapFlatGate({"enabled": True})
+            g.prepare(_regime_ctx())
+            assert all(g.allows(i, 0.0) for i in range(4)), f"flat case {flat!r}"
+
+        # The read needs no band frame: the fade-long's lower-band ctx reads the
+        # same number the same way.
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": 2.0}}}
+        g = gatesmod.VwapFlatGate({"enabled": True})
+        g.prepare(_regime_ctx(band="lower"))
+        assert not g.allows(2, 0.0)
+
+        # checkpoint="10:30" reads the 10:30 slope and stands down from 10:30.
+        art = {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": 0.1},
+                               "10:30": {"ny_vwap_slope_ppm": -0.9}}}
+        g = gatesmod.VwapFlatGate({"enabled": True, "grade_max": 0.33,
+                                   "checkpoint": "10:30"})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0) and g.allows(1, 0.0), "pre-checkpoint entries pass"
+        assert not g.allows(2, 0.0) and not g.allows(3, 0.0), "stood down from 10:30"
+
+        # Blind — no artifact, or no slope — must not read as confirmed.
+        for blind in (None, {"checkpoints": {}},
+                      {"checkpoints": {"09:45": {"ny_vwap_slope_ppm": None}}}):
+            art = blind
+            g = gatesmod.VwapFlatGate({"enabled": True})
+            g.prepare(_regime_ctx())
+            assert g.allows(0, 0.0) and not g.allows(1, 0.0), f"blind case {blind!r}"
+    finally:
+        gatesmod.regmod.get_regime = real
+
+    for bad in ({"enabled": True, "grade": 1.0}, {"enabled": True, "grade_max": 9.0},
+                {"enabled": True, "grade_max": -0.1},
+                {"enabled": True, "grade_max": True},
+                {"enabled": True, "checkpoint": "11:00"}):
+        try:
+            gatesmod.VwapFlatGate(bad)
             raise AssertionError(f"expected ValueError for {bad!r}")
         except ValueError:
             pass
@@ -1314,7 +1386,12 @@ def test_run_edges_partition_the_run_and_only_a_sim_knows_why_it_exited():
         payload = api.run_edges(SLUG, rid, compare=None)
         traded = payload["scopes"]["traded"]
         assert traded["trades"] == len(trades)
-        assert [c["name"] for c in traded["cuts"]] == list(api.TRADED_CUTS)
+        # A run is served every TRADED_CUTS cut whose columns its book carries;
+        # by_entry_reason drops out here (only the drift-fade strategies write it).
+        expected = [n for n in api.TRADED_CUTS
+                    if all(c in trades.columns for c in edges.BY_NAME[n].needs)]
+        assert [c["name"] for c in traded["cuts"]] == expected
+        assert "by_entry_reason" not in expected
 
         for cut in traded["cuts"]:
             rows = cut["rows"]
@@ -1406,6 +1483,44 @@ def test_confluence_breakdown_scores_every_gate_that_vetoed_not_just_the_first()
     assert legacy["trades"].sum() == len(v)
 
     assert edges.confluence_breakdown(pd.DataFrame()).empty
+
+
+def test_by_gate_cut_buckets_solo_vetoes_and_pools_the_stacked():
+    """"Which gate vetoed it" is only actionable as "what does one toggle free", so
+    the by_gate cut buckets each entry under the gate that vetoed it ALONE and pools
+    every 2+-gate veto into "(2+ gates)" — never crediting the first gate to fire for
+    a trade another gate would still have blocked."""
+    v = pd.DataFrame([
+        {"net_pnl": 100.0, "r_multiple": 1.0, "gate": "regime", "gates": "regime|slope"},
+        {"net_pnl": -50.0, "r_multiple": -0.5, "gate": "slope", "gates": "slope"},
+        {"net_pnl": 200.0, "r_multiple": 2.0, "gate": "slope", "gates": "slope"},
+        {"net_pnl": -30.0, "r_multiple": -0.3, "gate": "regime", "gates": "regime|slope|overhang"},
+        {"net_pnl": 400.0, "r_multiple": 4.0, "gate": "overhang", "gates": "overhang"},
+    ])
+    out = edges._frame(v, "by_gate").set_index("bucket")
+
+    # Solo vetoes land under their own gate; the two stacked ones pool together, and
+    # regime — which only ever fired stacked here — gets no bucket of its own.
+    assert out.loc["slope", "trades"] == 2
+    assert out.loc["overhang", "trades"] == 1
+    assert out.loc[edges.STACKED_GATE, "trades"] == 2
+    assert "regime" not in out.index
+
+    # A disjoint partition: the buckets sum to the ghost total (unlike the overlap
+    # breakdown), and each bucket's net is exactly its own rows.
+    assert out["trades"].sum() == len(v)
+    assert abs(out.loc["slope", "net_pnl"] - (-50 + 200)) < 1e-9
+    assert abs(out.loc[edges.STACKED_GATE, "net_pnl"] - (100 - 30)) < 1e-9
+
+    # A gate's solo bucket here equals its `unique` in the overlap breakdown.
+    cb = edges.confluence_breakdown(v).set_index("bucket")
+    assert out.loc["slope", "trades"] == cb.loc["slope", "unique"]
+    assert out.loc["overhang", "trades"] == cb.loc["overhang", "unique"]
+
+    # Legacy ledger with no gates set falls back to the first-match gate column.
+    legacy = edges._frame(v.drop(columns=["gates"]), "by_gate").set_index("bucket")
+    assert legacy.loc["regime", "trades"] == 2
+    assert edges.STACKED_GATE not in legacy.index
 
 
 def test_api_bad_config_is_a_400_not_a_run():
@@ -1644,13 +1759,51 @@ FADE_SLUG = "vwap-dev1-fade-short"
 FADE_LONG_SLUG = "vwap-dev1-fade-long"
 
 
+def test_value_rotation_registry_entry():
+    from journal.sim.rules import ValueRotationConfig
+
+    strat = registry.get("value-rotation")
+    assert strat.config_cls is ValueRotationConfig
+    assert strat.version == "2"
+    assert strat.session == "rth"
+    assert strat.confluences == ("vwap_flat", "vwap_slope_cap", "vwap_slope",
+                                 "ib_in_on", "ib_width")
+    assert strat.run_session is engine.run_session_value_rotation
+
+
+def test_value_rotation_schema_and_parse():
+    from journal.sim.rules import ValueRotationConfig
+
+    detail = api.strategy_detail("value-rotation")
+    assert detail["default_config"] == ValueRotationConfig().to_json()
+    names = {f["name"] for f in detail["config_schema"]["fields"]}
+    assert "arm_beyond_ticks" in names and "min_room_ticks" in names
+    assert "acceptance_min_ticks" not in names and "arm_extension_ticks" not in names
+    assert [c["name"] for c in detail["config_schema"]["confluences"]] == [
+        "vwap_flat", "vwap_slope_cap", "vwap_slope", "ib_in_on", "ib_width"]
+
+    # Partial configs parse against the class's own defaults; the side and the
+    # target are enums and reject strangers; unknown keys are a hard error.
+    cfg = schema.parse({"side": "long", "target": "rr", "target_rr": 2.0},
+                       ValueRotationConfig)
+    assert cfg.side == "long" and cfg.target_rr == 2.0
+    for bad in ({"side": "up"}, {"target": "vwap"}, {"stop_tickss": 50},
+                {"target": "rr"}):  # rr without target_rr
+        try:
+            schema.parse(bad, ValueRotationConfig)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
 def test_fade_registry_entry():
     strat = registry.get(FADE_SLUG)
     assert strat.config_cls is FadeConfig
-    assert strat.version == "2"   # v2: arm_stretch_side
+    assert strat.version == "3"   # v3: daily_loss_exit_open (v2: arm_stretch_side)
     assert strat.session == "rth"
-    assert strat.confluences == ("volume_profile", "vwap_slope_cap",
-                                 "upper_occupancy_cap", "gx_rescue_cap")
+    assert strat.confluences == ("volume_profile", "vwap_slope_cap", "vwap_flat",
+                                 "upper_occupancy_cap", "gx_rescue_cap",
+                                 "ib_in_on", "ib_width")
 
 
 def test_fade_long_registry_entry_is_the_short_reflected():
@@ -1729,7 +1882,8 @@ def test_fade_strategy_detail_serves_its_own_schema():
     assert "arm_extension_ticks" in names and "acceptance_min_ticks" not in names
     assert [g["key"] for g in detail["config_schema"]["groups"]].count("arming") == 1
     assert [c["name"] for c in detail["config_schema"]["confluences"]] == [
-        "volume_profile", "vwap_slope_cap", "upper_occupancy_cap", "gx_rescue_cap"]
+        "volume_profile", "vwap_slope_cap", "vwap_flat",
+        "upper_occupancy_cap", "gx_rescue_cap", "ib_in_on", "ib_width"]
 
 
 if __name__ == "__main__":
@@ -1738,3 +1892,199 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} passed")
+
+
+def test_wk_ext_gate_caps_entries_at_the_weekly_envelope():
+    from journal.sim import gates as gatesmod
+
+    ts = pd.to_datetime(
+        ["2025-10-14 13:35", "2025-10-14 14:00", "2025-10-14 14:30", "2025-10-14 15:00"],
+        utc=True)
+    # Zero-size ticks: the seeded accumulation stays exactly at the seed's mid
+    # and sigma at every tick, so the envelope under test is a known constant.
+    ticks = pd.DataFrame({"ts_utc": ts, "price": [100.0] * 4, "size": [0.0] * 4})
+    ctx = confmod.SessionCtx(cfg=SimConfig(), day=date(2025, 10, 14), ticks=ticks,
+                             bars=pd.DataFrame(), value_edge_at_tick=None, profile=None)
+    # Seed: 100 lots at mid 100 with variance 25 -> weekly mid 100, sigma 5.
+    seed = (100.0, 10_000.0, 1_002_500.0)
+    on = pd.DataFrame({"ts_utc": pd.to_datetime(["2025-10-14 13:00"], utc=True),
+                       "price": [100.0], "size": [0.0]})
+
+    real_seed = gatesmod.weeklymod.weekly_seed
+    real_contract = gatesmod.tickmod.contract_for_cached
+    real_on = gatesmod.tickmod.cached_overnight
+    try:
+        gatesmod.weeklymod.weekly_seed = lambda contract, day: seed
+        gatesmod.tickmod.contract_for_cached = lambda symbol, day: "NQZ5"
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on
+
+        g = gatesmod.WkExtGate({"enabled": True, "max_sigma": 2.0})
+        g.prepare(ctx)  # envelope: mid 100, sigma 5 -> cap at 110
+        assert g.allows(0, 95.0), "a fill below the weekly mid always passes"
+        assert g.allows(0, 110.0), "the +2 sigma edge itself passes"
+        assert not g.allows(0, 110.25), "one tick beyond the envelope is vetoed"
+        assert not g.allows(3, 125.0), "far beyond is vetoed at any tick"
+
+        # The lower-band mirror: the cap is beneath mid - max_sigma stds.
+        sctx = confmod.SessionCtx(cfg=ctx.cfg, day=ctx.day, ticks=ticks,
+                                  bars=pd.DataFrame(), value_edge_at_tick=None,
+                                  profile=None, side="short")
+        g = gatesmod.WkExtGate({"enabled": True, "max_sigma": 2.0})
+        g.prepare(sctx)
+        assert g.allows(0, 105.0), "a fill above the weekly mid always passes a short"
+        assert g.allows(0, 90.0), "the -2 sigma edge itself passes"
+        assert not g.allows(0, 89.75), "one tick beneath the envelope is vetoed"
+
+        # The week's first session is INERT: the weekly anchor has no history,
+        # the premise does not exist, and the gate must not fire.
+        gatesmod.weeklymod.weekly_seed = lambda contract, day: (0.0, 0.0, 0.0)
+        g = gatesmod.WkExtGate({"enabled": True, "max_sigma": 2.0})
+        g.prepare(ctx)
+        assert g.allows(0, 1e9), "the week's first session has no envelope to enforce"
+
+        # A hole in the week is missing data, and missing data vetoes.
+        gatesmod.weeklymod.weekly_seed = lambda contract, day: None
+        g = gatesmod.WkExtGate({"enabled": True})
+        g.prepare(ctx)
+        assert not g.allows(0, 100.0), "a week with a hole must not read as confirmed"
+
+        # So does a session whose own overnight was never cached.
+        gatesmod.weeklymod.weekly_seed = lambda contract, day: seed
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: None
+        g = gatesmod.WkExtGate({"enabled": True})
+        g.prepare(ctx)
+        assert not g.allows(0, 100.0), "no overnight must not read as confirmed"
+    finally:
+        gatesmod.weeklymod.weekly_seed = real_seed
+        gatesmod.tickmod.contract_for_cached = real_contract
+        gatesmod.tickmod.cached_overnight = real_on
+
+    for bad in ({"enabled": True, "sigma": 2}, {"enabled": True, "max_sigma": -1},
+                {"enabled": True, "max_sigma": True}):
+        try:
+            gatesmod.WkExtGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def _structure_session(minute_ohlc, day=date(2025, 10, 14)):
+    """SessionCtx + mocked overnight for the market-structure gates.
+
+    minute_ohlc: list of (high, low) per 1-min bar. The first ten bars are
+    served as the cached overnight (so the gates' spliced window is full from
+    the first RTH tick) and the rest become RTH ticks — two prints per minute,
+    the high then the low, which round-trips through _minute_bars exactly.
+    """
+    from journal.sim import gates as gatesmod
+
+    t0 = pd.Timestamp(f"{day} 13:20", tz="UTC")  # ON tail; RTH from 13:30
+    rows = []
+    for m, (h, l) in enumerate(minute_ohlc):
+        for off, px in ((0, h), (30, l)):
+            rows.append((t0 + pd.Timedelta(seconds=60 * m + off), float(px)))
+    frame = pd.DataFrame({"ts_utc": [r[0] for r in rows],
+                          "price": [r[1] for r in rows],
+                          "size": [1.0] * len(rows)})
+    split = frame["ts_utc"] < t0 + pd.Timedelta(minutes=10)
+    on, ticks = frame[split].reset_index(drop=True), frame[~split].reset_index(drop=True)
+    ctx = confmod.SessionCtx(cfg=SimConfig(), day=day, ticks=ticks,
+                             bars=pd.DataFrame(), value_edge_at_tick=None, profile=None)
+    return gatesmod, ctx, on
+
+
+def test_chop_gate_vetoes_overlapping_tape_and_passes_marching_tape():
+    # Ten identical bars (overlap 1.0) then ten stair-stepping bars whose
+    # consecutive ranges never touch (overlap 0.0). The window that ends inside
+    # the flat stretch must veto; once the ten marching bars have closed, the
+    # window is clean and the gate must pass.
+    flat = [(105.0, 100.0)] * 10
+    march = [(105.0 + 6 * k, 100.0 + 6 * k) for k in range(1, 11)]
+    gatesmod, ctx, on = _structure_session(flat + march)
+
+    real_contract = gatesmod.tickmod.contract_for_cached
+    real_on = gatesmod.tickmod.cached_overnight
+    try:
+        gatesmod.tickmod.contract_for_cached = lambda symbol, day: "NQZ5"
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on
+
+        g = gatesmod.ChopGate({"enabled": True, "max_overlap": 0.60})
+        g.prepare(ctx)
+        # Tick 0 prints in minute 10: closed bars are the ten flat ones.
+        assert not g.allows(0, 103.0), "a fully overlapping window is chop"
+        # The last tick prints in minute 19: bars 10..18 have closed, so the
+        # window is 9 marching pairs and one flat->march seam pair.
+        assert g.allows(len(ctx.ticks) - 1, 160.0), "marching bars pass"
+
+        # Blind sessions veto wholesale: no cached overnight, no window.
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: None
+        g = gatesmod.ChopGate({"enabled": True})
+        g.prepare(ctx)
+        assert not g.allows(0, 103.0), "no overnight must not read as confirmed"
+    finally:
+        gatesmod.tickmod.contract_for_cached = real_contract
+        gatesmod.tickmod.cached_overnight = real_on
+
+    for bad in ({"enabled": True, "overlap": 0.5}, {"enabled": True, "max_overlap": 1.5},
+                {"enabled": True, "max_overlap": True}):
+        try:
+            gatesmod.ChopGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_structure_clarity_gate_reads_the_causal_zigzag():
+    # Legs sized 12 points against zz_ticks=40 (10 points): up to 120, down to
+    # 108 (confirms H at 120), up to 124 (confirms L at 108, HH pending), down
+    # to 110 (confirms H at 124 -> highs 120,124), up to 126 (confirms L at
+    # 110 -> lows 108,110): HH + HL = confirmed uptrend. Then a plunge to 96
+    # confirms H at 126 (still HH) and prints a running low BELOW both prior
+    # lows — once IT confirms, the state is LH? no: highs 124,126 still HH,
+    # lows 110,96 lower -> one of each = MIXED.
+    def leg(a, b, n):
+        step = (b - a) / n
+        return [(max(a + step * k, a + step * (k + 1)) + 0.5,
+                 min(a + step * k, a + step * (k + 1)) - 0.5) for k in range(n)]
+
+    bars = (leg(100, 120, 10)      # ON: rally to 120
+            + leg(120, 108, 4)     # confirms H(120)
+            + leg(108, 124, 6)     # confirms L(108)
+            + leg(124, 110, 5)     # confirms H(124): HH
+            + leg(110, 126, 6)     # confirms L(110): HL -> CLEAR UP
+            + leg(126, 96, 10)     # confirms H(126); plunge under both lows
+            + leg(96, 108, 5))     # confirms L(96): lows 110,96 -> MIXED
+    gatesmod, ctx, on = _structure_session(bars)
+
+    real_contract = gatesmod.tickmod.contract_for_cached
+    real_on = gatesmod.tickmod.cached_overnight
+    try:
+        gatesmod.tickmod.contract_for_cached = lambda symbol, day: "NQZ5"
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: on
+
+        g = gatesmod.StructureClarityGate({"enabled": True, "zz_ticks": 40})
+        g.prepare(ctx)
+        n = len(ctx.ticks)
+        # Early RTH: only H(120) and L(108) confirmed — not enough swings.
+        assert not g.allows(2, 110.0), "one swing of each kind is unreadable, and vetoes"
+        # After the second high+low confirm: HH + HL, a confirmed uptrend.
+        i_clear = 2 * (10 + 4 + 6 + 5 + 3) - 20  # ticks into the 5th leg
+        assert g.allows(i_clear, 120.0), "a confirmed uptrend passes"
+        # After the plunge's low confirms: higher highs but lower lows — mixed.
+        assert not g.allows(n - 1, 108.0), "mixed structure is vetoed"
+
+        gatesmod.tickmod.cached_overnight = lambda symbol, day: None
+        g = gatesmod.StructureClarityGate({"enabled": True})
+        g.prepare(ctx)
+        assert not g.allows(0, 110.0), "no overnight must not read as confirmed"
+    finally:
+        gatesmod.tickmod.contract_for_cached = real_contract
+        gatesmod.tickmod.cached_overnight = real_on
+
+    for bad in ({"enabled": True, "ticks": 40}, {"enabled": True, "zz_ticks": 0},
+                {"enabled": True, "zz_ticks": True}):
+        try:
+            gatesmod.StructureClarityGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass

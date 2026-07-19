@@ -34,6 +34,7 @@ const WORKSPACES: Workspace[] = [
       { to: "/strategies", label: "Strategies" },
       { to: "/interactions", label: "Interactions" },
       { to: "/backtests", label: "Backtests" },
+      { to: "/research", label: "Research" },
     ],
   },
 ];

@@ -137,16 +137,18 @@ def needs_profile(cfg) -> bool:
 # above without a cycle. Every entry point that resolves a config goes through
 # this module, so importing it is what makes the gates exist.
 from .gates import (  # noqa: E402
-    GxFloorGate, GxOverhangGate, GxPocShapeGate, GxRescueCapGate, GxRescueGate,
-    GxValueGate, NyPocFloorGate, OnHighGate, RegimeGate, UpperOccupancyCapGate,
-    UpperOccupancyGate, VolumeProfileGate, VwapCrossGate, VwapSlopeCapGate,
-    VwapSlopeGate,
+    ChopGate, GxFloorGate, GxOverhangGate, GxPocShapeGate, GxRescueCapGate,
+    GxRescueGate, GxValueGate, IbInOnGate, IbWidthGate, NyPocFloorGate,
+    OnHighGate, RegimeGate, StructureClarityGate, UpperOccupancyCapGate,
+    UpperOccupancyGate, VolumeProfileGate, VwapCrossGate, VwapFlatGate,
+    VwapSlopeCapGate, VwapSlopeGate, WkExtGate,
 )
 
 GATE_FACTORIES[VolumeProfileGate.name] = VolumeProfileGate
 GATE_FACTORIES[RegimeGate.name] = RegimeGate
 GATE_FACTORIES[VwapSlopeGate.name] = VwapSlopeGate
 GATE_FACTORIES[VwapSlopeCapGate.name] = VwapSlopeCapGate
+GATE_FACTORIES[VwapFlatGate.name] = VwapFlatGate
 GATE_FACTORIES[VwapCrossGate.name] = VwapCrossGate
 GATE_FACTORIES[UpperOccupancyGate.name] = UpperOccupancyGate
 GATE_FACTORIES[UpperOccupancyCapGate.name] = UpperOccupancyCapGate
@@ -158,3 +160,8 @@ GATE_FACTORIES[GxValueGate.name] = GxValueGate
 GATE_FACTORIES[GxPocShapeGate.name] = GxPocShapeGate
 GATE_FACTORIES[NyPocFloorGate.name] = NyPocFloorGate
 GATE_FACTORIES[GxOverhangGate.name] = GxOverhangGate
+GATE_FACTORIES[IbInOnGate.name] = IbInOnGate
+GATE_FACTORIES[IbWidthGate.name] = IbWidthGate
+GATE_FACTORIES[WkExtGate.name] = WkExtGate
+GATE_FACTORIES[ChopGate.name] = ChopGate
+GATE_FACTORIES[StructureClarityGate.name] = StructureClarityGate

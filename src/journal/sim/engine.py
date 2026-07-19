@@ -66,13 +66,25 @@ class _Pos:
     # The fade's mirror streak: consecutive closes re-accepted back beyond dev1
     # against the position (invalidate_beyond_dev1_bars). Unused by the bounce.
     beyond_band: int = 0
+    # Consecutive bar closes past the NY session mid against the position
+    # (stop_below_mid_bars), since this position opened — like inside_value, a
+    # property of the trade, so a ghost counts its own.
+    below_mid_streak: int = 0
     # A rule decided to leave: exit at market on the next tick, booked under
     # this reason ("vah" for the bounce's value re-acceptance, "dev1" for the
-    # fade's, "panic" for the flow-shock exit). None = no market exit pending.
+    # fade's, "panic" for the flow-shock exit, "daily_loss" for the daily-loss
+    # flatten). None = no market exit pending.
     market_exit: str | None = None
     # The panic exit's one read has been taken (see _panic — it evaluates once,
     # at the window's end, never per tick).
     panic_checked: bool = False
+    # The underwater-stop's one read has been taken (see _underwater_stop — one
+    # read at underwater_stop_after_s, never per tick, like the panic exit).
+    uw_checked: bool = False
+    # What last moved the stop, so a stop-out can name which rule set the level it
+    # died on: "trail" (the ratchet) or "uw_stop" (the underwater tighten). Read
+    # only once the stop has left init_stop; a stop still at init_stop books "stop".
+    stop_src: str = "trail"
     # --- pyramid (scale-in) ---
     # Contracts actually filled so far — one lot at the first fill, one more on
     # each add. This, not cfg.contracts, is what the trade's P&L and commission
@@ -87,6 +99,14 @@ class _Pos:
     next_add: float | None = None
     # Lots still to add.
     adds_left: int = 0
+    # Big-lot participation read on the trailing window at the fill (NaN when the
+    # size-up knob is off). Recorded so a run can be audited for which fills the
+    # tape sized up. Does not affect the sim beyond the size already chosen.
+    entry_participation: float = float("nan")
+    # The reference level whose drift-touch triggered this entry, by its human
+    # name ("Globex POC", "NY VAH", "ONH", "pd VAL", ...). Set only by the
+    # drift-fade strategy; "" for callers that don't attribute an entry level.
+    entry_reason: str = ""
 
 
 def _minutes_et(ts: pd.Series) -> np.ndarray:
@@ -94,9 +114,21 @@ def _minutes_et(ts: pd.Series) -> np.ndarray:
     return (et.dt.hour * 60 + et.dt.minute).to_numpy()
 
 
+def _time_from_extreme(signed: np.ndarray, ts, entry_i: int, extreme: int,
+                       back: np.ndarray) -> float:
+    """Seconds from ``signed[extreme]`` to the first tick in ``back`` (a boolean
+    mask over ``signed[extreme:]`` that is True where price has returned to
+    breakeven). NaN if it never does — the excursion that never reversed."""
+    hits = np.nonzero(back)[0]
+    if not len(hits):
+        return float("nan")
+    return float((ts.iloc[entry_i + extreme + int(hits[0])]
+                  - ts.iloc[entry_i + extreme]).total_seconds())
+
+
 def _excursion(price: list[float], ts, entry_i: int, exit_i: int,
-               entry: float, s: float) -> tuple[float, float, float]:
-    """The best and worst this trade was ever worth, and how fast it climbed back.
+               entry: float, s: float) -> tuple[float, float, float, float, float, float]:
+    """The best and worst this trade was ever worth, and how fast it crossed back.
 
     Read off the same tick stream the fills came from (``price``), from the entry
     tick through the exit tick inclusive. In the trade's own direction (``s``): the
@@ -106,22 +138,41 @@ def _excursion(price: list[float], ts, entry_i: int, exit_i: int,
     >= 0 and MAE <= 0 except in the degenerate case where price never returned to a
     limit entry, which is itself the reading that the trade was never really live.
 
-    The third value is the recovery time in seconds: from the deepest adverse tick
-    back to the first tick that returned to breakeven (the entry, in the trade's
-    favor). It is how long the trade spent climbing out of its worst heat — 0 for a
-    trade that never went underwater, and NaN for one that never recovered (a loser
-    that died below water), which the winner-recovery read filters on anyway.
+    The crossing times, ``recovery_s`` and ``giveback_s``, are a mirrored pair:
+      - ``recovery_s`` — from the deepest adverse tick back up to breakeven. How long
+        the trade spent climbing out of its worst heat. 0 if never underwater, NaN if
+        it never recovered (a loser that died below water). The winner read.
+      - ``giveback_s`` — from the highest favorable tick back down to breakeven. How
+        long the trade held its best before collapsing into the exit. 0 if never
+        green, NaN if it never gave it back (a winner that peaked and stayed). The
+        loser read.
+
+    The dwell times, ``underwater_s`` and ``inprofit_s``, are the other mirrored pair
+    — total seconds each side of breakeven, summed over every tick regardless of when
+    it happened. Unlike the from-the-extreme crossing times these are never NaN and
+    count the whole path, so they answer "how long was this trade red / green in all"
+    — including the losers that never recovered, which ``recovery_s`` drops to NaN.
+    Each interval between consecutive ticks is charged to the sign it opened at.
     """
-    signed = s * (np.asarray(price[entry_i:exit_i + 1], dtype=float) - entry)
+    px = np.asarray(price[entry_i:exit_i + 1], dtype=float)
+    signed = s * (px - entry)
     fav, adv = float(signed.max()), float(signed.min())
     recovery_s = 0.0
-    if adv < 0:
-        lo = int(signed.argmin())  # earliest deepest tick, if the low is touched twice
-        back = np.nonzero(signed[lo:] >= 0)[0]
-        recovery_s = (float((ts.iloc[entry_i + lo + int(back[0])]
-                             - ts.iloc[entry_i + lo]).total_seconds())
-                      if len(back) else float("nan"))
-    return fav, adv, recovery_s
+    if adv < 0:  # earliest deepest tick if the low is touched twice, then climb back up
+        lo = int(signed.argmin())
+        recovery_s = _time_from_extreme(signed, ts, entry_i, lo, signed[lo:] >= 0)
+    giveback_s = 0.0
+    if fav > 0:  # earliest highest tick, then the collapse back down to breakeven
+        hi = int(signed.argmax())
+        giveback_s = _time_from_extreme(signed, ts, entry_i, hi, signed[hi:] <= 0)
+    # Seconds each tick's interval lasts, charged to the sign at its open tick. The
+    # last tick has no following interval, so signed[:-1] aligns with the gaps.
+    seg = ts.iloc[entry_i:exit_i + 1]
+    dt = (seg - seg.iloc[0]).dt.total_seconds().to_numpy()
+    gap = np.diff(dt)
+    underwater_s = float(gap[signed[:-1] < 0].sum()) if gap.size else 0.0
+    inprofit_s = float(gap[signed[:-1] > 0].sum()) if gap.size else 0.0
+    return fav, adv, recovery_s, giveback_s, underwater_s, inprofit_s
 
 
 def run_session(
@@ -205,6 +256,16 @@ def run_session(
     if b.empty:
         return [], [], b, pd.DataFrame()
 
+    # NY session VWAP mid for the stop_below_mid exit, anchored at the 09:30 bell
+    # over RTH ticks alone — the day's mean, not the Globex-anchored mid the bands
+    # ride. NaN across the overnight, where no NY mean exists; the exit only reads
+    # it in RTH (i >= rth_i0), so the NaN is never touched. Built only when the
+    # knob is on, like the profile — a run that ignores it must not pay the scan.
+    md_ny = None
+    if cfg.stop_below_mid_bars:
+        md_ny = np.full(len(t), np.nan)
+        md_ny[rth_i0:] = vwapmod.vwap_bands(t.iloc[rth_i0:])["mid"].to_numpy()
+
     tick = tick_size(cfg.instrument)
 
     # The developing profile is only built if a gate or the value-area exit reads
@@ -239,6 +300,7 @@ def run_session(
     acc_min = cfg.acceptance_min_ticks * tick
     entry_off = cfg.entry_stop_offset_ticks * tick
     limit_off = cfg.entry_limit_offset_ticks * tick
+    mid_exit_off = cfg.stop_below_mid_ticks * tick
     # The trail's knobs, in ticks (the arithmetic below stays on the integer tick
     # grid — see _trail). A 0 step means "one click per trail distance"; a 0
     # breakeven offset puts the first click on the entry itself.
@@ -254,8 +316,19 @@ def run_session(
     # is the sum over the first i ticks, so ticks a..b inclusive are
     # cum_delta[b+1] - cum_delta[a].
     panic_delta = cfg.panic_exit_delta
+    # The underwater-stop tighten: one read, at underwater_stop_after_s, that pulls
+    # the stop in to underwater_stop_ticks behind the entry if the trade is still red
+    # then. Both the panic exit and this one clock off the fill, so both need ts_ns.
+    uw_stop_ticks = cfg.underwater_stop_ticks
+    uw_stop_pts = uw_stop_ticks * tick
+    uw_after_ns = int(cfg.underwater_stop_after_s * 1_000_000_000)
     cum_delta: list | None = None
     ts_ns: list | None = None
+    # The re-arm window clocks off tick timestamps too, so it joins the knobs
+    # that materialize ts_ns.
+    if (panic_delta or uw_stop_ticks
+            or (cfg.reenter_after_stop_only and cfg.reentry_rearm_window_min)):
+        ts_ns = t["ts_utc"].astype("int64").to_numpy().tolist()
     if panic_delta:
         sd = t["side"].to_numpy()
         if not (sd != "N").any():
@@ -268,16 +341,61 @@ def run_session(
         sz = t["size"].to_numpy(dtype="float64")
         signed = np.where(sd == "B", sz, np.where(sd == "A", -sz, 0.0))
         cum_delta = np.concatenate([[0.0], np.cumsum(signed)]).tolist()
-        ts_ns = t["ts_utc"].astype("int64").to_numpy().tolist()
     panic_win_ns = int(cfg.panic_exit_window_s * 1_000_000_000)
+
+    # The daily-loss flatten: with it on, the daily loss stop is not just an entry
+    # governor but a hard exit on the OPEN trade — see _daily_loss_exit. Off (or
+    # with no daily_loss_stop) it never reads and the trade rides its normal exit.
+    daily_loss_exit = bool(cfg.daily_loss_stop) and cfg.daily_loss_exit_open
+
+    # Big-lot participation size-up: at each fill, size to size_up_contracts when
+    # the share of the trailing biglot_window_s of tape printed in >= biglot_min_size
+    # lots clears size_up_participation, else the base contracts. A composition read
+    # of the tape (size only, side ignored), built as two prefix sums so the window
+    # is two lookups — and built only when the knob is on, like cum_delta above.
+    size_up_part = float(getattr(cfg, "size_up_participation", 0.0))
+    size_up_ctr = int(getattr(cfg, "size_up_contracts", 0))
+    part_ts = part_big = part_tot = None
+    part_win_ns = 0
+    if size_up_part:
+        if max(1, cfg.pyramid_tranches) > 1:
+            # The adds would fill at the base lot off the module-level `lot`, so a
+            # sized-up first lot would grow by base lots — a size the study never
+            # measured. Refuse rather than size it wrong.
+            raise RuntimeError(
+                "size_up_participation is not supported with the pyramid "
+                "(pyramid_tranches > 1)")
+        part_ts = t["ts_utc"].astype("int64").to_numpy()
+        _szf = t["size"].to_numpy(dtype="float64")
+        _big = t["size"].to_numpy() >= int(getattr(cfg, "biglot_min_size", 10))
+        part_big = np.concatenate([[0.0], np.cumsum(np.where(_big, _szf, 0.0))])
+        part_tot = np.concatenate([[0.0], np.cumsum(_szf)])
+        part_win_ns = int(getattr(cfg, "biglot_window_s", 60) * 1_000_000_000)
 
     # Pyramid: split the size into pyr_n equal lots, one added each time price
     # runs pyr_step further in the trade's favour. pyr_n == 1 is the all-in fill —
     # one lot of the whole size, no adds, byte-identical to before the knob.
     pyr_n = max(1, cfg.pyramid_tranches)
     lot = cfg.contracts // pyr_n
+
+    def _entry_size(i: int) -> tuple[int, float]:
+        """(contracts, participation) for a fill at tick i. Off -> the base lot and
+        NaN; on -> size_up_contracts when the trailing big-lot share clears the
+        threshold, else the base contracts. pyr_n is 1 whenever the size-up is on
+        (guarded above), so contracts and lot coincide."""
+        if not size_up_part:
+            return lot, float("nan")
+        a = int(np.searchsorted(part_ts, part_ts[i] - part_win_ns, side="left"))
+        tot = part_tot[i + 1] - part_tot[a]
+        part = (part_big[i + 1] - part_big[a]) / tot if tot > 0 else 0.0
+        return (size_up_ctr if part >= size_up_part else cfg.contracts), part
     pyr_step = cfg.pyramid_step_ticks * tick
     pyr_blend = cfg.pyramid_stop_mode == "blend"
+    # The grid's sign against the trade: +1 walks the adds in the trade's favour
+    # (stops, the classic scale-in), -1 walks them against it (resting limits,
+    # averaging down). Folded into one signed step so _add and both entry sites
+    # read a single value.
+    pyr_sign = -1.0 if cfg.pyramid_direction == "against" else 1.0
 
     price = t["price"].to_numpy(dtype="float64").tolist()
     ts = t["ts_utc"]
@@ -314,6 +432,21 @@ def run_session(
     beyond = False             # variant A: price is still on the far side of dev1
     below_mid = 0
     acceptance_ts: pd.Timestamp | None = None
+    # The live machine's shadow, run only while a position is open. The live
+    # machine goes blind for the whole trade (the entry branch is an `elif`, and
+    # arming is gated on `pos is None`), so a setup that forms mid-trade vanishes
+    # without a record — and with it any measure of what being in the trade cost,
+    # or of why a small config change reshuffles the rest of the day. The shadow
+    # arms on the same acceptance read, touches on the same crossing rule, and
+    # books its fills as "in_trade" ghosts riding the real exit rules. It writes
+    # nothing the live machine reads, so real trades are byte-identical to a run
+    # without it; it dies with the trade that blinded it (post-exit blindness —
+    # the fresh acceptance the live machine now needs — is not tracked).
+    sh_armed = False
+    sh_awaiting = False        # variant B's reclaim wait, shadow copy
+    sh_beyond = False
+    sh_below_mid = 0
+    sh_acceptance_ts: pd.Timestamp | None = None
     pos: _Pos | None = None
     # (vetoing gate names, vetoed entry being tracked). The list holds EVERY gate
     # that rejected this fill, not just the first — the vetoed row keeps the whole
@@ -330,6 +463,16 @@ def run_session(
     # gates are never even asked.
     day_net = 0.0
     halted = False
+    # The reenter_after_stop_only stand-down. Separate from `halted` because it
+    # is softer: the daily governor refuses entries outright, while this one
+    # diverts them to "reentry_halt" ghosts and is lifted by a ghost stop-out.
+    knob_halted = False
+    # When the re-arm window is on, a stop opens the day only until this clock
+    # (ns epoch); None = no deadline pending. The day's first trade is never on
+    # the clock — no stop has happened yet.
+    rearm_deadline = None
+    rearm_win_ns = int(cfg.reentry_rearm_window_min * 60 * 1e9) \
+        if cfg.reenter_after_stop_only else 0
 
     def _row(p_: _Pos, reason: str, i: int, exit_price: float) -> dict:
         pts = s * (exit_price - p_.entry_price)
@@ -338,7 +481,7 @@ def run_session(
         # With pyr_n == 1 the single lot is the whole size, so this is cfg.contracts.
         gross = pts * pv * p_.size
         comm = 2 * cfg.commission_per_side * p_.size
-        mfe_pts, mae_pts, recovery_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, s)
+        mfe_pts, mae_pts, recovery_s, giveback_s, underwater_s, inprofit_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, s)
         return {
             "session": day,
             "direction": "Long" if side == "long" else "Short",
@@ -368,6 +511,14 @@ def run_session(
             # How long the trade spent climbing back from its worst heat to
             # breakeven, in seconds (0 if never underwater, NaN if never recovered).
             "recovery_s": recovery_s,
+            # The mirror: how long it held its best before collapsing back to
+            # breakeven (0 if never green, NaN if it never gave it back — a winner
+            # that peaked and stayed). The loser read.
+            "giveback_s": giveback_s,
+            # Total dwell each side of breakeven, over the whole path (never NaN).
+            # underwater_s counts the losers recovery_s can't; inprofit_s is its mirror.
+            "underwater_s": underwater_s,
+            "inprofit_s": inprofit_s,
             "exit_reason": reason,
             "points": pts,
             "r_multiple": pts / risk_pts,
@@ -377,6 +528,9 @@ def run_session(
             # that triggered. The column name predates the pyramid; it has always
             # meant "the most contracts this trade held".
             "max_contracts": p_.size,
+            # The big-lot participation the tape showed at the fill (NaN when the
+            # size-up knob is off) — what max_contracts was sized on.
+            "entry_participation": p_.entry_participation,
             "gross_pnl": gross,
             "commission": comm,
             "net_pnl": gross - comm,
@@ -384,12 +538,35 @@ def run_session(
 
     def _close(reason: str, i: int, exit_price: float) -> None:
         nonlocal pos, armed, awaiting_reclaim, below_mid, day_net, halted
+        nonlocal knob_halted, rearm_deadline
+        nonlocal sh_armed, sh_awaiting, sh_beyond, sh_below_mid
         assert pos is not None
         trades.append(_row(pos, reason, i, exit_price))
         day_net += trades[-1]["net_pnl"]
         if cfg.daily_loss_stop and day_net <= -cfg.daily_loss_stop:
             halted = True
+        # Only a stop re-arms the day: any other exit stands the session down.
+        # Not through the daily-loss halt — the stand-down watches. Would-be
+        # entries during it ride the exit rules as "reentry_halt" ghosts, and a
+        # ghost that stops out lifts the halt: the band just showed the shakeout
+        # without us paying for it, and the next acceptance is the re-entry the
+        # A+ cohort is made of. "trail" is not a stop here even when red — the
+        # initial stop never traded; the trade died of its ratchet.
+        if cfg.reenter_after_stop_only:
+            if reason != "stop":
+                knob_halted = True
+            else:
+                # A real stop re-opens the day — it may have been shut by an
+                # expired window — and starts the clock when one is set.
+                knob_halted = False
+                rearm_deadline = ts_ns[i] + rearm_win_ns if rearm_win_ns else None
         pos = None
+        # The shadow dies with the trade that blinded the live machine; from the
+        # next tick the live machine sees for itself again.
+        sh_armed = False
+        sh_awaiting = False
+        sh_beyond = False
+        sh_below_mid = 0
         if cfg.rearm_after_exit:
             armed = False
             awaiting_reclaim = False
@@ -414,11 +591,13 @@ def run_session(
             # Stop triggers on the first trade at or through it; fill at the
             # traded price, which is never better than the stop — i.e. never
             # better than reality.
-            # A trailed stop is its own reason: a breakeven scratch is not the
-            # full loss "stop" means, and lumping them would hide exactly the
-            # effect the trail was added to measure.
-            moved = p_.stop_price != p_.init_stop
-            return ("trail" if moved else "stop", p)
+            # A moved stop is its own reason: a breakeven scratch is not the full
+            # loss "stop" means, and lumping them would hide exactly the effect the
+            # rule was added to measure. stop_src names which rule moved it last —
+            # "trail" (the ratchet) or "uw_stop" (the underwater tighten).
+            if p_.stop_price == p_.init_stop:
+                return ("stop", p)
+            return (p_.stop_src, p)
         if s * (p - tgt) >= 0:
             # A resting exit limit gets its price.
             return ("target", tgt)
@@ -465,32 +644,40 @@ def run_session(
         lvl = p_.entry_price + s * (trail_be_t + steps * trail_step_t) * tick
         if s * (lvl - p_.stop_price) > 0:
             p_.stop_price = lvl
+            p_.stop_src = "trail"
 
     def _add(p_: _Pos, i: int, p: float) -> None:
-        """Fill pyramid lots whose stop this print has reached, and — in blend
+        """Fill pyramid lots whose trigger this print has reached, and — in blend
         mode — re-strike the shared stop and target off the new average entry.
 
-        A lot's add is a stop in the trade's favour (a buy-stop above for a long),
-        so it fills at the traded price, never better than its trigger — the same
-        'no free lunch' the exit stop gets. One fast print can sweep several
-        triggers at once; the loop books each as a real lot at this print. next_add
-        walks the grid from the *first* fill (one step per lot), not from where the
-        last add happened to print, so a gap that skipped a level does not shrink
-        the next lot's distance.
+        With the grid in the trade's favour a lot's add is a stop (a buy-stop
+        above for a long), so it fills at the traded price, never better than its
+        trigger — the same 'no free lunch' the exit stop gets. Against the trade
+        it is a resting limit (a buy limit below for a long), so it books at its
+        own level, exactly like the entry limit at dev1 does. One fast print can
+        sweep several triggers at once; the loop books each as a real lot.
+        next_add walks the grid from the *first* fill (one step per lot), not
+        from where the last add happened to print, so a gap that skipped a level
+        does not shrink the next lot's distance.
 
         Run BEFORE the tick's exit check: a print that reaches the target has
-        passed the add stops beneath it on the way, so those lots really would
-        have filled before the exit — scoring the exit on the larger size is the
-        honest outcome, not front-running it. It can never fill a lot into its own
-        stop: the adds are all in favour and the blended stop after an add sits
-        stop_ticks below an average that is itself below this print, so the new
-        stop stays under the price that installed it."""
-        while p_.next_add is not None and s * (p - p_.next_add) >= 0:
+        passed the favourable add stops beneath it on the way — and one that
+        reaches the exit stop has passed the against-grid's limits above it — so
+        those lots really would have filled before the exit; scoring the exit on
+        the larger size is the honest outcome, not front-running it. It can never
+        fill a lot into its own stop: the favourable grid's blended stop sits
+        stop_ticks below an average that is itself below this print, and the
+        against grid is schema-bound to end short of stop_ticks, which keeps even
+        the re-struck stop under the deepest fill."""
+        while (p_.next_add is not None
+               and s * pyr_sign * (p - p_.next_add) >= 0):
+            fill = p if pyr_sign > 0 else p_.next_add
             new_size = p_.size + lot
-            p_.entry_price = (p_.entry_price * p_.size + p * lot) / new_size
+            p_.entry_price = (p_.entry_price * p_.size + fill * lot) / new_size
             p_.size = new_size
             p_.adds_left -= 1
-            p_.next_add = (p_.next_add + s * pyr_step) if p_.adds_left > 0 else None
+            p_.next_add = ((p_.next_add + s * pyr_sign * pyr_step)
+                           if p_.adds_left > 0 else None)
             if pyr_blend:
                 p_.stop_price = p_.entry_price - s * risk_pts
                 p_.init_stop = p_.stop_price
@@ -523,6 +710,57 @@ def run_session(
         if s * (cum_delta[i] - cum_delta[p_.entry_i]) <= -panic_delta:
             p_.market_exit = "panic"
 
+    def _underwater_stop(p_: _Pos, i: int) -> None:
+        """One read at underwater_stop_after_s: if the trade is still red then, pull
+        the stop in to underwater_stop_ticks behind the entry.
+
+        Like _panic, one read at a fixed age off the fill, not a per-tick trigger —
+        the dwell study's whole point is that the fast winners resolve inside the
+        first minute, so a rule that keeps firing would catch them on the way up. If
+        the position is underwater at the read (the 60-180s band the book bleeds in),
+        tighten the stop: it caps the loss on a fill that hasn't worked without
+        flattening it, so a deep-heat winner still has room to recover. Only ever
+        toward the trade — never loosens, and never past a trail that moved further,
+        so a trade already green (whose trail may sit above this level) is untouched.
+        Read AFTER the tick's exit check, like _trail: the tightened stop takes on
+        the next print, and if the current price already violates it the very next
+        exit check books it — a stop, at the traded price, no free lunch."""
+        if p_.uw_checked or ts_ns[i] - ts_ns[p_.entry_i] < uw_after_ns:
+            return
+        p_.uw_checked = True
+        if p_.market_exit:
+            return
+        if s * (price[i] - p_.entry_price) < 0:  # still underwater at the read
+            lvl = p_.entry_price - s * uw_stop_pts
+            if s * (lvl - p_.stop_price) > 0:
+                p_.stop_price = lvl
+                p_.stop_src = "uw_stop"
+
+    def _daily_loss_exit(p_: _Pos, i: int) -> None:
+        """Flatten the open position at market once the day's running drawdown —
+        realized net so far (day_net) plus this position marked to the current
+        print — is at or beyond the daily loss stop.
+
+        Where _close's halt only refuses the NEXT entry, this bites the trade
+        already on: the governor otherwise cannot touch a position whose own stop
+        sits further out than the whole daily limit (150-tick stop on 3 lots is a
+        ~$2,250 loss against a $1,995 limit — a single stop overshoots it). Read
+        every tick while in the trade, because the drawdown deepens on any print;
+        it arms one market order under its own reason "daily_loss", filled on the
+        next print like the panic and value-area exits. The mark-to-market is the
+        same points × point-value × size − round-trip commission the row books, so
+        the trigger is exactly the number _close would have compared once realized.
+
+        day_net is read by closure — the realized book the drawdown rides on. For a
+        ghost that is the real day's realized plus the ghost's own open, the same
+        first-order counterfactual the other ghost exits already are."""
+        if p_.market_exit:
+            return
+        pts = s * (price[i] - p_.entry_price)
+        net = pts * pv * p_.size - 2 * cfg.commission_per_side * p_.size
+        if day_net + net <= -cfg.daily_loss_stop:
+            p_.market_exit = "daily_loss"
+
     for i in range(n):
         p = price[i]
 
@@ -537,10 +775,22 @@ def run_session(
                 vetoed.append({**_row(gp, hit[0], i, hit[1]),
                                "gate": gnames[0], "gates": "|".join(gnames)})
                 ghosts.remove((gnames, gp))
+                # A watched entry that stopped out lifts the stand-down: the
+                # attempt failed without us, and the next acceptance is the
+                # re-entry. Only "reentry_halt" ghosts qualify — an "in_trade"
+                # ghost was never a trade this rule declined.
+                if hit[0] == "stop" and gnames[0] == "reentry_halt":
+                    knob_halted = False
+                    if rearm_win_ns:
+                        rearm_deadline = ts_ns[i] + rearm_win_ns
             else:
                 _trail(gp, p)
                 if panic_delta:
                     _panic(gp, i)
+                if uw_stop_ticks:
+                    _underwater_stop(gp, i)
+                if daily_loss_exit:
+                    _daily_loss_exit(gp, i)
 
         if pos is not None:
             _add(pos, i, p)
@@ -551,6 +801,54 @@ def run_session(
                 _trail(pos, p)
                 if panic_delta:
                     _panic(pos, i)
+                if uw_stop_ticks:
+                    _underwater_stop(pos, i)
+                if daily_loss_exit:
+                    _daily_loss_exit(pos, i)
+                # The shadow entry: the same resting limit, the same crossing
+                # read, the same clock/width/halt conditions as the live branch
+                # below — but the fill becomes an "in_trade" ghost instead of a
+                # position. Gates that would also have refused it are recorded
+                # behind that name, so the ghost stays attributable gate by gate.
+                if sh_armed:
+                    lvl = d1[i] + s * limit_off
+                    at_limit = s * (p - lvl) <= 0
+                    sh_touched = sh_beyond and at_limit
+                    sh_beyond = not at_limit
+                    if not halted and open_m <= mins[i] < close_m and i < force_i:
+                        band_w = bs * (d2[i] - d1[i]) / tick
+                        fill = None
+                        if band_w < cfg.min_band_width_ticks:
+                            pass  # missed, not deferred — same as the live rule
+                        elif cfg.entry_variant == "A":
+                            if sh_touched:
+                                fill = lvl
+                        elif cfg.entry_variant == "B" and sh_awaiting:
+                            level = d1[i] + s * entry_off
+                            if s * (p - level) >= 0:
+                                fill = p
+                        if fill is not None:
+                            tp = None
+                            if cfg.target == "rr" and cfg.target_rr:
+                                tp = fill + s * cfg.target_rr * risk_pts
+                            stop = fill - s * risk_pts
+                            esize, epart = _entry_size(i)
+                            ghosts.append((
+                                ["in_trade"] + [g.name for g in gates
+                                                if not g.allows(i, fill)],
+                                _Pos(
+                                    entry_i=i, entry_price=fill,
+                                    stop_price=stop, init_stop=stop,
+                                    target_price=tp,
+                                    band_width_ticks=band_w,
+                                    acceptance_ts=sh_acceptance_ts,
+                                    size=esize, adds_left=pyr_n - 1,
+                                    next_add=(fill + s * pyr_sign * pyr_step)
+                                    if pyr_n > 1 else None,
+                                    entry_participation=epart,
+                                )))
+                            sh_armed = False
+                            sh_awaiting = False
 
         elif armed:
             # Where variant A's limit rests: dev1, or entry_limit_offset_ticks in
@@ -597,17 +895,29 @@ def run_session(
                     if cfg.target == "rr" and cfg.target_rr:
                         tp = fill + s * cfg.target_rr * risk_pts
                     stop = fill - s * risk_pts
+                    esize, epart = _entry_size(i)
                     new_pos = _Pos(
                         entry_i=i, entry_price=fill,
                         stop_price=stop, init_stop=stop, target_price=tp,
                         band_width_ticks=band_w, acceptance_ts=acceptance_ts,
                         # First lot down. The rest rest as stops one step apart in
                         # front of it; pyr_n == 1 leaves next_add None (no adds) and
-                        # size == the whole contracts, i.e. the all-in fill.
-                        size=lot, adds_left=pyr_n - 1,
-                        next_add=(fill + s * pyr_step) if pyr_n > 1 else None,
+                        # size == the whole contracts, i.e. the all-in fill. The
+                        # size-up may have made that whole size size_up_contracts.
+                        size=esize, adds_left=pyr_n - 1,
+                        next_add=(fill + s * pyr_sign * pyr_step) if pyr_n > 1 else None,
+                        entry_participation=epart,
                     )
                     vetoes = [g.name for g in gates if not g.allows(i, fill)]
+                    if rearm_deadline is not None and ts_ns[i] > rearm_deadline:
+                        # The window a stop opened ran out unused: the day
+                        # stands back down until another watched stop.
+                        knob_halted = True
+                        rearm_deadline = None
+                    if knob_halted:
+                        # The stand-down is a veto with a watch: first in the
+                        # list so the ghost is attributed to it in missed rows.
+                        vetoes = ["reentry_halt"] + vetoes
                     if not vetoes:
                         pos = new_pos
                     else:
@@ -646,19 +956,50 @@ def run_session(
                 # inverted setup — armed in the channel between its band and the
                 # mid — disarms when price closes THROUGH the mid and out the far
                 # side, not merely for sitting on its own side of it.
-                below_mid = below_mid + 1 if bs * (c - md[i]) < 0 else 0
+                far_side = bs * (c - md[i]) < 0
+                below_mid = below_mid + 1 if far_side else 0
                 if below_mid >= cfg.invalidate_below_mid_bars:
                     armed = False
                     awaiting_reclaim = False
+                # The shadow honors the same invalidation, on its own streak —
+                # counted from its own arming, exactly as the live one is.
+                sh_below_mid = sh_below_mid + 1 if far_side else 0
+                if sh_below_mid >= cfg.invalidate_below_mid_bars:
+                    sh_armed = False
+                    sh_awaiting = False
 
-            if pos is None:
-                ok = s * (c - d1[i]) > acc_min
-                if cfg.acceptance_require_green:
-                    # "Green" means with the trade: an up candle arms a long, a
-                    # down candle arms a short.
-                    ok = ok and s * (c - o) > 0
-                if cfg.acceptance_cap_at_dev2:
-                    ok = ok and s * (c - d2[i]) < 0
+            # Stop below the day's mean. A close at least stop_below_mid_ticks
+            # past the NY mid, band-signed (below it on a long/upper, above on a
+            # short/lower); stop_below_mid_bars such closes in a row arm a market
+            # exit for the next tick. The offset and the streak both exist to spare
+            # the winners that dip a tick through the mean and recover — a bare
+            # touch clips them, a confirmed break past it does not. Ghosts count
+            # their own streak, exactly as the value-area exit does.
+            if cfg.stop_below_mid_bars and md_ny is not None:
+                mv = md_ny[i]
+                past = not np.isnan(mv) and bs * (c - mv) <= -mid_exit_off
+                for p_ in ([pos] if pos is not None else []) + [g for _, g in ghosts]:
+                    p_.below_mid_streak = p_.below_mid_streak + 1 if past else 0
+                    if p_.below_mid_streak >= cfg.stop_below_mid_bars:
+                        p_.market_exit = "mid_exit"
+
+            ok = s * (c - d1[i]) > acc_min
+            if cfg.acceptance_require_green:
+                # "Green" means with the trade: an up candle arms a long, a
+                # down candle arms a short.
+                ok = ok and s * (c - o) > 0
+            if cfg.acceptance_cap_at_dev2:
+                ok = ok and s * (c - d2[i]) < 0
+            if pos is not None:
+                # A real acceptance the live machine is blind to: this is where
+                # the missed setups are born. Arms the shadow only.
+                if ok:
+                    sh_armed = True
+                    sh_awaiting = False
+                    sh_beyond = True
+                    sh_below_mid = 0
+                    sh_acceptance_ts = ts.iloc[i]
+            else:
                 if ok:
                     armed = True
                     awaiting_reclaim = False
@@ -675,6 +1016,8 @@ def run_session(
             # through dev1 (below it on a long, above it on a short).
             if armed and cfg.entry_variant == "B" and s * (c - d1[i]) < 0:
                 awaiting_reclaim = True
+            if sh_armed and cfg.entry_variant == "B" and s * (c - d1[i]) < 0:
+                sh_awaiting = True
 
     bands = w.iloc[b["end_idx"].to_numpy()].reset_index(drop=True)
     return trades, vetoed, b, bands
@@ -863,7 +1206,7 @@ def run_session_fade(
         pts = s * (exit_price - p_.entry_price)
         gross = pts * pv * cfg.contracts
         comm = 2 * cfg.commission_per_side * cfg.contracts
-        mfe_pts, mae_pts, recovery_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, s)
+        mfe_pts, mae_pts, recovery_s, giveback_s, underwater_s, inprofit_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, s)
         return {
             "session": day,
             "direction": "Long" if side == "long" else "Short",
@@ -885,6 +1228,14 @@ def run_session_fade(
             # How long the trade spent climbing back from its worst heat to
             # breakeven, in seconds (0 if never underwater, NaN if never recovered).
             "recovery_s": recovery_s,
+            # The mirror: how long it held its best before collapsing back to
+            # breakeven (0 if never green, NaN if it never gave it back — a winner
+            # that peaked and stayed). The loser read.
+            "giveback_s": giveback_s,
+            # Total dwell each side of breakeven, over the whole path (never NaN).
+            # underwater_s counts the losers recovery_s can't; inprofit_s is its mirror.
+            "underwater_s": underwater_s,
+            "inprofit_s": inprofit_s,
             "exit_reason": reason,
             "points": pts,
             "r_multiple": pts / risk_pts,
@@ -942,6 +1293,18 @@ def run_session_fade(
         if s * (lvl - p_.stop_price) > 0:
             p_.stop_price = lvl
 
+    # The daily-loss flatten — see run_session._daily_loss_exit. The fade prices
+    # on cfg.contracts (no pyramid on this family), so the mark-to-market uses it.
+    daily_loss_exit = bool(cfg.daily_loss_stop) and cfg.daily_loss_exit_open
+
+    def _daily_loss_exit(p_: _Pos, i: int) -> None:
+        if p_.market_exit:
+            return
+        pts = s * (price[i] - p_.entry_price)
+        net = pts * pv * cfg.contracts - 2 * cfg.commission_per_side * cfg.contracts
+        if day_net + net <= -cfg.daily_loss_stop:
+            p_.market_exit = "daily_loss"
+
     for i in range(n):
         p = price[i]
 
@@ -953,6 +1316,8 @@ def run_session_fade(
                 ghosts.remove((gnames, gp))
             else:
                 _trail(gp, p)
+                if daily_loss_exit:
+                    _daily_loss_exit(gp, i)
 
         if pos is not None:
             hit = _exit(pos, i, p)
@@ -960,6 +1325,8 @@ def run_session_fade(
                 _close(hit[0], i, hit[1])
             else:
                 _trail(pos, p)
+                if daily_loss_exit:
+                    _daily_loss_exit(pos, i)
 
         elif armed:
             # Variant A's limit: dev1, or entry_limit_offset_ticks in FRONT of it
@@ -1069,6 +1436,583 @@ def run_session_fade_long(
 ) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
     """Registry entry point: fade the lower-band stretch from below, long."""
     return run_session_fade(cfg, day, side="long")
+
+
+def run_session_value_rotation(
+    cfg, day: date
+) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
+    """Simulate one session of the VALUE ROTATION (cfg is ValueRotationConfig).
+
+    Price accepted outside the developing value area, re-accepted back inside,
+    traded with the rotation toward the developing POC. The state machine (all
+    tick-level except where a bar close is named):
+
+      quiet --print beyond the edge by > arm_beyond_ticks--------> ARMED
+      ARMED --accept_inside_bars consecutive closes back inside--> CONFIRMED
+      CONFIRMED --variant A: retest crossing back to the edge----> IN_TRADE
+      CONFIRMED --variant B: continuation through the edge
+                  - entry_stop_offset, into value---------------> IN_TRADE
+      IN_TRADE --stop / target / trail / time / edge-------------> quiet
+
+    The frame is signed like the fade's: ``s`` is the trade's direction, ``u``
+    the side of value the setup lives on (u = -s — the short lives above the
+    VAH, the long below the VAL). "Inside" is the -u direction from the edge.
+
+    Two rules exist because the profile MOVES, which no band ever does:
+
+    - Variant A's retest limit fills only when *price does the crossing* — the
+      previous print inside the current edge, this one at or through it. An
+      edge that relocates across a standing print (a VA rebuild engulfing the
+      market) DISARMS the setup instead: the premise ("price returned to the
+      failed edge") never happened, and profile-pullback v3 already paid to
+      learn what a fill against a level's own motion is worth.
+    - The live POC target settles the same way: price crossing the level is a
+      limit fill at the level; the level node-flipping across price is a
+      market fill at the print. Both end the trade — the magnet arrived — but
+      only one may claim the level's price.
+
+    The arming excursion is edge-triggered exactly like the fade's stretch,
+    and the confirming-close streak belongs to the armed setup (it resets on
+    every fresh arming). ``min_room_ticks`` is judged at the would-be fill
+    against the POC then in force; a touch without room is missed, not
+    deferred. Nothing arms and nothing fills while the profile is younger than
+    ``level_warmup_min`` — a minutes-old NY profile has POC=VAH=VAL on the
+    open print, and every "edge" it shows is an artifact.
+    """
+    if cfg.side not in ("long", "short"):
+        raise ValueError(f"side must be 'long' or 'short', got {cfg.side!r}")
+    s = 1.0 if cfg.side == "long" else -1.0
+    u = -s
+
+    t = tickmod.get_day_ticks(tickmod.contract_for(cfg.contract, day), day)
+    if t is None or t.empty:
+        return [], [], pd.DataFrame(), pd.DataFrame()
+    b = barmod.tick_bars(t, cfg.ticks_per_bar)
+    w = vwapmod.vwap_bands(t)
+    if b.empty:
+        return [], [], b, pd.DataFrame()
+
+    tick = tick_size(cfg.instrument)
+
+    # The profile is the setup, so it is always built — needs_profile() is a
+    # question for strategies where only a gate or an exit might read it.
+    edge_name = "vah" if u > 0 else "val"
+    prof = profmod.developing_profile(t, b, tick)
+    edge_tick = profmod.levels_in_force(prof, b, len(t), edge=edge_name)
+    poc_tick = profmod.levels_in_force(prof, b, len(t), edge="poc")
+
+    gates = confmod.build_gates(cfg)
+    if gates:
+        ctx = confmod.SessionCtx(
+            cfg=cfg, day=day, ticks=t, bars=b, value_edge_at_tick=edge_tick,
+            profile=prof, side=cfg.side, band="upper" if u > 0 else "lower",
+        )
+        for g in gates:
+            g.prepare(ctx)
+
+    pv = point_value(cfg.instrument)
+    risk_pts = cfg.stop_ticks * tick
+    arm_pts = cfg.arm_beyond_ticks * tick
+    entry_off = cfg.entry_stop_offset_ticks * tick
+    trail_dist_t = cfg.trail_stop_ticks
+    trail_step_t = cfg.trail_step_ticks or trail_dist_t
+    trail_be_t = cfg.trail_breakeven_ticks
+    trail_be_only = cfg.trail_breakeven_only
+
+    price = t["price"].to_numpy(dtype="float64").tolist()
+    ts = t["ts_utc"]
+    edge = edge_tick.tolist()
+    poc = poc_tick.tolist()
+    md = w["mid"].to_numpy().tolist()
+
+    n = len(price)
+    mins = _minutes_et(ts)
+    open_m = cfg.entry_open.hour * 60 + cfg.entry_open.minute
+    close_m = cfg.entry_close.hour * 60 + cfg.entry_close.minute
+    flat_m = cfg.flat_by.hour * 60 + cfg.flat_by.minute
+    # The NY profile anchors at the bell; its levels are not levels until the
+    # anchor is level_warmup_min old. Wall-clock, like the checkpoint gates.
+    warm_m = 9 * 60 + 30 + cfg.level_warmup_min
+
+    holdable = np.flatnonzero(mins < flat_m)
+    force_i = int(holdable[-1]) if len(holdable) else n - 1
+
+    bar_end_of = np.full(n, -1, dtype="int64")
+    bar_end_of[b["end_idx"].to_numpy()] = np.arange(len(b))
+    bar_end_of = bar_end_of.tolist()
+    b_close = b["close"].to_numpy().tolist()
+
+    armed = False
+    confirmed = False        # accept_inside_bars closes back inside have printed
+    inside_streak = 0        # consecutive closes inside, while armed
+    was_outside = False      # the standing "beyond the edge" state (edge-trigger)
+    arm_ts: pd.Timestamp | None = None
+    pos: _Pos | None = None
+    ghosts: list[tuple[list[str], _Pos]] = []
+    trades: list[dict] = []
+    vetoed: list[dict] = []
+    day_net = 0.0
+    halted = False
+
+    def _live_target(i: int) -> float:
+        return poc[i] if cfg.target == "poc" else md[i]
+
+    def _row(p_: _Pos, reason: str, i: int, exit_price: float) -> dict:
+        pts = s * (exit_price - p_.entry_price)
+        gross = pts * pv * cfg.contracts
+        comm = 2 * cfg.commission_per_side * cfg.contracts
+        mfe_pts, mae_pts, recovery_s, giveback_s, underwater_s, inprofit_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, s)
+        return {
+            "session": day,
+            "direction": "Long" if cfg.side == "long" else "Short",
+            "entry_ts_utc": ts.iloc[p_.entry_i],
+            "exit_ts_utc": ts.iloc[i],
+            "entry_idx": p_.entry_i,
+            "exit_idx": i,
+            "avg_entry": p_.entry_price,
+            "avg_exit": exit_price,
+            "stop_price": p_.init_stop,
+            "final_stop_price": p_.stop_price,
+            "target_price": (p_.target_price if p_.target_price is not None
+                             else _live_target(i)),
+            "mfe_points": mfe_pts,
+            "mae_points": mae_pts,
+            "mfe_r": mfe_pts / risk_pts,
+            "mae_r": mae_pts / risk_pts,
+            "recovery_s": recovery_s,
+            "giveback_s": giveback_s,
+            "underwater_s": underwater_s,
+            "inprofit_s": inprofit_s,
+            "exit_reason": reason,
+            "points": pts,
+            "r_multiple": pts / risk_pts,
+            # The POC room at entry, in ticks — this strategy's analog of the
+            # band width: the distance the rotation had to pay with, and the
+            # number min_room_ticks judged. Same column so every downstream
+            # table (and the width-vs-stop check) reads it unchanged.
+            "band_width_ticks": p_.band_width_ticks,
+            # The arming excursion's stamp, in the slot every consumer reads.
+            "acceptance_ts": p_.acceptance_ts,
+            "max_contracts": cfg.contracts,
+            "gross_pnl": gross,
+            "commission": comm,
+            "net_pnl": gross - comm,
+        }
+
+    def _close(reason: str, i: int, exit_price: float) -> None:
+        nonlocal pos, armed, confirmed, day_net, halted
+        assert pos is not None
+        trades.append(_row(pos, reason, i, exit_price))
+        day_net += trades[-1]["net_pnl"]
+        if cfg.daily_loss_stop and day_net <= -cfg.daily_loss_stop:
+            halted = True
+        pos = None
+        if cfg.rearm_after_exit:
+            armed = False
+            confirmed = False
+
+    def _exit(p_: _Pos, i: int, p: float) -> tuple[str, float] | None:
+        if p_.market_exit:
+            return (p_.market_exit, p)
+        tgt = p_.target_price if p_.target_price is not None else _live_target(i)
+        if s * (p - p_.stop_price) <= 0:
+            moved = p_.stop_price != p_.init_stop
+            return ("trail" if moved else "stop", p)
+        if s * (p - tgt) >= 0:
+            # Price crossing the level is a limit fill at the level; the level
+            # node-flipping across price is a market fill at the print. The
+            # previous print against the CURRENT level decides who moved.
+            crossed = i > 0 and s * (price[i - 1] - tgt) < 0
+            return ("target", tgt if crossed else p)
+        if i >= force_i:
+            return ("time", p)
+        return None
+
+    def _trail(p_: _Pos, p: float) -> None:
+        if not trail_dist_t:
+            return
+        fav_t = round(s * (p - p_.entry_price) / tick)
+        if fav_t < trail_dist_t + trail_be_t:
+            return
+        steps = 0 if trail_be_only else (fav_t - trail_dist_t - trail_be_t) // trail_step_t
+        lvl = p_.entry_price + s * (trail_be_t + steps * trail_step_t) * tick
+        if s * (lvl - p_.stop_price) > 0:
+            p_.stop_price = lvl
+
+    # The daily-loss flatten — see run_session._daily_loss_exit. Prices on
+    # cfg.contracts (no pyramid on this family).
+    daily_loss_exit = bool(cfg.daily_loss_stop) and cfg.daily_loss_exit_open
+
+    def _daily_loss_exit(p_: _Pos, i: int) -> None:
+        if p_.market_exit:
+            return
+        pts = s * (price[i] - p_.entry_price)
+        net = pts * pv * cfg.contracts - 2 * cfg.commission_per_side * cfg.contracts
+        if day_net + net <= -cfg.daily_loss_stop:
+            p_.market_exit = "daily_loss"
+
+    for i in range(n):
+        p = price[i]
+        e = edge[i]
+        warm = mins[i] >= warm_m and not np.isnan(e)
+
+        for gnames, gp in ghosts[:]:
+            hit = _exit(gp, i, p)
+            if hit:
+                vetoed.append({**_row(gp, hit[0], i, hit[1]),
+                               "gate": gnames[0], "gates": "|".join(gnames)})
+                ghosts.remove((gnames, gp))
+            else:
+                _trail(gp, p)
+                if daily_loss_exit:
+                    _daily_loss_exit(gp, i)
+
+        if pos is not None:
+            hit = _exit(pos, i, p)
+            if hit:
+                _close(hit[0], i, hit[1])
+            else:
+                _trail(pos, p)
+                if daily_loss_exit:
+                    _daily_loss_exit(pos, i)
+
+        elif confirmed and warm:
+            fill = None
+            if cfg.entry_variant == "A":
+                # The retest limit at the edge. Only price may do the crossing:
+                # the previous print inside the current edge, this one at or
+                # through it. An edge that relocated across the market instead
+                # disarms — the retest never happened.
+                prev_inside = i > 0 and u * (price[i - 1] - e) < 0
+                if u * (p - e) >= 0:
+                    if prev_inside:
+                        fill = e
+                    else:
+                        armed = False
+                        confirmed = False
+            elif cfg.entry_variant == "B":
+                # Stop into the rotation: past the edge, into value. A fill at
+                # the print is honest whichever of the two moved.
+                level = e - u * entry_off
+                if u * (p - level) <= 0:
+                    fill = p
+            if fill is not None and not halted and open_m <= mins[i] < close_m and i < force_i:
+                pc = poc[i]
+                room_t = (u * (fill - pc) / tick) if not np.isnan(pc) else float("nan")
+                if not (room_t >= cfg.min_room_ticks):  # NaN-safe: no POC, no trade
+                    pass  # the touch is missed, not deferred
+                else:
+                    tp = None
+                    if cfg.target == "rr" and cfg.target_rr:
+                        tp = fill + s * cfg.target_rr * risk_pts
+                    stop = fill - s * risk_pts
+                    new_pos = _Pos(
+                        entry_i=i, entry_price=fill,
+                        stop_price=stop, init_stop=stop, target_price=tp,
+                        band_width_ticks=room_t, acceptance_ts=arm_ts,
+                    )
+                    vetoes = [g.name for g in gates if not g.allows(i, fill)]
+                    if not vetoes:
+                        # The setup stays armed behind the open position, like
+                        # the fade's: with rearm_after_exit off, an exit may
+                        # re-fill the standing setup; _close disarms otherwise.
+                        pos = new_pos
+                    else:
+                        ghosts.append((vetoes, new_pos))
+                        armed = False
+                        confirmed = False
+
+        bi = bar_end_of[i]
+        if bi >= 0:
+            c = b_close[bi]
+
+            # Re-acceptance back outside the edge, against the position: the
+            # premise run backwards. Ghosts count their own streaks.
+            if cfg.invalidate_outside_bars and not np.isnan(e):
+                outside = u * (c - e) > 0
+                for p_ in ([pos] if pos is not None else []) + [g for _, g in ghosts]:
+                    p_.beyond_band = p_.beyond_band + 1 if outside else 0
+                    if p_.beyond_band >= cfg.invalidate_outside_bars:
+                        p_.market_exit = "edge"
+
+            # The confirming closes: consecutive closes back inside the edge
+            # while armed. The streak is the armed setup's — a fresh arming
+            # starts a fresh count.
+            if armed and not confirmed and warm:
+                inside_streak = inside_streak + 1 if u * (c - e) < 0 else 0
+                if inside_streak >= cfg.accept_inside_bars:
+                    confirmed = True
+
+        # --- arming: the excursion beyond the edge, edge-triggered last so a
+        # fresh excursion can only act from the next tick onward.
+        is_outside = warm and u * (p - e) > arm_pts
+        if is_outside and not was_outside and pos is None:
+            armed = True
+            confirmed = False
+            inside_streak = 0
+            arm_ts = ts.iloc[i]
+        was_outside = is_outside
+
+    bands = w.iloc[b["end_idx"].to_numpy()].reset_index(drop=True)
+    return trades, vetoed, b, bands
+
+
+def run_session_orb(
+    cfg, day: date
+) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
+    """Simulate one session of the OPENING RANGE BREAKOUT (cfg is OrbConfig).
+
+    One initiative trade off the session's opening window — high/low/open/close
+    of the first ``window_minutes`` from the bell. The three entry modes:
+
+      candle        WINDOW CLOSES --candle has a direction--> IN_TRADE
+                    (market entry at the first print at/after the window's end)
+      break         WINDOW CLOSES --price crosses an extreme + offset--> IN_TRADE
+                    (stop entry, filled at the print)
+      second_break  WINDOW CLOSES --one extreme crossed, then the other-->
+                    IN_TRADE with the second break's direction
+
+    ONE attempt per session, filled or vetoed — there is no re-arm. The window's
+    verdict (its candle, its extremes) is knowable at the first tick at or after
+    its end, and nothing reads it earlier: entries, and the gates judging them,
+    only ever run from that tick onward.
+
+    The stop is the trade's whole risk story, per the research: the Lab read of
+    the same entry WITHOUT the stop showed mean R ~0 — the paper's edge is the
+    stop's asymmetry, so ``stop_mode`` "range" (the window's opposite extreme)
+    is the base rule and the R-multiple every trade is measured against is the
+    risk actually taken at entry, which varies day by day with the window.
+    """
+    if cfg.entry_mode not in ("candle", "break", "second_break"):
+        raise ValueError(
+            f"entry_mode must be 'candle', 'break' or 'second_break', "
+            f"got {cfg.entry_mode!r}")
+    if cfg.direction not in ("both", "long_only", "short_only"):
+        raise ValueError(
+            f"direction must be 'both', 'long_only' or 'short_only', "
+            f"got {cfg.direction!r}")
+    if cfg.stop_mode not in ("range", "ticks"):
+        raise ValueError(f"stop_mode must be 'range' or 'ticks', got {cfg.stop_mode!r}")
+
+    t = tickmod.get_day_ticks(tickmod.contract_for(cfg.contract, day), day)
+    if t is None or t.empty:
+        return [], [], pd.DataFrame(), pd.DataFrame()
+    b = barmod.tick_bars(t, cfg.ticks_per_bar)
+    w = vwapmod.vwap_bands(t)
+    if b.empty:
+        return [], [], b, pd.DataFrame()
+
+    tick = tick_size(cfg.instrument)
+    pv = point_value(cfg.instrument)
+
+    price = t["price"].to_numpy(dtype="float64").tolist()
+    ts = t["ts_utc"]
+    n = len(price)
+    mins = _minutes_et(ts)
+    open_m = cfg.entry_open.hour * 60 + cfg.entry_open.minute
+    close_m = cfg.entry_close.hour * 60 + cfg.entry_close.minute
+    flat_m = cfg.flat_by.hour * 60 + cfg.flat_by.minute
+    win_end_m = 9 * 60 + 30 + cfg.window_minutes
+
+    holdable = np.flatnonzero(mins < flat_m)
+    force_i = int(holdable[-1]) if len(holdable) else n - 1
+
+    # The window: every tick before its end minute. Its extremes and its candle
+    # become facts at the first tick at/after win_end_m and are never read
+    # before it (post is empty on a session shorter than the window: no trade).
+    in_win = np.flatnonzero(mins < win_end_m)
+    post = np.flatnonzero(mins >= win_end_m)
+    if not len(in_win) or not len(post):
+        bands = w.iloc[b["end_idx"].to_numpy()].reset_index(drop=True)
+        return [], [], b, bands
+    entry_from = int(post[0])
+    w_hi = float(max(price[i] for i in in_win))
+    w_lo = float(min(price[i] for i in in_win))
+    w_open = float(price[int(in_win[0])])
+    w_close = float(price[int(in_win[-1])])
+    range_t = (w_hi - w_lo) / tick
+    candle_dir = 1.0 if w_close > w_open else -1.0 if w_close < w_open else 0.0
+    win_end_ts = ts.iloc[entry_from]
+
+    gates = confmod.build_gates(cfg)
+    if gates:
+        ctx = confmod.SessionCtx(
+            cfg=cfg, day=day, ticks=t, bars=b, value_edge_at_tick=None,
+            profile=None,
+        )
+        for g in gates:
+            g.prepare(ctx)
+
+    trail_dist_t = cfg.trail_stop_ticks
+    trail_step_t = cfg.trail_step_ticks or trail_dist_t
+    trail_be_t = cfg.trail_breakeven_ticks
+    trail_be_only = cfg.trail_breakeven_only
+
+    off_pts = cfg.entry_offset_ticks * tick
+    long_ok = cfg.direction in ("both", "long_only")
+    short_ok = cfg.direction in ("both", "short_only")
+
+    pos: _Pos | None = None
+    ghosts: list[tuple[list[str], _Pos]] = []
+    trades: list[dict] = []
+    vetoed: list[dict] = []
+    attempted = False        # the one shot, taken — filled, vetoed, or refused
+    first_break: str | None = None  # second_break's arming state
+    fb_ts: pd.Timestamp | None = None
+    trade_s = 1.0            # the filled attempt's direction; set at entry
+    risk_pts = 0.0           # the risk actually taken; set at entry
+
+    def _row(p_: _Pos, reason: str, i: int, exit_price: float) -> dict:
+        pts = trade_s * (exit_price - p_.entry_price)
+        gross = pts * pv * cfg.contracts
+        comm = 2 * cfg.commission_per_side * cfg.contracts
+        mfe_pts, mae_pts, recovery_s, giveback_s, underwater_s, inprofit_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, trade_s)
+        return {
+            "session": day,
+            "direction": "Long" if trade_s > 0 else "Short",
+            "entry_ts_utc": ts.iloc[p_.entry_i],
+            "exit_ts_utc": ts.iloc[i],
+            "entry_idx": p_.entry_i,
+            "exit_idx": i,
+            "avg_entry": p_.entry_price,
+            "avg_exit": exit_price,
+            "stop_price": p_.init_stop,
+            "final_stop_price": p_.stop_price,
+            "target_price": p_.target_price,
+            "mfe_points": mfe_pts,
+            "mae_points": mae_pts,
+            "mfe_r": mfe_pts / risk_pts,
+            "mae_r": mae_pts / risk_pts,
+            "recovery_s": recovery_s,
+            "giveback_s": giveback_s,
+            "underwater_s": underwater_s,
+            "inprofit_s": inprofit_s,
+            "exit_reason": reason,
+            "points": pts,
+            "r_multiple": pts / risk_pts,
+            # The window range, in the slot every downstream table reads as
+            # "the width the trade had to work with".
+            "band_width_ticks": range_t,
+            # The setup's stamp: the window's completion — or, on the second
+            # break, the FIRST break that armed it.
+            "acceptance_ts": p_.acceptance_ts,
+            "max_contracts": cfg.contracts,
+            "gross_pnl": gross,
+            "commission": comm,
+            "net_pnl": gross - comm,
+        }
+
+    def _exit(p_: _Pos, i: int, p: float) -> tuple[str, float] | None:
+        if trade_s * (p - p_.stop_price) <= 0:
+            moved = p_.stop_price != p_.init_stop
+            return ("trail" if moved else "stop", p)
+        if p_.target_price is not None:
+            tgt = p_.target_price
+            if trade_s * (p - tgt) >= 0:
+                # Price crossing a resting limit fills at the limit; a first
+                # print already beyond it (a gap) fills at the print.
+                crossed = i > 0 and trade_s * (price[i - 1] - tgt) < 0
+                return ("target", tgt if crossed else p)
+        if i >= force_i:
+            return ("time", p)
+        return None
+
+    def _trail(p_: _Pos, p: float) -> None:
+        if not trail_dist_t:
+            return
+        fav_t = round(trade_s * (p - p_.entry_price) / tick)
+        if fav_t < trail_dist_t + trail_be_t:
+            return
+        steps = 0 if trail_be_only else (fav_t - trail_dist_t - trail_be_t) // trail_step_t
+        lvl = p_.entry_price + trade_s * (trail_be_t + steps * trail_step_t) * tick
+        if trade_s * (lvl - p_.stop_price) > 0:
+            p_.stop_price = lvl
+
+    def _attempt(i: int, d: float, fill: float, stamp: pd.Timestamp) -> None:
+        """The session's one entry, in direction d at the fill. Refusals (range
+        filter, degenerate risk) consume the attempt too — the day produced its
+        verdict and it was 'no trade', which must not quietly become a retry."""
+        nonlocal pos, attempted, trade_s, risk_pts
+        attempted = True
+        if cfg.min_range_ticks and range_t < cfg.min_range_ticks:
+            return
+        if cfg.max_range_ticks and range_t > cfg.max_range_ticks:
+            return
+        if cfg.stop_mode == "range":
+            stop = w_lo if d > 0 else w_hi
+        else:
+            stop = fill - d * cfg.stop_ticks * tick
+        risk = d * (fill - stop)
+        if risk <= 0:
+            return  # a fill at or beyond its own stop: no trade to take
+        trade_s = d
+        risk_pts = risk
+        tp = fill + d * cfg.target_rr * risk if (cfg.target == "rr" and cfg.target_rr) else None
+        new_pos = _Pos(
+            entry_i=i, entry_price=fill,
+            stop_price=stop, init_stop=stop, target_price=tp,
+            band_width_ticks=range_t, acceptance_ts=stamp,
+        )
+        vetoes = [g.name for g in gates if not g.allows(i, fill)]
+        if not vetoes:
+            pos = new_pos
+        else:
+            ghosts.append((vetoes, new_pos))
+
+    for i in range(entry_from, n):
+        p = price[i]
+
+        for gnames, gp in ghosts[:]:
+            hit = _exit(gp, i, p)
+            if hit:
+                vetoed.append({**_row(gp, hit[0], i, hit[1]),
+                               "gate": gnames[0], "gates": "|".join(gnames)})
+                ghosts.remove((gnames, gp))
+            else:
+                _trail(gp, p)
+
+        if pos is not None:
+            hit = _exit(pos, i, p)
+            if hit:
+                trades.append(_row(pos, hit[0], i, hit[1]))
+                pos = None
+            else:
+                _trail(pos, p)
+
+        elif not attempted and open_m <= mins[i] < close_m and i < force_i:
+            if cfg.entry_mode == "candle":
+                # The window's candle, traded at the first eligible print. A
+                # doji (dir 0) or a filtered direction is the day's verdict:
+                # no trade.
+                if candle_dir == 0 or (candle_dir > 0 and not long_ok) \
+                        or (candle_dir < 0 and not short_ok):
+                    attempted = True
+                else:
+                    _attempt(i, candle_dir, p, win_end_ts)
+            elif cfg.entry_mode == "break":
+                if long_ok and p >= w_hi + off_pts:
+                    _attempt(i, 1.0, p, win_end_ts)
+                elif short_ok and p <= w_lo - off_pts:
+                    _attempt(i, -1.0, p, win_end_ts)
+            else:  # second_break
+                if first_break is None:
+                    if p > w_hi:
+                        first_break, fb_ts = "up", ts.iloc[i]
+                    elif p < w_lo:
+                        first_break, fb_ts = "down", ts.iloc[i]
+                elif first_break == "up" and p < w_lo:
+                    if short_ok:
+                        _attempt(i, -1.0, p, fb_ts)
+                    else:
+                        attempted = True
+                elif first_break == "down" and p > w_hi:
+                    if long_ok:
+                        _attempt(i, 1.0, p, fb_ts)
+                    else:
+                        attempted = True
+
+    bands = w.iloc[b["end_idx"].to_numpy()].reset_index(drop=True)
+    return trades, vetoed, b, bands
 
 
 def run_session_profile_pullback(
@@ -1198,7 +2142,7 @@ def run_session_profile_pullback(
         pts = exit_price - p_.entry_price
         gross = pts * pv * cfg.contracts
         comm = 2 * cfg.commission_per_side * cfg.contracts
-        mfe_pts, mae_pts, recovery_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, 1.0)
+        mfe_pts, mae_pts, recovery_s, giveback_s, underwater_s, inprofit_s = _excursion(price, ts, p_.entry_i, i, p_.entry_price, 1.0)
         return {
             "session": day,
             "direction": "Long",
@@ -1219,6 +2163,14 @@ def run_session_profile_pullback(
             # How long the trade spent climbing back from its worst heat to
             # breakeven, in seconds (0 if never underwater, NaN if never recovered).
             "recovery_s": recovery_s,
+            # The mirror: how long it held its best before collapsing back to
+            # breakeven (0 if never green, NaN if it never gave it back — a winner
+            # that peaked and stayed). The loser read.
+            "giveback_s": giveback_s,
+            # Total dwell each side of breakeven, over the whole path (never NaN).
+            # underwater_s counts the losers recovery_s can't; inprofit_s is its mirror.
+            "underwater_s": underwater_s,
+            "inprofit_s": inprofit_s,
             "exit_reason": reason,
             "points": pts,
             "r_multiple": pts / risk_pts,
@@ -1233,6 +2185,10 @@ def run_session_profile_pullback(
         }
 
     def _exit(p_: _Pos, i: int, p: float) -> tuple[str, float] | None:
+        if p_.market_exit:
+            # A market order armed by the daily-loss flatten (this loop's only
+            # market exit), filled at the next print like the bounce's.
+            return (p_.market_exit, p)
         if p - p_.stop_price <= 0:
             moved = p_.stop_price != p_.init_stop
             return ("trail" if moved else "stop", p)
@@ -1254,6 +2210,19 @@ def run_session_profile_pullback(
         if lvl - p_.stop_price > 0:
             p_.stop_price = lvl
 
+    # The daily-loss flatten — see run_session._daily_loss_exit. Long-only and no
+    # pyramid on this family, so the mark-to-market is the plain long P&L on
+    # cfg.contracts.
+    daily_loss_exit = bool(cfg.daily_loss_stop) and cfg.daily_loss_exit_open
+
+    def _daily_loss_exit(p_: _Pos, i: int) -> None:
+        if p_.market_exit:
+            return
+        net = (price[i] - p_.entry_price) * pv * cfg.contracts \
+            - 2 * cfg.commission_per_side * cfg.contracts
+        if day_net + net <= -cfg.daily_loss_stop:
+            p_.market_exit = "daily_loss"
+
     for i in range(n):
         p = price[i]
 
@@ -1272,6 +2241,8 @@ def run_session_profile_pullback(
                 armed = [False] * nlv
             else:
                 _trail(pos, p)
+                if daily_loss_exit:
+                    _daily_loss_exit(pos, i)
             continue  # exits settle first; a fill can only happen from the next tick on
 
         # Which level series were crossed on this tick (armed -> at-or-through).
@@ -1386,6 +2357,482 @@ def run_session_profile_pullback(
 
     bands = w_ny.iloc[b_ny["end_idx"].to_numpy()].reset_index(drop=True)
     return trades, [], b, bands
+
+
+def _prev_session_refs(cfg, day: date, tick: float) -> dict:
+    """The prior session's finished POC/VAH/VAL and close — the static ``pd *``
+    references, read-only from the tick cache.
+
+    Fetched nowhere: this walks back over recent weekdays and reads whatever RTH
+    segment is already on disk. In a normal run every session but the window's
+    first has its predecessor cached (the run bought it), so the refs are present;
+    the first session — whose predecessor sits outside the window — simply has no
+    ``pd *`` candidates, the same honest-absence the weekly-VWAP anchor uses. It
+    never spends money to draw a level, so a cold prior day degrades to no refs
+    rather than a paid pull inside a worker."""
+    from datetime import timedelta
+
+    prev = day
+    for _ in range(7):  # skip weekends/holidays until a cached session turns up
+        prev = prev - timedelta(days=1)
+        if prev.weekday() >= 5:
+            continue
+        sym = tickmod.contract_for_cached(cfg.contract, prev)
+        if sym is None:
+            continue
+        rth = tickmod.cached_rth(sym, prev)
+        if rth is None or rth.empty:
+            continue
+        pb = barmod.tick_bars(rth, cfg.ticks_per_bar)
+        if pb.empty:
+            return {}
+        prof = profmod.developing_profile(rth, pb, tick)
+        # The last finite developing bar IS the day's finished profile.
+        poc = next((v for v in prof.poc[::-1] if v == v), None)
+        vah = next((v for v in prof.vah[::-1] if v == v), None)
+        val = next((v for v in prof.val[::-1] if v == v), None)
+        return {"pd POC": poc, "pd VAH": vah, "pd VAL": val,
+                "pd Close": float(rth["price"].iloc[-1])}
+    return {}
+
+
+def run_session_drift_fade(
+    cfg, day: date, stop_ref: str = "level"
+) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
+    """Simulate one session of the DRIFT-TOUCH FADE (cfg is DriftFadeConfig).
+
+    A *drift touch* is contact with a level that neither side approached: over the
+    trailing GAP_LOOKBACK_BARS bars, price's net move toward the level plus the
+    level's net move toward price is <= 0 (profile.gap_closer). Price was loitering
+    by the level and wiggled into contact — a slow re-test of a hugged zone. The
+    trade fades it: long when price hugged ABOVE and drifted down onto support,
+    short when it hugged BELOW and drifted up into resistance; fixed stop behind
+    the zone; target toward value (the NY VWAP by default).
+
+    The event is reproduced on the engine's own bars, causally: a level's value
+    standing as a bar trades is the last bar to have *closed strictly before* it
+    (profile.levels_in_force), so touch geometry and the drift attribution read
+    only past data. A drift touch detected at a bar close arms an entry that fills
+    at market on the NEXT tick — the engine never trades on a close it could not
+    yet have seen. Its own loop, not a mode of any other strategy: there is no
+    acceptance candle, no arming stretch and no resting limit (a limit at the
+    level would fill the price-led approaches, exactly the dead class the drift
+    cut removes).
+
+    The overnight segment is spliced in (session="globex" in the registry): the
+    Globex developing profile and the ONH/ONL references need it. The NY VWAP and
+    NY profile anchor at the bell; trading lives in RTH only.
+    """
+    if cfg.side not in ("long", "short", "both"):
+        raise ValueError(f"side must be long|short|both, got {cfg.side!r}")
+    if cfg.target_mode not in ("ny_vwap", "r_multiple", "fixed_ticks"):
+        raise ValueError(f"unknown target_mode {cfg.target_mode!r}")
+    if stop_ref not in ("level", "entry"):
+        raise ValueError(f"stop_ref must be level|entry, got {stop_ref!r}")
+
+    t = tickmod.get_day_ticks(tickmod.contract_for(cfg.contract, day), day,
+                              include_overnight=True)
+    if t is None or t.empty:
+        return [], [], pd.DataFrame(), pd.DataFrame()
+
+    rth_i0 = int(t["ts_utc"].searchsorted(tickmod.session_bounds_utc(day)[0], side="left"))
+    if cfg.use_globex_levels and rth_i0 == 0:
+        raise RuntimeError(
+            f"no overnight ticks for {day} — the Globex profile cannot be built")
+
+    b = barmod.tick_bars(t, cfg.ticks_per_bar)
+    if b.empty:
+        return [], [], b, pd.DataFrame()
+
+    tick = tick_size(cfg.instrument)
+    n = len(t)
+    price = t["price"].to_numpy(dtype="float64").tolist()
+    ts = t["ts_utc"]
+    mins = _minutes_et(ts)
+
+    # NY VWAP mid, anchored at the bell over the RTH ticks alone — the ny_vwap
+    # target and (as +1σ..+2σ is not needed here) nothing else. NaN overnight.
+    t_ny = t.iloc[rth_i0:].reset_index(drop=True)
+    if t_ny.empty:
+        return [], [], b, pd.DataFrame()
+    b_ny = barmod.tick_bars(t_ny, cfg.ticks_per_bar)
+    w_ny = vwapmod.vwap_bands(t_ny)
+    ny_mid = np.full(n, np.nan)
+    ny_mid[rth_i0:] = w_ny["mid"].to_numpy()
+    ny_mid = ny_mid.tolist()
+
+    warm = (mins[rth_i0:] - mins[rth_i0]) >= cfg.level_warmup_min if rth_i0 < n else np.array([])
+
+    # --- candidate level series, each a per-tick "value standing at this tick" ---
+    levels: list[tuple[str, np.ndarray, bool]] = []  # (name, per-tick values, is_developing)
+
+    def _ny_masked(seg: np.ndarray) -> np.ndarray:
+        lv = np.full(n, np.nan)
+        lv[rth_i0:] = np.where(warm, seg, np.nan)
+        return lv
+
+    if cfg.use_globex_levels:
+        prof_gx = profmod.developing_profile(t, b, tick)
+        for edge, on in (("poc", cfg.trade_poc), ("vah", cfg.trade_vah), ("val", cfg.trade_val)):
+            if on:
+                levels.append((f"Globex {edge.upper()}",
+                               profmod.levels_in_force(prof_gx, b, n, edge=edge), True))
+    if cfg.use_ny_levels:
+        prof_ny = profmod.developing_profile(t_ny, b_ny, tick)
+        for edge, on in (("poc", cfg.trade_poc), ("vah", cfg.trade_vah), ("val", cfg.trade_val)):
+            if on:
+                seg = profmod.levels_in_force(prof_ny, b_ny, len(t_ny), edge=edge)
+                levels.append((f"NY {edge.upper()}", _ny_masked(seg), True))
+    if cfg.use_session_refs:
+        def _static(name: str, px, masked: bool) -> None:
+            if px is None or not np.isfinite(px):
+                return
+            arr = np.full(n, float(px))
+            if masked:  # the session open anchors at the bell, like an NY level
+                arr[:rth_i0] = np.nan
+                if rth_i0 < n:
+                    arr[rth_i0:] = np.where(warm, float(px), np.nan)
+            levels.append((name, arr, False))
+
+        _static("Open", float(t["price"].iloc[rth_i0]), True)
+        if rth_i0 > 0:
+            on_px = t["price"].iloc[:rth_i0]
+            _static("ONH", float(on_px.max()), False)
+            _static("ONL", float(on_px.min()), False)
+        for name, px in _prev_session_refs(cfg, day, tick).items():
+            _static(name, px, False)
+
+    if not levels:
+        raise ValueError("no candidate levels: enable a source with a level type")
+
+    # Per-bar view: the value standing (and the close) at each bar. levels_in_force
+    # returns the last bar closed strictly before a tick, so sampling at a bar's
+    # own end tick gives the level the trader knew as that bar traded — the causal
+    # reading the drift attribution and the touch geometry both want.
+    ends = b["end_idx"].to_numpy(dtype="int64")
+    b_close = b["close"].to_numpy()
+    b_high = b["high"].to_numpy()
+    b_low = b["low"].to_numpy()
+    b_end_min = mins[ends]
+    lvbar = [lv[ends] for _, lv, _ in levels]  # per-candidate per-bar values
+    bar_of = {int(e): bi for bi, e in enumerate(ends)}  # tick index -> bar index
+
+    pv = point_value(cfg.instrument)
+    risk_pts = cfg.stop_ticks * tick
+    tol = cfg.touch_tol
+    stab_tol_pts = cfg.stability_tol_ticks * tick
+    stab_ns = cfg.min_level_stability_min * 60_000_000_000
+    confirm_pts = cfg.confirm_ticks * tick
+    ts_ns = ts.astype("int64").to_numpy()
+    trail_dist_t = cfg.trail_stop_ticks
+    trail_step_t = cfg.trail_step_ticks or trail_dist_t
+    trail_be_t = cfg.trail_breakeven_ticks
+    trail_be_only = cfg.trail_breakeven_only
+    max_hold_ns = cfg.max_hold_min * 60_000_000_000  # 0 = off
+
+    open_m = cfg.entry_open.hour * 60 + cfg.entry_open.minute
+    close_m = cfg.entry_close.hour * 60 + cfg.entry_close.minute
+    flat_m = cfg.flat_by.hour * 60 + cfg.flat_by.minute
+    holdable = np.flatnonzero(mins[rth_i0:] < flat_m) + rth_i0
+    force_i = int(holdable[-1]) if len(holdable) else n - 1
+
+    # --- gates (single-sided only; the schema forbids a gate on side="both") ---
+    gates = confmod.build_gates(cfg)
+    if gates:
+        gside = cfg.side  # "long" | "short"
+        edge_name = "vah" if gside == "long" else "val"
+        prof_g = prof_ny if cfg.use_ny_levels else profmod.developing_profile(t_ny, b_ny, tick)
+        edge_full = np.full(n, np.nan)
+        edge_full[rth_i0:] = profmod.levels_in_force(prof_g, b_ny, len(t_ny), edge=edge_name)
+        ctx = confmod.SessionCtx(
+            cfg=cfg, day=day, ticks=t, bars=b,
+            value_edge_at_tick=pd.Series(edge_full), profile=prof_g,
+            side=gside, band="upper" if gside == "long" else "lower")
+        for g in gates:
+            g.prepare(ctx)
+
+    nlv = len(levels)
+    last_touch_bar = [-10**9] * nlv
+    touch_count = [0] * nlv
+
+    pos: _Pos | None = None
+    pos_s = 1.0
+    # ghosts: (vetoing gate names, ghost position, its signed direction)
+    ghosts: list[tuple[list[str], _Pos, float]] = []
+    trades: list[dict] = []
+    vetoed: list[dict] = []
+    pending: list[tuple[float, float, str]] = []  # (s, level, name) filled next tick
+    bwatch: dict | None = None               # variant-B confirmation watch
+    day_net = 0.0
+    halted = False
+
+    def _live_tgt(i: int) -> float:
+        return ny_mid[i]
+
+    def _row(p_: _Pos, reason: str, i: int, exit_price: float, s: float) -> dict:
+        pts = s * (exit_price - p_.entry_price)
+        gross = pts * pv * cfg.contracts
+        comm = 2 * cfg.commission_per_side * cfg.contracts
+        mfe_pts, mae_pts, recovery_s, giveback_s, underwater_s, inprofit_s = _excursion(
+            price, ts, p_.entry_i, i, p_.entry_price, s)
+        return {
+            "session": day,
+            "direction": "Long" if s > 0 else "Short",
+            "entry_ts_utc": ts.iloc[p_.entry_i],
+            "exit_ts_utc": ts.iloc[i],
+            "entry_idx": p_.entry_i,
+            "exit_idx": i,
+            "avg_entry": p_.entry_price,
+            "avg_exit": exit_price,
+            "stop_price": p_.init_stop,
+            "final_stop_price": p_.stop_price,
+            "target_price": (p_.target_price if p_.target_price is not None
+                             else _live_tgt(i)),
+            "mfe_points": mfe_pts,
+            "mae_points": mae_pts,
+            "mfe_r": mfe_pts / risk_pts,
+            "mae_r": mae_pts / risk_pts,
+            "recovery_s": recovery_s,
+            "giveback_s": giveback_s,
+            "underwater_s": underwater_s,
+            "inprofit_s": inprofit_s,
+            "exit_reason": reason,
+            "points": pts,
+            "r_multiple": pts / risk_pts,
+            # This strategy's analog of the band width: the room the fade had to
+            # its target at entry, in ticks — the number min_room_ticks judged.
+            "band_width_ticks": p_.band_width_ticks,
+            "acceptance_ts": p_.acceptance_ts,
+            # The reference level whose drift-touch triggered the entry
+            # ("Globex POC", "NY VAH", "ONH", "pd VAL", ...) — this strategy's
+            # entry attribution, the analog of by_gate on the veto side.
+            "entry_reason": p_.entry_reason,
+            "max_contracts": cfg.contracts,
+            "gross_pnl": gross,
+            "commission": comm,
+            "net_pnl": gross - comm,
+        }
+
+    def _exit(p_: _Pos, i: int, p: float, s: float) -> tuple[str, float] | None:
+        if p_.market_exit:
+            return (p_.market_exit, p)
+        if s * (p - p_.stop_price) <= 0:
+            moved = p_.stop_price != p_.init_stop
+            return ("trail" if moved else "stop", p)
+        if p_.target_price is not None:
+            if s * (p - p_.target_price) >= 0:
+                return ("target", p_.target_price)
+        else:
+            tgt = _live_tgt(i)
+            if tgt == tgt and s * (p - tgt) >= 0:
+                # Price crossing the level is a limit fill at the level; the level
+                # node-flipping across price is a market fill at the print.
+                crossed = i > 0 and s * (price[i - 1] - tgt) < 0
+                return ("target", tgt if crossed else p)
+        if max_hold_ns and ts_ns[i] - ts_ns[p_.entry_i] >= max_hold_ns:
+            return ("maxhold", p)
+        if i >= force_i:
+            return ("time", p)
+        return None
+
+    def _trail(p_: _Pos, p: float, s: float) -> None:
+        if not trail_dist_t:
+            return
+        fav_t = round(s * (p - p_.entry_price) / tick)
+        if fav_t < trail_dist_t + trail_be_t:
+            return
+        steps = 0 if trail_be_only else (fav_t - trail_dist_t - trail_be_t) // trail_step_t
+        lvl = p_.entry_price + s * (trail_be_t + steps * trail_step_t) * tick
+        if s * (lvl - p_.stop_price) > 0:
+            p_.stop_price = lvl
+
+    daily_loss_exit = bool(cfg.daily_loss_stop) and cfg.daily_loss_exit_open
+
+    def _daily_loss_exit(p_: _Pos, i: int, s: float) -> None:
+        if p_.market_exit:
+            return
+        net = s * (price[i] - p_.entry_price) * pv * cfg.contracts \
+            - 2 * cfg.commission_per_side * cfg.contracts
+        if day_net + net <= -cfg.daily_loss_stop:
+            p_.market_exit = "daily_loss"
+
+    def _open(s: float, level: float, i: int, name: str = "") -> None:
+        """Fill one armed signal at market (price[i]); route to a real position,
+        a gate ghost, or an in_trade ghost."""
+        nonlocal pos, pos_s
+        fill = price[i]
+        # Room to the target at entry, in ticks — and the ny_vwap trivial-rotation
+        # guard: a target already inside the stop distance is no trade.
+        if cfg.target_mode == "ny_vwap":
+            tgt0 = ny_mid[i]
+            room_t = (s * (tgt0 - fill) / tick) if tgt0 == tgt0 else float("nan")
+            if not (room_t >= cfg.min_room_ticks):  # NaN-safe: no VWAP, no trade
+                return
+            tp = None
+        elif cfg.target_mode == "r_multiple":
+            tp = fill + s * cfg.target_rr * risk_pts
+            room_t = cfg.target_rr * cfg.stop_ticks
+        else:  # fixed_ticks
+            tp = fill + s * cfg.target_ticks * tick
+            room_t = float(cfg.target_ticks)
+        # "level": the zone is the invalidation — risk from the fill varies with
+        # how far the confirming close landed from it (median ~2x stop_ticks in
+        # the Jul 2026 sweep). "entry": fixed risk from the fill instead.
+        stop = (level if stop_ref == "level" else fill) - s * risk_pts
+        new_pos = _Pos(
+            entry_i=i, entry_price=fill, stop_price=stop, init_stop=stop,
+            target_price=tp, band_width_ticks=room_t, acceptance_ts=ts.iloc[i],
+            entry_reason=name)
+        if pos is not None:
+            ghosts.append((["in_trade"], new_pos, s))
+            return
+        vetoes = [g.name for g in gates if not g.allows(i, fill)]
+        if vetoes:
+            ghosts.append((vetoes, new_pos, s))
+        else:
+            pos, pos_s = new_pos, s
+
+    for i in range(n):
+        p = price[i]
+
+        # Fill signals armed at the previous bar close, at this tick's market.
+        if pending:
+            for s, level, name in pending:
+                if not halted and open_m <= mins[i] < close_m and i < force_i:
+                    _open(s, level, i, name)
+            pending = []
+
+        # Ghost exits, then the real position — exits settle before any bar close.
+        for gnames, gp, gs in ghosts[:]:
+            hit = _exit(gp, i, p, gs)
+            if hit:
+                vetoed.append({**_row(gp, hit[0], i, hit[1], gs),
+                               "gate": gnames[0], "gates": "|".join(gnames)})
+                ghosts.remove((gnames, gp, gs))
+            else:
+                _trail(gp, p, gs)
+                if daily_loss_exit:
+                    _daily_loss_exit(gp, i, gs)
+
+        if pos is not None:
+            hit = _exit(pos, i, p, pos_s)
+            if hit:
+                trades.append(_row(pos, hit[0], i, hit[1], pos_s))
+                day_net += trades[-1]["net_pnl"]
+                if cfg.daily_loss_stop and day_net <= -cfg.daily_loss_stop:
+                    halted = True
+                pos = None
+            else:
+                _trail(pos, p, pos_s)
+                if daily_loss_exit:
+                    _daily_loss_exit(pos, i, pos_s)
+
+        # A bar that closed on this tick: confirm any B-watch, then detect touches.
+        bi = bar_of.get(i)
+        if bi is None:
+            continue
+        c = b_close[bi]
+
+        if bwatch is not None:
+            bs, blevel, btrig = bwatch["s"], bwatch["level"], bwatch["trigger"]
+            if bs * (c - btrig) >= 0:      # first bar to close beyond the trigger
+                pending.append((bs, blevel, bwatch["name"]))
+                bwatch = None
+
+        # Overnight bars feed the profiles but are never a touch. Touch counting
+        # (and the debounce) runs across the whole RTH session so "nth touch" and
+        # max_touches_per_zone mean the same as the study — a signal is only
+        # EMITTED inside the entry window, but a pre-window touch still counts.
+        if ends[bi] < rth_i0:
+            continue
+        emit_ok = open_m <= b_end_min[bi] < close_m
+
+        # Which candidate zones the bar came within tolerance of.
+        j0 = bi - min(profmod.GAP_LOOKBACK_BARS, bi)
+        best_signal = None
+        extra: list[tuple[float, float, str]] = []
+        for k in range(nlv):
+            lv = lvbar[k][bi]
+            if lv != lv:  # NaN — the level does not exist yet
+                continue
+            if not (b_low[bi] - tol <= lv <= b_high[bi] + tol):
+                continue
+            # Debounce: a re-approach is a fresh touch only after touch_gap_bars
+            # clear of the zone (the Lab's TOUCH_GAP_BARS rule).
+            last = last_touch_bar[k]
+            last_touch_bar[k] = bi
+            if bi - last <= cfg.touch_gap_bars:
+                continue
+            touch_count[k] += 1
+            # Everything below only produces a signal, so it is window-gated; the
+            # touch above is counted regardless of the window.
+            if not emit_ok:
+                continue
+            if cfg.max_touches_per_zone and touch_count[k] > cfg.max_touches_per_zone:
+                continue
+            # Drift classification, on the engine's bars.
+            cls, _, _ = profmod.gap_closer(lvbar[k], b_close, bi)
+            if cls != "drift":
+                continue
+            # The fade side: which side price hugged over the lookback. Above the
+            # level (support) -> long; below (resistance) -> short.
+            s = float(np.sign(b_close[j0] - lvbar[k][j0]))
+            if s == 0:
+                continue
+            if cfg.side != "both" and cfg.side != ("long" if s > 0 else "short"):
+                continue
+            # Stability: skip a developing level that only just relocated to here.
+            if stab_ns and levels[k][2]:
+                lvs = levels[k][1]
+                cut = ts_ns[ends[bi]] - stab_ns
+                jj = ends[bi]
+                ok = True
+                while jj >= 0 and ts_ns[jj] > cut:
+                    if lvs[jj] != lvs[jj] or abs(lvs[jj] - lv) > stab_tol_pts:
+                        ok = False
+                        break
+                    jj -= 1
+                if not ok:
+                    continue
+            # Stacked drift touches on one bar: the zone closest to the close is
+            # the representative (the Lab's rep choice); the rest can't be taken
+            # one-at-a-time and become in_trade ghosts.
+            name = levels[k][0]
+            if best_signal is None or abs(lv - c) < abs(best_signal[1] - c):
+                if best_signal is not None:
+                    extra.append(best_signal)
+                best_signal = (s, lv, name)
+            else:
+                extra.append((s, lv, name))
+
+        if best_signal is None:
+            continue
+        if cfg.entry_variant == "A":
+            pending.append(best_signal)
+            pending.extend(extra)  # simultaneous drift touches -> in_trade ghosts
+        else:  # variant B: watch for a confirming close beyond the touch extreme
+            s, lv, name = best_signal
+            extreme = b_high[bi] if s > 0 else b_low[bi]
+            bwatch = {"s": s, "level": lv, "name": name,
+                      "trigger": extreme + s * confirm_pts}
+
+    bands = w_ny.iloc[b_ny["end_idx"].to_numpy()].reset_index(drop=True)
+    return trades, vetoed, b, bands
+
+
+def run_session_drift_fade_entry_stop(
+    cfg, day: date
+) -> tuple[list[dict], list[dict], pd.DataFrame, pd.DataFrame]:
+    """Registry entry point: the drift-touch fade with the stop measured from the
+    FILL, not the level. Same detection, same entries, same targets — only the
+    invalidation moves: stop_ticks behind the entry print, so every trade risks
+    the same distance. A separate callable rather than a config knob (registry
+    doctrine: a knob an entry point ignored would let two different-looking
+    configs produce byte-identical runs), and a separate strategy because a
+    changed exit is a changed idea — the level-stop premise is "the zone failing
+    is the invalidation"; this one trades the same signal with entry-anchored
+    risk and lets the zone go."""
+    return run_session_drift_fade(cfg, day, stop_ref="entry")
 
 
 def finalize(rows: list[dict], cfg: SimConfig) -> pd.DataFrame:

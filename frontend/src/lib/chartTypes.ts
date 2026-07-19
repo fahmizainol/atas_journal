@@ -54,6 +54,20 @@ export interface ChartMarker {
   text?: string;
 }
 
+// Initial Balance — high/low of the first 60 min of RTH (9:30–10:30 ET), the
+// same window the IB/ORB study measures, so what the chart draws is what the
+// study's break/extension stats were computed against. `start`/`formed`/`end`
+// are drawn-bar times: the lines span start (the bell) → end (last bar), the
+// 1×/1.5×/2× extension guides span formed (the IB's completion) → end. Only the
+// sim/Lab charts send it; absent when the session's data ends inside the window.
+export interface IbOverlay {
+  high: number;
+  low: number;
+  start: number;
+  formed: number;
+  end: number;
+}
+
 export interface PriceLineSpec {
   price: number;
   color: string;
@@ -107,6 +121,9 @@ export interface TradeChartData {
   bars?: Bar[];
   vwap_globex?: VwapPoint[];
   vwap_ny?: VwapPoint[];
+  /** Weekly anchor (the week's first Globex open), context only: no engine
+   * trades it, so it is never `vwap_anchor`. Absent when the week has a hole. */
+  vwap_weekly?: VwapPoint[];
   /** Which anchor the engine actually traded; the other is drawn as context.
    * Only the sim's charts set it — the journal's draw both as reference. */
   vwap_anchor?: "globex" | "ny";
@@ -116,6 +133,7 @@ export interface TradeChartData {
   markers?: ChartMarker[];
   price_lines?: PriceLineSpec[];
   levels?: PriceLineSpec[];
+  ib?: IbOverlay | null;
   trade_rect?: TradeRect | null;
   excursion?: Omit<Excursion, "available">;
   footprint?: Footprint;
@@ -131,6 +149,9 @@ export interface DayChartData {
   bars?: Bar[];
   vwap_globex?: VwapPoint[];
   vwap_ny?: VwapPoint[];
+  /** Weekly anchor (the week's first Globex open), context only: no engine
+   * trades it, so it is never `vwap_anchor`. Absent when the week has a hole. */
+  vwap_weekly?: VwapPoint[];
   /** Which anchor the engine actually traded; the other is drawn as context.
    * Only the sim's charts set it — the journal's draw both as reference. */
   vwap_anchor?: "globex" | "ny";
@@ -139,6 +160,7 @@ export interface DayChartData {
   atr_points?: ATRPoint[];
   markers?: ChartMarker[];
   levels?: PriceLineSpec[];
+  ib?: IbOverlay | null;
   trades?: TradeRect[];
   footprint?: Footprint;
   cvd?: CvdPoint[];

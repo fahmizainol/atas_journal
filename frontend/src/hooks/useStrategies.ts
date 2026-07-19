@@ -107,6 +107,20 @@ export function usePatchRunMeta(slug: string) {
   });
 }
 
+// Set one trade's tags. Invalidates the whole "strategies" tree, which refetches
+// the open run detail so the new tags flow back into the table badges, the tag
+// editor, and the filter chips from the single source of truth.
+export function usePatchTradeTags(slug: string) {
+  const invalidate = useInvalidateStrategies();
+  return useMutation({
+    mutationFn: (v: { runId: string; tradeNo: number; tags: string[] }) =>
+      apiSend("PATCH", `/strategies/${slug}/runs/${v.runId}/trades/${v.tradeNo}`, {
+        tags: v.tags,
+      }),
+    onSuccess: invalidate,
+  });
+}
+
 export function useDeleteRun(slug: string) {
   const invalidate = useInvalidateStrategies();
   return useMutation({

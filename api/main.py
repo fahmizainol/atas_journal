@@ -36,6 +36,7 @@ from .routers import (  # noqa: E402
     notes,
     overview,
     regime,
+    research,
     sessions,
     settings,
     setups,
@@ -98,6 +99,7 @@ app.include_router(videos.router, prefix="/api")
 app.include_router(strategies.router, prefix="/api")
 app.include_router(regime.router, prefix="/api")
 app.include_router(interactions.router, prefix="/api")
+app.include_router(research.router, prefix="/api")
 
 
 # --- Prod static frontend (mounted last; only if a build exists) ---------
