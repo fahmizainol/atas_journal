@@ -59,6 +59,16 @@ app.add_middleware(
 @app.on_event("startup")
 async def _startup() -> None:
     deps.init()
+    # A sim run executes in an in-process background task, so a 'running' state on
+    # disk at startup is an orphan — the process that owned it is gone. Clear them
+    # before serving: otherwise the UI shows them frozen forever and their configs
+    # stay 409-locked against a re-run.
+    from journal.sim import store as sim_store
+
+    orphans = sim_store.reconcile_orphans()
+    if orphans:
+        print(f"[startup] cleared {len(orphans)} orphaned sim run(s): "
+              + ", ".join(orphans), flush=True)
     # Auto-import watcher: scans data/imports/ every WATCH_INTERVAL_S. Async
     # handler so the task lands on the running event loop.
     from . import watcher

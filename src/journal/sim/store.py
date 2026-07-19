@@ -66,7 +66,18 @@ def _write(path, obj) -> None:
 
 
 def _read(path) -> dict | None:
-    return json.loads(path.read_text()) if path.exists() else None
+    """Parsed JSON, or None when the file is absent — or empty/corrupt. A crash
+    mid-write leaves a truncated state.json/config.json behind (the process dies
+    between opening the file and writing it), and every reader here already treats
+    None as 'not there': list_runs skips such a run, read_state 404s it, derived
+    caches recompute. One unparseable file must never take down a startup sweep or
+    a run-create guard that walks every run on disk."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 # --- run lifecycle ----------------------------------------------------------
@@ -126,6 +137,50 @@ def delete_run(slug: str, rid: str) -> bool:
     if baseline(slug) == rid:
         set_baseline(slug, None)
     return True
+
+
+def running_runs() -> list[str]:
+    """``"<slug>/<rid>"`` of every run currently in 'running' state, across all
+    strategies. Used to serialize runs: each run fans out across a process pool
+    sized to the whole box, so two at once oversubscribe the cores and can wedge
+    (which is exactly how the orphans this reconciles were created)."""
+    if not SIMS_DIR.exists():
+        return []
+    out: list[str] = []
+    for slug_dir in SIMS_DIR.iterdir():
+        if not slug_dir.is_dir():
+            continue
+        for d in slug_dir.iterdir():
+            st = _read(d / "state.json") if d.is_dir() else None
+            if st and st.get("status") == "running":
+                out.append(f"{slug_dir.name}/{d.name}")
+    return out
+
+
+def reconcile_orphans() -> list[str]:
+    """Mark every still-'running' run as errored. Runs execute in an in-process
+    background task, so a run can only be 'running' while the process that owns it
+    is alive. At startup that owner is by definition gone (a restart killed it, or
+    it crashed), so any 'running' state on disk is an orphan that will never make
+    progress again — and, worse, its config stays 409-locked against a re-run.
+
+    Called once from the API's startup hook. Returns the ``"<slug>/<rid>"`` of each
+    run it cleared, so startup can log what it swept."""
+    if not SIMS_DIR.exists():
+        return []
+    cleared: list[str] = []
+    for slug_dir in SIMS_DIR.iterdir():
+        if not slug_dir.is_dir():
+            continue
+        for d in slug_dir.iterdir():
+            st = _read(d / "state.json") if d.is_dir() else None
+            if st and st.get("status") == "running":
+                st.update(status="error",
+                          error="orphaned: owning process exited before the run "
+                                "finished (server restart or crash)")
+                _write(d / "state.json", st)
+                cleared.append(f"{slug_dir.name}/{d.name}")
+    return cleared
 
 
 # --- reads ------------------------------------------------------------------

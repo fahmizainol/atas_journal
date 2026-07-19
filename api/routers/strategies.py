@@ -195,6 +195,15 @@ def create_run(slug: str, body: ConfigIn, background: BackgroundTasks) -> dict:
             return {"run_id": rid, "status": "done", "already_existed": True}
         store.delete_run(slug, rid)  # failed: clear and retry
 
+    # Serialize runs box-wide: each fans out across a pool sized to all cores, so
+    # a second concurrent run oversubscribes them and can wedge both (that is how
+    # the orphaned runs get made). One at a time — the caller retries when it's free.
+    inflight = store.running_runs()
+    if inflight:
+        raise HTTPException(
+            409, f"another run is already in progress ({inflight[0]}); "
+                 "wait for it to finish before starting another")
+
     try:
         rid = runner.start(strat, cfg)
     except ValueError as exc:
