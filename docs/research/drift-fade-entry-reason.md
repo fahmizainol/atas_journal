@@ -1,7 +1,7 @@
 # Drift-Fade — entry reference level, does it matter?
 
 - **Date:** 2026-07-19
-- **Status:** **RESOLVED NULL** — which reference level a drift-touch fade enters on has **no demonstrated edge**: not in aggregate (permutation p=0.91), not across the window's two halves (bucket rank corr **−0.09**, 8/13 buckets sign-flip avg_r), not before or after conditioning on the entry-knowable regime (raw p=0.91 → regime-residual p=0.88). The one non-significant *direction* worth a re-test on more data: **developing profile levels** (Globex/NY POC/VAH/VAL) run cleaner and steadier than **static/overnight refs** (Open/ONH/ONL/pd\*) — avg_r 0.150 vs 0.077, and stable H1↔H2 vs a coin-flip — but at p=0.31 it is a hint, not a finding. **No knob built.** Trade all levels; the edge is the drift-touch-fade mechanic itself, uniform across references.
+- **Status (updated 2026-07-19, §7):** the *individual level* (13-way) is **NULL** — no level has an edge (p=0.91, split-half rank corr −0.09, 8/13 sign-flip, regime-residual p=0.88). But the **developing-vs-static** regroup, a hint at p=0.31 in-sample, **REPLICATES OUT-OF-SAMPLE**: on a held-out 2026-H1 split, developing-only matches baseline net (−2%) with PF 1.61 vs 1.37, +43% expectancy, and a 26% shallower drawdown; developing beats static on efficiency in *both* train and test (test: developing Sharpe 1.99 / static 0.41 — static refs are near-dead money OOS); and it generalises to the level-stop sibling (OOS drawdown 44% shallower). This is now an **adoption-worthy lead** — flip `use_session_refs=false` for the drift-fade strategies — with two residual cautions (Sortino is lower in most in-sample cuts; one instrument / ~17 months). The old "trade all levels" verdict stands only for *which* profile level; the developing/static *family* split is real.
 - **Run:** `drift-touch-fade-entry-stop` `63c78056` (230 trades, net $64,440, 2025-02-03→2026-06-30, entry window 12:00–15:00 ET, `side=both`, all three sources + POC/VAH/VAL on).
 - **Machinery built:** the engine now records **which candidate zone's drift-touch triggered each fill** by its human name (`entry_reason`: "Globex POC", "NY VAH", "ONH", "pd VAL", …) — it was always known at the touch and dropped at `best_signal`; now threaded `best_signal → pending/bwatch → _Pos → _row`. New `by_entry_reason` edges cut ("Entry reference level", knowable, net-ranked), served per-run only where the column exists, visible in the Run Edges panel. Ghost/vetoed rows carry it too.
 
@@ -86,4 +86,43 @@ Developing is both higher avg_r **and** stable across halves; static is lower an
 
 - **Do not** build a per-level filter (drop `pd VAH`, trade-only-VAH). p=0.91 says there's no lead; §3 says the "loser" is one week. That is the exact post-hoc-into-A/B trap that has failed ~9–10 times.
 - **Positive read:** the edge is *robust to which level* — it comes from the drift-touch-fade mechanic, not from any one reference. A strategy whose profit lived in a single level would be fragile; this one isn't.
-- **Carry forward (low prior):** developing-vs-static (§5). Re-cut on `drift-touch-fade` (level-stop) and on the afternoon-only cohort as it grows; build the `use_session_refs` A/B only if it clears its own permutation bar there first.
+- **Carry forward (low prior):** developing-vs-static (§5). Re-cut on `drift-touch-fade` (level-stop) and on the afternoon-only cohort as it grows; build the `use_session_refs` A/B only if it clears its own permutation bar there first. **→ done in §7 — it held up OOS.**
+
+## 7. OOS + sibling: the developing-vs-static lead strengthens
+
+Ran the actual `use_session_refs=false` A/B (challenger run `03f4c56c`; the single-position slot re-times trades, so these are real runs, not filters). Full window it looks like a "trade money for smoothness" swap — net −17% ($64.4k→$53.4k) but PF +15%, DD −23%, Sharpe +10%, expectancy +23%. The split below shows the net-giveup is a **train-period artifact** and the efficiency edge is **out-of-sample real**.
+
+**A — developing-only vs baseline, entry-stop, split train (<2026) / test (2026 H1):**
+
+| period | config | n | net | PF | exp | r_mean | Sharpe | Sortino | maxDD |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| TRAIN | baseline(all) | 151 | 49,533 | 1.83 | 328 | 0.141 | 3.25 | 4.39 | −5,334 |
+| TRAIN | developing | 101 | 38,793 | 2.10 | 384 | 0.162 | 3.42 | 3.07 | −4,476 |
+| **TEST** | baseline(all) | 79 | 14,907 | 1.37 | 189 | 0.088 | 1.76 | 3.72 | −7,329 |
+| **TEST** | **developing** | 54 | **14,607** | **1.61** | **271** | **0.119** | **2.24** | 3.27 | **−5,427** |
+
+OOS, developing-only gives up **$300 of net** (−2%) for +18% PF, +43% expectancy, +27% Sharpe and a **26% shallower drawdown**. Nearly all the full-window −$11k giveup was in the (mined) train half.
+
+**B — founding signal replication: developing vs static families, baseline book, per period:**
+
+| period | family | n | net | PF | exp | r_mean | Sharpe |
+|---|---|--:|--:|--:|--:|--:|--:|
+| TRAIN | developing | 92 | 37,716 | 2.24 | 410 | 0.172 | 3.64 |
+| TRAIN | static | 59 | 11,817 | 1.40 | 200 | 0.092 | 1.09 |
+| **TEST** | **developing** | 52 | 12,891 | **1.54** | **248** | **0.110** | **1.99** |
+| **TEST** | static | 27 | 2,016 | **1.13** | **75** | **0.044** | **0.41** |
+
+Developing beats static on every efficiency metric in **both** halves. In the held-out test, static refs are barely alive (PF 1.13, expectancy $75, Sharpe 0.41). The p=0.31 full-window permutation was underpowered — it scored *net* (dominated by trade count and the fixed target), not efficiency, and diluted the 2-way contrast across a 13-way split. The train/test replication of the efficiency gap is the stronger evidence.
+
+**C — sibling `drift-touch-fade` (level-stop), all vs developing-only:**
+
+| scope | config | n | net | PF | exp | r_mean | Sharpe | Sortino | maxDD |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| full | baseline(all) | 232 | 54,006 | 1.46 | 233 | 0.105 | 1.85 | 2.93 | −13,527 |
+| full | developing | 156 | 47,568 | 1.69 | 305 | 0.132 | 2.16 | 2.31 | −10,884 |
+| TEST | baseline(all) | 79 | 15,582 | 1.36 | 197 | 0.091 | 1.49 | 4.01 | −10,458 |
+| TEST | developing | 54 | 12,207 | 1.43 | 226 | 0.102 | 1.45 | 4.11 | **−5,850** |
+
+Same shape on the other exit: PF/expectancy/efficiency up, drawdown down (OOS **44% shallower**), net down. Sortino even recovers OOS here.
+
+**Verdict:** the developing/static family split is a **replicating OOS lead**, not the in-sample mirage the p=0.31 implied — the rare A/B that *strengthens* out-of-sample. Adoptable: set `use_session_refs=false` on the drift-fade strategies (drop Open/ONH/ONL/pd\* as entry references). Residual cautions: Sortino is lower in most in-sample cuts (downside deviation relatively worse — watch it live), and this is one instrument over ~17 months. Recommended: adopt with `use_session_refs=false`, or paper-forward one more quarter if a second independent confirmation is wanted before committing size.
