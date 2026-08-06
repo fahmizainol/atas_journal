@@ -1,8 +1,22 @@
 .env
-# data/journal.db
-# data/journal.db-wal
-# data/journal.db-shm
-# data/cache/
+
+# ---- data ----
+# ~4.5G: the Databento tick cache, sim run artifacts, Rithmic recordings, the
+# journal DB and study outputs. All of it is either regenerable (`python -m
+# journal.sim.run`), re-purchasable, or a local database — none of it belongs in
+# history, and it was making `git status` unreadable.
+#
+# The exception is the hand-written analysis scripts under data/research: those
+# are source. Re-including them needs the walk down to be re-enabled at every
+# level, because git will not descend into an excluded directory — hence the
+# alternating exclude/negate pairs rather than one `data/` line.
+data/*
+!data/drafts/
+!data/research/
+data/research/*
+!data/research/*/
+data/research/*/*
+!data/research/*/*.py
 __pycache__/
 *.pyc
 .venv/

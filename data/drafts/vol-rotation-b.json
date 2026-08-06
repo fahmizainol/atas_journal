@@ -1,0 +1,14 @@
+{
+  "name": "Vol-rotation portfolio B (UB on quiet + DTF on mid/hot)",
+  "hypothesis": "The vol-clock habitat lead as a trading schedule: run upper-band only on quiet days (datr_pctl60 ≤ 1/3) and drift-touch-fade v2 only on mid/hot days. NOT an edge — the §9 re-cut retired it (DTF's lean fails on the pinned baseline, UB's is H1-heavy, and hard rotation forfeits ~30% of net). What it buys is shape: Sharpe 4.9→7.6, maxDD −$15.4k→−$9.9k, 16/16 months positive. This draft exists to look at that shape on real charts: which days each strategy 'owns', and what the trades it keeps vs. forfeits look like.",
+  "source_doc": "vol-clock",
+  "trades_parquet": "data/research/vol-clock/rotation_b_trades.parquet",
+  "query": "True",
+  "symbol": "NQ",
+  "notes": "Passthrough draft: these are the engine's own fills from the two pinned-era baselines (UB v13 a348d176, DTF v2 523f4000), day-filtered by the causal regime label — an EXACT re-simulation because sessions carry no cross-day engine state. Unlike race drafts, net_pnl here is the real 3-contract net (commission included). The day sets are disjoint by construction (quiet vs mid/hot), so no cross-strategy overlap. Label is knowable ~18:00 ET the prior evening; it misses ~1/3 of tercile days, clustered on NFP/earnings (vol-clock §8). Rebuild the parquet with data/research/vol-clock/build_rotation_draft.py.",
+  "checklist": {
+    "split_half": false,
+    "monthly_consistency": true,
+    "engine_ab": false
+  }
+}

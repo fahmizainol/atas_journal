@@ -22,7 +22,8 @@ rng = np.random.default_rng(7)
 META = {'idx', 'session', 'r', 'net', 'exit_reason', 'mfe_r', 'mae_r', 'dur_s',
         'risk_pts', 'entry_ts', 'is_stop', 'is_win', 'low_below_prelow_t',
         't25_hit', 't40_hit', 't25_secs', 't40_secs'}
-ALL_FEATS = [c for c in df.columns if c not in META and df[c].dtype != object]
+ALL_FEATS = [c for c in df.columns
+             if c not in META and pd.api.types.is_numeric_dtype(df[c])]
 ENTRY_FEATS = [c for c in ALL_FEATS if not c.startswith(('t25_', 't40_'))]
 
 

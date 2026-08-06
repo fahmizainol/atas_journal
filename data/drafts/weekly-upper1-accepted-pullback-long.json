@@ -1,0 +1,17 @@
+{
+  "name": "Weekly +1σ accepted-pullback long (obs 2a — negative exemplar)",
+  "hypothesis": "Original observation 2a: after price accepts in the weekly upper band (≥15m beyond +1σ, or a +2σ touch), a pullback onto +1σ from above gets bought and the band holds. The study REFUTED this: the band holds only 48.2% of decided next-bar races (n=312), and during NY hours just 43.9% — the pullback keeps going through the band more often than it bounces. This draft is kept as the negative exemplar: what a dead cell looks like laid out on charts.",
+  "source_doc": "weekly-vwap-context",
+  "events_parquet": "data/research/weekly-vwap-context/touches.parquet",
+  "query": "level == 'upper1' and not first_session and approach == 'above' and (res_beyond_u1_min >= 15 or touched_u2_before)",
+  "direction": "long",
+  "race_sigma": 0.30,
+  "horizon_min": 60,
+  "symbol": "NQ",
+  "notes": "Entry on the bar after the touch, exits at level ± 0.30σ, time-out at the 60m close — identical mechanics to the deep-traverse draft, opposite verdict. Materialized it is dead money, not a clean loser: 47.7% to target, +0.03R/trade (noise), 9 of 17 months negative — the trade layer's R asymmetry softens the 43.9% NY hold rate into a coin flip. That is the point of keeping it: this is what a refuted cell looks like as trades, and it also says the fade of this touch is not free money either.",
+  "checklist": {
+    "split_half": false,
+    "monthly_consistency": false,
+    "engine_ab": false
+  }
+}

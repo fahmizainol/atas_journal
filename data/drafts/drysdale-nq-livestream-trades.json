@@ -1,0 +1,14 @@
+{
+  "name": "Drysdale NQ livestream trades (VWAP Wave)",
+  "hypothesis": "NOT a hypothesis and NOT an edge — this is another trader's trade log laid on our charts. Six Trader Drysdale live streams (2026-04-29 → 06-12) were transcribed and hand-extracted into trades.json; these are the 25 NQ trades he actually held. The teardown's verdict was that his level precision is real (four to-the-tick entries, one 14.8 pts off the low of a 966-point day) while his directional narration is not (06-05: called for shorts 16 minutes after buying the low). This draft exists so that verdict can be looked at rather than read: where do his entries sit against our own VWAP anchors, bands, profile and IB?",
+  "source_doc": "vwap-wave-livestreams",
+  "trades_parquet": "data/research/vwap-wave-livestreams/drysdale_nq_trades.parquet",
+  "query": "True",
+  "symbol": "NQ",
+  "notes": "READ THE EXITS BEFORE THE NUMBERS. 10 of 25 trades exit at a price HE spoke — an outright exit price, or a round point count ('win ~200pt', 'quick four points') applied to the entry and placed at the first bar that traded it. The other 15 exit at their own entry and are marked `open`: he never said where he got out, so the chart draws a flat one-bar sliver — an entry marker, which is all we know. Consequently `total_points` covers 10 trades and is a scale, not his P&L: he traded unstated size across several accounts, and net_pnl here is one contract gross. R is 0 everywhere by construction — no stop was ever spoken, so stop_price is pinned to entry rather than invented. Entries: 13 spoken, 12 taken from the OPEN of the minute he named (never the bar's extreme, which would hand him a fill he never claimed). An earlier build exited unresolved trades at a flat 30-minute horizon and was scrapped — it contradicted his own stated results outright (+293 points on the trade he called a $200 loss, -210 on 'win, flat quickly'), because he is a scalper narrating partial exits and any fixed hold invents a trade he did not take. Excluded: his ES and YM trades (the tick cache is NQ only, ~12 more trades), one missed setup and one aborted hunt he never held, and two rows whose instrument he never stated. One artefact to expect: the 06-12 10:20 trade takes 35 minutes to reach his spoken +30 because its entry is a bar-open guess — he plainly did not hold it that long. Rebuild with data/research/vwap-wave-livestreams/build_drysdale_draft.py.",
+  "checklist": {
+    "split_half": false,
+    "monthly_consistency": false,
+    "engine_ab": false
+  }
+}

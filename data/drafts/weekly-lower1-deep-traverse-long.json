@@ -1,0 +1,17 @@
+{
+  "name": "Weekly −1σ deep-traverse long",
+  "hypothesis": "A session leg that starts at the weekly mid (or higher) and runs all the way down into the weekly −1σ band — with no prior residence below the band this session — gets bought: 57.9% of decided next-bar races resolve back toward the mid, and the edge grows with horizon (+0.21σ@60m → +0.29σ@120m). The strongest cell of the weekly-band touch-context study, and the only one that survived the next-bar race correction.",
+  "source_doc": "weekly-vwap-context",
+  "events_parquet": "data/research/weekly-vwap-context/touches.parquet",
+  "query": "level == 'lower1' and not first_session and approach == 'above' and res_beyond_l1_min < 5 and max_sig_before >= 0",
+  "direction": "long",
+  "race_sigma": 0.30,
+  "horizon_min": 60,
+  "symbol": "NQ",
+  "notes": "Entry on the bar after the touch (touch-bar artifact rule). Exits are the study's own race thresholds at level ± 0.30σ, time-out at the 60m close. Both-thresholds-in-one-bar scores as the stop. The mirror cell (upper1 deep traverse) is REVERSED (47.5%) — do not symmetrize. Validation 2026-07-28 on the materialized trades (111): split-half PASSES — the study table's second-half concentration dissolves at trade level (first half +4.9R / wr .566, second +10.2R / wr .589, both positive); monthly 10/17 positive, no month over ~29% of net. Caveats that stand: pooled significance is borderline (wr .578, p≈.05; session-bootstrap P(≤0)=.10) and net is tail-concentrated (top 5 trades = 87% of R, 177% of points). Promoted to the engine as strategy weekly-lower1-deep-traverse-long v1; baseline run 20250203-20260630-v2-1910733c replicates 1:1 (111/111 trades, R corr .98) — PF 1.10, +$2.9k/17mo, thin; see docs/research/weekly-lower1-traverse-promotion.md.",
+  "checklist": {
+    "split_half": true,
+    "monthly_consistency": true,
+    "engine_ab": true
+  }
+}
