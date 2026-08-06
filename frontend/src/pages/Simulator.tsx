@@ -1417,6 +1417,10 @@ export function Simulator() {
           value={tfId}
           onChange={changeTimeframe}
           options={TIMEFRAMES.map((t) => ({ key: t.id, label: t.label }))}
+          // The tick bar (unique to a tape-driven chart), the default, and the
+          // two the research vocabulary is written in. 30s/2m/3m/1h go behind ⋯.
+          primary={["500t", "1m", "5m", "15m"]}
+          compact
         />
       </ChartTopBar>
       {/* A press anywhere else puts the setup panel away — the touch screen's

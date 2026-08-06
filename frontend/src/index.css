@@ -599,6 +599,32 @@ button:disabled {
   background: var(--accent);
   color: #fff;
 }
+/* Overflow timeframes. The ⋯ sits in the row like any other option, but it is a
+   disclosure rather than a choice, so it never takes the active fill — only the
+   muted "this is open" tint. */
+.radio-group button.tf-more {
+  color: var(--muted);
+  letter-spacing: 1px;
+}
+.radio-group button.tf-more.active {
+  background: var(--bg);
+  color: var(--text);
+}
+.tf-wrap {
+  position: relative;
+  display: inline-flex;
+}
+/* Down and right-aligned, so a picker at the right end of a bar cannot push the
+   popup off the edge. Above the chart's own floating corners (legend and tools
+   at z-index 3, the ticket above them). */
+.tf-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 60;
+  background: var(--card);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
 
 /* Multi-select toggle chips (trade filter's "why out"). Unlike .radio-group,
    chips are independent toggles, so they keep their own borders. */
@@ -2262,6 +2288,14 @@ button:disabled {
   .sim-signals {
     width: 190px;
   }
+}
+
+/* The bar is 36px; .radio-group's default 7px padding makes a 33px control that
+   crowds it. Sized here rather than in the component because it is a fact about
+   this bar, not about the picker. */
+.chart-topbar .radio-group button {
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 /* Numbers in the top bar — the clock and the mark, which are read continuously
