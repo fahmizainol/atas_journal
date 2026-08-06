@@ -2274,28 +2274,31 @@ button:disabled {
     display: none;
   }
   /* The rail's icons are the only thing here that can afford to lose height. */
-  /* The Live signal feed. A column of the `.sim-body` grid, not an overlay: it is
-   something you keep in view, unlike the replay's ticket. */
-.sim-signals {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  width: 300px;
-  border-left: 1px solid var(--card-border);
-  background: var(--card);
-}
-@media (max-width: 640px) {
-  .sim-signals {
-    width: 190px;
-  }
-}
+  /* ---- Live status strip ----
+   A footer, not a header: it is state you glance at, not something you act on
+   continuously, and above the chart it pushed the tape down by a row nobody was
+   reading. Half the height it was — 3px of padding either side of 11px text
+   instead of 6px either side of 13px, and no bottom margin.
 
-/* The bar is 36px; .radio-group's default 7px padding makes a 33px control that
-   crowds it. Sized here rather than in the component because it is a fact about
-   this bar, not about the picker. */
-.chart-topbar .radio-group button {
-  padding: 4px 10px;
-  font-size: 12px;
+   nowrap + scroll rather than wrap: the whole point is a fixed, small height,
+   and a strip that grows a row when the recorder has something to say is the
+   thing being fixed. */
+.live-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 3px 10px;
+  background: var(--card);
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+.live-status::-webkit-scrollbar {
+  display: none;
+}
+.live-status > * {
+  flex: 0 0 auto;
 }
 
 /* Numbers in the top bar — the clock and the mark, which are read continuously
@@ -2721,18 +2724,6 @@ button:disabled {
     border-radius: 8px 0 0 8px;
     background: rgba(14, 17, 23, 0.82);
     backdrop-filter: blur(6px);
-  }
-  /* Live's signal feed becomes an overlay too, for the same reason — pinned open
-     at 190px it was eating half the screen. */
-  .sim-signals {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 4;
-    width: min(78vw, 300px);
-    border-left: 1px solid var(--card-border);
-    box-shadow: -8px 0 30px rgba(0, 0, 0, 0.45);
   }
 
   /* Pinning is a desktop idea: there is no width here to give a column, so the

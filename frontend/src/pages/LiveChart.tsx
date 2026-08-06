@@ -137,13 +137,15 @@ export function LiveChart() {
   const [openPos, setOpenPos] = useState<Position | null>(null);
   const [working, setWorking] = useState<WorkingOrderView[]>([]);
   const [setupOpen, setSetupOpen] = useState(false);
-  // Open by default — see the rail below for why a live signal feed is not the
-  // same kind of thing as a replay's order ticket. Not on a phone, though: there
-  // it is an overlay across most of the tape, and a feed covering the chart it
-  // is about is worse than a feed you have to tap for.
-  const [signalsOpen, setSignalsOpen] = useState(
-    () => !window.matchMedia("(max-width: 640px)").matches,
-  );
+  // Open and pinned by default, unlike the replay's ticket: this rail carries a
+  // feed of what the shelf believed, and a signal you have to remember to go and
+  // look at is the failure mode the whole shadow stack exists to avoid.
+  //
+  // Not on a phone, though — pinned there it is a column the tape cannot spare,
+  // and unpinned it covers most of the chart it is about.
+  const narrow = () => window.matchMedia("(max-width: 640px)").matches;
+  const [signalsOpen, setSignalsOpen] = useState(() => !narrow());
+  const [railPinned, setRailPinned] = useState(() => !narrow());
   const [indicators, setIndicators] = useState(true);
   const [size, setSize] = useState(1);
   const [stopTicks, setStopTicks] = useState(40);
@@ -525,7 +527,7 @@ export function LiveChart() {
     // share of, and the chart collapses to whatever the signal rail happens to
     // be tall — growing as the rail fills, which is not a chart, it's a symptom.
     <div
-      className="sim-page"
+      className={`sim-page${railPinned ? " pinned" : ""}`}
       style={{ "--chart-floor": `${floor}px` } as React.CSSProperties}
     >
       <ChartTopBar
@@ -566,34 +568,6 @@ export function LiveChart() {
           onClick={() => setSetupOpen(false)}
         />
       )}
-      <FeedBanner
-        source={status.source ?? "fake"}
-        symbol={status.symbol ?? "—"}
-        date={status.date ?? "—"}
-        speed={status.speed ?? 1}
-        feedRunning={!!status.feed_running}
-        closed={!!status.closed}
-        rows={tapeState.rows || (status.rows ?? 0)}
-        recording={!!status.recording}
-        signals={status.signals !== false}
-        canRecord={status.can_record !== false}
-        unrecorded={status.unrecorded_rows ?? 0}
-        onModes={async (m) => {
-          await setLiveModes(m);
-          void statusQ.refetch();
-          void signalsQ.refetch();
-        }}
-        backfilling={!!status.feed_status?.backfilling}
-        timing={status.feed_status?.timing}
-        backfills={status.feed_status?.backfills}
-        harvested={status.feed_status?.harvested}
-        feedError={status.feed_status?.error}
-        error={tapeState.error}
-        onStop={async () => {
-          await stopFeed();
-          void statusQ.refetch();
-        }}
-      />
 
       {/* Ticket sizing — the pre-trade configuration, behind the title exactly
           as the Simulator's session setup is. Everything you touch while
@@ -706,10 +680,8 @@ export function LiveChart() {
           </div>
         </div>
 
-        {/* Pinned by default, unlike the replay's ticket: this rail carries a
-            feed of what the shelf believed, and a signal you have to remember to
-            go and look at is the failure mode the whole shadow stack exists to
-            avoid. */}
+        {/* The same rail the replay carries, doing the same job: open the panel,
+            and pin it to a column when you want the width spent on it. */}
         <div className="sim-rail">
           <button
             type="button"
@@ -720,14 +692,61 @@ export function LiveChart() {
           >
             ▤
           </button>
+          {signalsOpen && (
+            <button
+              type="button"
+              className={`sim-rail-btn${railPinned ? " on" : ""}`}
+              onClick={() => setRailPinned((p) => !p)}
+              aria-pressed={railPinned}
+              title={
+                railPinned
+                  ? "Unpin — let the feed lay over the tape"
+                  : "Pin — give the feed its own column beside the tape"
+              }
+            >
+              📌
+            </button>
+          )}
           {working.length > 0 && (
             <span className="sim-rail-badge" title={`${working.length} working`}>
               {working.length}
             </span>
           )}
         </div>
-        {signalsOpen && <SignalPanel data={signalsQ.data} working={working.length} />}
+        <SignalPanel data={signalsQ.data} working={working.length} open={signalsOpen} />
       </div>
+
+      {/* The status strip is a footer: it is state you glance at, not something
+          you act on continuously, and above the chart it was pushing the tape
+          down by a row you were not reading. */}
+      <FeedBanner
+        source={status.source ?? "fake"}
+        symbol={status.symbol ?? "—"}
+        date={status.date ?? "—"}
+        speed={status.speed ?? 1}
+        feedRunning={!!status.feed_running}
+        closed={!!status.closed}
+        rows={tapeState.rows || (status.rows ?? 0)}
+        recording={!!status.recording}
+        signals={status.signals !== false}
+        canRecord={status.can_record !== false}
+        unrecorded={status.unrecorded_rows ?? 0}
+        onModes={async (m) => {
+          await setLiveModes(m);
+          void statusQ.refetch();
+          void signalsQ.refetch();
+        }}
+        backfilling={!!status.feed_status?.backfilling}
+        timing={status.feed_status?.timing}
+        backfills={status.feed_status?.backfills}
+        harvested={status.feed_status?.harvested}
+        feedError={status.feed_status?.error}
+        error={tapeState.error}
+        onStop={async () => {
+          await stopFeed();
+          void statusQ.refetch();
+        }}
+      />
     </div>
   );
 }
@@ -794,25 +813,20 @@ function FeedBanner(props: {
   const label = live ? "LIVE · RITHMIC" : resumed ? "RESUMED — NO FEED" : "SIMULATED FEED";
   return (
     <div
-      className="panel"
+      className="live-status"
       style={{
-        display: "flex",
-        gap: 12,
-        alignItems: "center",
-        flexWrap: "wrap",
-        padding: "6px 12px",
-        marginBottom: 8,
-        borderLeft: `3px solid ${accent}`,
+        // The status colour, on the edge the strip now sits against.
+        borderTop: `2px solid ${accent}`,
       }}
     >
-      <strong style={{ fontSize: 12, letterSpacing: 0.4, color: accent }}>
+      <strong style={{ fontSize: 11, letterSpacing: 0.4, color: accent }}>
         {label}
       </strong>
-      <span style={{ fontSize: 13 }}>
+      <span style={{ fontSize: 11 }}>
         {props.symbol} · {props.date}
         {live ? "" : ` · ${props.speed}×`} · {props.rows.toLocaleString()} ticks
       </span>
-      <span style={{ fontSize: 12, color: palette.muted }}>
+      <span style={{ fontSize: 11, color: palette.muted }}>
         {props.backfilling
           ? // Said out loud because the tape is empty while this runs — a whole
             // session takes tens of seconds to replay, and a blank chart with a
@@ -1020,17 +1034,28 @@ function ModeChip(props: {
 }
 
 /** Where the shelf would have signalled, on the day so far. */
-function SignalPanel({ data, working }: { data?: LiveSignals; working: number }) {
+function SignalPanel({
+  data,
+  working,
+  open,
+}: {
+  data?: LiveSignals;
+  working: number;
+  open: boolean;
+}) {
   const ran = data?.strategies.filter((s) => s.ran) ?? [];
   const fired = ran.filter((s) => s.trades.length > 0);
-  // Its own class, deliberately not `.sim-panel`: that one is the replay's order
-  // ticket, which is bottom-anchored, overlaid on the tape and hidden until it is
-  // opened. This is a feed you keep in view, so it is a plain column of the
-  // `.sim-body` grid. `min-height: 0` on the flex column and the scroll on the
-  // card are what stop a long signal list from stretching the row and squashing
-  // the chart — the row's height belongs to the page, not to this.
+  // `.sim-panel` — the same box the replay's ticket and blotter live in, opened
+  // and pinned from the same rail. It was briefly its own class on the theory
+  // that a feed you keep in view is a different kind of thing from a form you
+  // fill in; in practice that just meant a second set of rules to keep in step,
+  // and the panel already does overlay-or-column.
+  //
+  // `min-height: 0` on the flex column and the scroll on the card are what stop a
+  // long signal list from stretching the row and squashing the chart — the row's
+  // height belongs to the page, not to this.
   return (
-    <div className="sim-signals">
+    <div className={`sim-panel${open ? " open" : ""}`}>
       <div className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
         {!data ? (
           <div style={{ fontSize: 12, color: palette.muted }}>Loading signals…</div>
