@@ -35,7 +35,6 @@ import {
   useSimulatorSession,
   type HistDay,
 } from "../hooks/useSimulator";
-import { useFillHeight } from "../hooks/useFillHeight";
 import { useReplayAttempt } from "../hooks/useReplayAttempt";
 import {
   concatTapes,
@@ -392,10 +391,6 @@ export function Simulator() {
   // to be worth filling drops it and scrolls instead. There is deliberately no
   // floor here: a floor taller than the viewport is exactly what pushes the
   // transport below the fold on a phone held sideways.
-  const pageRef = useRef<HTMLDivElement>(null);
-  // Zero gutter: the page runs edge to edge, so there is no shell padding for it
-  // to sit inside and nothing below it to leave room for.
-  const fillH = useFillHeight(pageRef, 0);
 
 
   // Two pieces of chrome that only exist where the viewport can't afford them.
@@ -1390,11 +1385,9 @@ export function Simulator() {
 
   return (
     <div
-      ref={pageRef}
       className={`sim-page${railPinned ? " pinned" : ""}`}
       style={
         {
-          "--sim-fill-h": fillH != null ? `${fillH}px` : "auto",
           "--chart-floor": `${floor}px`,
           "--sim-foot-h": `${foot}px`,
         } as React.CSSProperties
@@ -1426,6 +1419,17 @@ export function Simulator() {
           options={TIMEFRAMES.map((t) => ({ key: t.id, label: t.label }))}
         />
       </ChartTopBar>
+      {/* A press anywhere else puts the setup panel away — the touch screen's
+          replacement for Escape, which a phone does not have. Under the bar, so
+          the title that opened it is still the thing that closes it too. */}
+      {setupOpen && (
+        <button
+          type="button"
+          className="sim-setup-backdrop"
+          aria-label="Close session setup"
+          onClick={() => setSetupOpen(false)}
+        />
+      )}
       {/* Pre-run configuration: instrument, session, how much context to draw,
           where to start. Touched once before a replay and then not again, which
           is what makes it a panel rather than a row — it was costing ~48px of

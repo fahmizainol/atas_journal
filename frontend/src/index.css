@@ -1716,19 +1716,17 @@ button:disabled {
   }
 }
 
-/* ---- simulator (Lab) ----
-   The one page in the app that fills the viewport instead of scrolling: the
-   replay wants the tape as tall as the screen allows, and the chrome above it
-   (topbar, tabs, padding) isn't a fixed height to subtract. So JS measures what
-   is left and publishes it as --sim-fill-h, and every decision about how that
-   measurement is *used* lives here — a viewport too short to fill can then opt
-   out of filling, which an inline height could not be talked out of. */
+/* ---- chart pages (Replay + Live) ----
+   The two pages that fill the viewport instead of scrolling. The height used to
+   be measured in JS and published as --sim-fill-h, because the chrome above them
+   was not a fixed height to subtract. There is no chrome above them any more, so
+   the height is simply 100dvh — see the chart-layout block at the end of the
+   file, which is also where dvh-vs-innerHeight is argued. */
 .sim-page {
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 16px;
-  height: var(--sim-fill-h, auto);
   min-height: 0;
   box-sizing: border-box;
 }
@@ -1742,12 +1740,15 @@ button:disabled {
 
    Not sticky and not floating: the page below it is exactly one viewport tall
    and never scrolls, so a bar in normal flow is already always visible. */
+:root {
+  --chart-topbar-h: 36px;
+}
 .chart-topbar {
   display: flex;
   align-items: center;
   gap: 8px;
   flex: none;
-  height: 36px;
+  height: var(--chart-topbar-h);
   padding: 0 8px;
   border-bottom: 1px solid var(--card-border);
   background: var(--card);
@@ -2337,6 +2338,18 @@ button:disabled {
   /* The containing block for the setup panel, which is laid over the top of the
      tape rather than pushing it down. */
   position: relative;
+  /* dvh, not a measured `window.innerHeight`. On a phone innerHeight counts the
+     strip under the browser's dynamic toolbar, so a page sized from it puts its
+     last row — the transport, with Play on it — below the visible viewport, and
+     a fixed-height page has no scroll to reach it. The old code dodged this by
+     going `height: auto` on narrow screens; with no shell chrome above, the page
+     starts at y=0 and dvh is simply the right answer at every size. */
+  height: 100dvh;
+}
+/* The shell's 100vh floor would otherwise exceed the page on mobile and hand the
+   document a scrollbar for the difference. */
+.ws-charts .app-shell {
+  min-height: 100dvh;
 }
 /* Setup is a thing you do before a replay, not during one — so it is a panel
    the title bar opens, laid over the top of the tape rather than pushing it
@@ -2345,9 +2358,12 @@ button:disabled {
 .sim-setup {
   display: none;
 }
+/* Below the bar, never over it: `top: 0` here covered the title button, which is
+   also the control that closes the panel — so on a touch screen, with no Esc,
+   there was no way back out. */
 .sim-setup.open {
   position: absolute;
-  top: 0;
+  top: var(--chart-topbar-h);
   left: 0;
   right: 0;
   z-index: 20;
@@ -2360,10 +2376,32 @@ button:disabled {
   border-bottom: 1px solid var(--card-border);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
 }
+.sim-setup-backdrop {
+  position: absolute;
+  inset: var(--chart-topbar-h) 0 0;
+  z-index: 19;
+  border: none;
+  background: transparent;
+  cursor: default;
+}
+
+/* Two columns while the panel is an overlay (chart + rail), three when it is
+   pinned and becomes a real column. Placed explicitly rather than left to
+   auto-flow: the panel follows the rail in the DOM, so auto-placement would put
+   it in column 1 of a second row — under the chart, full width. */
 .sim-body {
   position: relative;
   grid-template-columns: 1fr auto;
   gap: 0;
+}
+.sim-page.pinned .sim-body {
+  grid-template-columns: 1fr auto auto;
+}
+.sim-page.pinned .sim-panel {
+  grid-column: 2;
+}
+.sim-page.pinned .sim-rail {
+  grid-column: 3;
 }
 .sim-chart-card {
   border: none;
@@ -2626,13 +2664,51 @@ button:disabled {
   border-radius: 2px;
   background: var(--grid);
 }
-/* Too narrow for a 300px column — take the full width instead, and never pin. */
 @media (max-width: 640px) {
+  /* The rail stops reserving a column and rides the chart's right edge instead.
+     42px of permanently-empty strip is ~11% of a 390px phone, and the whole
+     point of the rail was to stop reserving width for something you are not
+     using. The grid drops back to one column with nothing else in it. */
+  .sim-body,
+  .sim-page.pinned .sim-body {
+    grid-template-columns: 1fr;
+  }
+  .sim-rail,
+  .sim-page.pinned .sim-rail {
+    position: absolute;
+    top: 8px;
+    right: 0;
+    z-index: 6;
+    grid-column: 1;
+    width: auto;
+    padding: 4px 2px;
+    border: 1px solid var(--card-border);
+    border-right: none;
+    border-radius: 8px 0 0 8px;
+    background: rgba(14, 17, 23, 0.82);
+    backdrop-filter: blur(6px);
+  }
+  /* Live's signal feed becomes an overlay too, for the same reason — pinned open
+     at 190px it was eating half the screen. */
+  .sim-signals {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 4;
+    width: min(78vw, 300px);
+    border-left: 1px solid var(--card-border);
+    box-shadow: -8px 0 30px rgba(0, 0, 0, 0.45);
+  }
+
+  /* Pinning is a desktop idea: there is no width here to give a column, so the
+     panel is an overlay whether or not it is pinned. Full width now that the
+     rail floats rather than reserving 34px of it. */
   .sim-panel,
   .sim-page.pinned .sim-panel {
     position: absolute;
     left: 0;
-    right: 34px;
+    right: 0;
     width: auto;
     max-height: calc(54dvh - var(--chart-floor, 0px) - var(--sim-foot-h, 0px));
     border-left: none;

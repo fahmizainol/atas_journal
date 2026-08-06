@@ -37,7 +37,6 @@ import { TimeframeControl } from "../components/charts/TimeframeControl";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import { SimIndicators } from "../components/charts/SimIndicators";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
-import { useFillHeight } from "../hooks/useFillHeight";
 import { useSimulatorDays } from "../hooks/useSimulator";
 import {
   setLiveModes,
@@ -95,9 +94,6 @@ export function LiveChart() {
   const header = headerQ.data ?? null;
   const signalsQ = useLiveSignals(gen);
 
-  // The page fills the viewport rather than scrolling; see useFillHeight.
-  const pageRef = useRef<HTMLDivElement>(null);
-  const fillH = useFillHeight(pageRef);
 
   const [tfId, setTfId] = useState("t500");
   const tf = useMemo(() => timeframeById(tfId), [tfId]);
@@ -141,9 +137,13 @@ export function LiveChart() {
   const [openPos, setOpenPos] = useState<Position | null>(null);
   const [working, setWorking] = useState<WorkingOrderView[]>([]);
   const [setupOpen, setSetupOpen] = useState(false);
-  // Pinned open by default — see the rail below for why a live signal feed is
-  // not the same kind of thing as a replay's order ticket.
-  const [signalsOpen, setSignalsOpen] = useState(true);
+  // Open by default — see the rail below for why a live signal feed is not the
+  // same kind of thing as a replay's order ticket. Not on a phone, though: there
+  // it is an overlay across most of the tape, and a feed covering the chart it
+  // is about is worse than a feed you have to tap for.
+  const [signalsOpen, setSignalsOpen] = useState(
+    () => !window.matchMedia("(max-width: 640px)").matches,
+  );
   const [indicators, setIndicators] = useState(true);
   const [size, setSize] = useState(1);
   const [stopTicks, setStopTicks] = useState(40);
@@ -525,14 +525,8 @@ export function LiveChart() {
     // share of, and the chart collapses to whatever the signal rail happens to
     // be tall — growing as the rail fills, which is not a chart, it's a symptom.
     <div
-      ref={pageRef}
       className="sim-page"
-      style={
-        {
-          "--sim-fill-h": fillH != null ? `${fillH}px` : "auto",
-          "--chart-floor": `${floor}px`,
-        } as React.CSSProperties
-      }
+      style={{ "--chart-floor": `${floor}px` } as React.CSSProperties}
     >
       <ChartTopBar
         title={
@@ -560,6 +554,14 @@ export function LiveChart() {
         />
       </ChartTopBar>
 
+      {setupOpen && (
+        <button
+          type="button"
+          className="sim-setup-backdrop"
+          aria-label="Close ticket settings"
+          onClick={() => setSetupOpen(false)}
+        />
+      )}
       <FeedBanner
         source={status.source ?? "fake"}
         symbol={status.symbol ?? "—"}
