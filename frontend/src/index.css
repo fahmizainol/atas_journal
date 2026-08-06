@@ -2084,7 +2084,11 @@ button:disabled {
    The Lab was the first workspace tuned for phones; the Journal keeps its desktop
    shell until it gets the same pass, so every rule here is scoped. Charts joined
    when the Simulator moved into it and needs the identical treatment — hence
-   :is(.ws-lab, .ws-charts) rather than a duplicated selector list. :is() takes the
+   :is(.ws-lab, .ws-charts) where both still match. (The .sim-* rules that used to
+   be here have moved into the base layout at the end of the file: that IS the
+   chart layout now, at every width, and a second statement of it here only meant
+   the two could disagree. Rules for chrome the Charts shell no longer draws —
+   the tab strip, the data sidebar — are plain .ws-lab.) :is() takes the
    specificity of its most specific argument, and both are a single class, so this
    is specificity-neutral: the deliberate source-order tie with .sim-page.full at
    the end of this file still resolves exactly as its comment describes.
@@ -2100,15 +2104,15 @@ button:disabled {
     padding: 0.85rem 0.8rem 2rem;
   }
   /* Tab strip scrolls as one row rather than wrapping under the content. */
-  :is(.ws-lab, .ws-charts) .tabs {
+  .ws-lab .tabs {
     flex-wrap: nowrap;
     overflow-x: auto;
     scrollbar-width: none;
   }
-  :is(.ws-lab, .ws-charts) .tabs::-webkit-scrollbar {
+  .ws-lab .tabs::-webkit-scrollbar {
     display: none;
   }
-  :is(.ws-lab, .ws-charts) .tabs a {
+  .ws-lab .tabs a {
     flex: 0 0 auto;
     padding: 0 13px;
     white-space: nowrap;
@@ -2148,7 +2152,7 @@ button:disabled {
   }
   /* The data/timezone drawer overlays the content instead of squeezing the flex
      row down to a sliver; the scrim behind it closes it on an outside tap. */
-  :is(.ws-lab, .ws-charts) .sidebar {
+  .ws-lab .sidebar {
     position: fixed;
     top: 0;
     left: 0;
@@ -2159,7 +2163,7 @@ button:disabled {
     overflow-y: auto;
     box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
   }
-  :is(.ws-lab, .ws-charts) .sidebar-backdrop {
+  .ws-lab .sidebar-backdrop {
     display: block;
     position: fixed;
     inset: 0;
@@ -2192,7 +2196,7 @@ button:disabled {
    a sheet handle, a foldaway setup row) were the phone's private version of
    "the chart takes the screen". That is now what the page does everywhere, and
    keeping a second statement of it here only meant the two could disagree —
-   which they did, since `:is(.ws-lab, .ws-charts) .sim-panel` outranks a bare
+   which they did, since `.sim-panel` outranks a bare
    `.sim-panel` however late the latter appears.
 
    The `.ws-lab` half of those selectors was vestigial in any case: `.sim-page`
@@ -2201,12 +2205,12 @@ button:disabled {
   /* Play / Step / Speed already fill the row at this width, so the scrubber wraps
      — but it should take the clock with it rather than leaving it stranded on a
      third row, which costs the chart ~35px for one line of text. */
-  :is(.ws-lab, .ws-charts) .sim-scrub {
+  .sim-scrub {
     flex: 1 1 60%;
     order: 10;
     min-width: 120px;
   }
-  :is(.ws-lab, .ws-charts) .sim-clock {
+  .sim-clock {
     order: 11;
   }
 }
@@ -2251,10 +2255,10 @@ button:disabled {
   /* Every row the transport wraps to is a row taken off the chart, and on a
      390px-tall screen that is the whole budget. Let the scrubber shrink so the
      transport stays one line. */
-  :is(.ws-lab, .ws-charts) .sim-scrub {
+  .sim-scrub {
     min-width: 90px;
   }
-  :is(.ws-lab, .ws-charts) .sim-lbl {
+  .sim-lbl {
     display: none;
   }
   /* The rail's icons are the only thing here that can afford to lose height. */
@@ -2308,22 +2312,22 @@ button:disabled {
    one. Hit sizes only. The chart's own grab targets (bracket legs, resting
    orders) are mouse-bound down in ReplayChart and need their own pass. */
 @media (pointer: coarse) {
-  :is(.ws-lab, .ws-charts) .sim-transport button,
-  :is(.ws-lab, .ws-charts) .sim-ticket button {
+  .sim-transport button,
+  .sim-ticket button {
     min-height: 44px;
   }
   .sim-setup select,
   .sim-setup input,
-  :is(.ws-lab, .ws-charts) .sim-transport select {
+  .sim-transport select {
     min-height: 40px;
   }
   /* A 10px ✕ is not a target. Grow it without moving the row it sits in. */
-  :is(.ws-lab, .ws-charts) .sim-cancel {
+  .sim-cancel {
     min-width: 40px;
     min-height: 40px;
     margin: -10px 0;
   }
-  :is(.ws-lab, .ws-charts) .sim-scrub {
+  .sim-scrub {
     height: 34px;
   }
 }
@@ -2337,7 +2341,7 @@ button:disabled {
    the only thing the app cannot do for itself.
 
    Still last in the file: these have to beat the phone and short-viewport rules
-   above, and they tie with `:is(.ws-lab, .ws-charts) .sim-page` on specificity,
+   above, and they tie with `.sim-page` on specificity,
    so position rather than a specificity arms race is what settles it. Adding a
    class to win would work today and rot the moment someone writes a longer
    selector upstream. */
