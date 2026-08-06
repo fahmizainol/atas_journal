@@ -819,14 +819,14 @@ function FeedBanner(props: {
         borderTop: `2px solid ${accent}`,
       }}
     >
-      <strong style={{ fontSize: 11, letterSpacing: 0.4, color: accent }}>
+      <strong style={{ letterSpacing: 0.4, color: accent }}>
         {label}
       </strong>
-      <span style={{ fontSize: 11 }}>
+      <span >
         {props.symbol} · {props.date}
         {live ? "" : ` · ${props.speed}×`} · {props.rows.toLocaleString()} ticks
       </span>
-      <span style={{ fontSize: 11, color: palette.muted }}>
+      <span style={{ color: palette.muted }}>
         {props.backfilling
           ? // Said out loud because the tape is empty while this runs — a whole
             // session takes tens of seconds to replay, and a blank chart with a
@@ -852,14 +852,14 @@ function FeedBanner(props: {
         // manifest because it is a property of the *day* now: the tape is in
         // memory and the chunks are what survives, so these prints are gone at
         // the next restart whatever happens next.
-        <span style={{ fontSize: 12, color: palette.orange }}>
+        <span style={{ color: palette.orange }}>
           ⚠ {props.unrecorded.toLocaleString()} tick
           {props.unrecorded === 1 ? "" : "s"} not written
         </span>
       )}
       {timingParts.length > 0 && (
         <span
-          style={{ fontSize: 12, color: palette.muted, cursor: "help" }}
+          style={{ color: palette.muted, cursor: "help" }}
           title={
             "hop — the exchange's stamp to Rithmic's send stamp. Both ride in the " +
             "same message, so no local clock enters into it.\n\n" +
@@ -877,7 +877,7 @@ function FeedBanner(props: {
         </span>
       )}
       {filled > 0 && (
-        <span style={{ fontSize: 12, color: palette.muted }}>
+        <span style={{ color: palette.muted }}>
           {filled.toLocaleString()} backfilled
         </span>
       )}
@@ -885,21 +885,21 @@ function FeedBanner(props: {
         // Earlier sessions, not this one — worth saying because it is what makes
         // the weekly anchor drawable after a week away, and it is otherwise
         // invisible work happening on a connection you opened to watch today.
-        <span style={{ fontSize: 12, color: palette.muted }}>
+        <span style={{ color: palette.muted }}>
           +{caughtUp} earlier session{caughtUp === 1 ? "" : "s"} filled
         </span>
       )}
       {backfillError && (
-        <span style={{ fontSize: 12, color: palette.orange }}>
+        <span style={{ color: palette.orange }}>
           ⚠ backfill: {backfillError} — the session begins where the feed
           connected
         </span>
       )}
       {props.feedError && (
-        <span style={{ fontSize: 12, color: palette.red }}>⚠ feed: {props.feedError}</span>
+        <span style={{ color: palette.red }}>⚠ feed: {props.feedError}</span>
       )}
       {props.error && (
-        <span style={{ fontSize: 12, color: palette.red }}>⚠ {props.error}</span>
+        <span style={{ color: palette.red }}>⚠ {props.error}</span>
       )}
       <button style={{ marginLeft: "auto" }} onClick={props.onStop}>
         Stop
