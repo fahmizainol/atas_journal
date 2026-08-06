@@ -63,11 +63,113 @@ from .recorder import TickRecorder, read_manifest
 # The one-time deep harvest is a CLI run with an explicit start.
 HARVEST_DAYS = int(os.getenv("LIVE_HARVEST_DAYS", "30"))
 
+# How far back the replay actually reaches for a *listed* contract, measured
+# rather than documented: dense data at 120 days, nothing at 140. Not a knob —
+# it is a property of Rithmic's service, and an env var here would only let a
+# host disagree with the measurement and then be surprised by an empty answer.
+REPLAY_DAYS = 120
+
 # One sweep at a time, process-wide. Not tidiness: Rithmic allows one concurrent
 # session per login, so two sweeps racing would force-log-out each other and the
 # live feed with them.
 _lock = threading.Lock()
 _running = False
+
+_MONTH_CODES = {"F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6,
+                "N": 7, "Q": 8, "U": 9, "V": 10, "X": 11, "Z": 12}
+
+# Roots whose contract expires on the **third Friday** of the coded month — the
+# CME equity-index rule. Deliberately a whitelist rather than a default: the
+# energy and metal roots settle on quite different days, and this date is the
+# input to a deadline nobody can re-check after it passes. An unknown root gets
+# no expiry at all, which the surface can say; a plausible wrong one it cannot.
+_THIRD_FRIDAY_ROOTS = {"NQ", "ES", "YM", "RTY", "MNQ", "MES", "MYM", "M2K"}
+
+
+def parse_contract(symbol: str) -> tuple[str, int, int] | None:
+    """``"NQU6"`` -> ``("NQ", 9, 2026)``. None if it is not a raw contract.
+
+    The year digit is read as the nearest such year rather than the one in this
+    decade: a single digit is ambiguous by construction, and "nearest" is the
+    only reading under which a contract listed today resolves to a date in front
+    of it. Two digits are taken literally (``NQU26``).
+    """
+    s = (symbol or "").strip().upper()
+    i = len(s)
+    while i > 0 and s[i - 1].isdigit():
+        i -= 1
+    digits, rest = s[i:], s[:i]
+    if not digits or len(digits) > 2 or len(rest) < 2 or rest[-1] not in _MONTH_CODES:
+        return None
+    root, month = rest[:-1], _MONTH_CODES[rest[-1]]
+    if len(digits) == 2:
+        return root, month, 2000 + int(digits)
+    this_year = date.today().year
+    year = this_year - this_year % 10 + int(digits)
+    # A contract more than three years behind is far likelier to be next decade's
+    # than a stale one still being asked about.
+    if year < this_year - 3:
+        year += 10
+    return root, month, year
+
+
+def contract_expiry(symbol: str) -> date | None:
+    """When the contract stops being listed — and with it, replayable at all.
+
+    None for a root whose settlement rule is not the equity-index one, and for
+    anything that is not a raw contract code.
+    """
+    parsed = parse_contract(symbol)
+    if parsed is None:
+        return None
+    root, month, year = parsed
+    if root not in _THIRD_FRIDAY_ROOTS:
+        return None
+    d = date(year, month, 1)
+    return d + timedelta(days=(4 - d.weekday()) % 7 + 14)  # first Friday, then two weeks
+
+
+def replay_window(symbol: str, recorded: set[date] | None = None,
+                  today: date | None = None) -> dict:
+    """What is still reachable for a contract, and how long that lasts.
+
+    Two ceilings, and only one of them moves with the calendar. ``floor`` is the
+    trailing 120 days — it slides forward every day, so a session not harvested
+    is lost on a rolling basis. ``expiry`` is the cliff: an expired contract
+    serves nothing at any depth, so everything still missing on that date is
+    missing permanently. That is the deadline the module docstring names, and it
+    is the number worth putting where somebody can act on it.
+
+    ``missing`` counts **weekday sessions with nothing at all in the store**, in
+    the reachable window. It is deliberately not "incomplete days": holidays
+    cannot be told from the calendar for a pinned contract (see
+    ``sessions_between``), so a handful of the count is always days the exchange
+    did not trade. Answering the finer question means reading every day's ticks,
+    which is what ``pending`` is for — too heavy for something a page polls.
+    """
+    today = today or tickmod.session_date_for(pd.Timestamp.now(tz="UTC"))
+    floor = today - timedelta(days=REPLAY_DAYS)
+    expiry = contract_expiry(symbol)
+    # Up to yesterday: today's session is the live feed's job, and counting it
+    # as a hole would make every morning open with a fresh one.
+    reachable = sessions_between(floor, today - timedelta(days=1))
+    have = recorded or set()
+    missing = [d for d in reachable if d not in have]
+    return {
+        "symbol": symbol,
+        "replay_days": REPLAY_DAYS,
+        "floor": floor.isoformat(),
+        "expiry": None if expiry is None else expiry.isoformat(),
+        "days_to_expiry": None if expiry is None else (expiry - today).days,
+        "sessions": len(reachable),
+        "recorded": len(reachable) - len(missing),
+        "missing": len(missing),
+        "oldest_missing": missing[0].isoformat() if missing else None,
+        # Listed, not just counted, so a coverage strip can draw the holes
+        # without a second copy of this calendar living in the client — the
+        # weekend/holiday reasoning above is subtle enough once.
+        "missing_dates": [d.isoformat() for d in missing],
+    }
 
 
 def in_progress() -> bool:
@@ -165,6 +267,14 @@ async def harvest_day(client, symbol: str, day: date, exchange: str = "CME") -> 
 
     agg_num, agg_side = _replay_aggressor_map(), _aggressor_map()
     rec = TickRecorder(symbol, day)
+    # Carry forward the marks a watching session left. ``heartbeat`` rewrites
+    # session.json whole, so without this a day that was watched and is now
+    # being gap-filled loses the one field saying the shelf ever ran over it —
+    # and "watched, then repaired" becomes indistinguishable from "never
+    # watched", which is exactly the distinction this module exists to keep.
+    prior = read_manifest(symbol, day) or {}
+    if "shadow" in prior:
+        rec.marks["shadow"] = prior["shadow"]
     loop = asyncio.get_running_loop()
 
     async def publish(frame: pd.DataFrame) -> None:

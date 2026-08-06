@@ -1528,3 +1528,236 @@ def test_a_truncated_journal_line_is_dropped_not_raised_on(live_store):
     with (jourmod.day_dir("TEST", DAY) / "s.jsonl").open("a") as fh:
         fh.write('{"rows": 20, "trad')
     assert len(jourmod.read("TEST", DAY, "s")) == 1
+
+
+# --- coverage: what is on disk, and how long the holes stay fillable ---------
+
+
+def test_a_raw_contract_parses_and_a_root_does_not():
+    assert harvest.parse_contract("NQU6") == ("NQ", 9, 2026)
+    assert harvest.parse_contract("NQU26") == ("NQ", 9, 2026)  # two digits taken literally
+    assert harvest.parse_contract("MNQZ5") == ("MNQ", 12, 2025)
+    # A root has no month code, which is the same thing the feed's own guard is
+    # about: a root would send `contract_for` to probe Databento.
+    assert harvest.parse_contract("NQ") is None
+    assert harvest.parse_contract("") is None
+
+
+def test_the_expiry_is_the_third_friday_and_only_for_roots_that_settle_there():
+    assert harvest.contract_expiry("NQU6") == date(2026, 9, 18)
+    assert harvest.contract_expiry("NQZ5") == date(2025, 12, 19)
+    assert harvest.contract_expiry("ESH7") == date(2027, 3, 19)
+    # Crude settles nowhere near the third Friday. No date beats a plausible
+    # wrong one on a deadline nobody can re-check after it passes.
+    assert harvest.contract_expiry("CLM6") is None
+
+
+def test_the_replay_window_counts_the_holes_and_the_days_left():
+    today = date(2026, 8, 6)
+    w = harvest.replay_window("NQU6", {date(2026, 8, 5), date(2026, 8, 4)}, today)
+
+    assert w["floor"] == "2026-04-08"                  # today - 120
+    assert w["expiry"] == "2026-09-18" and w["days_to_expiry"] == 43
+    assert w["recorded"] == 2
+    assert w["missing"] == w["sessions"] - 2
+    # Listed as well as counted, so the strip can draw the holes without a second
+    # copy of the session calendar living in the client.
+    assert len(w["missing_dates"]) == w["missing"]
+    # Today's session is the live feed's job, not a hole — counting it would open
+    # every morning with a fresh one.
+    assert today.isoformat() not in w["missing_dates"]
+    assert w["missing_dates"][0] == w["oldest_missing"]
+
+
+def test_the_window_ends_at_the_contract_and_not_at_the_calendar():
+    """The floor slides; the expiry does not. Both are ceilings on repair."""
+    near = harvest.replay_window("NQU6", set(), date(2026, 9, 14))
+    assert near["days_to_expiry"] == 4
+    past = harvest.replay_window("NQU6", set(), date(2026, 10, 1))
+    assert past["days_to_expiry"] < 0     # said plainly rather than clamped to 0
+
+
+def test_a_watched_day_and_a_harvested_one_are_told_apart():
+    """The four cases, in the order the evidence is trustworthy.
+
+    Not cosmetic: a harvested day has no signal journal and carries Rithmic's
+    clock rather than the exchange's, and a reader of the data has to be able to
+    find that out without asking a person.
+    """
+    from api.routers.live import _kind_of
+
+    assert _kind_of({}, ["vwap-upper-band-bounce"]) == "watched"
+    assert _kind_of({"shadow": "off"}, []) == "watched"      # shelf off, still watched
+    assert _kind_of({"source": "harvest"}, ["s"]) == "filled"  # watched, then repaired
+    assert _kind_of({"source": "harvest"}, []) == "harvest"
+    # Nothing on disk says which. Guessing "harvested" here would put a clock
+    # claim on a day that has not earned one.
+    assert _kind_of({}, []) == "unknown"
+
+
+def test_a_gap_fill_does_not_erase_that_the_day_was_watched(live_store):
+    """`heartbeat` rewrites session.json whole.
+
+    Without carrying the mark, a watched day that the sweep later repaired came
+    back looking exactly like a day nobody was ever connected for.
+    """
+    r = TickRecorder("TEST", DAY)
+    r.marks["shadow"] = "on"
+    r.append(_synthetic_day(DAY).iloc[:5])
+    r.close(None)
+    tickmod._clear_tick_caches()
+
+    asyncio.run(harvest.harvest_day(_StubSweepClient(), "TEST", DAY))
+
+    man = recorder_mod.read_manifest("TEST", DAY)
+    assert man["source"] == "harvest"       # the sweep did write it...
+    assert man["shadow"] == "on"            # ...and the session's mark survived
+
+
+def test_the_recordings_list_carries_the_provenance_and_the_deadline(live_store, monkeypatch):
+    from api.routers.live import live_recordings
+
+    monkeypatch.delenv("LIVE_SYMBOL", raising=False)
+    r = TickRecorder(CONTRACT, DAY)
+    r.stats["clamped"] = 7
+    r.append(_synthetic_day(DAY).iloc[:20])
+    r.close(None)
+    tickmod._clear_tick_caches()
+    jourmod.SignalJournal(CONTRACT, DAY).record("vwap-upper-band-bounce", 20, None, [], [])
+
+    body = live_recordings(None)
+    row = body["recordings"][0]
+
+    assert row["symbol"] == CONTRACT and row["date"] == DAY.isoformat()
+    assert row["kind"] == "watched"
+    assert row["signals"] == ["vwap-upper-band-bounce"]
+    # Out of `stats` and into a field of its own: the plan flags a non-tiny
+    # figure as a real finding, and it was only readable by opening a JSON file.
+    assert row["clamped"] == 7
+    assert [c["symbol"] for c in body["contracts"]] == [CONTRACT]
+
+
+def test_the_contract_being_recorded_appears_before_it_has_a_day(live_store, monkeypatch):
+    """Which is exactly the state in which a deadline is worth reading."""
+    from api.routers.live import live_recordings
+
+    monkeypatch.setenv("LIVE_SYMBOL", "NQU6")
+    body = live_recordings(None)
+
+    assert body["recordings"] == []
+    assert [c["symbol"] for c in body["contracts"]] == ["NQU6"]
+    assert body["contracts"][0]["recorded"] == 0
+
+
+# --- the days behind the live one ------------------------------------------
+# `/live/history` exists so the live chart is not stranded with only the session
+# in progress on it. The interesting part is not the encoding — that is the codec
+# the Simulator and the tape poll already share — but *which store answers*, and
+# what it says about the days it could not find.
+
+
+def test_the_cache_answers_before_the_live_store(live_store, monkeypatch):
+    """One rule, in one place — `journal.sim.weekly.session_sums`' rule.
+
+    The two stores overlap, and a day held in both has to draw the same bars on
+    the live chart as it does in the Simulator. Cache first, or the two surfaces
+    quietly disagree about a Tuesday.
+    """
+    from api.routers.live import _history_source
+
+    monkeypatch.setattr(tickmod, "has_rth", lambda s, d: False)
+    assert _history_source(CONTRACT, DAY) is None      # neither store has it
+
+    _record(CONTRACT, DAY, _synthetic_day(DAY).iloc[:20])
+    tickmod._clear_tick_caches()
+    assert _history_source(CONTRACT, DAY) == "live"    # only the recording
+
+    monkeypatch.setattr(tickmod, "has_rth", lambda s, d: True)
+    assert _history_source(CONTRACT, DAY) == "cache"   # both -> the cache wins
+
+
+def test_the_walk_back_skips_weekends_and_reports_the_holes(live_store, monkeypatch):
+    """A week of calendar is routinely fewer sessions of tape.
+
+    The live store has long contiguous stretches with nothing recorded, so the
+    holes have to come back with the answer: gluing across one would draw a
+    continuous chart out of a discontinuous week.
+    """
+    from api.routers.live import live_history_days
+
+    monkeypatch.setattr(tickmod, "has_rth", lambda s, d: False)
+    # Mon 2025-10-06 .. Fri 2025-10-10, with the Wednesday missing. DAY itself is
+    # the Monday after, and is never its own context.
+    for d in (date(2025, 10, 6), date(2025, 10, 7), date(2025, 10, 9), date(2025, 10, 10)):
+        _record(CONTRACT, d, _synthetic_day(d).iloc[:5])
+    tickmod._clear_tick_caches()
+
+    body = live_history_days(symbol=CONTRACT, date_=DAY.isoformat(), days=5)
+
+    assert [d["date"] for d in body["days"]] == [
+        "2025-10-06", "2025-10-07", "2025-10-09", "2025-10-10",
+    ]
+    assert all(d["source"] == "live" for d in body["days"])
+    # The Wednesday, and only it: the weekend is not a hole, and weekdays older
+    # than the oldest day found were never part of the window.
+    assert body["missing"] == ["2025-10-08"]
+
+
+def test_the_walk_stops_at_the_count_it_was_asked_for(live_store, monkeypatch):
+    """Oldest-first, and a shorter answer than requested is not an error."""
+    from api.routers.live import live_history_days
+
+    monkeypatch.setattr(tickmod, "has_rth", lambda s, d: False)
+    for d in (date(2025, 10, 6), date(2025, 10, 7), date(2025, 10, 8), date(2025, 10, 9)):
+        _record(CONTRACT, d, _synthetic_day(d).iloc[:5])
+    tickmod._clear_tick_caches()
+
+    body = live_history_days(symbol=CONTRACT, date_=DAY.isoformat(), days=2)
+    assert [d["date"] for d in body["days"]] == ["2025-10-08", "2025-10-09"]
+    # The Friday is still a hole even though the walk had already found what it
+    # was asked for: it sits between the newest context day and the session, so
+    # what gets drawn is *not* contiguous with the live tape. That is precisely
+    # the thing this list exists to say, and staying quiet about it because the
+    # count was satisfied would be the chart lying by omission.
+    assert body["missing"] == ["2025-10-10"]
+
+    # Nothing behind it at all: every weekday walked is a genuine hole, and the
+    # caller gets an empty list rather than a 404 — context is optional.
+    empty = live_history_days(symbol=CONTRACT, date_="2025-09-01", days=5)
+    assert empty["days"] == []
+    assert len(empty["missing"]) > 0
+
+
+def test_a_recorded_day_comes_back_as_tape(live_store, monkeypatch):
+    """The same bytes `/simulator/session` and `/live/tape` ship.
+
+    Decoded by the same function on the client, which is the whole reason a
+    finished day, a growing day and a replayed day are one wire format.
+    """
+    from api.routers.live import live_history_session
+
+    monkeypatch.setattr(tickmod, "has_rth", lambda s, d: False)
+    df = _synthetic_day(DAY)
+    _record(CONTRACT, DAY, df)
+    tickmod._clear_tick_caches()
+
+    body = live_history_session(symbol=CONTRACT, date_=DAY.isoformat(), tz="America/New_York")
+
+    assert body["source"] == "live"
+    assert body["n"] == len(df)
+    # Self-contained, like every other block from this codec.
+    assert body["dt"][0] == 0 and body["dp"][0] == 0
+    assert body["session_start_ms"] < body["rth_open_ms"] < body["rth_close_ms"]
+    assert body["session_end_ms"] >= body["rth_close_ms"]
+    # It is drawn, never played: there is no start for a transport to seek to.
+    assert "default_start_ms" not in body
+
+
+def test_a_day_with_no_tape_is_a_404_not_an_empty_chart(live_store, monkeypatch):
+    from api.routers.live import live_history_session
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(tickmod, "has_rth", lambda s, d: False)
+    with pytest.raises(HTTPException) as e:
+        live_history_session(symbol=CONTRACT, date_=DAY.isoformat(), tz=None)
+    assert e.value.status_code == 404

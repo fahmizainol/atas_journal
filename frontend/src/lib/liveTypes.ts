@@ -80,6 +80,94 @@ export interface LiveBackfill {
   error?: string;
 }
 
+/**
+ * One session in the live store, as `/live/recordings` lists it.
+ *
+ * This is the *recorded* store (`data/live/ticks/`, Rithmic), which is not the
+ * research cache (`data/cache/ticks/`, Databento) and is deliberately never
+ * mixed with it: the Databento corpus is the independent reference a recorded
+ * day gets checked against. A day in this list is not replayable on the
+ * Simulator, and its absence from there is not a bug.
+ */
+export interface LiveRecording {
+  symbol: string;
+  date: string;
+  chunks: number;
+  rows: number | null;
+  closed: boolean | null;
+  last_tick_utc: string | null;
+  updated_at: string | null;
+  stats: Record<string, number>;
+  /** How the day was come by, derived server-side from what survives on disk —
+   *  see `_kind_of` in api/routers/live.py, which is where the evidence order is
+   *  argued. The difference is not cosmetic: a harvested day has no signal
+   *  journal and carries Rithmic's clock rather than the exchange's. */
+  kind: "watched" | "filled" | "harvest" | "unknown";
+  /** The shelf's mode as the session ran it, when a session wrote this manifest. */
+  shadow: "on" | "off" | null;
+  /** Strategies with a signal journal for the day. Empty on a harvested day is
+   *  an honest absence — nothing recorded what the shelf believed, and nothing
+   *  can reconstruct it. */
+  signals: string[];
+  harvest: { complete: boolean; covered: boolean; error: string | null; rows: number } | null;
+  /** Exchange stamps that arrived out of order and had to be pushed forward. */
+  clamped: number;
+  /** Ticks that reached the tape with no recorder attached — a permanent hole. */
+  unrecorded_rows: number;
+}
+
+/**
+ * What is still reachable for one contract, and how long that lasts.
+ *
+ * Two ceilings, and only the first moves: `floor` is the trailing 120 days
+ * Rithmic will replay for a *listed* contract, so an un-harvested session ages
+ * out on a rolling basis. `expiry` is the cliff — an expired contract serves
+ * nothing at any depth, so whatever is still missing on that date is missing
+ * permanently.
+ */
+export interface LiveContract {
+  symbol: string;
+  replay_days: number;
+  floor: string;
+  expiry: string | null;
+  days_to_expiry: number | null;
+  sessions: number;
+  recorded: number;
+  missing: number;
+  oldest_missing: string | null;
+  /** Weekday sessions in the window with nothing at all in the store. Holidays
+   *  are in here: they cannot be told from the calendar for a pinned contract,
+   *  so a few of these are days the exchange did not trade. */
+  missing_dates: string[];
+}
+
+export interface LiveRecordings {
+  recordings: LiveRecording[];
+  contracts: LiveContract[];
+}
+
+/** One prior session with tape behind it, and which store answered. */
+export interface LiveHistoryDay {
+  date: string;
+  /** `"cache"` (Databento) or `"live"` (recorded). Resolved server-side,
+   *  cache-first, so a day held in both draws the same bars here as it does in
+   *  the Simulator. */
+  source: string;
+}
+
+/** What `/live/history/days` found behind a session. */
+export interface LiveHistoryDays {
+  symbol: string;
+  date: string;
+  requested: number;
+  /** Oldest first. Fewer than `requested` means the store ran out, not an error. */
+  days: LiveHistoryDay[];
+  /** Weekdays inside the returned span with no tape in either store. Reported
+   *  rather than skipped: gluing across a gap would draw a continuous chart out
+   *  of a discontinuous week. */
+  missing: string[];
+}
+
 /** The day's header: everything about the session that is not a tick.
  *
  *  Field-for-field a `SessionPayload` minus the tape and minus `session_end_ms`,

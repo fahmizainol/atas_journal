@@ -17,6 +17,13 @@
 //     also means a stop you rewound out of never happened. The attempt keeps the
 //     erased trades and the seek that erased them, so a track record can say
 //     which of its numbers were written with the answer already in hand.
+//
+// A fourth rule follows from the first three once the page can resume: a sitting
+// picked back up is the *same* sitting. `adopt` points the recorder at an
+// attempt that already exists rather than at a blank one, so a reload writes
+// back into the record it came from instead of minting a second attempt on the
+// same day — which the history page would read, correctly by its own rules and
+// wrongly in fact, as a re-run of a session you had already seen the end of.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -56,6 +63,20 @@ export interface AttemptRecord {
   repeat_index: number;
   note: string;
   model_id: number | null;
+}
+
+/** What `adopt` needs about the attempt it is taking over, beyond the record
+ *  itself: the state the log was last saved in, so the recorder can pick up
+ *  from it rather than treat it as a change to write back. */
+export interface AdoptState {
+  log: Log;
+  trades: Trade[];
+  rewinds: RewindEvent[];
+  discarded: Trade[];
+  /** The clock the attempt opened at, which is not this visit's start time — a
+   *  resumed sitting spans from the first fill of the *first* visit. */
+  startedMs: number;
+  clockMs: number;
 }
 
 interface Pending {
@@ -212,6 +233,46 @@ export function useReplayAttempt() {
     [flush],
   );
 
+  /**
+   * Take over an attempt that already exists, instead of waiting for a fill to
+   * open a new one.
+   *
+   * Called straight after `arm` when a session is resumed from a bookmark: the
+   * log the page just restored is the one this attempt already holds, so the
+   * continuation belongs in the same record. Nothing is written here — the state
+   * being adopted is by definition what is on disk — and the signature is primed
+   * with it, so the first `record` after a resume is the no-op it should be and
+   * a reload costs zero requests until you actually do something.
+   *
+   * Adopting a *finished* attempt is allowed and is not a contradiction: the
+   * tape ran out, and trading on after a rewind already reopens it (see the
+   * status logic in `flush`). Coming back to the same day is the same move made
+   * across a page load.
+   */
+  const adopt = useCallback((rec: AttemptRecord, st: AdoptState) => {
+    // Only ever into a session `arm` has already pointed us at — the context
+    // carries the tape fingerprint this attempt's cursors are measured against.
+    if (!ctxRef.current) return;
+    ctxRef.current = { ...ctxRef.current, startedMs: st.startedMs };
+    idRef.current = rec.id;
+    rewindsRef.current = st.rewinds;
+    discardedRef.current = st.discarded;
+    pendingRef.current = { log: st.log, trades: st.trades, clockMs: st.clockMs };
+    dirtyRef.current = false;
+    sigRef.current = sig(st.log, st.trades);
+    setAttempt(rec);
+    setStatus(rec.status === "finished" ? "finished" : "active");
+    setSummary(
+      summarize(st.trades, st.log, {
+        rewinds: st.rewinds,
+        discarded: st.discarded,
+        clockStartMs: st.startedMs,
+        clockEndMs: st.clockMs,
+      }),
+    );
+    setError(null);
+  }, []);
+
   /** Hand over a freshly published simulation. Cheap on every call but the ones
    *  that changed something. */
   const record = useCallback(
@@ -245,6 +306,12 @@ export function useReplayAttempt() {
     await flush(true);
   }, [flush]);
 
+  /** The attempt currently open, if one is, read straight off the ref rather
+   *  than out of React state. The id arrives from a POST and reaches `attempt`
+   *  only on the render after — which is one render too late for anything that
+   *  has to name the attempt from inside an effect (the resume bookmark does). */
+  const attemptId = useCallback(() => idRef.current, []);
+
   const setNote = useCallback(async (note: string) => {
     const id = idRef.current;
     if (!id) return;
@@ -273,5 +340,5 @@ export function useReplayAttempt() {
     [flush],
   );
 
-  return { attempt, summary, status, error, arm, record, noteRewind, finish, setNote };
+  return { attempt, attemptId, summary, status, error, arm, adopt, record, noteRewind, finish, setNote };
 }

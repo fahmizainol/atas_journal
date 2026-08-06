@@ -127,54 +127,243 @@ looking exactly like a market with no setups in it). Full suite 473 pass; the
 three `test_sim_charts.py` failures are the pre-existing WIP ones. Checked in a
 browser against a simulated feed, both states.
 
-### 3. Revamp `/charts/live` UI/UX to match `/charts/replay`
+### 3. Revamp `/charts/live` UI/UX to match `/charts/replay` — DONE (2026-08-06)
 
-The Live page is 1,007 lines against the Simulator's 2,297 and has none of the
+The Live page was 1,007 lines against the Simulator's 2,297 and had none of the
 Simulator's indicator suite, setup bar, or prefs plumbing — the two halves of the
-"one chart with two clocks" idea do not currently look like one chart.
+"one chart with two clocks" idea did not look like one chart.
 
-- [ ] Inventory what Replay has that Live does not: setup bar, `SimPrefs`
-      persistence, `IndicatorLegend`, the composite/nodes/events layers, the
-      developing NY profile, the ATR/range-budget indicators, the fullscreen
-      mode and mobile pointer handling.
-- [ ] Decide what is genuinely shared vs. deliberately different. A live chart
-      has no transport and no seek; everything else is arguably the same
-      instrument. Shared components beat a second copy — but note 1b (the
-      Simulator hook decomposition) is **still unfinished** in the live plan, and
-      that is the work that makes sharing cheap. Sequence accordingly.
-- [ ] `.sim-page` heights are measured in JS (`useFillHeight`) — any new page or
-      remount path needs the hook, not a copy of the old mount-once effect. This
-      already bit the Live page once (chart collapsed and grew as the signal rail
-      filled).
-- [ ] Keep the suite's standing rule: **context, not signals**. No indicator
-      lands on the live chart that failed its A/B elsewhere.
+> **Done**, on branch `chart-maximal-ui` (`375c2bc` … `ceb5b75`). The gap closed
+> mostly by *deletion* rather than by porting: both pages lost their shell chrome
+> to a single ~36px `ChartTopBar`, and what Live was missing turned out to be
+> reachable by handing the same components the live tape instead of a finished
+> one. Live is 1,379 lines now, and the growth is the feed and the shadow rail —
+> not a second copy of the chart.
+>
+> What it shares outright: `ReplayChart` whole (so the developing NY profile, the
+> viewport profile, the VWAP bands, the IB boxes, `IndicatorLegend`, the ⚓/ruler
+> tools, the order primitives, the long-press ticket and the mobile pointer
+> handling all arrive with it), `SimIndicators` for the day-scale ATR/range-budget
+> strip, `TimeframeControl` with the same four-primary/⋯ split, the `sim-quick`
+> market buttons, and the `sim-rail` panel-and-pin. The setup drawer opens off the
+> title exactly as the Simulator's session setup does — the rule that fell out of
+> it is *anything you touch while watching lives in the bar; anything you set once
+> lives behind the title*.
+>
+> Deliberately different, and each one traceable to a property of the clock rather
+> than to unfinished work:
+>
+> - **No transport.** `liveSource` reports `canSeek`/`canRewind`/`canSetSpeed`/
+>   `canStepBar` false, and `truncateLog` is *never imported* on this page. A live
+>   fill happened; un-happening it would be a lie about the session.
+> - **No `SimPrefs`.** Replay persists a day, a start time and a speed. Live has
+>   none of those — its "session" is whichever feed is running, which is server
+>   state and already on `/live/status`.
+> - **No composite / context days.** Live plays one growing session with no prior
+>   days glued to its left, so the composite has nothing to be built over. ~~Absent
+>   by construction, not by omission.~~ **Wrong reason — corrected in item 5.**
+>   Nothing about a live clock forbids prior days to the *left* of the current
+>   one; what forbids it is that no endpoint serves a *recorded* day as tape.
+>   The absence is a missing reader, not a property of the session.
+>
+> Two things the scoping got wrong:
+>
+> - **`useFillHeight` no longer exists.** The third bullet warned about keeping a
+>   JS-measured height in sync; the chart-maximal layout removed the chrome that
+>   made measuring necessary, and `.sim-page` is now `100dvh` in CSS. The hazard
+>   was deleted rather than handled. (One stale comment in `LiveChart.tsx` still
+>   claimed `--sim-fill-h` was load-bearing — corrected.)
+> - **Sharing did not have to wait on the hook decomposition.** The second bullet
+>   said live-plan item 1b was the work that makes sharing cheap, and to sequence
+>   after it. It is still unfinished, and sharing happened anyway: the seam that
+>   mattered was `lib/tapeSource` (where the clock comes from, whether the tape
+>   ends, what you may do to it), which already existed. The hook split is still
+>   worth doing; it was not the blocker.
 
-### 4. Display backfilled days on `/charts/live`
+- [x] Inventory what Replay has that Live does not — done, and most of it came
+      free with `ReplayChart`. The genuine absences are the three above, all
+      properties of a live clock rather than gaps.
+- [x] Decide what is genuinely shared vs. deliberately different — shared by
+      default, with the transport as the one hard line. See the `lib/tapeSource`
+      note above on why this did not have to wait on the hook decomposition.
+- [x] ~~`.sim-page` heights are measured in JS (`useFillHeight`)~~ — obsolete.
+      The hook is gone repo-wide; height is `100dvh`.
+- [x] Keep the suite's standing rule: **context, not signals**. Held. Everything
+      that landed is drawn context — profiles, bands, IB, the ATR/range budget —
+      and the one panel that carries strategy output is the shadow rail, which
+      reports what the shelf *believed* and cannot route anything.
 
-Harvested/recorded sessions are invisible in the UI today.
+Verified: three follow-up commits (`c06c3e1`, `cd856ee`, `ceb5b75`) are
+browser-found layout faults on the first cut — mobile, the pinned panel taking a
+grid row, and three CSS rules stranded inside a media query. Note the revamp cost
+Replay ~70px: it was already fullscreen-on-mount, so the top bar is chrome it did
+not have before, while Live gained everything.
 
-**Most of the server work is already done.** `GET /live/recordings`
-(`api/routers/live.py:175`) already lists every recorded session newest-first
-with rows, chunks, closed flag, last tick and the recorder's `stats` — and
-**nothing in `frontend/` calls it.** `src/journal/live/harvest.py` fills the days
-nobody was connected for and stamps `harvest.complete` in the manifest.
+### 4. Inventory the backfilled days — DONE (2026-08-06)
 
-- [ ] Render the recordings list on the Live page — a coverage strip or panel:
-      day, rows, complete/partial, source.
-- [ ] Distinguish **watched** from **harvested** in the UI, because the manifest
-      does and the difference matters: a harvested day has **no signal journal**
-      (nothing recorded what the shelf believed) and carries **Rithmic's clock**
-      (median 287µs later than the exchange stamp on a watched day). Honest
-      absence, not a blank cell.
-- [ ] Show the harvest deadline where it can be acted on: Rithmic replays a
-      *listed* contract back ~120 days and an **expired** one not at all — so the
-      outgoing contract must be deep-harvested **before** `LIVE_SYMBOL` rolls.
-      That is a date the UI can compute and warn about.
-- [ ] Surface `stats.clamped` from the manifest (out-of-order exchange stamps) —
-      the plan flags a non-tiny figure as a real finding, and it is currently
-      only readable by opening a JSON file.
+Harvested/recorded sessions were invisible in the UI.
 
-### 5. *(open slot)*
+> **Scope correction (2026-08-06, after the fact.)** This item was filed as
+> "display backfilled days" and built as an **inventory** — what tape is on
+> disk, where the holes are, what expires when. That was not the ask. The ask
+> was to *draw* those days on the chart, so the live page is not stranded with
+> only the current session's bars. That is now **item 5**, and it is open. What
+> shipped below is still worth having and stays done; it answers "what have I
+> got", not "show it to me".
+
+**Most of the server work was already done.** `GET /live/recordings` already
+listed every recorded session newest-first with rows, chunks, closed flag, last
+tick and the recorder's `stats` — and **nothing in `frontend/` called it.**
+`src/journal/live/harvest.py` fills the days nobody was connected for and stamps
+`harvest.complete` in the manifest.
+
+> **Done.** `frontend/src/components/TapeCoverage.tsx`, mounted twice off one
+> component: as a rail panel beside the running chart, and full-width on the
+> no-session setup screen — which is arguably its more important home, since
+> *"what have I got, and what is about to become unfetchable"* is a question you
+> ask **before** connecting. The rail holds one panel with two views rather than
+> two panels: a second `.sim-panel` would stack in the unpinned overlay and fight
+> for the same column when pinned, and coverage is something you consult, not
+> something you watch.
+>
+> The endpoint grew what the UI could not honestly derive: `kind`, `signals`
+> (the journalled slugs), `shadow`, `clamped` and `unrecorded_rows` lifted out of
+> `stats`, plus a `contracts` block carrying the deadline. Reads are a directory
+> walk, a manifest and a glob — no tick file is opened — because a page polls it:
+> **12–14ms for 40 recorded days** against the real store.
+>
+> Three things the scoping did not anticipate:
+>
+> - **`source` is the last writer, not the day's provenance — and the sweep was
+>   destroying the evidence.** `heartbeat` rewrites `session.json` whole, so a
+>   day that was watched and later gap-filled came back stamped
+>   `source: "harvest"` with its `shadow` mark gone: indistinguishable from a day
+>   nobody was ever connected for. **2026-08-05 in the real store is exactly this
+>   day.** Fixed at the writer (`harvest_day` now carries the prior manifest's
+>   marks forward), and the classifier reads the evidence in order of how much it
+>   can be trusted — a signal journal first, since it survives any number of
+>   manifest rewrites. Four answers, not two: `watched`, `filled` (watched then
+>   repaired), `harvest`, and **`unknown`** for days recorded before the fix,
+>   where guessing "harvested" would put a clock claim on a day that has not
+>   earned one.
+> - **The deadline is two ceilings, not one, and only one of them is a date.**
+>   The 120-day floor *slides forward daily*, so a session ages out on a rolling
+>   basis long before the contract rolls; expiry is the cliff behind which
+>   nothing is recoverable at any depth. The panel states both, and the warning
+>   names the count that dies on the specific date.
+> - **Contract expiry needed a whitelist, not a formula.** Third-Friday is the
+>   CME *equity-index* rule; the energy and metal roots settle nowhere near it.
+>   An unknown root gets **no** expiry, which the panel says — a plausible wrong
+>   date on a deadline nobody can re-check after it passes is worse than none.
+>
+> What it turned up on the real store, immediately: **46 of the 86 reachable
+> sessions have nothing recorded**, in one contiguous block from 2026-04-08 to
+> 2026-06-10 (the deep harvest only ever went back to 06-11), and **NQU6 expires
+> in 43 days**. That is the item working as intended on its first run.
+
+- [x] Render the recordings list on the Live page — day, rows, kind, partial
+      flag, plus a per-session coverage strip drawn over the **reachable window**
+      rather than over what exists, because the holes are the point. The strip's
+      calendar comes down from the server (`missing_dates`) rather than being
+      recomputed in TSX: the weekday/holiday reasoning is subtle enough to have
+      in one place.
+- [x] Distinguish **watched** from **harvested** — see the `_kind_of` note above.
+      The journalled slugs are listed in a tooltip, and an empty list on a
+      harvested day reads as the honest absence it is.
+- [x] Show the harvest deadline where it can be acted on — per contract, with
+      days-to-expiry going orange at 30 days and red at 7, and an explicit
+      "deep-harvest before it rolls" line naming how many sessions die on that
+      date. Computed server-side (`harvest.replay_window`): it is arithmetic over
+      a *measured* property of the service, not a display choice.
+- [x] Surface `stats.clamped` — its own field on every row, gold, with the "tiny
+      is ordinary, large is a finding" reading in the tooltip. `unrecorded_rows`
+      came along for the ride since it sits in the same dict and is the one hole
+      that **cannot** be repaired by fetching again.
+
+Verified: 10 new tests in `tests/test_live_record.py` §coverage — the contract
+parse (including the root the feed's own guard rejects), third-Friday expiry and
+its whitelist, the window arithmetic (floor, days-left, today-is-not-a-hole,
+negative days after expiry said plainly rather than clamped), all four `_kind_of`
+cases, the gap-fill mark carry-forward, and the endpoint's provenance/deadline
+fields. Suite: 486 pass, the same three pre-existing `test_sim_charts.py` WIP
+failures. Endpoint checked over HTTP against the real 40-day store; frontend
+typechecks and builds. **Not yet opened in a browser** — no headless browser on
+this host, so the layout of the rail panel at rail width is unverified.
+
+### 5. Draw the recorded days on the live chart — DONE (2026-08-06)
+
+**The original intent behind item 4.** The live chart holds exactly one
+session — today's, growing. Scrolling left runs out of tape at the Globex open.
+Every prior recorded day is sitting in `data/live/ticks/`, and none of it is on
+screen.
+
+> **Done.** A week by default (`HISTORY_DAYS_DEFAULT = 5`, selectable 0–10 in the
+> setup drawer). Two endpoints and a seed; no new chart.
+>
+> **The seam turned out to be the growable tape, not `concatTapes`.** `Tape.n` is
+> already independent of the typed arrays' length, so prior days are copied in as
+> a **prefix at construction** and the live rows append behind them —
+> `createGrowableTape(tickSize, pointValue, context)`. `ReplayEngine` needed no
+> change at all: it already binary-searches its session start against whatever
+> tape it is handed and draws everything before it as context bars, which is the
+> path the Simulator's `concatTapes` feeds.
+>
+> **Why seeding rather than splicing, and it is load-bearing:** an order's `idx`
+> and the ladder's snapshots are *positions in that array*. Context that arrived
+> later and shifted everything right would silently renumber every fill already
+> recorded. So context is a **precondition of starting the tape** — `useLiveTape`
+> is gated on the history having settled — not something added to a tape already
+> growing. The same fact has a UI consequence that the scoping missed: changing
+> "Prior days" re-seeds, and `onReset` clears the blotter with it. The control
+> **locks once the blotter has anything in it** rather than discarding paper
+> trades as a side effect of a reading choice.
+>
+> Three things worth keeping:
+>
+> - **The cache-first rule does real work, immediately.** `_history_source` tries
+>   the Databento cache then the live store, per day, mirroring
+>   `journal.sim.weekly.session_sums`. A week behind 2026-07-06 comes back as two
+>   cached days and three recorded ones. It is not a hypothetical either: the
+>   **fake feed replays a cached day**, so a simulated session's context is
+>   entirely in the cache while a Rithmic session's is entirely in the live store.
+> - **`missing` is reported, not skipped.** A test written for this caught the
+>   sharper case: asking for 2 days when the day *immediately* behind the session
+>   is unrecorded still reports that hole, because what gets drawn is then not
+>   contiguous with the live tape. Satisfying the count is not a reason to go
+>   quiet about a gap.
+> - **The composite became reachable rather than allowed.** Item 3 listed it as
+>   deliberately absent; it was absent because it is built over context days.
+>   It now switches on with them (frozen at the prior close, as ever) and off when
+>   there are none.
+>
+> Cost, measured against the real 40-day store: the index is **14ms**; a day is
+> **~1.65s and 4.1MB** for 510k prints, so a cold week is ~20MB and ~8s before the
+> session's own tape starts. That is why it is a control and not a constant, and
+> why the loader caches decoded tapes across changes.
+
+- [x] Add the reader endpoint — `GET /live/history/session`, same payload shape
+      as `/simulator/session` (minus `default_start_ms`: a context day is drawn,
+      never played), plus a `source` field naming which store answered.
+- [x] Decide which store answers — cache-first, per day, as reasoned above.
+- [x] A skipped day is visible as a skip — `GET /live/history/days` returns
+      `missing` alongside the days, and the setup drawer shows
+      "N unrecorded" (orange) separately from "N unread" (red). The two look
+      identical on the chart — a shorter chart — and the difference matters:
+      one is a hole in the store, the other is a request to retry.
+- [x] Default lookback is a preference, not a constant — 0/1/2/3/5/10.
+- [x] The composite follows, built from prior sessions only.
+- [x] Context, not signals. Held: prior days are drawn tape and nothing reads
+      the shelf off them.
+
+Verified: 5 new tests in `tests/test_live_record.py` §the days behind the live
+one — the cache-first resolution through all three states, the weekend/hole walk,
+the early stop and its gap, the encoded day, and the 404. Suite 491 pass (the
+same three pre-existing `test_sim_charts.py` WIP failures). Both endpoints
+exercised over HTTP against the real 40-day store; frontend typechecks and
+builds. **Not yet opened in a browser** — same gap as item 4, no headless browser
+on this host.
+
+### 6. *(open slot)*
 
 ---
 

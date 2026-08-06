@@ -36,6 +36,8 @@ import {
   type HistDay,
 } from "../hooks/useSimulator";
 import { useReplayAttempt } from "../hooks/useReplayAttempt";
+import { useReplayAttemptDetail, type AttemptDetail } from "../hooks/useReplays";
+import { clearResume, loadResume, saveResume, type ResumePoint } from "../lib/replayResume";
 import {
   concatTapes,
   ReplayEngine,
@@ -86,12 +88,17 @@ import {
 } from "../lib/simPrefs";
 import type { CompositeRule, CompositeSpan } from "../lib/compositeProfile";
 import type { TapeRange } from "../lib/volumeProfile";
-import { MIN_SAMPLE } from "../lib/replayStats";
+import { MIN_SAMPLE, SIM_ENGINE_VERSION } from "../lib/replayStats";
 import { palette } from "../theme";
 
 /** How far the ticket has to be dragged down before letting go puts it away. */
 const GRAB_DISMISS_PX = 64;
 const RTH_OPEN_MIN = 9 * 60 + 30;
+
+/** How often the resume bookmark is brought up to date with the clock. Bounds
+ *  what a crash costs you in tape — a few seconds of scrolling back — against a
+ *  localStorage write on a page that is already doing sixty frames a second. */
+const RESUME_SAVE_MS = 4_000;
 
 /** Both R's spelled out, for the row that only has room to show one. */
 const rTitle = (t: Trade) =>
@@ -122,6 +129,34 @@ export function Simulator() {
   const [sel, setSel] = useState<{ symbol: string; date: string } | null>(null);
   const [startTime, setStartTime] = useState(prefs.startTime);
   const tz = "New York";
+
+  // Where this browser was when the page last closed (see lib/replayResume).
+  // Read once and consumed once, by the first session build below — a bookmark
+  // that turns out not to fit the tape is spent rather than retried, so a bad
+  // one can't follow you around. From then on it is write-only: `sel` and the
+  // clock are the truth and the store trails them, the same shape as `prefs`.
+  const [pending, setPending] = useState(loadResume);
+  const pendingRef = useRef<ResumePoint | null>(pending);
+  pendingRef.current = pending;
+  // The order log the bookmark names, fetched in parallel with the session it
+  // belongs to rather than after it — the two are independent requests and the
+  // resume needs both.
+  const resumeQ = useReplayAttemptDetail(pending?.attemptId ?? null);
+  // Nothing to wait for, or the fetch has come back one way or the other. A
+  // failure settles it too: a missing attempt (deleted from the history page,
+  // say) costs the trades, never the day.
+  const resumeSettled = !pending?.attemptId || resumeQ.isSuccess || resumeQ.isError;
+  const resumeDetailRef = useRef<AttemptDetail | null>(null);
+  resumeDetailRef.current = resumeQ.data ?? null;
+
+  /** Start somewhere else on purpose — 🎲, or a day picked by hand. The
+   *  bookmark is a record of where you were, so a decision to be elsewhere
+   *  retires it rather than leaving it to resurface on the next reload. */
+  const leaveResume = useCallback(() => {
+    setPending(null);
+    pendingRef.current = null;
+    clearResume();
+  }, []);
 
   const sessionQ = useSimulatorSession(sel?.symbol ?? null, sel?.date ?? null, tz);
 
@@ -160,6 +195,8 @@ export function Simulator() {
   const attemptRec = useReplayAttempt();
   const {
     arm: armAttempt,
+    adopt: adoptAttempt,
+    attemptId: attemptIdOf,
     record: recordAttempt,
     noteRewind,
     finish: finishAttempt,
@@ -178,18 +215,39 @@ export function Simulator() {
   const hidden = blind && !revealed;
 
   /** Any cached day, at random. */
-  const anyDay = useCallback((days: { symbol: string; date: string }[]) => {
-    const d = days[Math.floor(Math.random() * days.length)];
-    setRevealed(false);
-    setSel({ symbol: d.symbol, date: d.date });
-  }, []);
+  const anyDay = useCallback(
+    (days: { symbol: string; date: string }[]) => {
+      const d = days[Math.floor(Math.random() * days.length)];
+      // Drawing is a decision to be somewhere else, so the bookmark goes.
+      leaveResume();
+      setRevealed(false);
+      setSel({ symbol: d.symbol, date: d.date });
+    },
+    [leaveResume],
+  );
 
-  // Which day the picker opens on is a draw, on purpose: the replay is only
-  // practice while the tape is one you don't remember, and the newest session is
-  // the one you have most likely just been looking at. Pick another with the
-  // dropdown, or draw again with 🎲.
+  // Which day the picker opens on. A sitting you were in the middle of wins:
+  // "carry on" is what you want far more often than "start again", and the tape
+  // you were half way through is by definition not one you can practise blind on
+  // any more anyway.
+  //
+  // Failing that it is a draw, on purpose — the replay is only practice while
+  // the tape is one you don't remember, and the newest session is the one you
+  // have most likely just been looking at. Pick another with the dropdown, or
+  // draw again with 🎲.
+  //
+  // A bookmarked day that isn't in the list falls through to the draw: the root
+  // is a preference saved next to it so the two normally agree, but a contract
+  // whose cache has since been cleared out is simply not there to go back to.
   useEffect(() => {
-    if (!sel && daysQ.data && daysQ.data.days.length) anyDay(daysQ.data.days);
+    const days = daysQ.data?.days;
+    if (sel || !days?.length) return;
+    const p = pendingRef.current;
+    if (p && days.some((d) => d.symbol === p.symbol && d.date === p.date)) {
+      setSel({ symbol: p.symbol, date: p.date });
+      return;
+    }
+    anyDay(days);
   }, [anyDay, daysQ.data, sel]);
 
   // --- imperative refs (not React state — the frame loop reads these) -------
@@ -221,6 +279,28 @@ export function Simulator() {
   const simRef = useRef<SimState>(newSim());
   const sigRef = useRef("");
   const openRef = useRef<Position | null>(null);
+
+  /** Note where the replay currently stands, for the next visit.
+   *
+   *  Reads the refs rather than React state for the same reason the frame loop
+   *  does: the clock never renders. What goes in is a *position* and nothing
+   *  else — the trades are already on the server under the attempt named here,
+   *  and a second copy of them in localStorage would be a second answer that
+   *  could disagree with the first. */
+  const writeResume = useCallback(() => {
+    const s = sessionRef.current;
+    if (!s) return;
+    saveResume({
+      symbol: s.symbol,
+      date: s.date,
+      clockMs: clockRef.current,
+      attemptId: attemptIdOf(),
+      // The cursors in the stored log count from the start of the glued tape, so
+      // what is glued in front of it right now is the number that makes them
+      // readable again next time.
+      contextTicks: histTapesRef.current.reduce((a, t) => a + t.n, 0),
+    });
+  }, [attemptIdOf]);
 
   // --- display state --------------------------------------------------------
   const [ready, setReady] = useState(false);
@@ -557,7 +637,18 @@ export function Simulator() {
     // place the recorder has to be told. It writes nothing until a fill has
     // happened, and nothing again until something changes.
     recordAttempt(logRef.current, st.trades, st.open != null, clock);
-  }, [barAt, recordAttempt]);
+    // And the one place the bookmark has to be moved. The timer alone would not
+    // do: it samples the clock every few seconds, and a fill inside that window
+    // would leave the bookmark sitting *before* a booked trade — so coming back
+    // would rewind past it and un-happen it, which is the one thing this page
+    // refuses to do silently (see `seekTo`'s rewind record). Pinning the
+    // bookmark to the moment something resolved makes that impossible, and it
+    // follows a rewind straight back down for the same reason.
+    //
+    // Cheap enough to sit here: this runs when a fill resolves or you do
+    // something, not per frame.
+    writeResume();
+  }, [barAt, recordAttempt, writeResume]);
 
   // Re-derive everything from the log. Every user action goes through here: an
   // action is rare enough that one pass over the tape costs nothing, and it
@@ -917,6 +1008,13 @@ export function Simulator() {
       contextTapes.length === histTapesRef.current.length &&
       contextTapes.every((t, i) => t === histTapesRef.current[i]);
     if (!fresh && same) return;
+    // A bookmark in hand has a log to put back, and it is still in flight.
+    // Building the tape without it would show a fresh, empty session for as long
+    // as the fetch takes and then yank the trades onto it — and would leave a
+    // gap in which a fill could open a *second* attempt on a day that already
+    // has one. Hold off instead: the query settles either way, so this is a wait
+    // and never a deadlock.
+    if (fresh && pendingRef.current && !resumeSettled) return;
     // A context change mid-replay is not a reason to stop watching: the clock
     // doesn't move, so playback picks up where the rebuild left it.
     const wasPlaying = playingRef.current;
@@ -925,9 +1023,8 @@ export function Simulator() {
     // re-decoding would be a million prints for a picture that didn't change.
     const sessTape = fresh || !sessTapeRef.current ? decodeTape(data) : sessTapeRef.current;
     const tape = contextTapes.length ? concatTapes([...contextTapes, sessTape]) : sessTape;
-    const shift =
-      contextTapes.reduce((a, t) => a + t.n, 0) -
-      histTapesRef.current.reduce((a, t) => a + t.n, 0);
+    const ctxTicks = contextTapes.reduce((a, t) => a + t.n, 0);
+    const shift = ctxTicks - histTapesRef.current.reduce((a, t) => a + t.n, 0);
     sessTapeRef.current = sessTape;
     histTapesRef.current = contextTapes;
     tapeRef.current = tape;
@@ -950,17 +1047,60 @@ export function Simulator() {
     // tools; on a context change it must not — the same session with more days
     // in front of it is the same chart.
     chartRef.current?.setTape(tape, { keepTools: !fresh, contextRanges });
+    // What the bookmark asks to be put back. Read — and spent — inside the same
+    // build that makes the tape, rather than by an effect afterwards, so the
+    // session is never briefly playable with the wrong log under it.
+    let resumed: { clock: number; log: Log; detail: AttemptDetail | null } | null = null;
+    const bookmark = fresh ? pendingRef.current : null;
+    if (bookmark) {
+      // Spent whether or not it fits: a bookmark that doesn't match this tape is
+      // one to let go of, not one to keep trying.
+      leaveResume();
+      if (bookmark.symbol === data.symbol && bookmark.date === data.date) {
+        const d = resumeDetailRef.current;
+        // The stored cursors only mean anything if the session under them is
+        // still the tape it was — the tick cache is not immutable, and the
+        // 16:00-17:00 gap fix re-fetched 352 sessions and moved every index in
+        // them — and if the fills would be resolved by the same rules. Either
+        // check failing costs the trades, not the day: the clock still goes back
+        // where you left it and you carry on reading from there.
+        const usable =
+          d != null &&
+          d.id === bookmark.attemptId &&
+          d.symbol === data.symbol &&
+          d.date === data.date &&
+          d.engine_version === SIM_ENGINE_VERSION &&
+          d.tape?.n === data.n &&
+          d.tape?.t0 === data.session_start_ms &&
+          d.tape?.end === data.session_end_ms;
+        resumed = {
+          clock: Math.max(
+            data.session_start_ms,
+            Math.min(data.session_end_ms, bookmark.clockMs),
+          ),
+          // `idx` counts from the start of the *glued* tape, so a visit carrying
+          // a different number of context days has to re-base every cursor in
+          // the log — the same correction the `shift` branch below makes when
+          // the day count changes mid-replay.
+          log: usable ? shiftLog(d.log, ctxTicks - bookmark.contextTicks) : newLog(),
+          detail: usable ? d : null,
+        };
+      }
+    }
     if (fresh) {
-      logRef.current = newLog();
+      logRef.current = resumed?.log ?? newLog();
       simRef.current = newSim();
       sigRef.current = simSig(simRef.current);
       openRef.current = null;
-      idRef.current = 1;
+      // Past every id a restored log already used, or the next order placed
+      // would answer to the same number as one that is still working.
+      idRef.current = logRef.current.orders.reduce((a, o) => Math.max(a, o.id + 1), 1);
       setTrades([]);
       setOpenPos(null);
       setWorking([]);
       // A new tape is a new question — whatever was revealed about the last one
-      // doesn't carry.
+      // doesn't carry. A resumed tape starts unrevealed too, and deliberately: a
+      // blind sitting you hadn't unmasked is one you are still in the middle of.
       setRevealed(false);
     } else if (shift) {
       // The tape grew (or shrank) in front of the session, so every cursor the
@@ -968,29 +1108,37 @@ export function Simulator() {
       // the clocks and the prices are what they were.
       logRef.current = shiftLog(logRef.current, shift);
     }
-    // Honour the chosen start time (falls back to the RTH bell). A context
-    // change is not a move through time, so it keeps the clock it had.
+    // Honour the chosen start time (falls back to the RTH bell) — unless this
+    // session was resumed, in which case the clock you left it at outranks it: a
+    // start time is where a *new* sitting begins. A context change is not a move
+    // through time either way, so it keeps the clock it had.
     const [h, m] = startTime.split(":").map((x) => parseInt(x, 10));
     const offMin = (Number.isFinite(h) ? h * 60 + m : RTH_OPEN_MIN) - RTH_OPEN_MIN;
-    const clock = fresh
-      ? Math.max(
+    const clock = !fresh
+      ? clockRef.current
+      : (resumed?.clock ??
+        Math.max(
           data.session_start_ms,
           Math.min(data.session_end_ms, data.rth_open_ms + offMin * 60_000),
-        )
-      : clockRef.current;
+        ));
     const snap = engineRef.current.snapshotTo(clock);
     chartRef.current?.setSnapshot(snap, fresh ? undefined : { reframe: false });
     geoRef.current = { ib: snap.ib, range: snap.range };
     clockRef.current = clock;
+    // A sitting resumed at the end of its tape has already had its ending — the
+    // attempt was finished when the tape ran out — and the clock-keyed effect
+    // below must not close it a second time.
+    if (resumed && clock >= data.session_end_ms) endedRef.current = true;
     setReady(true);
-    // Re-publish what the log says: the position, the working orders and every
-    // mark have to come back on a chart that was just handed a new tape.
-    if (!fresh) rebuild(clock);
-    pushHud(snap.lastPrice, clock, true);
     if (fresh) {
       // Point the recorder at this session. Nothing is written yet — an attempt
       // opens on the first fill — but the tape it would be measured against is
       // fingerprinted here, while the payload is in hand.
+      //
+      // Before the rebuild below, not after: `rebuild` publishes, and publishing
+      // is what tells the recorder. Until this call the recorder is still aimed
+      // at the session before this one, and a resumed log arriving there would
+      // be written against the wrong day.
       armAttempt({
         symbol: data.symbol,
         root: data.root,
@@ -1005,9 +1153,37 @@ export function Simulator() {
         prefs: () => ticketRef.current,
         startedMs: clock,
       });
-    } else if (wasPlaying) play();
+      // A resumed sitting continues the attempt it came from rather than opening
+      // a second one on the same day — which the history page would read,
+      // correctly by its own rules and wrongly in fact, as a re-run of a session
+      // you had already seen the end of.
+      const d = resumed?.detail;
+      if (d) {
+        adoptAttempt(d, {
+          log: logRef.current,
+          trades: d.trades,
+          rewinds: d.rewinds ?? [],
+          discarded: d.discarded ?? [],
+          // The sitting spans from the first fill of the *first* visit, not from
+          // the clock this one opened at.
+          startedMs: d.started_ms,
+          clockMs: clock,
+        });
+      }
+    }
+    // Re-publish what the log says: the position, the working orders and every
+    // mark have to come back on a chart that was just handed a new tape — and on
+    // a resumed session that log is not empty, so this is also what puts the
+    // open position and the resting orders back on it.
+    if (!fresh || resumed) rebuild(clock);
+    pushHud(snap.lastPrice, clock, true);
+    // Note where this session now stands, without waiting for the timer below:
+    // switching day and closing the tab in the same breath should still come
+    // back to the day you switched to.
+    writeResume();
+    if (!fresh && wasPlaying) play();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionQ.data, contextTapes, contextRanges]);
+  }, [sessionQ.data, contextTapes, contextRanges, resumeSettled]);
 
   // A change of span re-cuts the same days without touching the tape, so the
   // rebuild above sees nothing to do and returns early. Push the new spans on
@@ -1018,6 +1194,32 @@ export function Simulator() {
   }, [contextRanges]);
 
   useEffect(() => () => stop(), [stop]);
+
+  // Keep the bookmark on the moving clock.
+  //
+  // On a timer rather than off the HUD: the clock advances ~12×/second while
+  // playing, and the point of this is to survive a tab closing, not to be exact.
+  // What a crash costs is bounded by the interval and it costs it to the clock
+  // alone — the trades are on the server inside the recorder's own debounce,
+  // which is shorter.
+  useEffect(() => {
+    if (!ready) return;
+    const id = window.setInterval(writeResume, RESUME_SAVE_MS);
+    // The ordinary ways a sitting ends — switching apps, locking the screen,
+    // closing the tab — give nothing else a chance to run, so spend the interval
+    // early on the way out. Same hook the recorder flushes its debounce on.
+    const onHide = () => {
+      if (document.visibilityState === "hidden") writeResume();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onHide);
+      // Navigating off the page is leaving off somewhere, and this is the last
+      // chance to say where.
+      writeResume();
+    };
+  }, [ready, writeResume]);
 
   // --- trading actions ------------------------------------------------------
   // All of them do the same two things: append to the log, re-derive. Nothing
@@ -1483,6 +1685,9 @@ export function Simulator() {
               value={sel ? `${sel.symbol}|${sel.date}` : ""}
               onChange={(e) => {
                 const [symbol, date] = e.target.value.split("|");
+                // Picking a day by hand retires the bookmark for the same reason
+                // 🎲 does: it says where you want to be now.
+                leaveResume();
                 setRevealed(false);
                 setSel({ symbol, date });
               }}

@@ -11,7 +11,14 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiGet, apiSend, toQuery } from "../lib/api";
 import { createGrowableTape, type GrowableTape, type TapeBlock } from "../lib/growableTape";
-import type { LiveHeader, LiveSignals, LiveStatus } from "../lib/liveTypes";
+import type {
+  LiveHeader,
+  LiveHistoryDays,
+  LiveRecordings,
+  LiveSignals,
+  LiveStatus,
+} from "../lib/liveTypes";
+import type { Tape } from "../lib/replayEngine";
 
 /** How often the tape is asked for what has arrived. Fast enough that the chart
  *  moves like a feed, slow enough that a session is a few thousand requests and
@@ -40,6 +47,46 @@ export function useLiveHeader(gen: string | null, tz: string) {
     // weekly seed are all null until the ticks that answer them arrive — so it is
     // re-read while the session is young rather than cached for the visit.
     refetchInterval: STATUS_POLL_MS,
+  });
+}
+
+/**
+ * What is on disk in the live store, and how long the missing days stay
+ * reachable.
+ *
+ * Polled far more slowly than the rest of this file, and on purpose: a session
+ * is written continuously but *appears* here once, and the deadline it carries
+ * moves a day at a time. The refetch exists so the panel is not stale after a
+ * harvest sweep finishes behind the feed, not so it keeps up with the tape.
+ */
+export function useLiveRecordings(symbol?: string) {
+  return useQuery({
+    queryKey: ["live", "recordings", symbol ?? null],
+    queryFn: () => apiGet<LiveRecordings>("/live/recordings", symbol ? { symbol } : undefined),
+    refetchInterval: 60_000,
+  });
+}
+
+/**
+ * Which prior sessions have tape behind this one, oldest first.
+ *
+ * The server answers because it is the only side that can see both stores at
+ * once (the Databento cache and the live one, resolved cache-first per day) and
+ * the only side that can tell a hole from a holiday without opening a file.
+ * `missing` comes back with it: the live store has long contiguous stretches
+ * with nothing recorded, and a week of calendar is routinely fewer sessions of
+ * tape than it looks.
+ *
+ * Cached for the visit. Which days exist behind a fixed date does not change
+ * while you watch — the only thing that could change it is a harvest sweep, and
+ * that is what `useLiveRecordings` is for.
+ */
+export function useLiveHistoryDays(symbol: string | null, date: string | null, days: number) {
+  return useQuery({
+    queryKey: ["live", "history", "days", symbol, date, days],
+    queryFn: () => apiGet<LiveHistoryDays>("/live/history/days", { symbol, date, days }),
+    enabled: !!symbol && !!date && days > 0,
+    staleTime: Infinity,
   });
 }
 
@@ -128,6 +175,13 @@ export interface LiveTapeState {
  *
  * Polling is a `setTimeout` chain rather than `setInterval`: a slow reply must
  * delay the next request, not stack a second one behind it.
+ *
+ * `context` is the prior days drawn to the left, seeded in front of row zero
+ * (see `createGrowableTape`). It is read **only when a tape is created**, which
+ * is the point: tick indices have to be stable for the life of the session, so
+ * context is a precondition of starting rather than something spliced in later.
+ * `contextKey` is what the loop restarts on — an array identity changes every
+ * render and would tear the poll down with it.
  */
 export function useLiveTape(opts: {
   enabled: boolean;
@@ -135,10 +189,12 @@ export function useLiveTape(opts: {
   tz: string;
   tickSize: number;
   pointValue: number;
+  context?: readonly Tape[];
+  contextKey?: string;
   onReset: (tape: GrowableTape) => void;
   onAppend: (tape: GrowableTape, added: number) => void;
 }): LiveTapeState {
-  const { enabled, gen, tz, tickSize, pointValue } = opts;
+  const { enabled, gen, tz, tickSize, pointValue, contextKey = "" } = opts;
   const [state, setState] = useState<LiveTapeState>({ rows: 0, closed: false, error: null });
   // The callbacks are re-made on every render of a page that renders often. Held
   // in a ref so the poll loop is not torn down and restarted for that — the loop's
@@ -158,7 +214,7 @@ export function useLiveTape(opts: {
         const block = await apiGet<TapeBlock>("/live/tape", { since: cursor, gen, tz });
         if (cancelled) return;
         if (!tape || block.reset) {
-          tape = createGrowableTape(tickSize, pointValue);
+          tape = createGrowableTape(tickSize, pointValue, cb.current.context ?? []);
           cursor = 0;
           cb.current.onReset(tape);
         }
@@ -186,7 +242,7 @@ export function useLiveTape(opts: {
       if (timer != null) window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, gen, tz, tickSize, pointValue]);
+  }, [enabled, gen, tz, tickSize, pointValue, contextKey]);
 
   return state;
 }

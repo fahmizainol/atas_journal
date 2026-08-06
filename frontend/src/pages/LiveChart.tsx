@@ -36,6 +36,7 @@ import { ReplayChart, type ReplayChartHandle } from "../components/charts/Replay
 import { TimeframeControl } from "../components/charts/TimeframeControl";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import { SimIndicators } from "../components/charts/SimIndicators";
+import { TapeCoverage } from "../components/TapeCoverage";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
 import { useSimulatorDays } from "../hooks/useSimulator";
 import {
@@ -44,10 +45,14 @@ import {
   startRithmicFeed,
   stopFeed,
   useLiveHeader,
+  useLiveHistoryDays,
   useLiveSignals,
   useLiveStatus,
   useLiveTape,
 } from "../hooks/useLive";
+import { useTapeHistory } from "../hooks/useTapeHistory";
+import type { TapeRange } from "../lib/volumeProfile";
+import type { CompositeRule } from "../lib/compositeProfile";
 import type { GrowableTape } from "../lib/growableTape";
 import {
   sessionPayloadFor,
@@ -86,6 +91,32 @@ import { palette } from "../theme";
 const TZ = "New York";
 const SPEEDS = [1, 5, 15, 60, 300, 900];
 
+/** How many prior sessions to draw behind the live one, and the choices offered.
+ *
+ *  A week by default. It is the span the levels you trade off are actually made
+ *  of — the shelf the week has been sat on, Monday's high — and a live chart
+ *  that starts at the Globex open has none of them on it.
+ *
+ *  It costs something, which is why it is a control and not a constant: each day
+ *  is a whole tape to fetch, ~0.5M prints and a few megabytes, and they are
+ *  fetched before the session's own tape starts (see `useLiveTape`). Five is
+ *  about four seconds on a cold cache and nothing at all on a warm one. */
+const HISTORY_DAYS_DEFAULT = 5;
+const HISTORY_DAY_OPTIONS = [0, 1, 2, 3, 5, 10];
+
+/** First index in a tape's (ascending) times at or after `ms`, or `n` if there
+ *  is none. */
+const firstAt = (t: Float64Array, n: number, ms: number): number => {
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (t[mid] < ms) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+};
+
 export function LiveChart() {
   const statusQ = useLiveStatus();
   const status = statusQ.data;
@@ -93,6 +124,90 @@ export function LiveChart() {
   const headerQ = useLiveHeader(gen, TZ);
   const header = headerQ.data ?? null;
   const signalsQ = useLiveSignals(gen);
+
+  // --- the days behind this one ---------------------------------------------
+  // Whole prior sessions, drawn to the left of the live one. Real ticks, so they
+  // candle on any timeframe and profile off the tape exactly as the session
+  // does — but nothing develops over them and nothing on them can be traded.
+  //
+  // Which days those are is a server question: it needs both stores in view (the
+  // Databento cache and the recorded one, resolved cache-first per day) and it
+  // needs to tell a hole from a holiday, which the client cannot do without
+  // opening a file. `missing` comes back with the answer because the live store
+  // has long stretches with nothing recorded, and gluing across one would draw a
+  // continuous chart out of a discontinuous week.
+  const [historyDays, setHistoryDays] = useState(HISTORY_DAYS_DEFAULT);
+  const histDaysQ = useLiveHistoryDays(header?.symbol ?? null, header?.date ?? null, historyDays);
+  const histDates = useMemo(
+    () => (histDaysQ.data?.days ?? []).map((d) => d.date),
+    [histDaysQ.data],
+  );
+  const histQ = useTapeHistory("/live/history/session", header?.symbol ?? null, histDates, TZ);
+
+  // The days that may actually be seeded: in wall-clock order and not
+  // overlapping. A day that fails the test is dropped rather than drawn — bars
+  // out of order are a chart the library refuses, and one missing Tuesday is a
+  // cheaper failure than that.
+  //
+  // No comparison against the session's own start is needed, unlike the replay's
+  // version of this: every day here is a strictly earlier *date* than the one
+  // running, and a session's tape begins at the 18:00 open of its own eve. The
+  // ordering guard is the whole check.
+  const contextTapes = useMemo(() => {
+    const out: Tape[] = [];
+    let prevEnd = -Infinity;
+    for (const d of histQ.days) {
+      const t = d.tape;
+      if (t.n === 0 || t.t[0] <= prevEnd) continue;
+      out.push(t);
+      prevEnd = t.t[t.n - 1];
+    }
+    return out;
+  }, [histQ.days]);
+
+  // Where each context day sits on the seeded tape — the spans the composite is
+  // built over, and the only thing it is built over. The live session is
+  // deliberately not among them: a composite fed by the day in progress is a
+  // level that day could never violate.
+  //
+  // Ends at the 16:00 close either way. The post-close hour belongs to the
+  // *next* day's overnight, and counting it here would put the same ticks in two
+  // days.
+  const contextRanges = useMemo(() => {
+    const out: TapeRange[] = [];
+    let off = 0;
+    for (const d of histQ.days) {
+      const t = d.tape;
+      if (!contextTapes.includes(t)) continue;
+      const i1 = firstAt(t.t, t.n, d.rthCloseMs) - 1;
+      if (i1 >= 0) out.push({ i0: off, i1: off + i1 });
+      off += t.n;
+    }
+    return out;
+  }, [contextTapes, histQ.days]);
+  const ctxRangeRef = useRef<TapeRange[]>([]);
+  ctxRangeRef.current = contextRanges;
+
+  // The multi-session composite, reachable at last: it is built over context
+  // days, so on this page it has been *unavailable* rather than declined. Frozen
+  // at the prior close by construction (lib/compositeProfile) — the session in
+  // progress is never in it, which is the rule that stops it becoming a level
+  // today could not violate. "off" with no days behind it, since there would be
+  // nothing to build it from.
+  const composite: CompositeRule = contextTapes.length > 0 ? "balance" : "off";
+
+  // The tape cannot start until the context is decided: rows seeded in front of
+  // it shift every index behind them, and an order's `idx` is a position in that
+  // array. So this is a precondition, not a later splice — see
+  // `createGrowableTape`. Asking for none settles immediately.
+  const historyReady =
+    historyDays === 0 || (!histDaysQ.isPending && (histDates.length === 0 || histQ.settled));
+  // What the tape is keyed on. Dates, not tape identities: the array is re-made
+  // every render and would otherwise tear down the poll loop with it.
+  const contextKey = useMemo(
+    () => (historyReady ? contextTapes.map((t) => `${t.t[0]}:${t.n}`).join(",") : "pending"),
+    [contextTapes, historyReady],
+  );
 
 
   const [tfId, setTfId] = useState("t500");
@@ -144,8 +259,16 @@ export function LiveChart() {
   //
   // Unpinned, though — the feed lays over the tape rather than taking a column
   // off it. Pinning is there when you want to read the two side by side.
+  //
+  // One panel, two views, rather than a second panel for coverage: they would
+  // otherwise stack in the unpinned overlay and fight over the same column when
+  // pinned, and the layout rules for that are a second set to keep in step for
+  // no gain. Coverage is something you consult, not something you watch.
   const narrow = () => window.matchMedia("(max-width: 640px)").matches;
-  const [signalsOpen, setSignalsOpen] = useState(() => !narrow());
+  const [railView, setRailView] = useState<"signals" | "coverage" | null>(() =>
+    narrow() ? null : "signals",
+  );
+  const signalsOpen = railView === "signals";
   const [railPinned, setRailPinned] = useState(false);
   const [indicators, setIndicators] = useState(true);
   const [size, setSize] = useState(1);
@@ -317,14 +440,19 @@ export function LiveChart() {
 
   const onAppend = useCallback(
     (tape: GrowableTape) => {
-      if (!header || tape.n === 0 || engineRef.current) return;
+      // `tape.n > tape.ctx`, not `tape.n > 0`: with prior days seeded in front,
+      // the tape has rows before a single live print has landed, and building the
+      // engine off them would put the session's start inside yesterday.
+      if (!header || tape.n <= tape.ctx || engineRef.current) return;
       // The session's first print is where everything the engine develops
       // starts, and it is only knowable once that print has landed — which is
-      // why the header ships `session_start_ms` as null until then.
-      const payload = sessionPayloadFor(header, tape.t[0]);
+      // why the header ships `session_start_ms` as null until then. With context
+      // seeded it is the first row *after* it; the engine binary-searches this
+      // back into an index and draws everything before it as context bars.
+      const payload = sessionPayloadFor(header, tape.t[tape.ctx]);
       const eng = new ReplayEngine(tape as Tape, payload, tfRef.current);
       engineRef.current = eng;
-      chartRef.current?.setTape(tape as Tape);
+      chartRef.current?.setTape(tape as Tape, { contextRanges: ctxRangeRef.current });
       const clock = tape.t[tape.n - 1];
       const snap = eng.snapshotTo(clock);
       chartRef.current?.setSnapshot(snap);
@@ -339,11 +467,13 @@ export function LiveChart() {
   );
 
   const tapeState = useLiveTape({
-    enabled: !!gen && !!header,
+    enabled: !!gen && !!header && historyReady,
     gen,
     tz: TZ,
     tickSize,
     pointValue,
+    context: contextTapes,
+    contextKey,
     onReset,
     onAppend,
   });
@@ -517,16 +647,22 @@ export function LiveChart() {
   }, [closeAll, placeMarket]);
 
   const net = trades.reduce((a, t) => a + t.pnl, 0);
+  // Is there anything on the blotter that re-seeding the tape would take with
+  // it? A closed trade counts: the session's record is the point of the page,
+  // and "net" above is read off it.
+  const blotterBusy = trades.length > 0 || working.length > 0 || openPos != null;
 
   if (!status?.running) {
     return <NoSession onStarted={() => void statusQ.refetch()} />;
   }
 
   return (
-    // `--sim-fill-h` is what gives `.sim-page` a definite height. Without it the
-    // page is content-sized, `.sim-body`'s `flex: 1` has no height to take a
-    // share of, and the chart collapses to whatever the signal rail happens to
-    // be tall — growing as the rail fills, which is not a chart, it's a symptom.
+    // `.sim-page` gets a definite height from CSS (`100dvh` — there is no chrome
+    // above it left to subtract, so nothing is measured in JS any more). That
+    // height is load-bearing: without it the page is content-sized, `.sim-body`'s
+    // `flex: 1` has no height to take a share of, and the chart collapses to
+    // whatever the signal rail happens to be tall — growing as the rail fills,
+    // which is not a chart, it's a symptom.
     <div
       className={`sim-page${railPinned ? " pinned" : ""}`}
       style={{ "--chart-floor": `${floor}px` } as React.CSSProperties}
@@ -605,6 +741,67 @@ export function LiveChart() {
             style={{ width: 72 }}
           />
         </label>
+        {/* The days behind this one. Here rather than in the bar because it is
+            set once and because it costs something — each day is a whole tape,
+            and changing it restarts the session's own tape from row zero (the
+            context has to be seeded in front, so it cannot be added to a tape
+            already growing).
+            The tape itself is re-read from /live/tape and loses nothing. The
+            *blotter* is a different matter: `onReset` clears it, because every
+            order it holds is a tick index into the tape that just stopped
+            existing. Rather than discard paper trades as a side effect of a
+            reading choice — which is exactly the kind of quiet wrongness this
+            surface exists not to do — the control locks once there is anything
+            to lose. Choose the context before you start, or flatten and clear. */}
+        <label
+          style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}
+          title={
+            blotterBusy
+              ? "Locked while the blotter has something in it: changing the context re-seeds the tape from row zero, and every order on it is a tick index into the tape that would stop existing."
+              : "Draw this many prior sessions to the left of the live one. Real ticks, so they candle on any bar size and profile like the session does — but nothing develops over them, and they can't be traded."
+          }
+        >
+          Prior days
+          <select
+            value={historyDays}
+            onChange={(e) => setHistoryDays(Number(e.target.value))}
+            disabled={blotterBusy}
+            style={{ width: 96 }}
+          >
+            {HISTORY_DAY_OPTIONS.map((n) => (
+              <option key={n} value={n}>
+                {n === 0 ? "none" : `${n} day${n === 1 ? "" : "s"}`}
+              </option>
+            ))}
+          </select>
+        </label>
+        {historyDays > 0 && (
+          <span style={{ alignSelf: "flex-end", paddingBottom: 6, fontSize: 12, color: palette.muted }}>
+            {!historyReady
+              ? "loading context…"
+              : contextTapes.length === 0
+                ? "no prior tape"
+                : `${contextTapes.length} drawn`}
+            {/* Both of these are absences worth naming rather than hiding. A day
+                with nothing recorded and a day that failed to load look
+                identical on the chart — a shorter chart — and the difference
+                matters: one is a hole in the store, the other is a request to
+                retry. */}
+            {histDaysQ.data && histDaysQ.data.missing.length > 0 && (
+              <span
+                style={{ color: palette.orange }}
+                title={`No tape in either store: ${histDaysQ.data.missing.join(", ")}`}
+              >
+                {" "}· {histDaysQ.data.missing.length} unrecorded
+              </span>
+            )}
+            {histQ.failed.length > 0 && (
+              <span style={{ color: palette.red }} title={`Not drawn: ${histQ.failed.join(", ")}`}>
+                {" "}· {histQ.failed.length} unread
+              </span>
+            )}
+          </span>
+        )}
         <span style={{ alignSelf: "flex-end", paddingBottom: 6, fontSize: 12, color: palette.muted }}>
           {trades.length} closed · net {fmtUsd(net)}
           {openPos ? ` · open ${fmtUsd(hud.openPnl)}` : ""}
@@ -633,6 +830,7 @@ export function LiveChart() {
               mark={hud.lastPrice}
               canPlaceOrders={ready}
               secondsAxis={showsSeconds(tf)}
+              composite={composite}
             />
             {/* The same day-scale strip the replay carries. It was written for a
                 tape that grows print by print, which is what a live session is —
@@ -687,13 +885,22 @@ export function LiveChart() {
           <button
             type="button"
             className={`sim-rail-btn${signalsOpen ? " on" : ""}`}
-            onClick={() => setSignalsOpen((o) => !o)}
+            onClick={() => setRailView((v) => (v === "signals" ? null : "signals"))}
             aria-pressed={signalsOpen}
             title={signalsOpen ? "Hide the shadow signals" : "Show the shadow signals"}
           >
             ▤
           </button>
-          {signalsOpen && (
+          <button
+            type="button"
+            className={`sim-rail-btn${railView === "coverage" ? " on" : ""}`}
+            onClick={() => setRailView((v) => (v === "coverage" ? null : "coverage"))}
+            aria-pressed={railView === "coverage"}
+            title="Tape coverage — what is recorded, and how long the gaps stay fillable"
+          >
+            ▦
+          </button>
+          {railView && (
             <button
               type="button"
               className={`sim-rail-btn${railPinned ? " on" : ""}`}
@@ -701,8 +908,8 @@ export function LiveChart() {
               aria-pressed={railPinned}
               title={
                 railPinned
-                  ? "Unpin — let the feed lay over the tape"
-                  : "Pin — give the feed its own column beside the tape"
+                  ? "Unpin — let the panel lay over the tape"
+                  : "Pin — give the panel its own column beside the tape"
               }
             >
               📌
@@ -714,7 +921,19 @@ export function LiveChart() {
             </span>
           )}
         </div>
-        <SignalPanel data={signalsQ.data} working={working.length} open={signalsOpen} />
+        {/* `.sim-panel` is the box; which of the two it holds is `railView`. The
+            coverage read is mounted only while it is showing — it is a directory
+            walk on the server, and there is no reason for it to run behind a
+            panel nobody has opened. */}
+        {railView === "coverage" ? (
+          <div className="sim-panel open">
+            <div className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+              <TapeCoverage symbol={status.symbol} compact />
+            </div>
+          </div>
+        ) : (
+          <SignalPanel data={signalsQ.data} working={working.length} open={signalsOpen} />
+        )}
       </div>
 
       {/* The status strip is a footer: it is state you glance at, not something
@@ -1251,6 +1470,14 @@ function NoSession({ onStarted }: { onStarted: () => void }) {
           To practise against a finished session instead — with seek, rewind and
           speed — use <Link to="/charts/replay">Replay</Link>.
         </p>
+      </div>
+
+      {/* Coverage belongs on this screen as much as on the running one, and
+          arguably more: "what have I got, and what is about to become
+          unfetchable" is a question you ask *before* connecting, and this is the
+          only page with the room to answer it properly. */}
+      <div className="panel" style={{ maxWidth: 720, marginTop: 16 }}>
+        <TapeCoverage />
       </div>
     </div>
   );

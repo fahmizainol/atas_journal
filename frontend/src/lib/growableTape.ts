@@ -49,6 +49,10 @@ export interface TapeBlock {
 export interface GrowableTape extends Tape {
   /** Prefix-sum a block onto the tail. Returns the new row count. */
   append(block: TapeBlock): number;
+  /** Rows of context sitting in front of the live ones — 0 unless prior days
+   *  were seeded in. The live session begins at this index, so it is both the
+   *  count of live rows (`n - ctx`) and the row the engine's session starts at. */
+  readonly ctx: number;
 }
 
 /** A session's worth of headroom. NQ runs ~0.3-1M prints over the 18:00→18:00
@@ -56,11 +60,31 @@ export interface GrowableTape extends Tape {
  *  is the safety net, not the plan. */
 const INITIAL_CAPACITY = 1 << 20;
 
+/**
+ * A growing tape, optionally with whole prior sessions already on the front.
+ *
+ * `context` is the days to draw to the left of the session, oldest first. They
+ * are copied in at construction and the live rows land behind them, which is the
+ * one ordering that keeps **tick indices stable for the life of the session**:
+ * an order's `idx` and the ladder's snapshots are positions in this array, so
+ * context that arrived later and shifted everything right would silently
+ * renumber every fill already recorded. Seeding is therefore a decision made
+ * once, before the first block — the caller waits for the days rather than
+ * splicing them in afterwards.
+ *
+ * Nothing downstream needs to know. `ReplayEngine` already binary-searches its
+ * session start (`session_start_ms`) against the tape it is handed and draws
+ * whatever sits before it as context bars — the same path the Simulator's
+ * `concatTapes` feeds.
+ */
 export function createGrowableTape(
   tickSize: number,
   pointValue: number,
+  context: readonly Tape[] = [],
   capacity = INITIAL_CAPACITY,
 ): GrowableTape {
+  const ctx = context.reduce((a, t) => a + t.n, 0);
+  while (capacity < ctx) capacity *= 2;
   const tape: GrowableTape = {
     n: 0,
     t: new Float64Array(capacity),
@@ -70,6 +94,7 @@ export function createGrowableTape(
     side: new Uint8Array(capacity),
     tickSize,
     pointValue,
+    ctx,
     append(block: TapeBlock): number {
       const k = block.n;
       if (k <= 0) return this.n;
@@ -95,6 +120,16 @@ export function createGrowableTape(
       return this.n;
     },
   };
+  let at = 0;
+  for (const p of context) {
+    tape.t.set(p.t.subarray(0, p.n), at);
+    tape.price.set(p.price.subarray(0, p.n), at);
+    tape.level.set(p.level.subarray(0, p.n), at);
+    tape.size.set(p.size.subarray(0, p.n), at);
+    tape.side.set(p.side.subarray(0, p.n), at);
+    at += p.n;
+  }
+  tape.n = ctx;
   return tape;
 }
 
