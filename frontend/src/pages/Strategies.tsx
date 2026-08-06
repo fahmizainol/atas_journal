@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { useStrategyList } from "../hooks/useStrategies";
 import { fmt, fmtInt, fmtPct } from "../lib/format";
 import type { StrategySummary } from "../lib/strategyTypes";
+import { strategyExplainers } from "../lib/strategyExplainers";
 
 const tone = (n: number | undefined) => ((n ?? 0) >= 0 ? "pos" : "neg");
 
@@ -49,7 +50,16 @@ export function Strategies() {
                 v{s.version} · {fmtInt(s.run_count)} {s.run_count === 1 ? "run" : "runs"}
               </span>
             </div>
-            <div className="muted" style={{ margin: "6px 0 10px" }}>{s.description}</div>
+            {strategyExplainers[s.slug] ? (
+              <div className="se-card-line">
+                <span className="se-card-tag">{strategyExplainers[s.slug].tagline}</span>
+                <span className="badge badge-sm se-card-session">
+                  {s.session === "globex" ? "globex" : "RTH"}
+                </span>
+              </div>
+            ) : (
+              <div className="muted" style={{ margin: "6px 0 10px" }}>{s.description}</div>
+            )}
             <div>
               <span className="muted">Baseline: </span>
               <BaselineStats s={s} />

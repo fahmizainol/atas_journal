@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../lib/api";
-import type { RegimeDay, RegimeRange, RegimeStudy } from "../lib/regimeTypes";
+import type { RegimeDay, RegimeRange, RegimeStudy, VolRegimeRange } from "../lib/regimeTypes";
 
 // Regime is keyed by (symbol, date) — never by run — so these queries are shared
 // across every run that touched the same window, and the cache is hit rather than
@@ -10,6 +10,20 @@ export function useRegimeRange(symbol: string | null, start: string | null, end:
   return useQuery({
     queryKey: ["regime", "range", symbol, start, end],
     queryFn: () => apiGet<RegimeRange>("/regime", { symbol, start, end }),
+    enabled: !!symbol && !!start && !!end,
+  });
+}
+
+// The daily-ATR vol clock over the same window — keyed by (symbol, range) like
+// the day-type above, and just as run-independent. The server warms the label up
+// from ~90 sessions before `start`, so the first day of the range is anchored as
+// well as the last; the first call over a window that was never labelled scans a
+// parquet per new session, every call after that is served from small per-day
+// artifacts.
+export function useVolRegimeRange(symbol: string | null, start: string | null, end: string | null) {
+  return useQuery({
+    queryKey: ["regime", "vol-range", symbol, start, end],
+    queryFn: () => apiGet<VolRegimeRange>("/vol-regime", { symbol, start, end }),
     enabled: !!symbol && !!start && !!end,
   });
 }

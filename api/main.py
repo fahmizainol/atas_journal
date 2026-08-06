@@ -27,19 +27,23 @@ from .routers import (  # noqa: E402
     charts,
     confluences,
     day_notes,
+    drafts,
     edges,
     filters,
     imports,
     interactions,
+    live,
     meta,
     models,
     notes,
     overview,
     regime,
+    replays,
     research,
     sessions,
     settings,
     setups,
+    simulator,
     statistics,
     strategies,
     trades,
@@ -71,10 +75,73 @@ async def _startup() -> None:
         print(f"[startup] cleared {len(orphans)} orphaned sim run(s): "
               + ", ".join(orphans), flush=True)
     # Auto-import watcher: scans data/imports/ every WATCH_INTERVAL_S. Async
-    # handler so the task lands on the running event loop.
-    from . import watcher
+    # handler so the task lands on the running event loop. Disabled by default;
+    # set WATCH_ENABLED=1 to run the background polling loop.
+    from journal.config import WATCH_ENABLED
 
-    watcher.start()
+    if WATCH_ENABLED:
+        from . import watcher
+
+        watcher.start()
+    else:
+        print("[startup] auto-import watcher disabled (WATCH_ENABLED unset)",
+              flush=True)
+    _resume_live()
+
+
+def _resume_live() -> None:
+    """Pick a recorded session back up after a restart, and optionally reconnect.
+
+    Two separate things, in order. The resume is unconditional and free: if this
+    session date has ticks in the live store, the tape is rebuilt from them so
+    the surface is whole up to the restart and the shelf can go on reading the
+    day. Without it a process that came back at eleven would hold a tape that
+    began at eleven, and every strategy would be simulating a session that opened
+    two hours late — silently, with plausible numbers.
+
+    Reconnecting the feed is opt-in (``LIVE_AUTOSTART=1`` plus ``LIVE_SYMBOL``,
+    a RAW contract), because it opens a network connection and starts writing,
+    and neither should happen because somebody ran the dev server.
+    """
+    import os
+
+    from journal import live as livemod
+    from journal.config import load_env
+
+    try:
+        # This repo does not load .env at import — `load_env()` is what does it,
+        # and every consumer calls it before reading its own keys. Without this
+        # LIVE_AUTOSTART is invisible however it is set in the file, and the host
+        # would come up recording nothing while looking configured.
+        load_env()
+        symbol = os.environ.get("LIVE_SYMBOL", "").strip().upper()
+        autostart = os.environ.get("LIVE_AUTOSTART", "").strip().lower() in {
+            "1", "true", "yes", "on"}
+        if autostart and symbol:
+            live = livemod.start_rithmic(symbol, os.environ.get("LIVE_EXCHANGE", "CME"))
+            print(f"[startup] live feed connected: {live.session.symbol} "
+                  f"{live.session.day} (recording, sweeping earlier sessions)",
+                  flush=True)
+            # No sweep here: the feed runs its own behind the live stream. One
+            # session per login, so a second client would log the feed out.
+            return
+        live = livemod.resume(symbol or None)
+        if live is not None:
+            print(f"[startup] resumed recorded session {live.session.symbol} "
+                  f"{live.session.day} — {live.session.n} ticks, no feed attached",
+                  flush=True)
+        # Nothing is connected, so the history plant is ours to use: fill in the
+        # sessions this machine was off for. Backgrounded — it is minutes of work
+        # and the API must come up now. Needs a contract to sweep, and a raw one:
+        # a root would resolve through Databento's roll map, which ends
+        # 2026-06-30 and which a live path must not probe.
+        if symbol and len(symbol) >= 4:
+            from journal.live import harvest
+
+            harvest.sweep_in_background(symbol, exchange=os.environ.get(
+                "LIVE_EXCHANGE", "CME"))
+    except Exception as e:  # noqa: BLE001 — the API must come up regardless
+        print(f"[startup] live resume skipped: {type(e).__name__}: {e}", flush=True)
 
 
 app.include_router(meta.router, prefix="/api")
@@ -100,6 +167,10 @@ app.include_router(strategies.router, prefix="/api")
 app.include_router(regime.router, prefix="/api")
 app.include_router(interactions.router, prefix="/api")
 app.include_router(research.router, prefix="/api")
+app.include_router(drafts.router, prefix="/api")
+app.include_router(simulator.router, prefix="/api")
+app.include_router(live.router, prefix="/api")
+app.include_router(replays.router, prefix="/api")
 
 
 # --- Prod static frontend (mounted last; only if a build exists) ---------

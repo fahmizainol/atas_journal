@@ -17,6 +17,14 @@ at the close. A metric read from the "eod" snapshot is hindsight; one read from
 "09:45" is what you could have known at 09:45. Anything that trains on these has
 to be able to tell the two apart, so the artifact never collapses them.
 
+Since v8 the artifact also carries a market-structure layer: the swing-pivot →
+BOS/CHoCH state machine from the structure-events study (docs/research/
+market-structure-events.md), run causally per checkpoint, plus the bar-overlap
+chop measure from the winners-vs-losers study. Both studies found the *events*
+carry no forward edge on their own — what survives is the texture and state,
+which is exactly what a regime artifact is for. The structure KPIs describe the
+day; nothing here trades a break.
+
 Charts and KPIs are GETs, and a GET must never spend money at Databento — so
 this reads the tick cache only (see ticks.cached_rth / cached_overnight). A day
 whose overnight was never bought still gets its RTH-anchored KPIs, marked
@@ -39,7 +47,7 @@ REGIME_DIR = CACHE_DIR / "regime"
 
 # Bump when a KPI's definition changes. Old files are then simply ignored and
 # recomputed — never migrated, never silently reinterpreted under a new meaning.
-REGIME_VERSION = 7
+REGIME_VERSION = 8
 
 # What "knowable at time T" means. The intraday checkpoints are where a model
 # would actually have to choose; "eod" is the hindsight snapshot.
@@ -64,17 +72,51 @@ ON_BELOW = "on_below_gx"
 # minutes" no matter which anchor or spread it is read from.
 SPREAD_SLOPE_MIN = 30
 
+# Structure-layer knobs. The swing threshold is ATR-scaled, not fixed points:
+# a 40pt reversal is 300 swings on a high-vol day and 67 on a quiet one, so a
+# fixed number means something different every session (structure-events study
+# §7). Two tiers, exactly the study's internal-vs-swing split: the fine tier
+# reads whipsaw density, the major tier reads the day's skeleton — bias, its
+# age, and whether breaks continue it or flip it. The ATR that scales both is
+# the median 14-bar ATR of the RTH bars available *at the checkpoint* (overnight
+# bars before enough RTH exists), so the threshold itself is causal — an eod ATR
+# would leak the day's volatility into its own 09:45 snapshot.
+ST_FINE_MULT = 2.0
+ST_MAJOR_MULT = 4.0
+ST_ATR_BARS = 14
+# The chop KPIs are an *occupancy*, not a session mean: a bar is "in chop" when
+# its trailing 10-bar overlap runs at or above 0.60 — the winners-vs-losers
+# study's own window and threshold family (overlap_10) — and the KPI is the
+# share of minutes spent in that state. The obvious alternative, averaging the
+# overlap over the whole session, is degenerate: 365 cached sessions land in
+# 0.53–0.63 (std 0.016), because averaging 390 bars washes the texture out.
+# Occupancy keeps the local measure local and has real spread (0.21–0.65).
+CHOP_STATE_BARS = 10
+CHOP_STATE_OVERLAP = 0.60
+CHOP_WINDOW_MIN = 30
+# A day that spends at least this share of its RTH minutes in chop-state reads
+# "churny". Calibrated on the 365 full cached sessions 2025-02..2026-07 (mean
+# occupancy 0.434, std 0.084): 0.48 sits just above the upper tercile, so
+# churny is a real minority class (~29% of days) rather than a coin flip, and
+# it is class-orthogonal — every class's mean occupancy lands in 0.42–0.44, so
+# the label is not a re-reading of trend-vs-balance. Like classify()'s
+# thresholds, this is a description of the collected sample, not a fit to P&L.
+TEXTURE_CHURN_OCC = 0.48
+
 
 # --- bars -------------------------------------------------------------------
 
-def minute_bars(t: pd.DataFrame) -> pd.DataFrame:
-    """1-minute OHLCV bars from a tick frame, plus ``end_idx`` — the positional
-    index of each bar's last tick back into *t*, which is how a bar's close is
-    aligned with the running VWAP frames (they are one row per tick)."""
+def minute_bars(t: pd.DataFrame, freq: str = "1min") -> pd.DataFrame:
+    """Time OHLCV bars from a tick frame, plus ``end_idx`` — the positional index
+    of each bar's last tick back into *t*, which is how a bar's close is aligned
+    with the running VWAP frames (they are one row per tick). ``freq`` is any
+    pandas offset (default ``"1min"``); pass e.g. ``"5min"`` for coarser candles —
+    the per-tick VWAP/profile frames sampled at the wider bar boundaries stay the
+    true developing values, only sparser."""
     if t.empty:
         return pd.DataFrame(columns=["ts_utc", "open", "high", "low", "close",
                                      "volume", "end_idx"])
-    g = t.assign(_i=np.arange(len(t)), _m=t["ts_utc"].dt.floor("1min")).groupby("_m", sort=True)
+    g = t.assign(_i=np.arange(len(t)), _m=t["ts_utc"].dt.floor(freq)).groupby("_m", sort=True)
     b = g.agg(
         open=("price", "first"), high=("price", "max"), low=("price", "min"),
         close=("price", "last"), volume=("size", "sum"), end_idx=("_i", "last"),
@@ -412,6 +454,182 @@ def _overnight_kpis(b: pd.DataFrame, w: pd.DataFrame, first_rth) -> dict:
     }
 
 
+# --- market structure -------------------------------------------------------
+
+def _causal_zigzag(high: np.ndarray, low: np.ndarray, thr: float) -> list[tuple]:
+    """(pivot_idx, price, kind, confirm_idx) swings — the structure studies'
+    primitive, verbatim, so this layer agrees with them bit-for-bit. A pivot
+    exists at bar t only if the reversal confirming it completed by t: running
+    this on a prefix of the bars yields exactly the pivots the full run had
+    confirmed by then, which is what makes a per-checkpoint scan honest."""
+    n = len(high)
+    piv = []
+    direction = 0  # 0 unknown, +1 up-leg (tracking max), -1 down-leg
+    max_i, min_i = 0, 0
+    for i in range(n):
+        if high[i] >= high[max_i]:
+            max_i = i
+        if low[i] <= low[min_i]:
+            min_i = i
+        if direction >= 0 and high[max_i] - low[i] >= thr:
+            piv.append((max_i, high[max_i], "H", i))
+            direction = -1
+            min_i = i
+        elif direction <= 0 and high[i] - low[min_i] >= thr:
+            piv.append((min_i, low[min_i], "L", i))
+            direction = 1
+            max_i = i
+    return piv
+
+
+def _structure_scan(high: np.ndarray, low: np.ndarray, close: np.ndarray,
+                    thr: float) -> tuple[np.ndarray, list[tuple[int, bool]]]:
+    """The BOS/CHoCH bias state machine over one bar prefix.
+
+    Returns the per-bar bias (+1 up, −1 down, 0 not yet seeded) and the break
+    events as (bar, is_choch). Canonical SMC form: a close beyond the active
+    swing *in* the bias is a BOS (continuation), the first close beyond the
+    opposing swing is a CHoCH (the bias flips). A broken reference is consumed —
+    the machine waits for the next confirmed pivot before that side can break
+    again, so one swing never fires twice.
+    """
+    piv = _causal_zigzag(high, low, thr)
+    by_confirm: dict[int, list] = {}
+    for p in piv:
+        by_confirm.setdefault(p[3], []).append(p)
+
+    n = len(close)
+    bias_arr = np.zeros(n, dtype="int8")
+    breaks: list[tuple[int, bool]] = []
+    ref_high = ref_low = None
+    bias = 0
+    for t in range(n):
+        for p in by_confirm.get(t, []):
+            if p[2] == "H":
+                ref_high = p[1]
+            else:
+                ref_low = p[1]
+        c = close[t]
+        if ref_high is not None and c > ref_high:
+            breaks.append((t, bias == -1))
+            bias = 1
+            ref_high = None
+        elif ref_low is not None and c < ref_low:
+            breaks.append((t, bias == 1))
+            bias = -1
+            ref_low = None
+        bias_arr[t] = bias
+    return bias_arr, breaks
+
+
+def _chop_state(high: np.ndarray, low: np.ndarray) -> np.ndarray:
+    """Per-bar chop flag: NaN until a full trailing window exists, else 1.0 when
+    the mean bar-to-bar range overlap of the last CHOP_STATE_BARS bars is at or
+    above CHOP_STATE_OVERLAP. This is the winners-vs-losers overlap_10, computed
+    at every bar instead of only at entries — 1.0 is bars stacked on top of each
+    other, a clean staircase runs near 0."""
+    n = len(high)
+    out = np.full(n, np.nan)
+    if n < CHOP_STATE_BARS:
+        return out
+    inter = np.minimum(high[1:], high[:-1]) - np.maximum(low[1:], low[:-1])
+    rng = ((high[1:] - low[1:]) + (high[:-1] - low[:-1])) / 2.0
+    frac = np.where(rng > 0, np.clip(inter / np.where(rng > 0, rng, 1), 0, 1), np.nan)
+    w = CHOP_STATE_BARS - 1  # pair-overlaps per 10-bar window
+    ov = pd.Series(frac).rolling(w, min_periods=w - 3).mean().to_numpy()
+    out[1:] = np.where(np.isfinite(ov), (ov >= CHOP_STATE_OVERLAP).astype("float64"),
+                       np.nan)
+    out[:CHOP_STATE_BARS - 1] = np.nan
+    return out
+
+
+def _occupancy(state: np.ndarray, min_bars: int = CHOP_WINDOW_MIN // 3) -> float | None:
+    """Share of the bars whose chop flag is defined that have it set."""
+    ok = np.isfinite(state)
+    return None if ok.sum() < min_bars else _f(state[ok].mean())
+
+
+def _median_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray,
+                window: int = ST_ATR_BARS) -> float | None:
+    """Median rolling ATR over the bars given — the causal volatility yardstick
+    the swing thresholds scale by."""
+    n = len(close)
+    if n < window + 1:
+        return None
+    prev_close = np.concatenate(([close[0]], close[:-1]))
+    tr = np.maximum(high - low,
+                    np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+    atr = pd.Series(tr).rolling(window).mean().to_numpy()
+    atr = atr[np.isfinite(atr)]
+    return None if len(atr) == 0 else float(np.median(atr))
+
+
+def _structure_kpis(b: pd.DataFrame, n_on: int) -> dict:
+    """The structure + chop KPIs for one checkpoint.
+
+    *b* is every completed 1-minute bar the checkpoint can see — overnight bars
+    first (there are *n_on* of them), then the RTH bars up to the cutoff. The
+    machine runs over all of them, because the structure a 09:30 decision reads
+    was built overnight; but every *rate and share* is counted over RTH bars
+    only, so "breaks per hour" compares the same market hours across days
+    instead of diluting a 6.5-hour session with a 15.5-hour night.
+
+    State vs rate is the split that matters at the open: st_bias and its age are
+    machine *state* — knowable at 09:30 from the overnight skeleton, like the
+    on_* KPIs — while the rates are None until enough RTH bars exist to count
+    over.
+    """
+    empty = {"st_bias": None, "st_bias_age_min": None, "st_bias_share": None,
+             "st_break_rate": None, "st_bos_share": None, "st_choch_rate": None,
+             "chop_occ_30m": None, "chop_occ_rth": None}
+    high = b["high"].to_numpy(dtype="float64")
+    low = b["low"].to_numpy(dtype="float64")
+    close = b["close"].to_numpy(dtype="float64")
+    n = len(b)
+    n_rth = n - n_on
+
+    out = dict(empty)
+    # The chop occupancy doesn't need the zigzag or its ATR yardstick, so it
+    # exists even on the thin early slices where structure can't.
+    chop = _chop_state(high, low)
+    out["chop_occ_30m"] = _occupancy(chop[-CHOP_WINDOW_MIN:])
+    if n_rth >= 2:
+        out["chop_occ_rth"] = _occupancy(chop[n_on:])
+
+    # The yardstick is RTH volatility as soon as there is enough of it to
+    # measure: a session's swings should be judged at the session's scale, not
+    # a median dragged down by 15 quiet overnight hours. Before that — at the
+    # bell — the overnight ATR is the only causal choice, and it is also the
+    # right scale for the overnight skeleton it thresholds.
+    if n_rth >= ST_ATR_BARS + 1:
+        atr = _median_atr(high[n_on:], low[n_on:], close[n_on:])
+    else:
+        atr = _median_atr(high, low, close)
+    if atr is None or atr <= 0:
+        return out
+
+    bias_arr, breaks = _structure_scan(high, low, close, ST_MAJOR_MULT * atr)
+    last = int(bias_arr[-1])
+    if last != 0:
+        out["st_bias"] = _f(last)
+        # Age = the trailing run of the current bias. A BOS extends the run —
+        # only a CHoCH (or the seed) starts it — so this is "minutes since the
+        # day's character last changed".
+        age = int(np.argmax(bias_arr[::-1] != last)) if (bias_arr != last).any() else n
+        out["st_bias_age_min"] = age
+    if n_rth >= 2:
+        rth_bias = bias_arr[n_on:]
+        out["st_bias_share"] = _f((rth_bias == 1).mean() - (rth_bias == -1).mean())
+        rth_breaks = [is_ch for (t, is_ch) in breaks if t >= n_on]
+        out["st_break_rate"] = _per_hour(len(rth_breaks), n_rth)
+        if rth_breaks:
+            out["st_bos_share"] = _f(1.0 - sum(rth_breaks) / len(rth_breaks))
+        _, fine = _structure_scan(high, low, close, ST_FINE_MULT * atr)
+        n_choch = sum(1 for (t, is_ch) in fine if is_ch and t >= n_on)
+        out["st_choch_rate"] = _per_hour(n_choch, n_rth)
+    return out
+
+
 # --- classification ---------------------------------------------------------
 
 def classify(k: dict) -> str:
@@ -450,6 +668,27 @@ def classify(k: dict) -> str:
     return "mixed"
 
 
+def texture(k: dict) -> str:
+    """The day's second axis: not *which way* it went (class) but *how it
+    traded* — clean directional bars or churn. Deliberately one measure, the
+    chop-state occupancy, because bar overlap is the one texture number with a
+    pedigree (overlap_10 predicted stops on two independent runs, AUC .61–.64,
+    and survived the gate-robustness audit as a real signal even though its
+    per-trade veto failed). Orthogonal to classify() by construction: a trend
+    day can be churny (grinds up through overlapping bars) and a balance day
+    can be clean (wide, decisive rotations).
+
+    Falls back to the trailing window at the 09:30 checkpoint, where no RTH
+    bars exist yet and the overnight texture is all there is to read.
+    """
+    c = k.get("chop_occ_rth")
+    if c is None:
+        c = k.get("chop_occ_30m")
+    if c is None:
+        return "unknown"
+    return "churny" if c >= TEXTURE_CHURN_OCC else "clean"
+
+
 # --- the artifact -----------------------------------------------------------
 
 def _et_utc(day: date, t: time) -> pd.Timestamp:
@@ -461,16 +700,39 @@ def _sample(w: pd.DataFrame, pos: np.ndarray) -> pd.DataFrame:
     return w.iloc[pos].reset_index(drop=True)
 
 
-def compute_regime(symbol: str, day: date) -> dict | None:
-    """Regime artifact for one session, straight from the tick cache.
+def compute_regime(
+    symbol: str, day: date,
+    frames: tuple[pd.DataFrame | None, pd.DataFrame | None] | None = None,
+) -> dict | None:
+    """Regime artifact for one session, from the tick cache or a supplied frame.
 
     Reads only what is on disk. Returns None when the session has no RTH ticks
     cached at all — there is no day to describe.
+
+    ``frames`` is ``(overnight, rth)`` handed over by a caller that already holds
+    the ticks — the shadow-mode seam, mirroring ``engine._load_ticks``. A live
+    session in progress has no cache file to read and must not grow one, and
+    re-reading the settled vendor copy of a day that hasn't settled would answer
+    a different question. Supplied as a pair so "there is no overnight" stays
+    distinguishable from "look it up yourself": pass ``(None, rth)`` for a
+    session whose night genuinely isn't there.
+
+    A frame that is a *prefix* of the session yields the artifact as it stood at
+    that moment, and every checkpoint is already causal in the whole-day path —
+    each one slices to the bars that had closed by its own cutoff. So a
+    checkpoint computed from a longer prefix is the same checkpoint, which is
+    what makes the live caller's freeze a guarantee rather than a hope. The one
+    value that does keep moving is the top-level ``class``/``texture``: they
+    mirror the ``eod`` checkpoint, which on a partial day means "the day so
+    far", not the day. Gates read a named checkpoint, never these.
     """
-    rth = tickmod.cached_rth(symbol, day)
+    if frames is None:
+        rth = tickmod.cached_rth(symbol, day)
+        on = tickmod.cached_overnight(symbol, day)
+    else:
+        on, rth = frames
     if rth is None or rth.empty:
         return None
-    on = tickmod.cached_overnight(symbol, day)
     partial = on is None or on.empty
 
     if partial:
@@ -533,12 +795,19 @@ def compute_regime(symbol: str, day: date) -> dict | None:
         else:
             kp.update({f"gx_{k}": v for k, v in _band_kpis(rb, gx).items()})
             kp.update(_dual_kpis(rb, gx, ny))
+        # The structure machine reads the whole tape it could have seen — the
+        # night's bars first, then the RTH bars up to this cutoff — because the
+        # skeleton a 09:30 decision leans on was built overnight. Anchor-free,
+        # so unlike the gx_* KPIs it exists on partial days (just unseeded).
+        kp.update(_structure_kpis(pd.concat([on_bars, rb], ignore_index=True),
+                                  len(on_bars)))
         kp["net_travel"] = _net_travel(rb["close"].to_numpy(dtype="float64"))
         kp["bars"] = int(len(rb))
         # Each checkpoint carries the class its own KPIs support: the label at
         # "12:00" is what the day looked like at noon, not a preview of the
         # verdict. Only the eod one is hindsight, and it is mirrored at top level.
         kp["class"] = classify(kp)
+        kp["texture"] = texture(kp)
         checkpoints[name] = kp
 
     # Ribbon: the quadrant state per minute across the whole session. Pre-RTH bars
@@ -568,6 +837,7 @@ def compute_regime(symbol: str, day: date) -> dict | None:
         "date": day.isoformat(),
         "partial": bool(partial),
         "class": checkpoints["eod"]["class"],
+        "texture": checkpoints["eod"]["texture"],
         "checkpoints": checkpoints,
         "ribbon": ribbon,
     }

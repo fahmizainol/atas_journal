@@ -267,6 +267,50 @@ def test_regime_gate_stands_down_after_1030_on_below_vwap_days():
             pass
 
 
+def test_regime_mirror_gate_stands_down_off_below_vwap_days():
+    from journal.sim import gates as gatesmod
+
+    real = gatesmod.regmod.get_regime
+    # The long's toxic morning is the mirror's habitat: a high bbr qualifies.
+    art = {"checkpoints": {"10:30": {"bbr": 0.8}}}
+    try:
+        gatesmod.regmod.get_regime = lambda symbol, day: art
+        g = gatesmod.RegimeMirrorGate({"enabled": True, "bbr_min": 0.65})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4)), "high-bbr morning is inert"
+
+        # A morning that held above the VWAPs stands the short down from 10:30.
+        art = {"checkpoints": {"10:30": {"bbr": 0.2}}}
+        g = gatesmod.RegimeMirrorGate({"enabled": True})
+        g.prepare(_regime_ctx())
+        assert g.allows(0, 0.0) and g.allows(1, 0.0), "pre-checkpoint entries pass"
+        assert not g.allows(2, 0.0) and not g.allows(3, 0.0), "stood down from 10:30"
+
+        # Blind — no artifact, or no bbr — must not read as confirmed.
+        for blind in (None, {"checkpoints": {}}, {"checkpoints": {"10:30": {"bbr": None}}}):
+            art = blind
+            g = gatesmod.RegimeMirrorGate({"enabled": True})
+            g.prepare(_regime_ctx())
+            assert g.allows(1, 0.0) and not g.allows(2, 0.0), f"blind case {blind!r}"
+
+        # An exactly-at-the-floor bbr qualifies (>= is the habitat test).
+        art = {"checkpoints": {"10:30": {"bbr": 0.65}}}
+        g = gatesmod.RegimeMirrorGate({"enabled": True, "bbr_min": 0.65})
+        g.prepare(_regime_ctx())
+        assert all(g.allows(i, 0.0) for i in range(4))
+    finally:
+        gatesmod.regmod.get_regime = real
+
+    for bad in ({"enabled": True, "bbr": 0.6}, {"enabled": True, "bbr_min": 1.5},
+                {"enabled": True, "bbr_min": True},
+                {"enabled": True, "checkpoint": "09:30"}):
+        try:
+            gatesmod.RegimeMirrorGate(bad)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
 def test_vwap_slope_gate_stands_down_after_1030_without_upward_grade():
     from journal.sim import gates as gatesmod
 
@@ -1230,75 +1274,77 @@ def test_gx_overhang_gate_caps_the_globex_over_ny_vwap_spread():
 # --- preflight spend guard ------------------------------------------------------
 
 def test_preflight_globex_needs_the_overnight_segment_too():
-    """A day with only its RTH file cached still costs money for a globex
-    strategy — the guard must count it and price the overnight range. Same for an
-    RTH strategy under the default fetch scope, which buys the night for the
-    charts; only ``fetch_overnight=False`` (the form's "NY session only") counts
-    that day as paid for."""
+    """A day holding only its RTH file is not a paid-for session: the night and the
+    post hour are still a Databento purchase waiting to happen, so the guard must
+    count it and price the whole day. Erring high is the point — a spend guard that
+    under-quotes is worse than one that over-quotes."""
     old_dir, old_est = ticks.TICK_CACHE_DIR, ticks.estimate_cost
     with tempfile.TemporaryDirectory() as tmp:
         try:
             ticks.TICK_CACHE_DIR = Path(tmp) / "ticks"
             ticks.TICK_CACHE_DIR.mkdir(parents=True)
-            priced: list[bool] = []
+            priced: list[tuple] = []
 
-            def fake_cost(symbol, start, end, include_overnight=False):
-                priced.append(include_overnight)
+            def fake_cost(symbol, start, end):
+                priced.append((symbol, start, end))
                 return 1.0
 
             ticks.estimate_cost = fake_cost
             # Pinned, so the guard is measured against one known symbol: what's under
-            # test is which *segments* get priced, not which contract they belong to.
+            # test is which *sessions* get priced, not which contract they belong to.
             cfg = SimConfig(contract="NQZ5", start_date=DAY, end_date=DAY)
-            ticks._cache_path(cfg.contract, DAY).touch()  # RTH cached, overnight not
+            ticks._cache_path(cfg.contract, DAY).touch()  # RTH cached, the rest not
 
-            assert runner.preflight(cfg, fetch_overnight=False)["uncached_sessions"] == 0
-            assert runner.preflight(cfg)["uncached_sessions"] == 1, \
-                "the default scope buys the night for the charts"
-            pf = runner.preflight(cfg, "globex")
-            assert pf["uncached_sessions"] == 1, "RTH alone must not satisfy globex"
-            assert priced == [True, True], "the estimate must span the overnight range"
+            pf = runner.preflight(cfg)
+            assert pf["uncached_sessions"] == 1, "RTH alone does not settle a session"
+            assert priced == [("NQZ5", DAY, DAY)], "the estimate spans the whole day"
             assert pf["est_cost_usd"] == 1.0
 
-            ticks._cache_path(cfg.contract, DAY, "on").touch()
-            assert runner.preflight(cfg, "globex")["uncached_sessions"] == 0
+            # Complete the session and it stops costing anything.
+            for seg in ("on", "post"):
+                ticks._cache_path(cfg.contract, DAY, seg).touch()
             assert runner.preflight(cfg)["uncached_sessions"] == 0
+
+            # A day file settles a session on its own, with no segment beside it.
+            other = date(2025, 10, 14)
+            cfg2 = SimConfig(contract="NQZ5", start_date=other, end_date=other)
+            assert runner.preflight(cfg2)["uncached_sessions"] == 1
+            ticks._cache_path(cfg2.contract, other, "day").touch()
+            assert runner.preflight(cfg2)["uncached_sessions"] == 0
         finally:
             ticks.TICK_CACHE_DIR = old_dir
             ticks.estimate_cost = old_est
 
 
-def test_run_buys_the_overnight_for_the_charts_unless_rth_only():
-    """An RTH strategy's run pulls the night too — the charts can't, they only read
-    the cache. `rth_only` on the request is what skips it, and neither choice may
-    touch the run's identity: it buys data, it doesn't change a rule."""
+def test_run_buys_the_whole_session_for_the_charts():
+    """An RTH strategy's run pulls the night and the post hour too — the charts and
+    the weekly anchor can't, they only read the cache. There is no opting out any
+    more, and what a run buys still never touches its identity: it buys data, it
+    doesn't change a rule."""
     strat = registry.get(SLUG)
     asked: list[date] = []
-    old = ticks.ensure_overnight
+    old = ticks.ensure_day
     try:
-        ticks.ensure_overnight = lambda symbol, day: asked.append(day) or True
+        ticks.ensure_day = lambda symbol, day: asked.append(day) or True
 
-        for body, want in ((api.ConfigIn(), True), (api.ConfigIn(rth_only=True), False)):
-            assert api._fetch_overnight(strat, body) is want
-
-        # A globex strategy simulates on the night, so it cannot honour rth_only.
-        globex = registry.get("vwap-globex-bounce")
-        assert api._fetch_overnight(globex, api.ConfigIn(rth_only=True)) is True
+        # A client may still send the retired flag; it must simply be ignored
+        # rather than 422 the request.
+        assert api.ConfigIn(**{"rth_only": True}) is not None
 
         cfg = SimConfig(start_date=DAY, end_date=DAY)
-        rth_only_id = store.run_id(cfg, strat.version)
-        assert rth_only_id == store.run_id(cfg, strat.version), "scope is not in the hash"
+        assert store.run_id(cfg, strat.version) == store.run_id(cfg, strat.version), \
+            "fetch scope is not in the hash"
 
         with _TmpStore():
             rid = store.init_run(SLUG, cfg, strat.version, 1)
-            runner.run_to_completion(strat, cfg, rid, fetch_overnight=False)
-            assert asked == [], "rth_only must not buy the night"
+            runner.run_to_completion(strat, cfg, rid)
+            assert asked == [DAY], "the run buys the session, once"
 
             rid2 = store.init_run(SLUG, cfg, strat.version + "x", 1)
             runner.run_to_completion(strat, cfg, rid2)
-            assert asked == [DAY], "the default scope buys the night, once per session"
+            assert asked == [DAY, DAY], "each run ensures its own window"
     finally:
-        ticks.ensure_overnight = old
+        ticks.ensure_day = old
 
 
 def test_a_dead_overnight_fetch_does_not_fail_the_run():
@@ -1315,7 +1361,11 @@ def test_a_dead_overnight_fetch_does_not_fail_the_run():
             return old(symbol, day, segment, use_cache)
 
         ticks._get_segment = boom
-        assert ticks.ensure_overnight("NQZ5", DAY) is False
+        # A night already on disk is ensured without asking Databento at all —
+        # the outage can't even be observed. Only a genuinely uncached day
+        # reaches the fetch, and its failure degrades to False, never an error.
+        assert ticks.ensure_overnight("NQZ5", DAY) is True
+        assert ticks.ensure_overnight("NQZ5", date(1999, 1, 4)) is False
 
         with _TmpStore():
             strat = registry.get(SLUG)
@@ -1794,6 +1844,82 @@ def test_value_rotation_schema_and_parse():
             raise AssertionError(f"expected ValueError for {bad!r}")
         except ValueError:
             pass
+
+
+def test_ema_pullback_registry_entry():
+    from journal.sim.rules import EmaPullbackConfig
+
+    strat = registry.get("ema-pullback-long")
+    assert strat.config_cls is EmaPullbackConfig
+    assert strat.version == "3"   # v2: open_stack_veto; v3: use_ema50/use_ema200
+    # Globex session: the overnight warms the 9/20 EMA to match the drawn overlay.
+    assert strat.session == "globex"
+    assert strat.run_session is engine.run_session_ema_pullback
+
+
+def test_ema_pullback_schema_and_parse():
+    from journal.sim.rules import EmaPullbackConfig
+
+    detail = api.strategy_detail("ema-pullback-long")
+    assert detail["default_config"] == EmaPullbackConfig().to_json()
+    names = {f["name"] for f in detail["config_schema"]["fields"]}
+    # its own knobs are present, and the profile pullback's are not
+    assert {"use_ema9", "use_ema20", "use_ema50", "use_ema200",
+            "require_stacked", "min_ema_gap_ticks",
+            "entry_variant", "confirm_ticks", "band_region",
+            "open_stack_veto"} <= names
+    assert "trade_poc" not in names and "acceptance_min_ticks" not in names
+    # band_region carries its four regions; the old boolean gate is gone
+    assert "require_upper_band" not in names
+    band = next(f for f in detail["config_schema"]["fields"] if f["name"] == "band_region")
+    assert {c["value"] for c in band["choices"]} == {
+        "channel", "above_dev1", "above_dev2", "off"}
+
+    # Partial configs parse against the class's own defaults; the enums reject
+    # strangers; unknown keys and the inert no-EMA / rr-without-multiple configs
+    # are hard errors.
+    cfg = schema.parse({"use_ema20": False, "target": "ticks", "target_ticks": 80},
+                       EmaPullbackConfig)
+    assert cfg.use_ema9 and not cfg.use_ema20 and cfg.target_ticks == 80
+    cfg = schema.parse({"entry_variant": "B", "confirm_ticks": 12,
+                        "band_region": "above_dev2"}, EmaPullbackConfig)
+    assert cfg.entry_variant == "B" and cfg.confirm_ticks == 12
+    assert cfg.band_region == "above_dev2"
+    cfg = schema.parse({"open_stack_veto": "bear"}, EmaPullbackConfig)
+    assert cfg.open_stack_veto == "bear"
+    cfg = schema.parse({"use_ema9": False, "use_ema20": False, "use_ema200": True},
+                       EmaPullbackConfig)
+    assert cfg.use_ema200 and not cfg.use_ema9
+    for bad in ({"use_ema9": False, "use_ema20": False},   # no candidate line
+                {"target": "rr", "target_rr": None},       # rr without a multiple
+                {"entry_variant": "C"},                    # not a variant
+                {"band_region": "below_dev1"},             # not a region
+                {"open_stack_veto": "sideways"},           # not a stack state
+                {"acceptance_min_ticks": 30},              # a bounce knob
+                {"stop_tickss": 50}):                      # a typo
+        try:
+            schema.parse(bad, EmaPullbackConfig)
+            raise AssertionError(f"expected ValueError for {bad!r}")
+        except ValueError:
+            pass
+
+
+def test_ema_pullback_schema_covers_every_field_both_ways():
+    from journal.sim.rules import EmaPullbackConfig
+
+    described = {f.name for f in schema.EMA_FIELDS}
+    assert set(EmaPullbackConfig().to_json()) - described == {"confluences"}
+    assert described - set(EmaPullbackConfig().to_json()) == set()
+
+
+def test_ema_pullback_config_is_its_own_identity():
+    from journal.sim.rules import EmaPullbackConfig
+
+    assert store.run_id(EmaPullbackConfig(), "1") != store.run_id(SimConfig(), "1")
+    # coercion: one spelling, one id
+    a = store.config_from_json({"min_ema_gap_ticks": 8}, EmaPullbackConfig)
+    b = store.config_from_json({"min_ema_gap_ticks": 8.0}, EmaPullbackConfig)
+    assert store.run_id(a, "1") == store.run_id(b, "1")
 
 
 def test_fade_registry_entry():

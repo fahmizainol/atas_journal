@@ -37,6 +37,14 @@ OSC = lambda p: 20000 + 30 * math.sin(p * 26 * math.pi)  # noqa: E731 — ~13 cy
 # Up 80 and all the way back: the closes sit above the (lagging) VWAPs for most
 # of the session, yet close − open is a sliver of the range. A gap-and-fade day.
 ROUND_TRIP = lambda p: 20000 + 80 * math.sin(p * math.pi)  # noqa: E731
+# A trending staircase: every peak and trough above the last, so each pullback
+# confirms a swing and each new leg breaks the prior peak — pure continuation.
+STAIR = lambda p: 20000 + 100 * p + 15 * math.sin(p * 26 * math.pi)  # noqa: E731
+# An expanding rotation: each swing overshoots the one before it on BOTH sides,
+# so the machine keeps closing beyond the opposing swing — character flips all
+# day. (A fixed-amplitude sine would never break its own extremes: rotation
+# between the same two prices is, correctly, zero structure events.)
+EXPAND = lambda p: 20000 + (30 + 40 * p) * math.sin(p * 26 * math.pi)  # noqa: E731
 
 
 def _seg(d0: date, t0: time, d1: date, t1: time, fn) -> pd.DataFrame:
@@ -191,6 +199,88 @@ def test_cache_round_trip_and_version_bump():
             assert path.exists()  # the v1 artifact survives, it is just never read
         finally:
             regmod.REGIME_VERSION -= 1
+
+
+def test_structure_ramp_without_pullbacks_never_seeds():
+    with cache(_rth(UP), _overnight(ON_UP)):
+        r = regmod.compute_regime(SYMBOL, DAY)
+    cps = r["checkpoints"]
+    eod = cps["eod"]
+
+    # A frictionless ramp confirms no swing highs — there is no pullback to
+    # confirm one — so there is nothing to break and the bias honestly never
+    # seeds. Absent, not "up": the machine refuses to call structure it never
+    # saw tested. (Real trends pull back; this is a synthetic-tape boundary.)
+    assert eod["st_bias"] is None and eod["st_bias_age_min"] is None
+    assert eod["st_break_rate"] == 0.0 and eod["st_choch_rate"] == 0.0
+    # But the texture is readable regardless: staircase bars barely overlap.
+    assert eod["chop_occ_rth"] < 0.3, eod["chop_occ_rth"]
+    assert eod["texture"] == "clean" and r["texture"] == "clean"
+
+    # State vs rate at the bell: the rates need RTH bars that don't exist yet —
+    # absent, not zero — while the chop window can still read the night's tape.
+    bell = cps["09:30"]
+    assert bell["st_bias_share"] is None and bell["st_break_rate"] is None
+    assert bell["st_choch_rate"] is None and bell["chop_occ_rth"] is None
+    assert bell["chop_occ_30m"] is not None
+
+
+def test_structure_reads_a_staircase_as_all_bos():
+    with cache(_rth(STAIR), _overnight(ON_UP)):
+        r = regmod.compute_regime(SYMBOL, DAY)
+    cps = r["checkpoints"]
+    eod = cps["eod"]
+
+    # Higher highs off higher lows: once seeded the bias is up and stays up
+    # and nearly every break extends it (the gap off the overnight tape may
+    # flip the machine once at the open before the staircase asserts itself).
+    assert eod["st_bias"] == 1, eod["st_bias"]
+    assert eod["st_bos_share"] > 0.9, eod["st_bos_share"]
+    assert eod["st_choch_rate"] < 0.5, eod["st_choch_rate"]
+    assert eod["st_bias_share"] > 0.8, eod["st_bias_share"]
+    # An unbroken bias only ages.
+    assert eod["st_bias_age_min"] >= cps["12:00"]["st_bias_age_min"]
+
+
+def test_structure_reads_expanding_rotation_as_flips():
+    with cache(_rth(EXPAND), _overnight(ON_UP)):
+        r = regmod.compute_regime(SYMBOL, DAY)
+    eod = r["checkpoints"]["eod"]
+
+    # Every swing overshoots the prior one on both sides: CHoCH after CHoCH,
+    # and neither bias owns the day's minutes the way the staircase's did.
+    assert eod["st_bias"] in (1, -1), eod["st_bias"]
+    assert eod["st_choch_rate"] > 1, eod["st_choch_rate"]
+    assert eod["st_bos_share"] < 0.5, eod["st_bos_share"]
+    assert abs(eod["st_bias_share"]) < 0.6, eod["st_bias_share"]
+
+
+def test_flat_churn_is_churny_but_structureless():
+    # A one-minute-period wobble: every bar retraces the whole previous bar, so
+    # the overlap pins near 1 — and ±5 pts never amounts to an ATR-scaled swing,
+    # so the structure layer honestly reports nothing rather than labeling noise.
+    churn = lambda p: 20000 + 5 * math.sin(p * 390 * 2 * math.pi)  # noqa: E731
+    with cache(_rth(churn), _overnight(ON_UP)):
+        r = regmod.compute_regime(SYMBOL, DAY)
+    eod = r["checkpoints"]["eod"]
+
+    assert eod["chop_occ_rth"] > 0.8, eod["chop_occ_rth"]
+    assert eod["texture"] == "churny" and r["texture"] == "churny"
+    assert eod["st_bias"] is None
+    assert eod["st_break_rate"] == 0.0, eod["st_break_rate"]
+
+
+def test_structure_survives_a_partial_day():
+    # No overnight: the machine is anchor-free, so unlike the gx_* KPIs the
+    # chop and texture still exist — structure just starts unseeded at the bell.
+    with cache(_rth(EXPAND), None):
+        r = regmod.compute_regime(SYMBOL, DAY)
+    eod = r["checkpoints"]["eod"]
+
+    assert r["partial"] is True
+    assert eod["chop_occ_rth"] is not None
+    assert eod["texture"] in ("clean", "churny")
+    assert eod["st_choch_rate"] is not None and eod["st_choch_rate"] > 0
 
 
 def test_vwap_slope_units_agree():

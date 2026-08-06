@@ -1,0 +1,390 @@
+<meta charset="utf-8"/>
+<title>NQ — big trades (&gt; __BIG_LOTS__ lots)</title>
+<script>__LWC_JS__</script>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0e13; color:#cbd5e1; font:14px/1.5 Inter,system-ui,sans-serif; }
+  #wrap { max-width:1240px; margin:0 auto; padding:18px 20px 48px; }
+  h1 { font-size:20px; font-weight:600; margin:0 0 4px; }
+  .lede { color:#64748b; font-size:12.5px; margin:0 0 16px; max-width:900px; }
+  .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 26px; padding:12px 14px;
+              background:#11151d; border:1px solid #1c2230; border-radius:8px; margin:0 0 16px; }
+  .ctl { display:flex; align-items:center; gap:9px; font-size:12.5px; color:#94a3b8; }
+  .ctl b { color:#e2e8f0; font-weight:600; }
+  input[type=range] { accent-color:#a78bfa; width:190px; }
+  .seg { display:flex; border:1px solid #1c2230; border-radius:6px; overflow:hidden; }
+  .seg button { background:#0b0e13; color:#94a3b8; border:none; padding:5px 11px; font:inherit; font-size:12px; cursor:pointer; }
+  .seg button.on { background:#1c2230; color:#e2e8f0; }
+  .tabs { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 18px; border-bottom:1px solid #1c2230; }
+  .tab { padding:8px 15px; cursor:pointer; border:1px solid #1c2230; border-bottom:none;
+         border-radius:8px 8px 0 0; background:#11151d; color:#94a3b8; font:inherit; font-size:12.5px; }
+  .tab.active { background:#1c2230; color:#e2e8f0; }
+  .tabpane { display:none; } .tabpane.active { display:block; }
+  .panel h2 { font-size:15px; font-weight:600; margin:0 0 6px; }
+  .sub { color:#64748b; margin:0 0 10px; font-size:12.5px; }
+  .info { display:flex; flex-wrap:wrap; gap:6px 22px; margin:0 0 10px; padding:11px 14px;
+          background:#11151d; border:1px solid #1c2230; border-radius:8px; font-size:12.5px; }
+  .info b { color:#e2e8f0; }
+  .chartbox { position:relative; }
+  .chart { height:520px; background:#0b0e13; border:1px solid #1c2230; border-radius:8px; }
+  .tip { position:absolute; pointer-events:none; display:none; z-index:5; background:#161b26;
+         border:1px solid #2a3346; border-radius:6px; padding:7px 10px; font-size:12px; white-space:nowrap;
+         box-shadow:0 6px 18px rgba(0,0,0,.45); }
+  .tip .hd { color:#e2e8f0; font-weight:600; margin-bottom:2px; }
+  .legend { display:flex; flex-wrap:wrap; gap:18px; margin:8px 2px 0; font-size:12px; color:#64748b; }
+  .swatch { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .bar { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:middle; }
+  .tbl-card { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; margin-top:14px; }
+  .tbl-card h3 { font-size:12.5px; margin:0 0 8px; color:#e2e8f0; font-weight:600; }
+  .scroll { max-height:300px; overflow:auto; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th, td { padding:4px 8px; text-align:right; border-bottom:1px solid #1c2230; white-space:nowrap; }
+  th { color:#94a3b8; font-weight:600; position:sticky; top:0; background:#11151d; cursor:pointer; user-select:none; }
+  th.sorted { color:#e2e8f0; }
+  td:first-child, th:first-child { text-align:left; }
+  tr.row:hover { background:#161b26; }
+  .pos { color:#21c07a; } .neg { color:#f5455f; } .muted { color:#64748b; }
+  .note { margin-top:22px; padding:12px 14px; background:#11151d; border:1px solid #1c2230;
+          border-radius:8px; font-size:12px; color:#64748b; }
+  .note b { color:#94a3b8; }
+  .note ul { margin:6px 0 0; padding-left:18px; } .note li { margin:3px 0; }
+</style>
+<div id="wrap">
+  <h1>NQ — big trades</h1>
+  <p class="lede">Every RTH trade over the lot threshold, drawn at its exact price and time. Bubble area scales
+    with size; green lifts the offer, red hits the bid. The lower pane sums the big-lot delta per minute — it counts
+    only the trades above the threshold, not the whole tape.</p>
+
+  <div class="controls">
+    <div class="ctl"><b>threshold</b> &gt;<span id="thVal">__BIG_LOTS__</span> lots
+      <input id="th" type="range" min="__EMBED_MIN__" max="150" step="5" value="__BIG_LOTS__"/></div>
+    <div class="ctl"><b>unit</b>
+      <span class="seg" id="modeSeg">
+        <button data-mode="prints" class="on">prints</button>
+        <button data-mode="sweeps">sweeps</button>
+      </span></div>
+    <div class="ctl"><b>side</b>
+      <span class="seg" id="sideSeg">
+        <button data-side="all" class="on">both</button>
+        <button data-side="buy">buy</button>
+        <button data-side="sell">sell</button>
+      </span></div>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+  <div id="panes"></div>
+
+  <div class="note">
+    <b>How this is put together</b>
+    <ul>
+      <li><b>Data</b> — the existing tick cache only (<code>data/cache/ticks/*_day.parquet</code>), RTH segment,
+          09:30-16:00 ET. Nothing is fetched, so re-running is free.</li>
+      <li><b>Aggressor side</b> — checked against the cache, not assumed: <code>B</code> prints sit above the local
+          41-trade mid (lifting the offer, <span class="pos">buy</span>), <code>A</code> prints below it
+          (hitting the bid, <span class="neg">sell</span>).</li>
+      <li><b>Sweeps</b> — a resting-size order arrives as a burst of fills. Sweep mode glues consecutive same-side
+          fills within __SWEEP_GAP__ ms and __SWEEP_SPAN__ pt into one event, then applies the threshold, so a
+          300-lot order shows up as 300 rather than six prints of 50.</li>
+      <li><b>move +__FOLLOW_MIN__m</b> — trade price __FOLLOW_MIN__ minutes later minus the print price. It is a
+          description of what happened next, not a backtest: no entry rule, no stop, no costs.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const SESSIONS = __SESSIONS_JSON__;
+const DEFAULT_TH = __BIG_LOTS__, FOLLOW_MIN = __FOLLOW_MIN__;
+const GREEN = '#21c07a', RED = '#f5455f', VWAP_COLOR = '#a78bfa';
+
+let TH = DEFAULT_TH, MODE = 'prints', SIDE = 'all';
+const views = [];      // one per session, built lazily on first tab view
+let active = 0;
+
+// --- bubble layer ---------------------------------------------------------
+// A series primitive rather than markers: markers snap to the bar and sit above
+// or below it, while a big trade wants to land on its own price, at the second
+// of the minute it printed. x = bar coordinate + (frac - 0.5) * barSpacing.
+function radiusFor(size) { return Math.min(26, 4 + 1.55 * Math.sqrt(Math.max(1, size - TH + 1))); }
+
+class BubbleRenderer {
+  constructor(layer) { this.layer = layer; }
+  draw(target) {
+    target.useMediaCoordinateSpace(scope => {
+      const ctx = scope.context, L = this.layer;
+      const ts = L.chart.timeScale();
+      const spacing = ts.options().barSpacing;
+      L.hit = [];
+      // Biggest first, so it lands underneath: at the open, prints stack on a
+      // few ticks and a 300-lot circle would otherwise swallow its neighbours.
+      const ordered = [...L.events].sort((a, b) => b.size - a.size);
+      for (const e of ordered) {
+        const bx = ts.timeToCoordinate(e.bar);
+        const y = L.series.priceToCoordinate(e.price);
+        if (bx == null || y == null) continue;
+        const x = bx + (e.frac - 0.5) * spacing;
+        const r = radiusFor(e.size);
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = e.buy ? 'rgba(33,192,122,0.28)' : 'rgba(245,69,95,0.28)';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = e.buy ? GREEN : RED;
+        ctx.stroke();
+        L.hit.push({ x, y, r, e });
+      }
+      // Labels last and largest-first, dropping any that would collide with a
+      // label already placed — an unreadable pile of numbers helps nobody.
+      ctx.font = '600 11px Inter, system-ui, sans-serif';
+      ctx.textBaseline = 'middle';
+      const placed = [];
+      for (const h of L.hit) {
+        if (h.e.size < TH * 2) continue;
+        const text = String(h.e.size);
+        const w = ctx.measureText(text).width;
+        const box = { x0: h.x + h.r + 3, y0: h.y - 7, x1: h.x + h.r + 5 + w, y1: h.y + 7 };
+        if (placed.some(p => box.x0 < p.x1 && box.x1 > p.x0 && box.y0 < p.y1 && box.y1 > p.y0)) continue;
+        placed.push(box);
+        ctx.lineWidth = 3;                     // halo, so a number stays legible
+        ctx.strokeStyle = 'rgba(11,14,19,0.85)'; // where it lands on another bubble
+        ctx.strokeText(text, box.x0 + 1, h.y);
+        ctx.fillStyle = h.e.buy ? GREEN : RED;
+        ctx.fillText(text, box.x0 + 1, h.y);
+      }
+    });
+  }
+}
+class BubbleView {
+  constructor(layer) { this._r = new BubbleRenderer(layer); }
+  update() {}
+  renderer() { return this._r; }
+  zOrder() { return 'top'; }
+}
+class BubbleLayer {
+  constructor() { this.events = []; this.hit = []; }
+  attached(p) {
+    this.chart = p.chart; this.series = p.series; this.requestUpdate = p.requestUpdate;
+    this._view = new BubbleView(this);
+    this.requestUpdate?.();
+  }
+  detached() { this._view = null; }
+  setEvents(events) { this.events = events; this.requestUpdate?.(); }
+  updateAllViews() {}
+  paneViews() { return this._view ? [this._view] : []; }
+}
+
+// --- helpers --------------------------------------------------------------
+const fmt = n => n.toLocaleString('en-US');
+const sideClass = buy => buy ? 'pos' : 'neg';
+
+function filtered(s) {
+  const src = MODE === 'prints' ? s.prints : s.sweeps;
+  return src.filter(e => e.size > TH && (SIDE === 'all' || (SIDE === 'buy') === e.buy));
+}
+
+function perMinuteDelta(events) {
+  const m = new Map();
+  for (const e of events) m.set(e.bar, (m.get(e.bar) || 0) + (e.buy ? e.size : -e.size));
+  return [...m.entries()].sort((a, b) => a[0] - b[0]).map(([time, v]) => ({
+    time, value: v, color: v >= 0 ? 'rgba(33,192,122,0.65)' : 'rgba(245,69,95,0.65)',
+  }));
+}
+
+function statLine(s, events) {
+  const lots = events.reduce((a, e) => a + e.size, 0);
+  const buys = events.filter(e => e.buy);
+  const sells = events.filter(e => !e.buy);
+  const withFwd = events.filter(e => e.fwd != null);
+  const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+  const fwdBuy = mean(buys.filter(e => e.fwd != null).map(e => e.fwd));
+  const fwdSell = mean(sells.filter(e => e.fwd != null).map(e => e.fwd));
+  const largest = events.reduce((a, e) => Math.max(a, e.size), 0);
+  const cells = [
+    ['symbol', s.info.symbol],
+    [MODE === 'prints' ? 'big prints' : 'big sweeps', fmt(events.length)],
+    ['lots', fmt(lots)],
+    ['% of RTH volume', s.info.volume ? (100 * lots / s.info.volume).toFixed(2) + '%' : '—'],
+    ['buy / sell', `<span class="pos">${buys.length}</span> / <span class="neg">${sells.length}</span>`],
+    ['largest', largest || '—'],
+    [`mean move +${FOLLOW_MIN}m`, withFwd.length
+      ? `<span class="pos">buy ${fwdBuy == null ? '—' : fwdBuy.toFixed(2)}</span> · ` +
+        `<span class="neg">sell ${fwdSell == null ? '—' : fwdSell.toFixed(2)}</span> pt`
+      : '—'],
+    ['session range', s.info.range],
+  ];
+  return cells.map(([k, v]) => `<span><b>${k}</b> ${v}</span>`).join('');
+}
+
+const SORTS = {
+  size: (a, b) => b.size - a.size,
+  et: (a, b) => a.et.localeCompare(b.et),
+  price: (a, b) => b.price - a.price,
+  fwd: (a, b) => (b.fwd ?? -1e9) - (a.fwd ?? -1e9),
+  fills: (a, b) => b.fills - a.fills,
+};
+
+function tableBody(events, sortKey) {
+  if (!events.length) return `<tr><td colspan="6" class="muted">no ${MODE} over ${TH} lots</td></tr>`;
+  const rows = [...events].sort(SORTS[sortKey] || SORTS.size);
+  return rows.map(e => `<tr class="row">
+    <td>${e.et}</td>
+    <td>${e.price.toFixed(2)}</td>
+    <td class="${sideClass(e.buy)}">${e.size}</td>
+    <td class="${sideClass(e.buy)}">${e.buy ? 'buy' : 'sell'}</td>
+    <td class="muted">${e.fills}</td>
+    <td class="${e.fwd == null ? 'muted' : e.fwd >= 0 ? 'pos' : 'neg'}">${e.fwd == null ? '—' : e.fwd.toFixed(2)}</td>
+  </tr>`).join('');
+}
+
+// --- one session panel ----------------------------------------------------
+function buildView(host, s) {
+  const sec = document.createElement('section');
+  sec.className = 'panel';
+  sec.innerHTML = `
+    <h2>${s.info.title}</h2>
+    <div class="sub">1-minute candles · session VWAP · ${fmt(s.info.trades)} trades,
+      ${fmt(s.info.volume)} contracts on the tape</div>
+    <div class="info"></div>
+    <div class="chartbox"><div class="chart"></div><div class="tip"></div></div>
+    <div class="legend">
+      <span><span class="swatch" style="background:rgba(33,192,122,.28);border:1.5px solid ${GREEN}"></span>buy aggressor (lifts offer)</span>
+      <span><span class="swatch" style="background:rgba(245,69,95,.28);border:1.5px solid ${RED}"></span>sell aggressor (hits bid)</span>
+      <span class="muted">bubble area ∝ lots · number shown above ${'2×'} threshold</span>
+      <span><span class="bar" style="background:${VWAP_COLOR}"></span>session VWAP</span>
+      <span><span class="bar" style="background:#3b82f6"></span>big-lot delta / minute</span>
+    </div>
+    <div class="tbl-card">
+      <h3></h3>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th data-k="et">time (ET)</th><th data-k="price">price</th><th data-k="size" class="sorted">lots</th>
+          <th data-k="size">side</th><th data-k="fills">fills</th><th data-k="fwd">move +${FOLLOW_MIN}m</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>`;
+  host.appendChild(sec);
+
+  const el = sec.querySelector('.chart');
+  const chart = LightweightCharts.createChart(el, {
+    width: el.clientWidth, height: 520,
+    layout: { background: { type: LightweightCharts.ColorType.Solid, color: '#0b0e13' },
+              textColor: '#cbd5e1', fontFamily: 'Inter, sans-serif', attributionLogo: false },
+    grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
+    rightPriceScale: { borderColor: '#1c2230' },
+    timeScale: { borderColor: '#1c2230', timeVisible: true, secondsVisible: false, rightOffset: 3 },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+  const candle = chart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: '#2f4f43', downColor: '#54313c', wickUpColor: '#3f6b5b', wickDownColor: '#6f414f',
+    borderVisible: false, priceLineVisible: false,
+  });
+  candle.setData(s.bars);
+  const vwap = chart.addSeries(LightweightCharts.LineSeries,
+    { color: VWAP_COLOR, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+  vwap.setData(s.vwap);
+
+  const bubbles = new BubbleLayer();
+  candle.attachPrimitive(bubbles);
+
+  const delta = chart.addSeries(LightweightCharts.HistogramSeries,
+    { priceFormat: { type: 'volume' }, priceScaleId: '', lastValueVisible: false }, 1);
+  const panes = chart.panes();
+  if (panes.length > 1) { panes[0].setStretchFactor(1000); panes[1].setStretchFactor(300); }
+  chart.timeScale().fitContent();
+
+  const view = { s, chart, el, candle, bubbles, delta, sec, sort: 'size',
+                 tip: sec.querySelector('.tip') };
+
+  sec.querySelectorAll('th[data-k]').forEach(th => th.addEventListener('click', () => {
+    view.sort = th.dataset.k;
+    sec.querySelectorAll('th').forEach(t => t.classList.toggle('sorted', t === th));
+    refresh(view, true);
+  }));
+
+  // Hover: nearest bubble under the cursor, using the coordinates the renderer
+  // just drew with (so it stays right through pans and zooms).
+  el.addEventListener('mousemove', ev => {
+    const box = el.getBoundingClientRect();
+    const mx = ev.clientX - box.left, my = ev.clientY - box.top;
+    let best = null, bestD = 1e9;
+    for (const h of view.bubbles.hit) {
+      const d = Math.hypot(h.x - mx, h.y - my);
+      if (d <= h.r + 3 && d < bestD) { best = h; bestD = d; }
+    }
+    if (!best) { view.tip.style.display = 'none'; return; }
+    const e = best.e;
+    view.tip.innerHTML =
+      `<div class="hd">${e.size} lots <span class="${sideClass(e.buy)}">${e.buy ? 'buy' : 'sell'}</span></div>` +
+      `${e.et} · ${e.price.toFixed(2)}` +
+      (e.fills > 1 ? ` · ${e.fills} fills` : '') +
+      (e.fwd == null ? '' : ` · +${FOLLOW_MIN}m <span class="${e.fwd >= 0 ? 'pos' : 'neg'}">${e.fwd.toFixed(2)}</span>`);
+    view.tip.style.display = 'block';
+    const w = view.tip.offsetWidth, h = view.tip.offsetHeight;
+    view.tip.style.left = Math.max(4, Math.min(el.clientWidth - w - 4, best.x - w / 2)) + 'px';
+    view.tip.style.top = Math.max(4, best.y - best.r - h - 8) + 'px';
+  });
+  el.addEventListener('mouseleave', () => { view.tip.style.display = 'none'; });
+
+  refresh(view, true);
+  return view;
+}
+
+function refresh(view, withTable) {
+  const events = filtered(view.s);
+  view.bubbles.setEvents(events);
+  view.delta.setData(perMinuteDelta(events));
+  view.sec.querySelector('.info').innerHTML = statLine(view.s, events);
+  view.sec.querySelector('.tbl-card h3').textContent =
+    `${MODE === 'prints' ? 'Prints' : 'Sweeps'} over ${TH} lots — ${events.length} of ` +
+    `${(MODE === 'prints' ? view.s.prints : view.s.sweeps).length} at the ${'≥'}__EMBED_MIN__-lot floor`;
+  if (withTable !== false) view.sec.querySelector('tbody').innerHTML = tableBody(events, view.sort);
+}
+
+function refreshAll() { views.forEach(v => v && refresh(v)); }
+
+// --- tabs + controls ------------------------------------------------------
+const tabsEl = document.getElementById('tabs'), panesEl = document.getElementById('panes');
+SESSIONS.forEach((s, i) => {
+  const b = document.createElement('button');
+  b.className = 'tab' + (i === 0 ? ' active' : '');
+  b.textContent = s.info.title.split(' · ')[0];
+  b.addEventListener('click', () => showTab(i));
+  tabsEl.appendChild(b);
+  const pane = document.createElement('div');
+  pane.className = 'tabpane' + (i === 0 ? ' active' : '');
+  pane.id = 'pane-' + i;
+  panesEl.appendChild(pane);
+  views.push(null);
+});
+
+function showTab(i) {
+  active = i;
+  [...tabsEl.children].forEach((b, j) => b.classList.toggle('active', i === j));
+  [...panesEl.children].forEach((p, j) => p.classList.toggle('active', i === j));
+  if (!views[i]) views[i] = buildView(document.getElementById('pane-' + i), SESSIONS[i]);
+  else views[i].chart.applyOptions({ width: views[i].el.clientWidth });
+}
+
+document.getElementById('th').addEventListener('input', ev => {
+  TH = +ev.target.value;
+  document.getElementById('thVal').textContent = TH;
+  refreshAll();
+});
+document.getElementById('modeSeg').addEventListener('click', ev => {
+  const b = ev.target.closest('button'); if (!b) return;
+  MODE = b.dataset.mode;
+  [...ev.currentTarget.children].forEach(c => c.classList.toggle('on', c === b));
+  refreshAll();
+});
+document.getElementById('sideSeg').addEventListener('click', ev => {
+  const b = ev.target.closest('button'); if (!b) return;
+  SIDE = b.dataset.side;
+  [...ev.currentTarget.children].forEach(c => c.classList.toggle('on', c === b));
+  refreshAll();
+});
+window.addEventListener('resize', () => {
+  views.forEach(v => v && v.chart.applyOptions({ width: v.el.clientWidth }));
+});
+
+showTab(0);
+</script>

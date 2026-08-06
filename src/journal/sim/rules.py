@@ -50,6 +50,12 @@ class SimConfig(_JsonMixin):
 
     # --- acceptance (arms the setup) ---
     acceptance_min_ticks: int = 30       # close must be > this far above dev1
+    # A band-width-normalised floor ON TOP OF acceptance_min_ticks: the close must
+    # also be at least this fraction of the band's own σ (dev2-dev1) beyond dev1.
+    # 0 = off. Where the fixed tick gate reads shallow on a wide-band day (30t can
+    # be <0.1σ when σ is 280t), this vetoes the "acceptance" that is really at or
+    # just off the band. A floor, not a target — it only ever removes entries.
+    min_acceptance_sigma: float = 0.0
     acceptance_require_green: bool = True
     acceptance_cap_at_dev2: bool = False  # if True, close must also be below dev2
 
@@ -141,6 +147,21 @@ class SimConfig(_JsonMixin):
     # front of that band — early enough to save the loss, late enough that the fast
     # winners (the first-minute cohort that carries the book) have already resolved.
     underwater_stop_after_s: int = 60
+    # 0 = off. Flatten at market once the trade has been CONTINUOUSLY underwater for
+    # this many seconds — the run resets on any tick back at or above breakeven, so a
+    # trade that dips, recovers and dips again starts the clock over and the rule can
+    # only ever fire while the position is actually red. Its own exit reason,
+    # "uw_exit".
+    #
+    # The sibling underwater_stop_ticks TIGHTENS on a one-shot read at a fixed age;
+    # this one FLATTENS on a duration. That difference makes it the house's first
+    # per-tick exit trigger by necessity — "has been red for a minute" is not knowable
+    # from a single read — and the panic exit's history is the standing warning: its
+    # per-tick variant A/B'd $23k UNDER the one-shot because it also fired on the
+    # transient dip that recovers, which is this book's winner signature (winners
+    # routinely start ugly). Expect this knob to cut winners for the same reason and
+    # treat a favourable in-sample read with suspicion.
+    underwater_exit_after_s: int = 0
     # 0 = off. N consecutive bar closes at least stop_below_mid_ticks past the NY
     # session VWAP mid — anchored at the 09:30 bell, not the Globex open the bands
     # ride — exit the position at market ("mid_exit"). Below the mid on a long,
@@ -436,6 +457,154 @@ class ProfilePullbackConfig(_JsonMixin):
 
 
 @dataclass(frozen=True)
+class EmaPullbackConfig(_JsonMixin):
+    """The 9/20 EMA pullback's knobs: buy the pullback onto an EMA in the channel.
+
+    Long the pullback-from-above onto any enabled 1-minute EMA (9/20/50/200 —
+    each enabled line is its own independent candidate level, 9+20 by default)
+    while the EMA sits in the configured region of the NY VWAP upper channel
+    (``band_region`` — inside dev1..dev2 by default, or opened up to the
+    overextended zone at or above dev2). The EMA is the repo's charted 9/20:
+    1-minute bars over the overnight+RTH stream, ``ewm(adjust=False)``
+    (recursive), exactly the line the chart draws (``interactions._ema_rows``) —
+    so the engine trades the line you see, the same invariant the sim VWAP holds
+    against the chart VWAP.
+
+    Structurally it is the profile pullback with EMAs standing in for the
+    developing profile levels: no acceptance candle, no arming stretch — the EMA
+    in force IS the setup. Two entries share the pullback classification and
+    differ only in how they commit to it. Variant A rests a limit on the EMA: it
+    fills on the crossing back down to at-or-through the line (price must first
+    have cleared it by ``rearm_ticks`` from above; the fill is the transition,
+    never the standing "price is below the EMA" inequality — an EMA rising up to
+    meet a flat market is not a pullback). Variant B waits for the bounce to
+    confirm: after a pullback touch, the first bar to CLOSE ``confirm_ticks`` back
+    above the EMA enters at market on the next tick — later than A, and above the
+    line rather than on it, but it filters the touches that keep falling straight
+    through. Its own class and its own engine loop for the same reason
+    ``ProfilePullbackConfig`` is one: it shares no rules with the band bounce.
+
+    ``require_stacked`` and ``min_ema_gap_ticks`` are the trend/chop filters —
+    the 9 must sit above the 20 (a stacked-bull context), and the two lines must
+    not have converged (a squeeze reads as chop the pullback has no trend to lean
+    on). Both read the 9/20 pair specifically, regardless of which lines are
+    being traded (a 50/200-only config still gates on the 9/20 relationship), so
+    those two are computed every run; off (the defaults) they ride the base rule
+    path and a config that leaves them off simulates identically to one without
+    them.
+
+    ``open_stack_veto`` is the session-level regime gate from the 20/50/200
+    study (docs/research/ema-20-50-200-behavior.md §4/§4b): the 1-minute
+    20/50/200 EMA ordering read once at the close of the 09:35 bar classifies
+    the day (bull-stacked / bear-stacked / mixed), and a vetoed day takes no
+    trades at all — whole-day on/off, so the intraday re-arm chains are never
+    perturbed. "bear" stands down only the bear-stacked open (the study's loss
+    engine: buying EMA pullbacks against a bear-ordered open is a counter-regime
+    long); "not_bull" is the stricter cut that also drops mixed opens (and a
+    session too short to classify). The read is causal by construction: with the
+    veto on, no entry may fill before the 09:35 bar has closed, whatever
+    ``entry_open`` says. "off" (the default) rides the base rule path and
+    simulates identically to v1.
+    """
+
+    # --- scope ---
+    instrument: str = "NQ"
+    contract: str = "NQ"
+    start_date: date = date(2025, 10, 13)
+    end_date: date = date(2025, 10, 17)
+
+    # --- bars ---
+    # The tick-count bars are for the exit rules and the chart only; the EMA is
+    # always the 1-minute line (fixed, to match the drawn overlay).
+    ticks_per_bar: int = 500
+
+    # --- session (ET wall clock) ---
+    # Skip the open's impulse; the EMA is already warm, seeded over the overnight.
+    entry_open: time = time(9, 45)
+    entry_close: time = time(16, 0)
+    flat_by: time = time(16, 0)
+
+    # --- levels (which EMA a limit may rest on) ---
+    # Each enabled EMA is its own independent candidate level. All four are the
+    # chart's 1-minute lines, warmed over the overnight. The 50/200 are the
+    # regime-scale lines from the 20/50/200 study — pullbacks onto them are
+    # rarer and deeper than onto the 9/20.
+    use_ema9: bool = True             # the fast line
+    use_ema20: bool = True            # the slow line
+    use_ema50: bool = False           # the intermediate line
+    use_ema200: bool = False          # the regime line
+
+    # --- entry ---
+    # "A": rest a limit on the EMA; fill on the pullback crossing back down to it.
+    # "B": wait for a bar to CLOSE confirm_ticks back above the EMA after a
+    #      pullback touch (the bounce confirmed), then enter at market next tick.
+    entry_variant: str = "A"
+    # Variant B only: how far above the EMA a bar must close to confirm the
+    # bounce. Ignored under variant A.
+    confirm_ticks: int = 8
+
+    # --- setup (what makes a touch a trade) ---
+    # Which region of the NY VWAP upper channel the EMA must sit in at the fill —
+    # the "lines and price both inside the upper bands" premise, and the knob that
+    # opens it above dev2:
+    #   "channel"    — inside dev1..dev2 (the default).
+    #   "above_dev1" — at or above dev1, no ceiling: the channel AND the
+    #                  overextended zone above dev2.
+    #   "above_dev2" — at or above dev2 only: buy the pullback while price rides
+    #                  the far band, an overextension-continuation read.
+    #   "off"        — no band gate; trade every pullback onto the EMA (the switch
+    #                  to measure that the band context matters at all).
+    band_region: str = "channel"
+    # Price must clear the EMA by this much before a new touch of it can fill — a
+    # rotation sitting on the line is one touch, not many.
+    rearm_ticks: int = 8
+
+    # --- exit ---
+    stop_ticks: int = 70
+    target: str = "rr"                   # "rr" | "ticks"
+    target_rr: float | None = 1.5
+    target_ticks: int = 100              # used when target == "ticks"
+    # The trail: same rule and same knobs as the bounce's (see SimConfig).
+    trail_stop_ticks: int = 0
+    trail_step_ticks: int = 0
+    trail_breakeven_ticks: int = 0
+    trail_breakeven_only: bool = False
+
+    # --- filters / lifecycle ---
+    # The 9 must sit at or above the 20 at the fill — the stacked-bull context
+    # ("the 20 EMA below the 9 EMA"). Off = trade the pullback regardless of the
+    # cross.
+    require_stacked: bool = False
+    # 0 = off. Skip the fill when the two EMAs are within this many ticks of each
+    # other: a convergence is the signature of chop, where a pullback has no trend
+    # slope to lean on. A floor on the gap, read whichever line is traded.
+    min_ema_gap_ticks: int = 0
+    # 0 = off. Skip the fill when the NY VWAP +1σ..+2σ channel the EMA sits in
+    # (dev2−dev1) is tighter than this — a pinched band makes the inside-the-
+    # channel condition trivial and leaves the pullback no room to run.
+    min_band_width_ticks: int = 0
+    # Session-level open-stack veto, read once at the close of the 09:35 minute
+    # bar from the 1-minute 20/50/200 EMAs (warmed over the overnight, the same
+    # recursion as the traded 9/20):
+    #   "off"      — trade every day (the default; identical to v1).
+    #   "bear"     — stand down the whole day when 20 < 50 < 200 (bear-stacked).
+    #   "not_bull" — trade only when 20 > 50 > 200 (bull-stacked); mixed opens
+    #                and sessions too short to classify stand down too.
+    open_stack_veto: str = "off"
+    daily_loss_stop: float = 0.0         # 0 = off. Same governor as the bounce's.
+    # False = off. Also flatten the open trade at the daily loss stop — see
+    # SimConfig.daily_loss_exit_open. Needs a daily_loss_stop set.
+    daily_loss_exit_open: bool = False
+
+    # --- size & cost ---
+    contracts: int = 1
+    commission_per_side: float = 7.0
+
+    # --- confluences (veto-only gates) ---
+    confluences: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ValueRotationConfig(_JsonMixin):
     """The value rotation's knobs: re-acceptance into value, traded to the POC.
 
@@ -662,6 +831,261 @@ class DriftFadeConfig(_JsonMixin):
     # candidate loser filter. The A/B has to weigh that against the slow-but-real
     # winners (the 15-20 min pocket ran 94% wins), which a cap cuts too.
     max_hold_min: int = 0
+    # 0 = off. The fade enters AT the drift level (the source) and runs away from
+    # it toward value; a bar that closes back THROUGH the source — at least this
+    # many ticks past it on the LOSING side — is the fade's premise run backwards.
+    # Exit at market on the next tick: a close-based early stop that sits in front
+    # of the fixed stop behind the zone (its own exit reason, "source"). Set it
+    # below the stop distance from the source or the fixed stop bites first and it
+    # is a no-op. Ghosts read their own fill's source, scored on the same rule.
+    exit_return_to_source_ticks: int = 0
+
+    # --- filters / lifecycle ---
+    # 0 = off. Veto an armed entry when the net move in the TRADE'S direction
+    # over the trailing this-many minutes is positive at the fill — a with-move
+    # touch. Side-aware by construction, so it works where the single-sided
+    # gates cannot; vetoed entries ride the exit rules as ghosts in the vetoed
+    # rows (gate "approach_mom"). Built for the 03f4c56c structure study's
+    # chase-entry lead, which turned out to be a LOOKAHEAD ARTIFACT (the study
+    # read this engine's ON+RTH tick indices with the flagship's RTH-only
+    # convention, anchoring "entry" features hours late); the honest A/B then
+    # FAILED on both siblings — most drift touches genuinely arrive with-move,
+    # the veto kills ~2/3 of entries and halves net while the vetoed ghosts
+    # finish positive (docs/research/drift-fade-market-structure.md). Ships
+    # off; leave it off.
+    approach_mom_veto_min: int = 0
+    daily_loss_stop: float = 0.0         # 0 = off. Same governor as the bounce's.
+    # False = off. Also flatten the open trade at the daily loss stop — see
+    # SimConfig.daily_loss_exit_open. Needs a daily_loss_stop set.
+    daily_loss_exit_open: bool = False
+
+    # --- size & cost ---
+    contracts: int = 1
+    commission_per_side: float = 7.0
+
+    # --- confluences (veto-only gates) ---
+    confluences: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DriftFadeGlobexConfig(_JsonMixin):
+    """The drift-touch fade run over the WHOLE Globex session, not just RTH.
+
+    Same event and same trade as DriftFadeConfig — a drift touch is contact with
+    a level that neither side approached (profile.gap_closer), faded away from
+    the level with a fixed stop from the fill and a target toward value. The one
+    difference is *when* it may fire: the RTH siblings confine every signal to
+    bars closing at or after 09:30, so the overnight is indicator input only.
+    This one trades the session from the 18:00 ET Globex open onward.
+
+    That scope change is a new strategy rather than a knob because three of the
+    engine's readings only hold once the night is over, and each needed a
+    different answer here (see engine.run_session_drift_fade's ``scope``):
+
+      * the target. There is no NY VWAP at 21:00, and the RTH engine drops any
+        signal whose target is NaN — flipping the floor alone would have traded
+        nothing. The Globex-anchored VWAP mid is the session's own value line,
+        defined from the first overnight tick, so ``gx_vwap`` replaces
+        ``ny_vwap`` as the fade-to-value target.
+      * ONH/ONL. The RTH engine broadcasts the finished night's high and low to
+        every tick, which is free of lookahead only because it never trades
+        before the bell. Here they develop: the night's extremes SO FAR,
+        settling to the session's ONH/ONL at 09:30.
+      * the Globex profile's age. It is exempt from level_warmup_min in the RTH
+        siblings because it is ~15h mature by the open — untrue at 18:05, where
+        POC=VAH=VAL sit on the open print. ``globex_warmup_min`` is the same
+        guard NY value already gets.
+
+    The NY levels and the session Open need no special handling: they are
+    already NaN before the bell (plus their warm-up), which for a
+    session-spanning strategy is exactly right — a level that does not exist yet
+    cannot be touched, so those sources simply switch on partway through.
+
+    Trades are NOT flattened at the bell: an overnight fill runs to its stop,
+    target or flat_by like any other. The engine holds one position, so a fill
+    that carries into RTH blocks the morning's signals behind it as in_trade
+    ghosts — read the vetoed rows before comparing net against an RTH sibling.
+    """
+
+    # --- scope ---
+    instrument: str = "NQ"
+    contract: str = "NQ"
+    start_date: date = date(2025, 10, 13)
+    end_date: date = date(2025, 10, 17)
+
+    # --- bars ---
+    ticks_per_bar: int = 500
+
+    # --- session (ET wall clock) ---
+    # The window wraps midnight: 18:00 -> 15:00 is the whole session bar the last
+    # RTH hour (the drop-15:xx rule the RTH siblings already apply). The engine
+    # reads open > close as a wrapping window; a non-wrapping pair still means
+    # what it says, so 09:45/15:00 here reproduces the RTH sibling's window.
+    entry_open: time = time(18, 0)
+    entry_close: time = time(15, 0)
+    flat_by: time = time(16, 0)
+
+    # --- sources (what a drift touch may land on) ---
+    use_ny_levels: bool = True       # developing NY POC/VAH/VAL — absent before the bell
+    use_globex_levels: bool = True   # developing Globex POC/VAH/VAL — the overnight's own value
+    use_session_refs: bool = True    # developing ONH/ONL, pd POC/VAH/VAL, pd Close, Open
+    trade_poc: bool = True
+    trade_vah: bool = True
+    trade_val: bool = True
+    # The NY anchor's warm-up, unchanged from the RTH sibling: NY levels and the
+    # session Open are not candidates until the bell is this old.
+    level_warmup_min: int = 15
+    # The Globex anchor's warm-up, this strategy's own. Its profile is degenerate
+    # while minutes old exactly as the NY one is; the RTH siblings never see it
+    # young so they have no equivalent.
+    globex_warmup_min: int = 15
+
+    # --- detection (identical to the RTH sibling) ---
+    touch_tol: float = 2.0
+    touch_gap_bars: int = 3
+    min_level_stability_min: int = 5
+    stability_tol_ticks: int = 8
+
+    # --- entry ---
+    entry_variant: str = "A"
+    confirm_ticks: int = 8               # variant B only
+    side: str = "both"                   # "long" | "short" | "both"
+    max_touches_per_zone: int = 0
+
+    # --- exit ---
+    # Measured from the FILL, not the level — this strategy takes the entry-stop
+    # sibling's invalidation ("adverse excursion from my price kills it"), so
+    # every trade risks exactly stop_ticks and the zone is allowed to fail.
+    stop_ticks: int = 160
+    # "gx_vwap": fade to the Globex-anchored VWAP mid, tracked live with the
+    #            crossing discipline. "r_multiple" / "fixed_ticks": struck at entry.
+    target_mode: str = "gx_vwap"         # "gx_vwap" | "r_multiple" | "fixed_ticks"
+    target_rr: float | None = 1.5        # used when target_mode == "r_multiple"
+    target_ticks: int = 120              # used when target_mode == "fixed_ticks"
+    min_room_ticks: int = 40
+    trail_stop_ticks: int = 0
+    trail_step_ticks: int = 0
+    trail_breakeven_ticks: int = 0
+    trail_breakeven_only: bool = False
+    max_hold_min: int = 0
+    exit_return_to_source_ticks: int = 0
+
+    # --- filters / lifecycle ---
+    approach_mom_veto_min: int = 0
+    daily_loss_stop: float = 0.0
+    daily_loss_exit_open: bool = False
+
+    # --- size & cost ---
+    contracts: int = 1
+    commission_per_side: float = 7.0
+
+    # --- confluences (veto-only gates) ---
+    # Empty by construction: every gate this family supports anchors to an RTH
+    # checkpoint (09:45/10:30) or reads the NY-anchored value edge, neither of
+    # which has a defined value for a 21:00 fill. The registry offers none, so
+    # this stays an empty dict — kept as a field only so the config shape and the
+    # canonicalizer match every other strategy's.
+    confluences: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WeeklyTraverseConfig(_JsonMixin):
+    """The weekly −1σ deep-traverse long's knobs: buy the session leg that ran
+    from the weekly mid all the way down into the weekly −1σ band.
+
+    Promoted from the weekly-lower1-deep-traverse-long draft (the strongest cell
+    of the weekly-band touch-context study, and the only one that survived the
+    next-bar race correction): a touch of the weekly −1σ, approached from above,
+    with no prior residence below the band this session and an origin at or
+    above the weekly mid inside the trailing lookback, resolves back toward the
+    mid 57.9% of the time and the edge grows with horizon. The mirror cell
+    (upper1 deep traverse) is REVERSED — this idea is long-only by construction,
+    so there is no side knob.
+
+    Detection runs on 1-minute bars over the full Globex session (ON + RTH),
+    the study's own frame — residence and origin are *minute* counts, and a
+    tick-count bar would quietly change what they mean. ``ticks_per_bar`` is
+    only the chart's candle size. The week's first session (the weekly anchor
+    IS that day's Globex open) and any session without an honest weekly line
+    (a hole in the week, no cached overnight) take no trades — absent, not
+    approximated, per the weekly anchor's own rules.
+    """
+
+    # --- scope ---
+    instrument: str = "NQ"
+    contract: str = "NQ"
+    start_date: date = date(2025, 10, 13)
+    end_date: date = date(2025, 10, 17)
+
+    # --- bars (charts only — detection is fixed to 1-minute bars) ---
+    ticks_per_bar: int = 500
+
+    # --- detection (the engine's translation of the study event) ---
+    # A touched −1σ only re-arms after a full 1-min bar trades clear of it by
+    # this many weekly sigmas — the study's episode rule (REARM_SIG), so a
+    # choppy hour hugging the band is one touch, not thirty.
+    rearm_sigma: float = 0.25
+    # "No prior residence below the band": strictly fewer than this many 1-min
+    # closes below the weekly −1σ earlier in the session. The studied cell used
+    # 5 — a session already living under the band is a breakdown, not a traverse.
+    max_res_below_min: int = 5
+    # "The leg started at the mid or higher": over the trailing lookback the
+    # σ-position (close − weekly mid)/σ must have reached at least
+    # min_origin_sigma. 0 is the studied cell (touched the mid); it is a real
+    # threshold, not an off switch. A touch with no lookback history (the
+    # session's first bar) fails the condition, as in the study.
+    origin_lookback_min: int = 120
+    min_origin_sigma: float = 0.0
+
+    # --- entry ---
+    # The study's frame is the whole Globex session and the overnight cohort
+    # carried more per-trade edge than RTH in the draft, so entries default to
+    # anywhere in the session. True confines signals to 09:30–16:00 ET.
+    rth_only: bool = False
+
+    # --- exit ---
+    # "level_sigma" is the draft's race stop: stop_sigma weekly sigmas BELOW the
+    # −1σ level, frozen at the signal bar — the band failing is the invalidation,
+    # and the risk taken varies with the band's width (median ~22 pts, p95 ~70 in
+    # the draft). "entry_ticks" anchors stop_ticks below the FILL instead — every
+    # trade risks the same distance and the band is allowed to fail without
+    # ending the trade (the drift-fade entry-stop lesson).
+    stop_mode: str = "level_sigma"       # "level_sigma" | "entry_ticks"
+    stop_sigma: float = 0.30
+    stop_ticks: int = 90                 # read when stop_mode == "entry_ticks"
+    # "level_sigma" is the draft's race target: target_sigma sigmas ABOVE the
+    # level, frozen at the signal bar. "wk_mid" tracks the developing weekly mid
+    # live (the hypothesis's actual magnet — the edge grew with horizon), with
+    # the crossing discipline: price crossing the mid is a limit fill at the mid,
+    # the mid relocating across price books a market fill at the print.
+    # "r_multiple" is a fixed R at entry against the risk actually taken.
+    target_mode: str = "level_sigma"     # "level_sigma" | "wk_mid" | "r_multiple"
+    target_sigma: float = 0.30
+    target_rr: float | None = None       # used when target_mode == "r_multiple"
+    # wk_mid target only: at the would-be fill the weekly mid must sit at least
+    # this far above the fill, or the signal is skipped — a target already
+    # inside the stop distance is no trade. 0 = off.
+    min_room_ticks: int = 40
+    # The trail: same rule and same knobs as the bounce's (see SimConfig) — the
+    # ratchet's first click lands trail_breakeven_ticks past the entry, so it
+    # can only ever buy breakeven or better, never a tightened loss. The
+    # R-multiple stays measured against the INITIAL stop (the risk actually
+    # taken at entry), whatever the trail later did.
+    trail_stop_ticks: int = 0
+    trail_step_ticks: int = 0
+    trail_breakeven_ticks: int = 0
+    trail_breakeven_only: bool = False
+    # 0 = off. Flatten at market once the trade has been held this many minutes,
+    # target unmet — the study's outcome horizon (60m in the draft; the edge was
+    # still growing at 120m, which is what an A/B of this knob measures).
+    max_hold_min: int = 60
+    # 0 = off. Flatten at market once the trade has been CONTINUOUSLY underwater for
+    # this many seconds — see SimConfig.underwater_exit_after_s for the rule and the
+    # per-tick-trigger warning. Where max_hold_min caps the clock regardless of where
+    # price sits, this one cuts on the trade being red specifically, so the two are
+    # independent: the sweep's best arm runs with max_hold_min off and would be capped
+    # by this alone.
+    underwater_exit_after_s: int = 0
 
     # --- filters / lifecycle ---
     daily_loss_stop: float = 0.0         # 0 = off. Same governor as the bounce's.
@@ -673,7 +1097,7 @@ class DriftFadeConfig(_JsonMixin):
     contracts: int = 1
     commission_per_side: float = 7.0
 
-    # --- confluences (veto-only gates) ---
+    # --- confluences (none supported yet; the idea must first stand alone) ---
     confluences: dict = field(default_factory=dict)
 
 

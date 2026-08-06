@@ -32,6 +32,12 @@ const FILL_POC = "rgba(224, 165, 42, 0.75)";
 const GAP = 1;
 /** Half-height of the grab handle drawn on a selected profile's edges. */
 const GRIP_H = 14;
+/** Fraction of the selection the widest (POC) row spans. Not the whole width:
+ *  the histogram is a shape to read, and a POC bar reaching the far edge of a
+ *  wide drag buries every candle inside the range it is measuring. Rows still
+ *  grow from the selection's left edge, so which range they belong to is not in
+ *  question. */
+const ROW_SPAN = 0.42;
 
 interface Ctx {
   chart: IChartApi;
@@ -69,10 +75,10 @@ class FillRenderer {
         const p = d.profile;
         if (!p || p.maxVolume <= 0) continue;
 
-        // Rows grow rightward from the selection's left edge, the widest (POC)
-        // spanning the full selection — so the histogram reads as belonging to
-        // the range it measures, the way TV's fixed-range tool does.
-        const width = x2 - x1;
+        // Rows grow rightward from the selection's left edge — so the histogram
+        // reads as belonging to the range it measures, the way TV's fixed-range
+        // tool does — with the widest (POC) row spanning `ROW_SPAN` of it.
+        const width = (x2 - x1) * ROW_SPAN;
         const pocRow = p.rows.reduce((a, b) => (b.volume > a.volume ? b : a));
         for (let i = 0; i < p.rows.length; i++) {
           const row = p.rows[i];

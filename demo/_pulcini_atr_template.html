@@ -1,0 +1,406 @@
+<meta charset="utf-8"/>
+<title>Pulcini's ATR skeleton — demo</title>
+<script>__LWC_JS__</script>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0e13; color:#cbd5e1; font:14px/1.5 Inter,system-ui,sans-serif; }
+  #wrap { max-width:1240px; margin:0 auto; padding:18px 20px 48px; }
+  h1 { font-size:20px; font-weight:600; margin:0 0 4px; }
+  .lede { color:#64748b; font-size:12.5px; margin:0 0 14px; max-width:940px; }
+  .lede b { color:#94a3b8; }
+  .warn { display:flex; gap:10px; padding:10px 13px; margin:0 0 16px; font-size:12.5px;
+          background:#1a1410; border:1px solid #3a2a18; border-radius:8px; color:#c8a06a; }
+  .warn b { color:#e0b878; }
+  .steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; margin:0 0 16px; }
+  .step { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; font-size:12px; color:#94a3b8; }
+  .step h3 { margin:0 0 4px; font-size:12px; color:#e2e8f0; font-weight:600; }
+  .step.off { opacity:.5; }
+  .step .tag { float:right; font-size:10.5px; text-transform:uppercase; letter-spacing:.4px; color:#64748b; }
+  .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 26px; padding:12px 14px;
+              background:#11151d; border:1px solid #1c2230; border-radius:8px; margin:0 0 16px; }
+  .ctl { display:flex; align-items:center; gap:9px; font-size:12.5px; color:#94a3b8; }
+  .ctl b { color:#e2e8f0; font-weight:600; }
+  .seg { display:flex; border:1px solid #1c2230; border-radius:6px; overflow:hidden; }
+  .seg button { background:#0b0e13; color:#94a3b8; border:none; padding:5px 11px; font:inherit; font-size:12px; cursor:pointer; }
+  .seg button.on { background:#1c2230; color:#e2e8f0; }
+  .tabs { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 18px; border-bottom:1px solid #1c2230; }
+  .tab { padding:8px 15px; cursor:pointer; border:1px solid #1c2230; border-bottom:none;
+         border-radius:8px 8px 0 0; background:#11151d; color:#94a3b8; font:inherit; font-size:12.5px; }
+  .tab.active { background:#1c2230; color:#e2e8f0; }
+  .tabpane { display:none; } .tabpane.active { display:block; }
+  .info { display:flex; flex-wrap:wrap; gap:6px 22px; margin:0 0 10px; padding:11px 14px;
+          background:#11151d; border:1px solid #1c2230; border-radius:8px; font-size:12.5px; }
+  .info b { color:#e2e8f0; }
+  .chartbox { position:relative; }
+  .chart { height:520px; background:#0b0e13; border:1px solid #1c2230; border-radius:8px; }
+  .legend { display:flex; flex-wrap:wrap; gap:18px; margin:8px 2px 0; font-size:12px; color:#64748b; }
+  .key { display:inline-block; width:16px; height:0; border-top-width:2px; margin-right:6px; vertical-align:middle; }
+  .tbl-card { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; margin-top:14px; }
+  .tbl-card h3 { font-size:12.5px; margin:0 0 2px; color:#e2e8f0; font-weight:600; }
+  .tbl-card p { font-size:12px; color:#64748b; margin:0 0 8px; }
+  .scroll { max-height:340px; overflow:auto; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th, td { padding:4px 8px; text-align:right; border-bottom:1px solid #1c2230; white-space:nowrap; }
+  th { color:#94a3b8; font-weight:600; position:sticky; top:0; background:#11151d; }
+  td:first-child, th:first-child { text-align:left; }
+  tr.row { cursor:pointer; }
+  tr.row:hover { background:#161b26; }
+  tr.row.sel { background:#1b2333; }
+  tr.dead td { color:#475569; }
+  .pos { color:#21c07a; } .neg { color:#f5455f; } .muted { color:#64748b; } .amber { color:#e0b878; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:99px; font-size:11px; border:1px solid; }
+  .pill.long { color:#21c07a; border-color:#1c5340; background:#0f2019; }
+  .pill.short { color:#f5455f; border-color:#5c2230; background:#1f1014; }
+  .pill.none { color:#64748b; border-color:#252c3a; }
+  .note { margin-top:22px; padding:12px 14px; background:#11151d; border:1px solid #1c2230;
+          border-radius:8px; font-size:12px; color:#64748b; }
+  .note b { color:#94a3b8; }
+  .note ul { margin:6px 0 0; padding-left:18px; } .note li { margin:4px 0; }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#94a3b8; }
+</style>
+
+<div id="wrap">
+  <h1>Pulcini's ATR skeleton</h1>
+  <p class="lede">All nineteen of his named setups are the same five steps — only step 1 changes.
+    Steps 3–5 are pure geometry in <b>ATR units</b>, which is the part we can draw from ticks alone.
+    Pick an event in the table to lay the skeleton over the chart.</p>
+
+  <div class="warn"><b>Not a backtest.</b>
+    <span>There is no exit rule here, no trade management, and no sample worth a statistic. The page draws
+    where the geometry <em>puts</em> the entry and the stop, and reports how far price then travelled —
+    it does not claim the setup makes money. The volume event is a stand-in (see the notes at the foot).</span></div>
+
+  <div class="steps">
+    <div class="step off"><span class="tag">not drawn</span><h3>1 · Location</h3>
+      A pre-drawn important area — profile edge, balance top, move origin. Each named setup is only a different way of picking this.</div>
+    <div class="step off"><span class="tag">proxy</span><h3>2 · Event</h3>
+      An iceberg or stop run at that area, labelled from CME MBO. We have no L2, so this is stood in for by a
+      burst of ≥__EVENT_LOTS__ lots of large sweeps at one price.</div>
+    <div class="step"><span class="tag">drawn</span><h3>3 · Confirmation</h3>
+      Price must escape the zone by <b>1 ATR + 15%</b> before entry. Snap-back algos yank price back to volume events; only a full-ATR escape counts.</div>
+    <div class="step"><span class="tag">drawn</span><h3>4 · Stop</h3>
+      Far side of the zone, another ATR + 15% beyond. To be wrong, price has to re-cross the whole trapped-trader zone <em>plus</em> an ATR.</div>
+    <div class="step"><span class="tag">drawn</span><h3>5 · Size</h3>
+      Flat $__RISK_USD__ of risk; the contract count falls out of the stop distance. Never the other way round.</div>
+  </div>
+
+  <div class="controls">
+    <div class="ctl"><b>ATR lookback</b>
+      <span class="seg" id="perSeg"></span>
+      <span class="muted">bars of __BAR_MIN__ min</span></div>
+    <div class="ctl"><b>multiplier</b>
+      <span class="seg" id="multSeg"></span></div>
+    <div class="ctl"><b>compare</b>
+      <span class="seg" id="fixSeg">
+        <button data-fix="0" class="on">ATR stop</button>
+        <button data-fix="1">+ fixed __FIXED_STOP__pt stop</button>
+      </span></div>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+  <div id="panes"></div>
+
+  <div class="note">
+    <b>How this is put together</b>
+    <ul>
+      <li><b>Data</b> — the existing tick cache only (<code>data/cache/ticks/*.parquet</code>). Nothing is fetched, so the page costs nothing to rebuild.</li>
+      <li><b>ATR</b> — Wilder's ATR on __BAR_MIN__-minute bars, read off the last bar to have <em>closed</em> before the event.
+        The <em>bar size</em> is his — he says "5-minute ATR" outright. The <em>lookback</em> is not: the episode never names a period,
+        so the switch offers 5, 10 and 14 (Wilder's default). Flipping it barely moves anything — 5-min NQ vol is persistent enough
+        over 25–70 minutes that ATR(5) and ATR(14) land within a few points of each other. That is the useful result: the wide stop is
+        <em>not</em> an artifact of a lookback we guessed at.
+        The bar the event lands in is still forming while a trader would be reading the number, and its range is partly the event itself.
+        Bars run through the overnight so the number is already warm at 09:30 — otherwise the first 70 minutes of RTH, where most events land, would have no ATR to scale by.</li>
+      <li><b>The event is a proxy, and a leaky one.</b> His trigger is an MBO-labelled iceberg or stop run. From trade prints, a burst of size and a stop run look identical.
+        What's drawn is: sweeps of ≥__SWEEP_LOTS__ lots (consecutive fills merged into order-shaped units), clustered when they land within 60&nbsp;s and 5&nbsp;pt of each other, kept when the cluster totals ≥__EVENT_LOTS__ lots.
+        The zone is the price span the burst printed across. Absorption-flavoured detectors have died in our own A/Bs more than once — this one is here to hang the geometry off, not because it is believed.</li>
+      <li><b>Confirmation window</b> — price gets __CONFIRM_WINDOW__ minutes from the end of the burst to escape by ATR × multiplier, in either direction; whichever side goes first sets the side.
+        Events that never escape are listed as <span class="muted">no escape</span> and are worth as much attention as the ones that do.</li>
+      <li><b>Reach / offside</b> — the furthest price got onside and offside within __RESOLVE_MIN__ minutes of entry. There is no target and no exit, so these are distances, not results.</li>
+      <li><b>Sizing</b> — $__RISK_USD__ ÷ (stop distance × $__POINT_USD__/pt) on micros, rounded down. A wide ATR stop with small size is the same dollar risk as a tight stop with big size; that is his entire argument.</li>
+      <li><b>The fixed-stop column</b> — the identical entry carrying a __FIXED_STOP__-point stop instead. <span class="amber">first</span> means the fixed stop was touched before the ATR stop, i.e. the trade was ended by noise the ATR stop never registered. His "risking 15 NQ points in a 180-ATR regime" line, measured.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const SESSIONS = __SESSIONS_JSON__;
+const MULTS = __MULTS_JSON__;
+const FIXED = __FIXED_STOP__;
+const RISK = __RISK_USD__;
+let mult = "__DEFAULT_MULT__";
+let period = "__DEFAULT_PERIOD__";
+const PERIODS = __PERIODS_JSON__;
+const key = () => period + "|" + mult;
+let showFixed = false;
+
+const C = {
+  up:'#21c07a', dn:'#f5455f', zone:'#8b5cf6', conf:'#e0b878',
+  stop:'#f5455f', entry:'#38bdf8', fixed:'#f97316', atr:'#64748b', grid:'#161b26',
+};
+const fmtET = t => {
+  const d = new Date(t * 1000);
+  return String(d.getUTCHours()).padStart(2,'0') + ':' + String(d.getUTCMinutes()).padStart(2,'0');
+};
+
+// --- shell ---------------------------------------------------------------
+const tabs = document.getElementById('tabs'), panes = document.getElementById('panes');
+const views = [];
+
+SESSIONS.forEach((s, i) => {
+  const tab = document.createElement('button');
+  tab.className = 'tab' + (i === 0 ? ' active' : '');
+  // The vol regime is the whole subject, so it rides on the tab: the same
+  // 15-point stop means something different at ATR 17 and at ATR 118.
+  tab.dataset.date = s.date;
+  tab.innerHTML = `${s.date} <span class="muted tabAtr">· ATR ${s.info.atr_med[period] ?? '—'}</span>`;
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach((t, j) => t.classList.toggle('active', i === j));
+    document.querySelectorAll('.tabpane').forEach((p, j) => p.classList.toggle('active', i === j));
+    views[i].fit();
+  };
+  tabs.appendChild(tab);
+
+  const pane = document.createElement('div');
+  pane.className = 'tabpane' + (i === 0 ? ' active' : '');
+  pane.innerHTML = `
+    <div class="info">
+      <span><b>${s.info.symbol}</b> ${s.info.title}</span>
+      <span>range <b>${s.info.range}</b> (${s.info.range_pts} pt)</span>
+      <span>session ATR <b class="sessAtr">${s.info.atr_med[period] ?? '—'}</b> pt</span>
+      <span class="muted">at the events <span class="evAtr">${s.info.atr_events[period] ?? '—'}</span> pt</span>
+      <span>events <b>${s.info.events}</b></span>
+      <span class="muted">${s.info.trades.toLocaleString()} trades</span>
+    </div>
+    <div class="info sum"></div>
+    <div class="chartbox"><div class="chart" id="ch${i}"></div></div>
+    <div class="legend">
+      <span><i class="key" style="border-top:2px solid ${C.zone}"></i>event zone</span>
+      <span><i class="key" style="border-top:2px dashed ${C.conf}"></i>confirmation (zone ± ATR<span class="perEcho">${period}</span>×<span class="multEcho">${mult}</span>)</span>
+      <span><i class="key" style="border-top:2px solid ${C.entry}"></i>entry</span>
+      <span><i class="key" style="border-top:2px dashed ${C.stop}"></i>ATR stop</span>
+      <span class="fixKey" style="display:none"><i class="key" style="border-top:2px dotted ${C.fixed}"></i>fixed ${FIXED}pt stop</span>
+      <span class="muted">lower pane: ATR</span>
+    </div>
+    <div class="tbl-card">
+      <h3>Events</h3>
+      <p>Click a row to draw its skeleton. Rows that never escaped the zone by an ATR are greyed — the snap-back he is filtering for.</p>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>#</th><th>burst</th><th>lots</th><th>zone</th><th>ATR</th><th>reach</th>
+          <th>side</th><th>entry</th><th>wait</th><th>stop</th><th>risk</th><th title="stop distance in ATR units">×ATR</th><th>size</th>
+          <th>onside</th><th>offside</th><th>stopped</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>`;
+  panes.appendChild(pane);
+  views.push(makeView(s, pane, document.getElementById('ch' + i) || pane.querySelector('.chart')));
+});
+
+// --- one session ---------------------------------------------------------
+function makeView(s, pane, el) {
+  const chart = LightweightCharts.createChart(el, {
+    autoSize: true,
+    layout: { background: { color: '#0b0e13' }, textColor: '#94a3b8', fontSize: 11,
+              panes: { separatorColor: '#1c2230' } },
+    grid: { vertLines: { color: C.grid }, horzLines: { color: C.grid } },
+    rightPriceScale: { borderColor: '#1c2230' },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: {
+      borderColor: '#1c2230', timeVisible: true, secondsVisible: false,
+      // Bar times are ET wall-clock stamped as UTC seconds, so the axis must be
+      // read in UTC or the browser's own zone would shift every label.
+      tickMarkFormatter: fmtET,
+    },
+    localization: { timeFormatter: fmtET },
+  });
+
+  const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: C.up, downColor: C.dn, borderVisible: false,
+    wickUpColor: C.up, wickDownColor: C.dn,
+  }, 0);
+  candles.setData(s.bars);
+
+  const atr = chart.addSeries(LightweightCharts.LineSeries, {
+    color: C.atr, lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+  }, 1);
+  atr.setData(s.atr[period]);
+  chart.panes()[1].setHeight(96);
+
+  // Overlays are line series over whitespace: a value only inside the window
+  // the level is live for, `time`-only points everywhere else, so each level
+  // is a segment rather than a rule across the whole session.
+  const line = (color, style, width) => chart.addSeries(LightweightCharts.LineSeries, {
+    color, lineWidth: width || 1, lineStyle: style,
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  }, 0);
+  const S = LightweightCharts.LineStyle;
+  const zoneHi = line(C.zone, S.Solid, 2), zoneLo = line(C.zone, S.Solid, 2);
+  const confUp = line(C.conf, S.Dashed), confDn = line(C.conf, S.Dashed);
+  const stopL  = line(C.stop, S.Dashed, 2), entryL = line(C.entry, S.Solid, 2);
+  const fixedL = line(C.fixed, S.Dotted, 2);
+  const marks = LightweightCharts.createSeriesMarkers(candles, []);
+
+  const times = s.bars.map(b => b.time);
+  const seg = (from, to, value) => times.map(t =>
+    (t >= from && t <= to && value != null) ? { time: t, value } : { time: t });
+  const clear = () => [zoneHi, zoneLo, confUp, confDn, stopL, entryL, fixedL]
+    .forEach(x => x.setData(times.map(t => ({ time: t }))));
+
+  let sel = null;
+  const tbody = pane.querySelector('tbody');
+
+  function draw() {
+    clear(); marks.setMarkers([]);
+    if (sel == null) return;
+    const e = s.events[sel], r = e.runs[key()];
+    const zoneEnd = r.entry_bar ?? (e.end_bar + 3600);
+
+    zoneHi.setData(seg(e.bar, zoneEnd, e.hi));
+    zoneLo.setData(seg(e.bar, zoneEnd, e.lo));
+    confUp.setData(seg(e.end_bar, zoneEnd, r.up));
+    confDn.setData(seg(e.end_bar, zoneEnd, r.dn));
+
+    const ms = [{ time: e.bar, position: 'belowBar', color: C.zone, shape: 'circle',
+                  text: `event ${e.lots} lots` }];
+    if (r.state === 'confirmed') {
+      const last = times[times.length - 1];
+      entryL.setData(seg(r.entry_bar, last, r.entry));
+      stopL.setData(seg(r.entry_bar, last, r.stop));
+      if (showFixed) {
+        fixedL.setData(seg(r.entry_bar, last, r.long ? r.entry - FIXED : r.entry + FIXED));
+      }
+      ms.push({ time: r.entry_bar, position: r.long ? 'belowBar' : 'aboveBar',
+                color: C.entry, shape: r.long ? 'arrowUp' : 'arrowDown',
+                text: `${r.long ? 'long' : 'short'} ${r.entry} · ${r.lots}x` });
+    }
+    marks.setMarkers(ms);
+
+    const from = e.bar - 60 * 60, to = (r.entry_bar ?? e.end_bar) + 90 * 60;
+    chart.timeScale().setVisibleRange({ from, to });
+  }
+
+  const sumBar = pane.querySelector('.sum');
+  const med = xs => {
+    if (!xs.length) return null;
+    const a = [...xs].sort((p, q) => p - q), h = a.length >> 1;
+    return a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2;
+  };
+
+  function summary() {
+    const runs = s.events.map(e => e.runs[key()]);
+    const conf = runs.filter(r => r.state === 'confirmed');
+    if (!conf.length) {
+      sumBar.innerHTML = `<span class="muted">no event escaped its zone by ATR(${period})×${mult} today</span>`;
+      return;
+    }
+    const fixed = conf.filter(r => r.fixed_first).length;
+    const wide = conf.filter(r => r.lots === 0).length;
+    sumBar.innerHTML = `
+      <span>at <b>ATR(${period}) × ${mult}</b>: <b>${conf.length}</b> of ${runs.length} events escaped the zone</span>
+      <span>median stop <b>${med(conf.map(r => r.risk)).toFixed(1)}</b> pt
+        <span class="muted">($${(med(conf.map(r => r.risk_usd))).toFixed(0)}/micro)</span></span>
+      <span>stop is <b>${med(conf.map(r => r.risk_atr)).toFixed(1)}×</b> the ATR <span class="muted">(zone + 2 × ${mult})</span></span>
+      <span>ATR stop touched <b>${conf.filter(r => r.atr_stop_hit).length}</b>×</span>
+      <span class="amber">a ${FIXED}pt stop would have gone first <b>${fixed}</b>×</span>
+      ${wide ? `<span class="amber">${wide} too wide for a $${RISK} budget on one micro</span>` : ''}`;
+  }
+
+  function rows() {
+    summary();
+    tbody.innerHTML = '';
+    s.events.forEach((e, i) => {
+      const r = e.runs[key()], ok = r.state === 'confirmed';
+      const tr = document.createElement('tr');
+      tr.className = 'row' + (ok ? '' : ' dead') + (i === sel ? ' sel' : '');
+      const side = ok ? `<span class="pill ${r.long ? 'long' : 'short'}">${r.long ? 'long' : 'short'}</span>`
+                      : `<span class="pill none">${r.state}</span>`;
+      const stopped = !ok ? '—'
+        : (r.fixed_first ? `<span class="amber">fixed first</span>`
+           : r.atr_stop_hit ? `<span class="neg">ATR stop</span>`
+           : showFixed && r.fixed_stop_hit ? `<span class="amber">fixed only</span>`
+           : `<span class="muted">not hit</span>`);
+      tr.innerHTML = `
+        <td>${e.n}</td>
+        <td>${e.t0}</td>
+        <td>${e.lots.toLocaleString()}<span class="muted"> /${e.sweeps}</span></td>
+        <td>${e.lo}–${e.hi}</td>
+        <td>${r.atr}</td>
+        <td>${r.reach}</td>
+        <td>${side}</td>
+        <td>${ok ? r.entry : '—'}</td>
+        <td>${ok ? (r.wait_s < 90 ? r.wait_s + 's' : Math.round(r.wait_s / 60) + 'm') : '—'}</td>
+        <td>${ok ? r.stop : '—'}</td>
+        <td>${ok ? `${r.risk}pt <span class="muted">$${r.risk_usd}</span>` : '—'}</td>
+        <td>${ok ? `<span class="muted">${r.risk_atr}×</span>` : '—'}</td>
+        <td>${!ok ? '—' : r.lots > 0 ? r.lots + '×'
+              : `<span class="amber" title="one micro already risks more than $${RISK}">over budget</span>`}</td>
+        <td>${ok ? `<span class="pos">+${r.mfe}</span>` : '—'}</td>
+        <td>${ok ? `<span class="neg">−${r.mae}</span>` : '—'}</td>
+        <td>${stopped}</td>`;
+      tr.onclick = () => { sel = i; rows(); draw(); };
+      tbody.appendChild(tr);
+    });
+  }
+
+  const firstOk = s.events.findIndex(e => e.runs[key()].state === 'confirmed');
+  sel = firstOk >= 0 ? firstOk : (s.events.length ? 0 : null);
+  rows(); draw();
+  if (sel == null) chart.timeScale().fitContent();
+
+  return {
+    fit: () => { if (sel == null) chart.timeScale().fitContent(); else draw(); },
+    refresh: () => {
+      atr.setData(s.atr[period]);
+      pane.querySelectorAll('.multEcho').forEach(x => x.textContent = mult);
+      pane.querySelectorAll('.perEcho').forEach(x => x.textContent = period);
+      pane.querySelectorAll('.sessAtr').forEach(x => x.textContent = s.info.atr_med[period] ?? '—');
+      pane.querySelectorAll('.evAtr').forEach(x => x.textContent = s.info.atr_events[period] ?? '—');
+      pane.querySelector('.fixKey').style.display = showFixed ? '' : 'none';
+      rows(); draw();
+    },
+  };
+}
+
+// --- controls ------------------------------------------------------------
+const perSeg = document.getElementById('perSeg');
+PERIODS.forEach(p => {
+  const b = document.createElement('button');
+  b.textContent = p;
+  b.className = p === period ? 'on' : '';
+  b.onclick = () => {
+    period = p;
+    [...perSeg.children].forEach(c => c.classList.toggle('on', c === b));
+    // The tab strip carries each session's ATR, so it has to move with the
+    // lookback too — otherwise the ladder would read off the wrong number.
+    document.querySelectorAll('.tab').forEach((t, i) => {
+      const el = t.querySelector('.tabAtr');
+      if (el) el.textContent = '· ATR ' + (SESSIONS[i].info.atr_med[period] ?? '—');
+    });
+    views.forEach(v => v.refresh());
+  };
+  perSeg.appendChild(b);
+});
+
+const multSeg = document.getElementById('multSeg');
+MULTS.forEach(m => {
+  const b = document.createElement('button');
+  b.textContent = '×' + m;
+  b.className = m === mult ? 'on' : '';
+  b.onclick = () => {
+    mult = m;
+    [...multSeg.children].forEach(c => c.classList.toggle('on', c === b));
+    views.forEach(v => v.refresh());
+  };
+  multSeg.appendChild(b);
+});
+
+document.querySelectorAll('#fixSeg button').forEach(b => {
+  b.onclick = () => {
+    showFixed = b.dataset.fix === '1';
+    document.querySelectorAll('#fixSeg button').forEach(c => c.classList.toggle('on', c === b));
+    views.forEach(v => v.refresh());
+  };
+});
+</script>

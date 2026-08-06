@@ -79,6 +79,14 @@ a {
   padding: 2rem 2.2rem;
   min-width: 0;
 }
+/* Charts draws no shell chrome (see Layout's `chrome` flag) and no page padding
+   either: the tape runs to the window edge and the page supplies its own bar.
+   That is ~2rem of height and ~4.4rem of width handed back to the candles.
+   Stated once here rather than per-width — the phone block below deliberately no
+   longer re-pays it for this workspace. */
+.ws-charts .app-main {
+  padding: 0;
+}
 
 .sidebar {
   width: 260px;
@@ -439,6 +447,23 @@ button:disabled {
 .badge-input:focus-within {
   border-color: var(--accent);
 }
+/* Inline tag editor packed into a table row (Interactions Sessions grid) — drop
+   the standalone-field height so the row stays as compact as an unedited one. */
+.session-tag-cell .badge-input {
+  min-height: 22px;
+  padding: 1px 5px;
+  gap: 4px;
+  border-radius: 6px;
+}
+.session-tag-cell .badge-input-field {
+  padding: 0;
+}
+.session-tag-cell .badge-input-wrap {
+  min-width: 70px;
+}
+.session-tag-cell .badge {
+  padding: 1px 3px 1px 7px;
+}
 .badge-input-wrap {
   position: relative;
   flex: 1;
@@ -593,6 +618,11 @@ button:disabled {
 }
 
 /* ---- on-chart indicator legend (TV-style) ---- */
+/* The legend's own box is as wide as its widest row and as tall as all of them,
+   but the rows inside it are chips with ragged right edges — so most of that box
+   is empty space that was still hit-testing as the legend. On a narrow chart it
+   reaches across the tool buttons and swallows their clicks. Only the chips are
+   clickable; the column they sit in is just a layout box. */
 .chart-legend {
   position: absolute;
   top: 8px;
@@ -602,6 +632,10 @@ button:disabled {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+  pointer-events: none;
+}
+.chart-legend > * {
+  pointer-events: auto;
 }
 .chart-legend-row {
   display: inline-flex;
@@ -623,6 +657,16 @@ button:disabled {
 .chart-legend-row svg {
   opacity: 0.55;
 }
+/* The collapse toggle at the top of the list: a touch bolder than the rows it
+   controls, with the visible/total count sitting between label and chevron. */
+.chart-legend-head {
+  font-weight: 600;
+}
+.chart-legend-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
 .chart-legend-row.off {
   color: var(--muted);
 }
@@ -635,13 +679,118 @@ button:disabled {
   border-radius: 2px;
 }
 
+/* ---- per-indicator settings, off the row's "…" ---- */
+/* A row and its "…" are one chip split in two: a layer's settings belong to the
+   layer, so they share its box rather than sitting in a bar somewhere above the
+   chart. The wrapper is also what a click-away test asks about — hence the
+   data attribute on it. */
+.chart-legend-item {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  max-width: 100%;
+}
+/* An open panel has to clear the tool buttons, which share this edge and sit a
+   layer above the legend (see .chart-tools). Only while one is out: the rest of
+   the time the buttons should keep winning. */
+.chart-legend.settings-open {
+  z-index: 5;
+}
+.chart-legend-row.has-dots {
+  border-radius: 6px 0 0 6px;
+}
+.chart-legend-dots {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  border-radius: 0 6px 6px 0;
+  background: rgba(14, 17, 23, 0.72);
+  color: var(--text);
+  padding: 4px 6px;
+  /* The hairline that makes one chip read as two targets. */
+  box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.08);
+}
+.chart-legend-dots:hover:not(:disabled),
+.chart-legend-dots[aria-expanded="true"] {
+  border: none;
+  background: rgba(26, 29, 39, 0.95);
+}
+.chart-legend-dots svg {
+  opacity: 0.55;
+}
+.chart-legend-dots:hover svg,
+.chart-legend-dots[aria-expanded="true"] svg {
+  opacity: 1;
+}
+/* Under the row rather than beside it. The legend lives on the chart's left
+   edge and the rows are ragged — a panel hung off the right of a long one would
+   start halfway across a narrow chart and finish outside it. */
+.chart-set {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 1;
+  width: 232px;
+  max-width: calc(100vw - 32px);
+  padding: 8px;
+  font-size: 11px;
+  background: rgba(14, 17, 23, 0.94);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+.chart-set-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+}
+.chart-set-head button {
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+}
+.chart-set-head button:hover:not(:disabled) {
+  border: none;
+  color: var(--text);
+}
+.chart-set-row {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  color: var(--muted);
+}
+.chart-set-row select {
+  width: 100%;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+/* Said out loud where one knob feeds two rows, because the alternative is
+   changing a number here and watching a different row's label move. */
+.chart-set-note {
+  font-size: 10px;
+  line-height: 1.35;
+  opacity: 0.75;
+}
+
 /* ---- on-chart tool buttons (fixed-range profile), mirroring the legend ---- */
 .chart-tools {
   position: absolute;
   top: 8px;
   right: 12px;
-  z-index: 3;
+  /* Above the legend, which shares this edge and is drawn after it. Where a wide
+     legend row and a tool button genuinely land on the same pixels, the button
+     is the one that has to win — it is the smaller target and the rarer one. */
+  z-index: 4;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 4px;
 }
 .chart-tool {
@@ -654,6 +803,12 @@ button:disabled {
   line-height: 1;
   padding: 5px 9px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.chart-tool-i {
+  line-height: 1;
 }
 .chart-tool:hover {
   border: none;
@@ -662,6 +817,344 @@ button:disabled {
 .chart-tool.on {
   background: var(--accent);
   color: #fff;
+}
+.chart-tool:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* The order tool's channel picker. Deliberately NOT in the top-left corner where
+   the Space+click banner sits: that corner already holds the indicator legend and
+   is within reach of the tool buttons opposite, and these are things you have to
+   be able to hit. Bottom-left is the one corner of a chart nothing occupies.
+   Above everything, because while it is up it is the only thing you're doing. */
+.replay-order-armed {
+  position: absolute;
+  bottom: 10px;
+  left: 12px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: rgba(14, 17, 23, 0.86);
+  border: 1px solid var(--card-border);
+  font-size: 11px;
+  line-height: 1;
+}
+.replay-side {
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  font: inherit;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.replay-side.on {
+  border-color: var(--card-border);
+  background: var(--bg-2);
+}
+
+/* ---- the long-press order ＋, and the ticket that hangs off it ----
+   Press and hold anywhere on the tape and a ＋ appears on the price axis at that
+   price; tap it and the ticket opens to its left.
+
+   The row spans the chart so the ticket has somewhere to grow into, but only the
+   controls inside it take a pointer — the rest of that band is chart, and a drag
+   started there still has to pan. Nothing here sets `top` or `transform`: the
+   anchor is positioned from JS on every frame, because the price it is pinned to
+   moves as the replay scrolls and rescales under it. */
+.replay-anchor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Over the tool buttons and the armed-order banner: while it is up it is the
+     only thing you're doing, and it is the smallest target on the chart. */
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  pointer-events: none;
+  /* These appear under a finger that is still held down — the moment Android
+     goes looking for something to offer copy/share/select on. There is nothing
+     here anyone wants to select, so nothing is being taken away. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.replay-anchor > * {
+  pointer-events: auto;
+}
+/* Centred in whatever width the price scale is currently drawing itself at —
+   published as --axis-w, because that width tracks the digits in the scale, not
+   just the layout. max() keeps the button on the glass if the scale is ever
+   narrower than it is. */
+.replay-plus {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-right: max(2px, calc((var(--axis-w, 60px) - 26px) / 2));
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+/* The level, readable before you commit to it. This is what the second step of
+   the gesture buys — the ticket prints it too, so it goes away once that's up. */
+.replay-plus-px {
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+  color: var(--text);
+  background: rgba(14, 17, 23, 0.86);
+  border: 1px solid var(--card-border);
+  border-radius: 4px;
+}
+.replay-omenu {
+  width: 216px;
+  padding: 8px;
+  font-size: 11px;
+  background: rgba(14, 17, 23, 0.94);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+.replay-omenu-kinds {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+.replay-okind {
+  padding: 8px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.replay-okind.long {
+  background: var(--green);
+}
+.replay-okind.short {
+  background: var(--red);
+}
+/* The two that can't sit at this price. Dimmed rather than removed: which two
+   are live is the thing the menu is saying, and a grid that reshuffled under the
+   pointer as the tape crossed the price would be unusable. */
+.replay-okind:disabled {
+  background: var(--bg-2);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+.replay-omenu-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 4px;
+  margin-top: 8px;
+}
+.replay-omenu-f {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.replay-omenu-f input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 5px;
+  font-size: 11px;
+}
+.replay-omenu-px {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--card-border);
+}
+.replay-omenu-px span {
+  flex: 1;
+  text-align: center;
+  font-family: monospace;
+  font-size: 13px;
+  color: var(--text);
+}
+.replay-omenu-px button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text);
+  background: var(--bg-2);
+  border: 1px solid var(--card-border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.replay-omenu-x {
+  color: var(--muted) !important;
+}
+/* The one thing in here that is text you might want to put a cursor in — the
+   panel and the anchor around it are unselectable so the platform stops offering
+   to copy them. */
+.replay-omenu input {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ---- the docked ticket ----
+   Where the panel goes on a fingertip. Hung off the ＋ it sits on the price it
+   is about to trade, which on a phone means it covers the read you opened it to
+   make; docked, it costs the foot of the chart and nothing else. The ＋ stays up
+   on the axis at the price, so what the ticket is for is still on screen.
+
+   Bottom-anchored above --chart-floor: whatever the page has already parked down
+   here. In the simulator's fullscreen that is the transport, the market buttons
+   and the way back out — covering the way out would be the worst thing this
+   panel could do. Unset elsewhere, where the foot of the chart is just the foot
+   of the chart. */
+.replay-omenu-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--chart-floor, 0px);
+  /* Above the anchor, which is above everything else. */
+  z-index: 8;
+  display: flex;
+  justify-content: center;
+  padding: 0 8px 8px;
+  /* Only the panel takes a pointer; the rest of this band is still chart. */
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.replay-omenu-dock > * {
+  pointer-events: auto;
+}
+/* Wide and shallow rather than tall and narrow: the whole point of docking is to
+   cost the tape as little height as possible, so the four order types go on one
+   row and the sizing sits beside the price instead of above it. */
+.replay-omenu.docked {
+  width: min(560px, 100%);
+}
+.replay-omenu.docked .replay-omenu-kinds {
+  grid-template-columns: repeat(4, 1fr);
+}
+.replay-omenu.docked .replay-omenu-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.replay-omenu.docked .replay-omenu-row {
+  flex: 1;
+  min-width: 0;
+}
+/* Beside the sizing now, not under it — so the rule that separated the two
+   stacked halves has nothing left to separate. */
+.replay-omenu.docked .replay-omenu-px {
+  flex: none;
+  padding-top: 0;
+  border-top: none;
+}
+.replay-omenu.docked .replay-omenu-px span {
+  min-width: 76px;
+}
+/* Fingertip sizing. Keyed off the pointer, never the viewport — a landscape
+   phone is 844px wide and still a fingertip. */
+@media (pointer: coarse) {
+  .chart-tool {
+    font-size: 12px;
+    padding: 10px 12px;
+  }
+  /* The "…" is the narrowest thing on the legend and the one you reach for with
+     a thumb over a chart that is also listening for a long press. Widened, and
+     the panel with it — a 232px dialog on a phone leaves no margin. */
+  .chart-legend-dots {
+    padding: 6px 10px;
+  }
+  .chart-set {
+    width: 248px;
+  }
+  .chart-set-row select {
+    font-size: 13px;
+    padding: 8px;
+  }
+  .replay-side {
+    padding: 9px 12px;
+  }
+  /* The ＋ is the target the whole long-press gesture funnels into, and it sits
+     on a price axis narrow enough to miss. Grown along with it. */
+  .replay-plus {
+    width: 36px;
+    height: 36px;
+    margin-right: max(2px, calc((var(--axis-w, 60px) - 36px) / 2));
+    font-size: 16px;
+  }
+  .replay-plus-px {
+    font-size: 12px;
+    padding: 5px 7px;
+  }
+  .replay-omenu {
+    width: 244px;
+  }
+  .replay-okind {
+    padding: 12px 6px;
+    font-size: 12px;
+  }
+  .replay-omenu-f input {
+    padding: 8px 6px;
+    font-size: 12px;
+  }
+  .replay-omenu-px button {
+    width: 34px;
+    height: 34px;
+  }
+  /* Finger-sized buttons wrap onto more rows, and the lower rows would reach back
+     across the top edge into the legend. Fenced off at the width of a collapsed
+     legend (128px) plus its margins, so the two can't land on each other however
+     many rows the tools take. An expanded legend is wider than that and will
+     overlap — the z-index above decides it in the tools' favour, and collapsing
+     the legend is one tap. */
+  .chart-tools {
+    max-width: calc(100% - 148px);
+  }
+}
+/* Icons only, once the words cost more than they explain. Worded and finger-sized,
+   the row wraps into three lines that sit on top of the candles — on a phone the
+   tools end up hiding the chart they act on. Keyed off width rather than the
+   pointer for once, because this is a space problem and not a fingertip one: a
+   coarse-pointer tablet has room for the words and keeps them. The icons stay
+   the same ones the wide row shows, so nothing has to be re-learned, and title /
+   aria-label still carry the full name. */
+@media (max-width: 640px) {
+  .chart-tool-t {
+    display: none;
+  }
+  .chart-tool {
+    font-size: 14px;
+    padding: 8px 10px;
+  }
+  /* Nothing left to wrap into a second row, so the fence against the legend can
+     go — the icons need the width less than the legend needs to be reachable. */
+  .chart-tools {
+    max-width: calc(100% - 24px);
+  }
 }
 
 /* ---- data table ---- */
@@ -902,6 +1395,13 @@ button:disabled {
   margin: 10px 0 4px;
   font-size: 13px;
 }
+/* Drafts: the session-chart panel pins to the viewport top while the trade
+   table scrolls, so clicking a row swaps the tape without losing it. */
+.draft-chart-sticky {
+  position: sticky;
+  top: 10px;
+  z-index: 10;
+}
 /* Rendered markdown. The docs are stat-heavy memos: readable measure, tables
    that scroll inside the panel instead of widening the page, tabular digits. */
 .md-body {
@@ -997,4 +1497,1181 @@ button:disabled {
   border-radius: 14px;
   background: #fff; /* artifact pages paint their own bg; white avoids a dark flash on light pages */
   margin: 10px 0;
+}
+
+/* ---- responsive helpers ---- */
+/* Wrapper for wide data-tables that don't live in a fixed-height .table-scroll:
+   inert when the table fits, and on narrow screens it scrolls the table sideways
+   inside its panel instead of widening the whole page. */
+.table-scroll-x {
+  overflow-x: auto;
+}
+/* Backtests metric grid: five compact KPIs across on desktop (see mobile block
+   for the phone fallback). */
+.bt-metric-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+/* Sidebar scrim — only materialises on phones (see the Lab mobile block). */
+.sidebar-backdrop {
+  display: none;
+}
+
+/* ---- strategy explainer (visual strategy description) ----
+   Shown on the detail header and (as a tagline) the list card for strategies
+   that have a spec in lib/strategyExplainers.ts. All classes are namespaced
+   `se-` so the cascade never collides with the shared .panel/.badge/.card
+   system. Charts are static SVG scaled to their container. */
+.se {
+  margin-bottom: 18px;
+}
+.se-subtitle {
+  font-size: 13px;
+  color: var(--text);
+  margin: 2px 0 14px;
+  max-width: 64ch;
+  line-height: 1.55;
+}
+.se-toggle {
+  display: inline-flex;
+  background: var(--bg-2);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 3px;
+  margin-bottom: 18px;
+}
+.se-toggle button {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  padding: 5px 15px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.se-toggle button:hover {
+  color: var(--text);
+}
+.se-toggle button[aria-selected="true"] {
+  background: var(--accent);
+  color: #fff;
+}
+.se-toggle button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.se-rail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.se-rule {
+  background: var(--bg-2);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.se-rule .k {
+  font-size: 10px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  font-weight: 650;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+.se-rule .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.se-rule .v {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.45;
+}
+.se-rule .v em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.se-figs {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.se-fig {
+  margin: 0;
+}
+.se-fig-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.se-fig-num {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-radius: 5px;
+  padding: 2px 7px;
+}
+.se-fig-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.se-fig-cap {
+  color: var(--muted);
+  font-size: 12.5px;
+  margin: 8px 0 0;
+  max-width: 74ch;
+  line-height: 1.5;
+}
+.se-card-chart {
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 8px;
+  overflow-x: auto;
+}
+.se-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.se-sub {
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 8px 8px 4px;
+}
+.se-sub-cap {
+  font-size: 11.5px;
+  padding: 2px 6px 6px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+}
+.se-verdict {
+  font-weight: 700;
+  font-size: 12.5px;
+}
+.se-verdict.skip {
+  color: var(--red);
+}
+.se-verdict.take {
+  color: var(--green);
+}
+.se-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.se-def p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+  max-width: 78ch;
+  margin: 0;
+}
+
+/* list card: tagline + session pill in place of the long description */
+.se-card-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+}
+.se-card-tag {
+  color: var(--text);
+  font-size: 13px;
+}
+.se-card-session {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+@media (max-width: 700px) {
+  .se-split {
+    grid-template-columns: 1fr;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .se-toggle button {
+    transition: none;
+  }
+}
+
+/* ---- simulator (Lab) ----
+   The one page in the app that fills the viewport instead of scrolling: the
+   replay wants the tape as tall as the screen allows, and the chrome above it
+   (topbar, tabs, padding) isn't a fixed height to subtract. So JS measures what
+   is left and publishes it as --sim-fill-h, and every decision about how that
+   measurement is *used* lives here — a viewport too short to fill can then opt
+   out of filling, which an inline height could not be talked out of. */
+.sim-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  height: var(--sim-fill-h, auto);
+  min-height: 0;
+  box-sizing: border-box;
+}
+
+/* ---- chart top bar (see components/charts/ChartTopBar) ----
+   The whole of a chart page's persistent chrome, in one ~36px row: the way out,
+   what you are looking at, the timeframe, and the switch between the two chart
+   pages. It replaces the shell's topbar + tab strip + page padding, which
+   together were ~215px — so every rule here is written against a budget, and
+   anything that wants a second row wants it somewhere else.
+
+   Not sticky and not floating: the page below it is exactly one viewport tall
+   and never scrolls, so a bar in normal flow is already always visible. */
+.chart-topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 36px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--card-border);
+  background: var(--card);
+  font-size: 13px;
+}
+.chart-topbar-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Pushes the whole right-hand cluster over without anything in the middle
+     needing to know how wide it is. */
+  margin-left: auto;
+}
+
+/* The identity, doubling as the setup panel's trigger. Styled as text rather
+   than a button so the bar reads as a title with a caret, not as a toolbar of
+   equal-weight controls — what session this is, is the one thing here you look
+   at rather than press. */
+.chart-topbar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chart-topbar-title.static {
+  cursor: default;
+}
+.chart-topbar-title:not(.static):hover,
+.chart-topbar-title.open {
+  background: var(--bg-2);
+}
+.chart-topbar-caret {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* Replay|Live — the tab strip, reduced to the two tabs this workspace has.
+   Deliberately quieter than the old 42px strip: with only two destinations the
+   underline that made a seven-tab row scannable is just noise. */
+.chart-topbar-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+  border-radius: 7px;
+  padding: 2px;
+}
+.chart-topbar-tabs a {
+  padding: 3px 12px;
+  border-radius: 5px;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 18px;
+}
+.chart-topbar-tabs a.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.chart-topbar-btn {
+  border: 1px solid var(--card-border);
+  background: var(--bg);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 13px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.chart-topbar-btn:hover,
+.chart-topbar-btn.on {
+  color: var(--text);
+}
+
+/* ---- nav menu (see components/NavMenu) ----
+   Navigation for the pages that draw no shell chrome. A popover, not a drawer:
+   it is nine links, and a drawer would want a scrim, a transition and a
+   scroll lock to show a list that fits in 200px. */
+.nav-menu {
+  position: relative;
+  flex: none;
+}
+.nav-menu-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.nav-menu-btn:hover,
+.nav-menu-btn[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--bg-2);
+}
+/* Over the chart and over anything the chart floats in its own corners — the
+   legend and tool buttons sit at z-index 3, the order ticket above them. */
+.nav-menu-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  min-width: 190px;
+  padding: 6px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 9px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  /* A phone in landscape is shorter than this list is tall. */
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+}
+.nav-menu-group + .nav-menu-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--card-border);
+}
+.nav-menu-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 4px 8px 2px;
+}
+.nav-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.nav-menu-item:hover {
+  background: var(--bg-2);
+}
+.nav-menu-item.here {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Announced, not drawn. With no tab strip on a chart page there is nothing else
+   telling a screen reader which workspace you are in. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* Setup is always open where there is room for it; the toggle that folds it away
+   only exists on viewports where there isn't. */
+.sim-body {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 12px;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+}
+.sim-chart-card {
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+/* The chart takes the card's leftover height; the transport keeps its own.
+   min-height:0 is what lets it shrink instead of overflowing. The positioning
+   context is for the indicator strip below, which floats over the chart's foot:
+   the chart's own canvas fills this box, so an absolutely-positioned sibling is
+   how anything gets to sit on top of it. */
+.sim-chart {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+/* ---- day-scale indicator strip (see components/charts/SimIndicators) ----
+   The corner nothing else owns: the legend has top-left, the tools top-right,
+   and in fullscreen the transport floats over the bottom edge — so this rides
+   above --chart-floor exactly like the docked order ticket does, and the two
+   never both exist at once (placing an order is not a moment for reading the
+   day's scale). Only the chips take pointer events; the row they sit in is a
+   layout box and must not eat clicks meant for the tape, the same fix the
+   legend needed. */
+.sim-ind {
+  position: absolute;
+  left: 8px;
+  /* Two floors, whichever is higher: the page's dock (fullscreen only, where the
+     transport floats over the chart) and the chart's own time axis, which is
+     always down there and is not something this page publishes a height for.
+     34px clears the axis labels at every font size the chart uses. */
+  bottom: max(34px, calc(var(--chart-floor, 0px) + 8px));
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+}
+.sim-ind > * {
+  pointer-events: auto;
+}
+.sim-ind-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 6px;
+  background: rgba(14, 17, 23, 0.72);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 5px 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* The width tercile, in the IB's own lime ramp — the same chip the Lab's
+   sessions table draws, so one day reads the same in both places. */
+.sim-ind-bucket {
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-weight: 600;
+}
+.sim-ind-dim {
+  color: var(--muted);
+}
+.sim-ind-bar {
+  display: inline-block;
+  position: relative;
+  width: 64px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--grid);
+  overflow: hidden;
+}
+.sim-ind-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+}
+.sim-ind-x,
+.sim-ind-pill {
+  border: none;
+  border-radius: 6px;
+  background: rgba(14, 17, 23, 0.72);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.sim-ind-x:hover,
+.sim-ind-pill:hover {
+  background: rgba(26, 29, 39, 0.95);
+  color: var(--text);
+}
+.sim-transport {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  flex-wrap: wrap;
+  flex: none;
+}
+.sim-scrub {
+  flex: 1;
+  min-width: 160px;
+}
+.sim-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+/* The strip that summarises the ticket when it is collapsed into a bottom sheet
+   — which only happens on a narrow viewport. */
+.sim-card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  padding: 12px;
+  flex: none;
+}
+.sim-blotter {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 120px;
+}
+.sim-icon-btn {
+  background: var(--bg-2);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.sim-icon-btn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+
+/* ---- mobile: Lab + Charts workspaces ----
+   The Lab was the first workspace tuned for phones; the Journal keeps its desktop
+   shell until it gets the same pass, so every rule here is scoped. Charts joined
+   when the Simulator moved into it and needs the identical treatment — hence
+   :is(.ws-lab, .ws-charts) rather than a duplicated selector list. :is() takes the
+   specificity of its most specific argument, and both are a single class, so this
+   is specificity-neutral: the deliberate source-order tie with .sim-page.full at
+   the end of this file still resolves exactly as its comment describes.
+   Charts already size to their container (ResizeObserver / Recharts width:100%),
+   so the work is reclaiming width from chrome, scrolling the tab strip and wide
+   tables sideways instead of down, and overlaying the data drawer. */
+@media (max-width: 640px) {
+  /* Lab only: Charts wants zero page padding at every width, and says so once in
+     the layout section above. Same specificity as this rule would have had, so
+     keeping :is() here would leave the winner decided by source order — naming
+     the one workspace that still wants padding is what makes it unambiguous. */
+  .ws-lab .app-main {
+    padding: 0.85rem 0.8rem 2rem;
+  }
+  /* Tab strip scrolls as one row rather than wrapping under the content. */
+  :is(.ws-lab, .ws-charts) .tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  :is(.ws-lab, .ws-charts) .tabs::-webkit-scrollbar {
+    display: none;
+  }
+  :is(.ws-lab, .ws-charts) .tabs a {
+    flex: 0 0 auto;
+    padding: 0 13px;
+    white-space: nowrap;
+  }
+  /* Hand the panel / doc side padding back to content. */
+  :is(.ws-lab, .ws-charts) .panel {
+    padding: 13px;
+  }
+  /* A pinned 560px chart would cover the whole phone viewport, hiding the
+     trade rows that drive it — let it scroll normally there. */
+  :is(.ws-lab, .ws-charts) .draft-chart-sticky {
+    position: static;
+  }
+  :is(.ws-lab, .ws-charts) .md-body {
+    padding: 16px 15px;
+    font-size: 13.5px;
+  }
+  /* Five compact KPIs won't fit a phone; drop to two-up. */
+  :is(.ws-lab, .ws-charts) .bt-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  /* Strategy-detail metric grids: four fixed columns force a phone to scroll
+     (a value like "$150,439.45" won't fit a quarter-width track), so collapse to
+     two and give the hero its own full-width row. minmax(0,…) lets values wrap
+     rather than widen their track. `!important` beats KpiGrid's inline template. */
+  :is(.ws-lab, .ws-charts) .lab-kpi {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  :is(.ws-lab, .ws-charts) .lab-kpi .kpi-hero {
+    grid-column: 1 / -1;
+  }
+  :is(.ws-lab, .ws-charts) .lab-kpi .kpi-hero .kpi-value {
+    font-size: 30px;
+  }
+  :is(.ws-lab, .ws-charts) .lab-kpi .kpi-value {
+    overflow-wrap: anywhere;
+  }
+  /* The data/timezone drawer overlays the content instead of squeezing the flex
+     row down to a sliver; the scrim behind it closes it on an outside tap. */
+  :is(.ws-lab, .ws-charts) .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 40;
+    width: 82%;
+    max-width: 300px;
+    overflow-y: auto;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+  }
+  :is(.ws-lab, .ws-charts) .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 39;
+    margin: 0;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* ---- simulator: narrow, short, and touch ----
+   Three independent questions, so three independent queries rather than one
+   breakpoint doing all three jobs badly:
+
+     · whether the ticket sits beside the chart or under it is about WIDTH
+     · whether the page can fill the viewport at all is about HEIGHT
+     · whether a control is big enough to hit is about the POINTER
+
+   The middle one is what a width-only pass misses. A phone on its side is 844×390
+   — it clears every max-width query in this file, and still has nowhere to put a
+   chart that wants 420px plus a transport bar under it. */
+
+/* Narrow. The base layout is already the chart layout at every width — one
+   viewport-tall page, an overlaid setup panel, an overlaid ticket — so what is
+   left here is genuinely about size, not about mode.
+
+   The rules this block used to carry (a collapsing bottom sheet, a 55dvh chart,
+   a sheet handle, a foldaway setup row) were the phone's private version of
+   "the chart takes the screen". That is now what the page does everywhere, and
+   keeping a second statement of it here only meant the two could disagree —
+   which they did, since `:is(.ws-lab, .ws-charts) .sim-panel` outranks a bare
+   `.sim-panel` however late the latter appears.
+
+   The `.ws-lab` half of those selectors was vestigial in any case: `.sim-page`
+   is rendered by Simulator and LiveChart, and both live in Charts. */
+@media (max-width: 640px) {
+  /* Play / Step / Speed already fill the row at this width, so the scrubber wraps
+     — but it should take the clock with it rather than leaving it stranded on a
+     third row, which costs the chart ~35px for one line of text. */
+  :is(.ws-lab, .ws-charts) .sim-scrub {
+    flex: 1 1 60%;
+    order: 10;
+    min-width: 120px;
+  }
+  :is(.ws-lab, .ws-charts) .sim-clock {
+    order: 11;
+  }
+}
+
+/* Short. A landscape phone is 844x390 and clears every max-width query in this
+   file; a short desktop window lands here too, correctly, since it has the same
+   problem for the same reason.
+
+   Much less to say than there used to be. The shell chrome this block spent most
+   of its rules compressing is simply not rendered on a chart page any more, and
+   the setup row it folded behind a toggle is a panel at every size now. What is
+   left is the transport, which is the one thing on the page that still costs
+   height unconditionally — so on a short viewport it gets tighter, not hidden. */
+@media (max-height: 620px) {
+  /* Lab only: Charts draws no shell chrome to compress. */
+  .ws-lab .app-main {
+    padding-top: 0.7rem;
+  }
+  .ws-lab .app-topbar {
+    margin-bottom: 4px;
+  }
+  .ws-lab .tabs {
+    margin-bottom: 6px;
+    /* A landscape phone is 641-844px wide, so it clears the narrow query above
+       and its tab row (~710px) would otherwise overflow the document sideways. */
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .ws-lab .tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .ws-lab .tabs a {
+    flex: 0 0 auto;
+    height: 34px;
+    padding: 0 13px;
+    white-space: nowrap;
+  }
+  .sim-transport {
+    padding: 4px 8px;
+  }
+  /* Every row the transport wraps to is a row taken off the chart, and on a
+     390px-tall screen that is the whole budget. Let the scrubber shrink so the
+     transport stays one line. */
+  :is(.ws-lab, .ws-charts) .sim-scrub {
+    min-width: 90px;
+  }
+  :is(.ws-lab, .ws-charts) .sim-lbl {
+    display: none;
+  }
+  /* The rail's icons are the only thing here that can afford to lose height. */
+  /* The Live signal feed. A column of the `.sim-body` grid, not an overlay: it is
+   something you keep in view, unlike the replay's ticket. */
+.sim-signals {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 300px;
+  border-left: 1px solid var(--card-border);
+  background: var(--card);
+}
+@media (max-width: 640px) {
+  .sim-signals {
+    width: 190px;
+  }
+}
+
+/* Numbers in the top bar — the clock and the mark, which are read continuously
+   and so must not reflow the bar as their digits change. */
+.sim-topbar-num {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.sim-topbar-link {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.sim-rail {
+    padding: 3px 0;
+  }
+}
+
+/* Short *and* wide — a phone in landscape, and the orientation this page is
+   actually best in: a replay wants width more than anything else. The rail is
+   already beside the chart at every size; it only has to be slimmer when pinned,
+   because a 300px column out of 844px is more than a third of the tape. */
+@media (max-height: 620px) and (min-width: 641px) {
+  .sim-page.pinned .sim-panel {
+    width: 240px;
+  }
+}
+
+/* Coarse pointer: a fingertip is ~40px across, and that is true in both
+   orientations — which is exactly why this is a pointer query and not a width
+   one. Hit sizes only. The chart's own grab targets (bracket legs, resting
+   orders) are mouse-bound down in ReplayChart and need their own pass. */
+@media (pointer: coarse) {
+  :is(.ws-lab, .ws-charts) .sim-transport button,
+  :is(.ws-lab, .ws-charts) .sim-ticket button {
+    min-height: 44px;
+  }
+  .sim-setup select,
+  .sim-setup input,
+  :is(.ws-lab, .ws-charts) .sim-transport select {
+    min-height: 40px;
+  }
+  /* A 10px ✕ is not a target. Grow it without moving the row it sits in. */
+  :is(.ws-lab, .ws-charts) .sim-cancel {
+    min-width: 40px;
+    min-height: 40px;
+    margin: -10px 0;
+  }
+  :is(.ws-lab, .ws-charts) .sim-scrub {
+    height: 34px;
+  }
+}
+
+/* ---- simulator: the chart layout ----
+   These rules were `.sim-page.full` — a second layout the page entered on mount,
+   which covered the shell with position:fixed and an z-index:50 contract. The
+   shell now declines to draw chrome for the Charts workspace at all (see the
+   `chrome` flag in lib/workspaces), so there is one layout and this is it. ⛶
+   still exists, on ChartTopBar, and asks the *browser* to hide *its* chrome —
+   the only thing the app cannot do for itself.
+
+   Still last in the file: these have to beat the phone and short-viewport rules
+   above, and they tie with `:is(.ws-lab, .ws-charts) .sim-page` on specificity,
+   so position rather than a specificity arms race is what settles it. Adding a
+   class to win would work today and rot the moment someone writes a longer
+   selector upstream. */
+.sim-page {
+  padding: 0;
+  gap: 0;
+  background: var(--bg);
+  /* The containing block for the setup panel, which is laid over the top of the
+     tape rather than pushing it down. */
+  position: relative;
+}
+/* Setup is a thing you do before a replay, not during one — so it is a panel
+   the title bar opens, laid over the top of the tape rather than pushing it
+   down. `display:none` and not visibility: a closed panel must not hold width
+   for its widest select. */
+.sim-setup {
+  display: none;
+}
+.sim-setup.open {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 12px;
+  background: var(--card);
+  border-bottom: 1px solid var(--card-border);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+}
+.sim-body {
+  position: relative;
+  grid-template-columns: 1fr auto;
+  gap: 0;
+}
+.sim-chart-card {
+  border: none;
+  border-radius: 0;
+}
+.sim-chart {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+/* The transport keeps a row of its own — the one thing on this page that is not
+   summoned. It is the instrument a replay is driven with, and it carries the
+   clock, so a click before every scrub and speed change was the wrong trade.
+   In flow, not floating: nothing it covers is worth covering, least of all the
+   chart's own time axis. */
+.sim-transport {
+  flex: none;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border-top: 1px solid var(--card-border);
+  background: var(--card);
+}
+
+/* ---- the rail ----
+   ~34px of icons at the right edge, always there. The panel behind it used to be
+   a 300px column reserved whether or not you were trading; the rail is what
+   replaced it, and the pin is what gets the column back when you want it. */
+.sim-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  width: 34px;
+  padding: 6px 0;
+  border-left: 1px solid var(--card-border);
+  background: var(--card);
+}
+.sim-rail-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.sim-rail-btn:hover {
+  color: var(--text);
+  background: var(--bg-2);
+}
+.sim-rail-btn.on {
+  color: var(--text);
+  border-color: var(--card-border);
+  background: var(--bg-2);
+}
+/* A count, not a control: with the panel away this is the only thing saying
+   something is still resting out there. */
+.sim-rail-badge {
+  min-width: 18px;
+  padding: 1px 4px;
+  font-size: 10px;
+  font-family: monospace;
+  text-align: center;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: 9px;
+}
+
+/* Market orders, floating at the foot of the tape — the lowest thing on the
+   screen and so the easiest to reach, which is the point: everything else here
+   is something you call up, and these two are not.
+
+   Sized to their contents so the band they sit in doesn't swallow chart drags
+   along the bottom of the tape, and pointer-events only on the buttons for the
+   same reason. */
+.sim-quick {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 0 10px;
+  pointer-events: none;
+}
+.sim-quick > * {
+  pointer-events: auto;
+}
+.sim-quick-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 104px;
+  padding: 8px 16px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+.sim-quick-btn b {
+  font-family: monospace;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.sim-quick-btn.buy {
+  background: var(--green);
+}
+.sim-quick-btn.sell {
+  background: var(--red);
+}
+.sim-quick-btn.flat {
+  background: var(--accent);
+  padding: 12px 18px;
+}
+.sim-quick-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* Joins the pair while a trade is on rather than replacing it — the position is
+   netted, so those two buttons are how you scale in and out of what this chip is
+   reporting. Takes the whole first line when the four of them won't fit across a
+   phone, which puts it directly above the buttons it belongs to. */
+.sim-quick-pos {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  background: rgba(14, 17, 23, 0.86);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+}
+.sim-quick-pos b {
+  font-family: monospace;
+  font-size: 14px;
+}
+
+/* The ticket and blotter. Unpinned it lays over the tape, anchored to the bottom
+   edge and sized to its contents rather than stretched: it is a ticket, not a
+   sidebar, and being bottom-anchored is what makes "drag it back down" the
+   obvious dismissal.
+
+   It rests *on* the market buttons rather than under them — --chart-floor is
+   their measured height, so they can wrap to any number of rows and still never
+   cover the blotter or the ticket's last field. Padding can't do that job: the
+   row has two heights and a guess is wrong on one of them. */
+.sim-panel {
+  position: absolute;
+  top: auto;
+  right: 34px;
+  /* Clear of both feet: the market buttons floating over the tape, and the
+     transport row under it. This box is positioned against `.sim-body`, whose
+     bottom edge is below the transport, so the transport's height has to be in
+     here or the panel lays over the clock. */
+  bottom: calc(var(--chart-floor, 0px) + var(--sim-foot-h, 0px));
+  z-index: 3;
+  width: 300px;
+  max-height: calc(62dvh - var(--chart-floor, 0px) - var(--sim-foot-h, 0px));
+  gap: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--card);
+  border-top: 1px solid var(--card-border);
+  border-left: 1px solid var(--card-border);
+  border-top-left-radius: 10px;
+  box-shadow: -8px -8px 30px rgba(0, 0, 0, 0.45);
+  transition: transform 140ms ease;
+}
+/* Pinned, it stops being an overlay and becomes the column it used to be —
+   full height, in flow, no shadow, and the tape gives up the width. The rail
+   stays put beside it either way. */
+.sim-page.pinned .sim-panel {
+  position: static;
+  width: 300px;
+  max-height: none;
+  border-top: none;
+  border-top-left-radius: 0;
+  box-shadow: none;
+}
+.sim-page.pinned .sim-panel:not(.open) {
+  display: none;
+}
+/* While a finger is on the grab bar the sheet tracks it exactly; the snap-back
+   after letting go is what the transition is for. */
+.sim-panel.dragging {
+  transition: none;
+}
+.sim-panel:not(.open) {
+  display: none;
+}
+.sim-panel .sim-card,
+.sim-panel .sim-blotter {
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--card-border);
+  /* Tighter than a docked panel — every row here is covering the tape. */
+  padding: 10px;
+}
+.sim-blotter {
+  min-height: 0;
+}
+/* A long session would otherwise grow the ticket to its cap on the strength of
+   trades you have already had. Keep the recent few and scroll the rest. */
+.sim-blotter-list {
+  max-height: 84px;
+}
+/* The Space+click advert is three lines explaining a key a phone doesn't have
+   and a returning user has already met. */
+.sim-hint {
+  display: none;
+}
+/* The grab bar. Sticky so it stays reachable however far the ticket beneath it
+   has been scrolled, and touch-action:none because the drag is ours — without it
+   the browser reads the gesture as a scroll of the panel and eats it. Gone when
+   pinned: a column in normal flow has nowhere to be dragged to. */
+.sim-grab {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  height: 26px;
+  background: var(--card);
+  cursor: grab;
+  touch-action: none;
+}
+.sim-page.pinned .sim-grab,
+.sim-grab:active {
+  cursor: grabbing;
+}
+.sim-grab span {
+  width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--grid);
+}
+/* Too narrow for a 300px column — take the full width instead, and never pin. */
+@media (max-width: 640px) {
+  .sim-panel,
+  .sim-page.pinned .sim-panel {
+    position: absolute;
+    left: 0;
+    right: 34px;
+    width: auto;
+    max-height: calc(54dvh - var(--chart-floor, 0px) - var(--sim-foot-h, 0px));
+    border-left: none;
+    border-top: 1px solid var(--card-border);
+    border-top-right-radius: 10px;
+    border-top-left-radius: 10px;
+    box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.5);
+  }
+  .sim-page.pinned .sim-grab {
+    display: flex;
+  }
+}
+/* Targets you tap with a thumb. Kept off width on purpose — a landscape phone is
+   844px wide and still a fingertip. */
+@media (pointer: coarse) {
+  .sim-rail {
+    width: 42px;
+  }
+  .sim-rail-btn {
+    width: 34px;
+    height: 34px;
+    font-size: 15px;
+  }
+  .sim-grab {
+    height: 34px;
+  }
+  .sim-quick-btn {
+    min-width: 124px;
+    padding: 12px 20px;
+  }
 }

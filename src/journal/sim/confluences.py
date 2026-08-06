@@ -57,6 +57,14 @@ class SessionCtx:
     # on the upper side. None derives it from ``side`` the bounce's way, which
     # keeps every pre-fade construction meaning what it always did.
     band: str | None = None
+    # The session's regime artifact, when the caller already has one. Gates used
+    # to each fetch their own; that is the same "gate builds its own view of the
+    # session" this class exists to prevent, and it has no answer for a session
+    # that hasn't settled — there is no cached day to compute an artifact from.
+    # None means "read it from cache the way we always did", which keeps the read
+    # lazy: a config with no regime gate never triggers a compute. See
+    # ``gates._regime_art``.
+    regime: dict | None = None
 
     def band_side(self) -> str:
         return self.band or ("upper" if self.side == "long" else "lower")
@@ -139,13 +147,15 @@ def needs_profile(cfg) -> bool:
 from .gates import (  # noqa: E402
     ChopGate, GxFloorGate, GxOverhangGate, GxPocShapeGate, GxRescueCapGate,
     GxRescueGate, GxValueGate, IbInOnGate, IbWidthGate, NyPocFloorGate,
-    OnHighGate, RegimeGate, StructureClarityGate, UpperOccupancyCapGate,
+    OnHighGate, RegimeGate, RegimeMirrorGate, StructureClarityGate,
+    UpperOccupancyCapGate,
     UpperOccupancyGate, VolumeProfileGate, VwapCrossGate, VwapFlatGate,
     VwapSlopeCapGate, VwapSlopeGate, WkExtGate,
 )
 
 GATE_FACTORIES[VolumeProfileGate.name] = VolumeProfileGate
 GATE_FACTORIES[RegimeGate.name] = RegimeGate
+GATE_FACTORIES[RegimeMirrorGate.name] = RegimeMirrorGate
 GATE_FACTORIES[VwapSlopeGate.name] = VwapSlopeGate
 GATE_FACTORIES[VwapSlopeCapGate.name] = VwapSlopeCapGate
 GATE_FACTORIES[VwapFlatGate.name] = VwapFlatGate

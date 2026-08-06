@@ -39,6 +39,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -82,6 +83,23 @@ DEFAULTS = {
     "ib_minutes": 60,
     "orb_windows": (5, 15, 30),
 }
+
+# Pinned IB-width tercile edges in ADR units, from vol-clock §10c (the 1/3 and
+# 2/3 quantiles of `ib_vs_adr` over the full studied window — 349 sessions,
+# measured 0.458/0.668). Pinned rather than recomputed per request so "narrow"
+# means the same thing whether you are looking at one month or all of them; the
+# study's own `_ib_width_terciles` still cuts its window's own quantiles,
+# because there the point is to split the sample evenly.
+WIDTH_TERCILE_EDGES = (0.46, 0.67)
+
+# New range a session adds *after* the IB completes, in ADR14 units (vol-clock
+# §10c). The finding is that this is a constant: corr(IB width, post-IB
+# expansion in ADR units) = +0.01 (halves −0.07/+0.14) and the expansion sits at
+# 0.39–0.44 in every width tercile — so how wide the morning ran says nothing
+# about how much more range is coming. A base rate for the range still on offer
+# at 10:30, never a forecast of where it goes; the day-range correlation the
+# same section reports (+0.61) is this constant plus the morning, not a signal.
+POST_IB_RANGE_ADD_X = 0.4
 
 
 # --- config -----------------------------------------------------------------
@@ -623,6 +641,133 @@ def get(cfg: IbConfig, refresh: bool = False) -> dict:
     result = study(cfg)
     write(cfg, result)
     return result
+
+
+def width_bucket(ib_vs_adr: float | None) -> str | None:
+    """narrow / mid / wide against the pinned ADR-unit edges (None without an
+    adr14 denominator — the first ~14 sessions of any run)."""
+    if ib_vs_adr is None:
+        return None
+    lo, hi = WIDTH_TERCILE_EDGES
+    return "narrow" if ib_vs_adr < lo else "wide" if ib_vs_adr > hi else "mid"
+
+
+def _widest_snapshot(symbol: str) -> tuple[str, dict] | None:
+    """The widest default-window IB snapshot on disk for `symbol`.
+
+    Session widths are *read* from a saved study rather than recomputed for the
+    requested range, for one reason that matters: ``adr14`` chains through the
+    sessions before it, so a day computed inside a one-month window would get a
+    different denominator (or none at all, for its first two weeks) than the
+    same day inside the full window. Reading the widest snapshot keeps
+    ``ib_vs_adr`` — and therefore the tercile chip — identical no matter what
+    range the Lab happens to be showing.
+    """
+    best: tuple[int, float, str, dict] | None = None
+    for p in IB_DIR.glob("*.json") if IB_DIR.exists() else []:
+        try:
+            d = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if (d.get("ib_version") != IB_VERSION or d.get("symbol") != symbol
+                or d.get("ib_minutes") != DEFAULTS["ib_minutes"]):
+            continue
+        span = (date.fromisoformat(d["end"]) - date.fromisoformat(d["start"])).days
+        key = (span, p.stat().st_mtime, p.stem, d)
+        if best is None or key[:2] > best[:2]:
+            best = key
+    return (best[2], best[3]) if best else None
+
+
+def _snapshot_dir_sig() -> tuple:
+    """The snapshot directory, plus (name, mtime, size) per file — a cache key.
+
+    A stat per file, where reading them is megabytes of JSON. Re-running a study
+    rewrites (or adds) a file, which moves the signature and drops the cached
+    read; same trick the tick-cache footer readers key on. The directory itself
+    leads because ``IB_DIR`` is swappable (the tests point it at a temp dir), and
+    two directories must never share a cache entry.
+    """
+    if not IB_DIR.exists():
+        return (str(IB_DIR),)
+    out = [str(IB_DIR)]
+    for p in sorted(IB_DIR.glob("*.json")):
+        try:
+            st = p.stat()
+        except OSError:  # vanished between the glob and the stat
+            continue
+        out.append((p.name, st.st_mtime, st.st_size))
+    return tuple(out)
+
+
+@lru_cache(maxsize=8)
+def _adr_index(symbol: str, _sig: tuple) -> tuple[dict | None, dict[str, float]]:
+    """``day -> adr14`` for `symbol`, out of the widest snapshot on disk.
+
+    Cached because the caller is a per-session endpoint: without this, picking a
+    replay day would re-parse every snapshot in the directory (megabytes) to read
+    one float. ``_sig`` is not used in the body — it is the cache key that makes
+    the result follow the files.
+    """
+    found = _widest_snapshot(symbol)
+    if found is None:
+        return None, {}
+    run_id, snap = found
+    source = {"run_id": run_id, "start": snap["start"], "end": snap["end"],
+              "ib_minutes": snap["ib_minutes"]}
+    return source, {r["day"]: r["adr14"] for r in snap["days"] if r.get("adr14")}
+
+
+def day_context(symbol: str, day: date) -> dict:
+    """The prior-days context for one session: ``adr14`` and where it came from.
+
+    ``symbol`` is the study root (``NQ``), not a contract. This exists for
+    callers that hold a session's own tape and need the one number that is *not*
+    in it — ``adr14`` is the mean of the fourteen sessions *before* this one, so
+    it can never be derived from today and is knowable at the open (which is
+    what makes it safe to show during a replay).
+
+    Read from the widest snapshot for the same reason ``session_widths`` is: the
+    denominator chains, so a day must always get the one it got in the full run.
+    ``adr14`` is ``None`` for a day the snapshot doesn't cover and for its first
+    fourteen sessions — honest absence, so the caller draws nothing rather than a
+    number measured against a different window.
+    """
+    source, adr = _adr_index(symbol, _snapshot_dir_sig())
+    return {"adr14": adr.get(day.isoformat()), "source": source}
+
+
+def session_widths(symbol: str, start: date, end: date) -> dict:
+    """Per-session IB width for the Lab's sessions table, sliced out of the
+    widest saved snapshot.
+
+    Display aid only — vol-clock §10c found width is a *causal-at-10:30*
+    day-character read (wide leans trend, narrow leans balance/churn) but not a
+    forecast, and the built ``ib_width`` gate stays off. Days the snapshot
+    doesn't cover are simply absent from ``days``: the caller renders a dash
+    rather than a recomputed number that would not be comparable.
+    """
+    lo, hi = WIDTH_TERCILE_EDGES
+    out = {
+        "symbol": symbol, "run_id": None, "source": None,
+        "tercile_edges": [lo, hi], "days": {},
+    }
+    found = _widest_snapshot(symbol)
+    if found is None:
+        return out
+    run_id, snap = found
+    out["run_id"] = run_id
+    out["source"] = {"start": snap["start"], "end": snap["end"],
+                     "ib_minutes": snap["ib_minutes"]}
+    lo_iso, hi_iso = start.isoformat(), end.isoformat()
+    out["days"] = {
+        r["day"]: {
+            "ib_range": r["ib_range"], "ib_vs_adr": r["ib_vs_adr"],
+            "adr14": r["adr14"], "width": width_bucket(r["ib_vs_adr"]),
+        }
+        for r in snap["days"] if lo_iso <= r["day"] <= hi_iso
+    }
+    return out
 
 
 def list_runs() -> list[dict]:

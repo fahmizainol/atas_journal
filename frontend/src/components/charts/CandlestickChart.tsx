@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CandlestickSeries,
   ColorType,
@@ -11,15 +11,17 @@ import {
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
-import { ibPalette, palette, profilePalette, regimePalette, vwapPalette } from "../../theme";
+import { emaPalette, ibPalette, palette, profilePalette, regimePalette, vwapPalette } from "../../theme";
 import { TradeRectanglePrimitive } from "./TradeRectanglePrimitive";
 import { RulerPrimitive } from "./RulerPrimitive";
 import { MarkerPrimitive } from "./MarkerPrimitive";
+import { CvdDivergencePrimitive } from "./CvdDivergencePrimitive";
 import { VwapBandPrimitive } from "./VwapBandPrimitive";
 import { VolumeProfilePrimitive } from "./VolumeProfilePrimitive";
 import { RangeProfilePrimitive } from "./RangeProfilePrimitive";
 import { InteractionPrimitive } from "./InteractionPrimitive";
 import { IndicatorLegend, type IndicatorKey, type LegendItem } from "./IndicatorLegend";
+import { ChartToolButton } from "./ChartToolButton";
 import {
   loadIndicatorVisibility,
   saveIndicatorVisibility,
@@ -35,10 +37,13 @@ import type {
   Bar,
   ChartMarker,
   CvdPoint,
+  CvdDivergence,
+  EmaPoint,
   Footprint,
   IbOverlay,
   PriceLineSpec,
   ProfilePoint,
+  RsiPoint,
   TradeRect,
   VwapPoint,
 } from "../../lib/chartTypes";
@@ -59,6 +64,24 @@ interface Props {
    */
   profileGlobex?: ProfilePoint[];
   profileNy?: ProfilePoint[];
+  /**
+   * 9/20/50/200 EMA on the 1-minute grid — the day-trading convention, drawn as
+   * context lines over the candles (9/20 the fast pullback pair, 50/200 the
+   * slower trend reference). Stamped on the minute they were computed on, so on a
+   * tick-bar chart they are sampled onto the drawn bar grid (a bar takes the
+   * latest EMA at or before its close). Each has its own legend toggle.
+   */
+  ema9?: EmaPoint[];
+  ema20?: EmaPoint[];
+  ema50?: EmaPoint[];
+  ema200?: EmaPoint[];
+  /**
+   * Wilder RSI(14), drawn as a line in its own oscillator pane under the candles
+   * (0-100, with 30/50/70 guides). Unlike the EMA it tracks the *drawn* timeframe
+   * — the backend computes it on the drawn-bar closes, so it arrives already
+   * stamped on the bar grid. Only the Interactions Lab supplies it. See RsiPoint.
+   */
+  rsi?: RsiPoint[];
   atrPoints?: ATRPoint[];
   /**
    * Cumulative volume delta (signed aggressor volume, running sum) per bar, drawn
@@ -66,6 +89,12 @@ interface Props {
    * it needs the tape's aggressor side. See lib/chartTypes.CvdPoint.
    */
   cvd?: CvdPoint[];
+  /**
+   * Price/CVD divergences, drawn as A→B lines on the CVD pane (not the price
+   * candles). Rides with the CVD series — shown only when CVD is on, since the
+   * divergence is a statement about the delta line. See CvdDivergencePrimitive.
+   */
+  cvdDivergences?: CvdDivergence[];
   markers?: ChartMarker[];
   /**
    * Level-interaction overlay from the Interactions Lab: touch dots (coloured by
@@ -78,9 +107,11 @@ interface Props {
   /**
    * Initial Balance (first 60 min of RTH): high/low drawn as flat segments from
    * the bell to the close, plus faint 1×/1.5×/2× extension guides from where the
-   * IB completes. Only the sim/Lab charts send it. See lib/chartTypes.IbOverlay.
+   * IB completes. A single overlay for the single-session sim charts, or one per
+   * session for the multi-session Interactions/Drafts tapes (each drawn in its
+   * own span). Only the sim/Lab charts send it. See lib/chartTypes.IbOverlay.
    */
-  ib?: IbOverlay | null;
+  ib?: IbOverlay | IbOverlay[] | null;
   tradeRects?: TradeRect[];
   /**
    * Open zoomed in on the (first) trade rectangle rather than fitting the whole
@@ -95,6 +126,14 @@ interface Props {
    * effect without `focusOnTrade`.
    */
   debugZoom?: boolean;
+  /**
+   * Frame this time span (bar times) on open instead of fitting the whole loaded
+   * tape — used by the continuous session chart, whose `bars` span many sessions
+   * but which should open on the one the user selected. Changing it re-frames the
+   * chart in place (no rebuild), so dragging into adjacent days keeps its zoom.
+   * Ignored while `focusOnTrade` is set (that owns the initial viewport).
+   */
+  initialTimeRange?: { from: number; to: number } | null;
   /**
    * Real volume-at-price per bar. When supplied (the sim's charts), the volume
    * profile is computed from the actual tape; without it (the journal's Databento
@@ -171,6 +210,11 @@ function tradeTooltipHtml(r: TradeRect): string {
   ].join("");
 }
 
+// How far off the loaded tape a ⚓ anchor may sit and still be kept when the
+// bars change under it: one bar at the coarsest resolution any chart draws, so
+// re-gridding 1m → 15m never drops an anchor sitting on the first/last bar.
+const GRID_SLACK_S = 15 * 60;
+
 // Client-side candlestick (+ anchored VWAPs + volume) used by both the
 // single-trade reconstruction and the full-day session views. Weekend/overnight
 // gaps collapse natively (missing bars aren't drawn).
@@ -181,8 +225,14 @@ export function CandlestickChart({
   vwapWeekly,
   profileGlobex,
   profileNy,
+  ema9,
+  ema20,
+  ema50,
+  ema200,
+  rsi,
   atrPoints,
   cvd,
+  cvdDivergences,
   markers,
   touches,
   vaSnaps,
@@ -192,6 +242,7 @@ export function CandlestickChart({
   tradeRects,
   focusOnTrade,
   debugZoom,
+  initialTimeRange,
   footprint,
   regimeStates,
   tickSize,
@@ -202,6 +253,20 @@ export function CandlestickChart({
   const ref = useRef<HTMLDivElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
   const debugRef = useRef<HTMLDivElement>(null);
+  // Normalise the IB prop to a list up front: the sim charts pass one overlay,
+  // the multi-session Interactions/Drafts tapes pass one per session. Memoised so
+  // the build effect's dependency stays reference-stable across renders.
+  const ibList = useMemo<IbOverlay[]>(
+    () => (ib ? (Array.isArray(ib) ? ib : [ib]) : []),
+    [ib],
+  );
+  // The chart instance and the desired initial frame, both in refs: the frame is
+  // read (not deps'd) by the build effect so a new selected day re-frames through
+  // the effect below rather than rebuilding the chart, and the instance lets that
+  // effect reach the timeScale without capturing it in a closure.
+  const chartApiRef = useRef<IChartApi | null>(null);
+  const initialRangeRef = useRef(initialTimeRange);
+  initialRangeRef.current = initialTimeRange;
   // Ref, not an effect dep: a new callback identity must not rebuild the chart
   // (that would lose the user's zoom/scroll), same reason as applyRef above.
   const onTradeClickRef = useRef(onTradeClick);
@@ -222,6 +287,20 @@ export function CandlestickChart({
       saveIndicatorVisibility(next);
       return next;
     });
+  // Force an indicator on. Hide/show is a sticky global preference, so a layer
+  // hidden on some other chart stays hidden here — fine for the fixed overlays,
+  // wrong for one the user just asked for by hand. Applied through the ref
+  // first so a draw in the same tick already sees it.
+  const reveal = (key: IndicatorKey) => {
+    if (visRef.current[key]) return;
+    const next = { ...visRef.current, [key]: true };
+    visRef.current = next;
+    applyRef.current?.(next);
+    saveIndicatorVisibility(next);
+    setVis(next);
+  };
+  const revealRef = useRef(reveal);
+  revealRef.current = reveal;
 
   // Fixed-range profile tool. `armed` = waiting for the drag that defines a new
   // profile; `ranges` are the ones already on the chart, any of which can be
@@ -244,7 +323,11 @@ export function CandlestickChart({
   const paintRef = useRef<(() => void) | null>(null);
 
   const arm = (v: boolean) => {
-    if (v) armRulerRef.current(false); // one drag tool owns the mouse at a time
+    // one drag/click tool owns the mouse at a time
+    if (v) {
+      armRulerRef.current(false);
+      armAvwapRef.current(false);
+    }
     armedRef.current = v;
     setArmed(v);
     armApplyRef.current?.(v);
@@ -260,13 +343,49 @@ export function CandlestickChart({
   const rulerApplyRef = useRef<((a: boolean) => void) | null>(null);
   const rulerClearRef = useRef<() => void>(() => {});
   const armRuler = (v: boolean) => {
-    if (v && armedRef.current) arm(false);
+    if (v) {
+      if (armedRef.current) arm(false);
+      armAvwapRef.current(false);
+    }
     rulerArmedRef.current = v;
     setRulerArmed(v);
     rulerApplyRef.current?.(v);
   };
   const armRulerRef = useRef(armRuler);
   armRulerRef.current = armRuler;
+
+  // Anchored-VWAP tool (TV's ⚓): arm it, click any bar, and a VWAP + ±1σ/±2σ
+  // bands draw from that bar forward — computed client-side from the bar tape, so
+  // its σ is bar-derived (typical price × volume), not the engine's tick-derived
+  // σ. One anchor at a time; re-clicking moves it, the Clear button removes it.
+  // `avwapAnchor` is a bar *time* (survives a timeframe switch, same as the
+  // ranges); the draw itself lives in the build effect and is triggered through
+  // avwapDrawRef so re-anchoring never rebuilds the chart (which would lose the
+  // user's zoom/scroll). Same three-way exclusion as the range and ruler tools.
+  const [avwapArmed, setAvwapArmed] = useState(false);
+  const [avwapAnchor, setAvwapAnchor] = useState<number | null>(null);
+  const avwapArmedRef = useRef(false);
+  const avwapAnchorRef = useRef<number | null>(null);
+  const avwapApplyRef = useRef<((a: boolean) => void) | null>(null);
+  const avwapDrawRef = useRef<(() => void) | null>(null);
+  const avwapSyncRef = useRef<() => void>(() => {});
+  avwapSyncRef.current = () => setAvwapAnchor(avwapAnchorRef.current);
+  const armAvwap = (v: boolean) => {
+    if (v) {
+      if (armedRef.current) arm(false);
+      armRulerRef.current(false);
+    }
+    avwapArmedRef.current = v;
+    setAvwapArmed(v);
+    avwapApplyRef.current?.(v);
+  };
+  const armAvwapRef = useRef(armAvwap);
+  armAvwapRef.current = armAvwap;
+  const clearAvwap = () => {
+    avwapAnchorRef.current = null;
+    avwapDrawRef.current?.(); // anchor null -> draw removes the series
+    setAvwapAnchor(null);
+  };
   // Push whatever the refs now hold into both the chart and the toolbar. Called
   // once a drag settles, never mid-drag.
   const syncRanges = () => {
@@ -297,6 +416,7 @@ export function CandlestickChart({
       if (e.key === "Escape") {
         if (armedRef.current) arm(false);
         if (rulerArmedRef.current) armRulerRef.current(false);
+        if (avwapArmedRef.current) armAvwapRef.current(false);
         rulerClearRef.current(); // Esc also dismisses a finished measurement
       }
       // Don't hijack Delete while the user is typing somewhere on the page.
@@ -323,6 +443,10 @@ export function CandlestickChart({
         background: { type: ColorType.Solid, color: palette.bg },
         textColor: palette.text,
         fontFamily: "Inter, sans-serif",
+        // Axis labels are smaller than the default 12px so the right price scale
+        // (a wide 5-digit NQ price + ".25") takes a narrower gutter — the scale
+        // auto-sizes to the widest label, and the library has no max-width knob.
+        fontSize: 9,
       },
       grid: {
         vertLines: { color: palette.grid },
@@ -332,6 +456,7 @@ export function CandlestickChart({
       timeScale: { borderColor: palette.grid, timeVisible: true, secondsVisible: false },
       crosshair: { mode: CrosshairMode.Normal },
     });
+    chartApiRef.current = chart;
 
     const candle = chart.addSeries(CandlestickSeries, {
       upColor: palette.green,
@@ -476,9 +601,9 @@ export function CandlestickChart({
       }
     };
 
-    // CVD gets the same create/remove-on-toggle treatment as ATR and its own pane.
-    // On the sim's charts ATR is never supplied (atrPoints is empty), so CVD sits
-    // directly under the ribbon; the offset keeps it correct if both ever coexist.
+    // CVD gets the same create/remove-on-toggle treatment as ATR and its own pane,
+    // stacked under it. The offset keeps it right on a chart with no ATR (the
+    // journal's own charts carry no CVD, the Lab's carry both).
     let cvdSeries: ISeriesApi<"Line"> | null = null;
     const cvdPane = atrPane + (atrPoints && atrPoints.length > 0 ? 1 : 0);
     const addCvd = () => {
@@ -503,10 +628,64 @@ export function CandlestickChart({
         lineStyle: 2,
         axisLabelVisible: false,
       });
+      // Divergence A→B lines live on this pane, attached to the CVD series so
+      // they resolve in delta units and vanish with CVD when it's toggled off.
+      if (cvdDivergences && cvdDivergences.length > 0) {
+        cvdSeries.attachPrimitive(new CvdDivergencePrimitive(cvdDivergences) as any);
+      }
       const panes = chart.panes();
       if (panes.length > cvdPane) {
         panes[0].setStretchFactor(1000);
         panes[cvdPane].setStretchFactor(200);
+      }
+    };
+
+    // RSI gets the same create/remove-on-toggle treatment as ATR/CVD and its own
+    // pane, stacked after them. It's computed on the drawn bars (so it tracks the
+    // chart's timeframe), arriving already stamped on the bar grid; the forward-walk
+    // is a straight copy, but kept identical to the EMA's so it's robust to any
+    // stamp that lands off-grid. The pane is pinned to 0-100 with 30/50/70 guides —
+    // the oscillator's whole read is where it sits between those bands.
+    let rsiSeries: ISeriesApi<"Line"> | null = null;
+    const rsiPane = cvdPane + (cvd && cvd.length > 0 ? 1 : 0);
+    const addRsi = () => {
+      rsiSeries = chart.addSeries(
+        LineSeries,
+        {
+          color: palette.violet,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: true,
+          priceFormat: { type: "price", precision: 1, minMove: 0.1 },
+          // Pin the pane to the oscillator's fixed 0-100 range so the guide lines
+          // mean the same thing every session, whatever the day's RSI swing.
+          autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }),
+        },
+        rsiPane,
+      );
+      const data: { time: Time; value: number }[] = [];
+      let j = 0;
+      for (const b of bars) {
+        while (j + 1 < rsi!.length && rsi![j + 1].time <= b.time) j++;
+        const p = rsi![j];
+        if (!p || p.time > b.time) continue; // a bar before the first RSI point
+        data.push({ time: b.time as Time, value: p.value });
+      }
+      rsiSeries.setData(data);
+      // Overbought / midline / oversold guides — the levels the RSI read is against.
+      for (const lvl of [70, 50, 30]) {
+        rsiSeries.createPriceLine({
+          price: lvl,
+          color: lvl === 50 ? palette.grid : palette.muted,
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+        });
+      }
+      const panes = chart.panes();
+      if (panes.length > rsiPane) {
+        panes[0].setStretchFactor(1000);
+        panes[rsiPane].setStretchFactor(200);
       }
     };
 
@@ -517,6 +696,32 @@ export function CandlestickChart({
       panes0[0].setStretchFactor(1000);
       panes0[ribbonPane].setStretchFactor(70);
     }
+
+    // A non-finite value is a session-boundary break sentinel (see
+    // Interactions.tsx). lightweight-charts has no native line gaps: a
+    // whitespace item only reserves a time-scale slot — the series drops it
+    // from its own rows and the line renderer connects the surviving
+    // neighbours straight across. Each drawn segment takes the colour of the
+    // point it *leaves*, so the break is enforced by painting the last real
+    // point before the sentinel fully transparent: the stroke arriving there
+    // keeps the series colour, the bridge to the next session doesn't render.
+    const GAP_COLOR = "rgba(0,0,0,0)";
+    const gappedLineData = <K extends string>(
+      pts: ({ time: number } & Record<K, number>)[],
+      key: K,
+    ): { time: Time; value?: number; color?: string }[] => {
+      const out: { time: Time; value?: number; color?: string }[] = [];
+      for (const v of pts) {
+        if (Number.isFinite(v[key])) {
+          out.push({ time: v.time as Time, value: v[key] });
+        } else {
+          const prev = out.length > 0 ? out[out.length - 1] : null;
+          if (prev && prev.value !== undefined) prev.color = GAP_COLOR;
+          out.push({ time: v.time as Time });
+        }
+      }
+      return out;
+    };
 
     // One anchored VWAP = 5 lines (mid, ±1σ, ±2σ) plus a shaded fill between the
     // σ bands. The σ lines are dashed and fade outward so they read as an
@@ -532,7 +737,7 @@ export function CandlestickChart({
         lineWidth: 2,
         priceLineVisible: false,
       });
-      mid.setData(points.map((v) => ({ time: v.time as Time, value: v.middle })));
+      mid.setData(gappedLineData(points, "middle"));
       series.push(mid);
       const bands = [
         { keys: ["upper1", "lower1"], color: colors.band1 },
@@ -547,7 +752,7 @@ export function CandlestickChart({
             priceLineVisible: false,
             lastValueVisible: false,
           });
-          line.setData(points.map((v) => ({ time: v.time as Time, value: v[key] })));
+          line.setData(gappedLineData(points, key));
           series.push(line);
         }
       }
@@ -561,6 +766,68 @@ export function CandlestickChart({
     const ny = vwapNy && vwapNy.length > 0 ? addVwap(vwapNy, vwapPalette.ny) : null;
     const weekly =
       vwapWeekly && vwapWeekly.length > 0 ? addVwap(vwapWeekly, vwapPalette.weekly) : null;
+
+    // User-anchored VWAP (the ⚓ tool). Computed here from the bars in the browser
+    // — running Σv, Σpv, Σp²v over each bar's typical price (H+L+C)/3 from the
+    // anchor bar forward, the same bar-derived formula the journal charts use
+    // (api/charts_data._vwap_rows), NOT the engine's tick-derived σ. Redrawn
+    // imperatively whenever the anchor moves; the anchor is a bar *time*, so it
+    // re-snaps onto the current grid after a timeframe switch, exactly like the
+    // fixed-range profiles.
+    let avwap: { series: ISeriesApi<"Line">[]; band: VwapBandPrimitive } | null = null;
+    const computeAvwap = (i0: number): VwapPoint[] => {
+      const out: VwapPoint[] = [];
+      let sumV = 0;
+      let sumPV = 0;
+      let sumP2V = 0;
+      for (let i = i0; i <= last; i++) {
+        const b = bars[i];
+        const typ = (b.high + b.low + b.close) / 3;
+        sumV += b.volume;
+        sumPV += typ * b.volume;
+        sumP2V += typ * typ * b.volume;
+        if (sumV <= 0) continue; // no volume yet -> no defined VWAP
+        const mid = sumPV / sumV;
+        const sd = Math.sqrt(Math.max(0, sumP2V / sumV - mid * mid));
+        out.push({
+          time: b.time,
+          middle: mid,
+          upper1: mid + sd,
+          lower1: mid - sd,
+          upper2: mid + 2 * sd,
+          lower2: mid - 2 * sd,
+        });
+      }
+      return out;
+    };
+    const drawAvwap = () => {
+      if (avwap) {
+        for (const s of avwap.series) chart.removeSeries(s);
+        candle.detachPrimitive(avwap.band as any);
+        avwap = null;
+      }
+      const t = avwapAnchorRef.current;
+      if (t == null) return;
+      // The tape can change under a live anchor: a timeframe switch re-grids it
+      // (re-snapping is the point), but a new session window can also slide the
+      // anchored bar out of the loaded range entirely — and nearestIdx would
+      // then clamp to the first bar and draw a VWAP nobody asked for. Drop the
+      // anchor instead. The slack covers a re-grid moving an endpoint by up to
+      // one bar at the coarsest resolution the charts draw.
+      if (t < barTimes[0] - GRID_SLACK_S || t > barTimes[last] + GRID_SLACK_S) {
+        avwapAnchorRef.current = null;
+        avwapSyncRef.current();
+        return;
+      }
+      const pts = computeAvwap(nearestIdx(t));
+      if (pts.length === 0) return;
+      avwap = addVwap(pts, vwapPalette.anchored);
+      const on = visRef.current.vwapAnchored;
+      for (const s of avwap.series) s.applyOptions({ visible: on });
+      avwap.band.setVisible(on);
+    };
+    avwapDrawRef.current = drawAvwap;
+    drawAvwap(); // restore the anchor across a rebuild (data / timeframe change)
 
     // Developing value areas, one per anchor: VAH and VAL solid (they are the
     // levels the rules actually test against), POC dashed between them, each in its
@@ -585,12 +852,53 @@ export function CandlestickChart({
           priceLineVisible: false,
           lastValueVisible: false,
         });
-        s_.setData(pts.map((v) => ({ time: v.time as Time, value: v[l.key] })));
+        s_.setData(gappedLineData(pts, l.key));
         return s_;
       });
     };
     const profileGlobexSeries = addProfile(profileGlobex, profilePalette.globex);
     const profileNySeries = addProfile(profileNy, profilePalette.ny);
+
+    // 9/20 EMA (1-minute). The values arrive stamped on the minute they were
+    // computed on, but the candles may be tick bars — and an off-grid time has no
+    // coordinate — so each drawn bar takes the latest EMA at or before its close,
+    // exactly the forward-walk the regime ribbon uses. On the 1-minute chart the
+    // stamps already match the bars, so this is a straight copy; on tick bars it
+    // samples the minute line onto the tick grid (flat within a minute, stepping
+    // at each new one), keeping the line a true 1-minute EMA either way.
+    const addEma = (pts: EmaPoint[] | undefined, color: string): ISeriesApi<"Line"> | null => {
+      if (!pts || pts.length === 0) return null;
+      const s_ = chart.addSeries(LineSeries, {
+        color,
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      const data: { time: Time; value: number }[] = [];
+      let j = 0;
+      for (const b of bars) {
+        while (j + 1 < pts.length && pts[j + 1].time <= b.time) j++;
+        const p = pts[j];
+        if (!p || p.time > b.time) continue; // a bar before the first EMA point
+        data.push({ time: b.time as Time, value: p.value });
+      }
+      s_.setData(data);
+      return s_;
+    };
+    // Each EMA carries its own toggle key so the four lines hide/show
+    // independently (see the visibility pass below and the legend rows).
+    const emaSpecs: { key: IndicatorKey; pts: EmaPoint[] | undefined; color: string }[] = [
+      { key: "ema9", pts: ema9, color: emaPalette.fast },
+      { key: "ema20", pts: ema20, color: emaPalette.slow },
+      { key: "ema50", pts: ema50, color: emaPalette.trend50 },
+      { key: "ema200", pts: ema200, color: emaPalette.trend200 },
+    ];
+    const emaSeries: { key: IndicatorKey; series: ISeriesApi<"Line"> }[] = [];
+    for (const spec of emaSpecs) {
+      const s = addEma(spec.pts, spec.color);
+      if (s) emaSeries.push({ key: spec.key, series: s });
+    }
 
     if (markers && markers.length > 0) {
       const barMap = new Map(bars.map((b) => [b.time, b]));
@@ -639,14 +947,17 @@ export function CandlestickChart({
     // must not crush the candles.
     const ibSeries: ISeriesApi<"Line">[] = [];
     const ibExtSeries: ISeriesApi<"Line">[] = [];
-    if (ib) {
+    // One overlay (single-session sim charts) or many (a session per day on the
+    // Interactions/Drafts tapes). Each is drawn bell → its own session's close,
+    // so the segments never bleed across the overnight into the next session.
+    for (const one of ibList) {
       const ibSeg = (
         price: number,
         from: number,
         into: ISeriesApi<"Line">[],
         opts: { color: string; style: 0 | 2; guide?: boolean },
       ) => {
-        if (ib.end <= from) return; // degenerate session: nothing to span
+        if (one.end <= from) return; // degenerate session: nothing to span
         const s_ = chart.addSeries(LineSeries, {
           color: opts.color,
           lineWidth: 1,
@@ -658,16 +969,16 @@ export function CandlestickChart({
         });
         s_.setData([
           { time: from as Time, value: price },
-          { time: ib.end as Time, value: price },
+          { time: one.end as Time, value: price },
         ]);
         into.push(s_);
       };
-      ibSeg(ib.high, ib.start, ibSeries, { color: ibPalette.line, style: 0 });
-      ibSeg(ib.low, ib.start, ibSeries, { color: ibPalette.line, style: 0 });
-      const ibRange = ib.high - ib.low;
+      ibSeg(one.high, one.start, ibSeries, { color: ibPalette.line, style: 0 });
+      ibSeg(one.low, one.start, ibSeries, { color: ibPalette.line, style: 0 });
+      const ibRange = one.high - one.low;
       for (const m of [1, 1.5, 2]) {
-        for (const p of [ib.high + m * ibRange, ib.low - m * ibRange]) {
-          ibSeg(p, ib.formed, ibExtSeries, { color: ibPalette.ext, style: 2, guide: true });
+        for (const p of [one.high + m * ibRange, one.low - m * ibRange]) {
+          ibSeg(p, one.formed, ibExtSeries, { color: ibPalette.ext, style: 2, guide: true });
         }
       }
     }
@@ -837,7 +1148,7 @@ export function CandlestickChart({
       });
     };
     armApplyRef.current = (a: boolean) => {
-      setScroll(a || rulerArmedRef.current);
+      setScroll(a || rulerArmedRef.current || avwapArmedRef.current);
       if (ref.current) ref.current.style.cursor = a ? "crosshair" : "";
     };
     armApplyRef.current(armedRef.current);
@@ -853,6 +1164,10 @@ export function CandlestickChart({
     // a no-move click, so both TV gestures work: press-drag-release and
     // click-move-click.
     let rulerDrag: { i1: number; p1: number } | null = null;
+    // Set when a mousedown placed a VWAP anchor, so the trade-click that
+    // lightweight-charts fires from the same click doesn't also open a trade
+    // (the anchor may land on top of a trade rectangle).
+    let avwapConsumedClick = false;
 
     const onDown = (e: MouseEvent) => {
       if (e.button !== 0) return;
@@ -861,6 +1176,22 @@ export function CandlestickChart({
       if (idx == null) return;
       downX = x;
       downY = yOf(e);
+
+      if (avwapArmedRef.current) {
+        // Anchor the VWAP on the clicked bar, draw it, and put the tool away.
+        // Un-hide the layer first: its legend row only exists once an anchor is
+        // placed, so hiding it once (easy — it's the row that just appeared)
+        // would otherwise make every later anchor land invisible, and the tool
+        // read as dead.
+        revealRef.current("vwapAnchored");
+        avwapAnchorRef.current = barTimes[idx];
+        avwapConsumedClick = true;
+        drawAvwap();
+        armAvwapRef.current(false);
+        avwapSyncRef.current(); // reflect the anchor in the toolbar + legend
+        e.preventDefault();
+        return;
+      }
 
       if (rulerArmedRef.current) {
         if (rulerDrag) {
@@ -925,7 +1256,7 @@ export function CandlestickChart({
       if (!drag) {
         // Idle hover: advertise what a grab here would do, and take the mouse away
         // from the chart's panning so the grab actually lands.
-        if (armedRef.current || rulerArmedRef.current) return;
+        if (armedRef.current || rulerArmedRef.current || avwapArmedRef.current) return;
         const hit = hitTest(x);
         setScroll(hit != null);
         host.style.cursor = !hit ? "" : hit.mode === "move" ? "grab" : "col-resize";
@@ -984,7 +1315,7 @@ export function CandlestickChart({
     // clearing must also drop an in-flight anchor, or the measurement would keep
     // chasing the pointer after Esc / toggling the tool off.
     rulerApplyRef.current = (a: boolean) => {
-      setScroll(a || armedRef.current);
+      setScroll(a || armedRef.current || avwapArmedRef.current);
       if (ref.current) ref.current.style.cursor = a ? "crosshair" : "";
       if (a) ruler.setData(null); // re-arming starts a fresh measurement
       else rulerDrag = null;
@@ -994,6 +1325,14 @@ export function CandlestickChart({
       rulerDrag = null;
       ruler.setData(null);
     };
+
+    // Arming the ⚓ tool just sets the crosshair and takes the pointer off panning
+    // so the anchor click lands cleanly; the actual placement happens in onDown.
+    avwapApplyRef.current = (a: boolean) => {
+      setScroll(a || armedRef.current || rulerArmedRef.current);
+      if (ref.current) ref.current.style.cursor = a ? "crosshair" : "";
+    };
+    avwapApplyRef.current(avwapArmedRef.current);
 
     host.addEventListener("mousedown", onDown);
     // Move/up on the window, so a drag that leaves the chart still tracks and,
@@ -1011,8 +1350,11 @@ export function CandlestickChart({
       ny?.band.setVisible(v.vwapNy);
       for (const s of weekly?.series ?? []) s.applyOptions({ visible: v.vwapWeekly });
       weekly?.band.setVisible(v.vwapWeekly);
+      for (const s of avwap?.series ?? []) s.applyOptions({ visible: v.vwapAnchored });
+      avwap?.band.setVisible(v.vwapAnchored);
       for (const s of profileGlobexSeries) s.applyOptions({ visible: v.developingProfileGlobex });
       for (const s of profileNySeries) s.applyOptions({ visible: v.developingProfileNy });
+      for (const { key, series } of emaSeries) series.applyOptions({ visible: v[key] });
       for (const l of levelLines) l.applyOptions({ lineVisible: v.levels, axisLabelVisible: v.levels });
       for (const s of ibSeries) s.applyOptions({ visible: v.initialBalance });
       for (const s of ibExtSeries) s.applyOptions({ visible: v.ibExtensions });
@@ -1029,6 +1371,13 @@ export function CandlestickChart({
         else if (!v.cvd && cvdSeries) {
           chart.removeSeries(cvdSeries);
           cvdSeries = null;
+        }
+      }
+      if (rsi && rsi.length > 0) {
+        if (v.rsi && !rsiSeries) addRsi();
+        else if (!v.rsi && rsiSeries) {
+          chart.removeSeries(rsiSeries);
+          rsiSeries = null;
         }
       }
     };
@@ -1085,6 +1434,7 @@ export function CandlestickChart({
           if (
             armedRef.current ||
             rulerArmedRef.current ||
+            avwapArmedRef.current ||
             (param.point && hitTest(param.point.x))
           ) {
             tip.style.display = "none";
@@ -1111,7 +1461,13 @@ export function CandlestickChart({
 
         chart.subscribeClick((param) => {
           const cb = onTradeClickRef.current;
-          if (armedRef.current || rulerArmedRef.current || !cb || !param.point) return;
+          // Swallow the click that just placed a VWAP anchor.
+          if (avwapConsumedClick) {
+            avwapConsumedClick = false;
+            return;
+          }
+          if (armedRef.current || rulerArmedRef.current || avwapArmedRef.current || !cb || !param.point)
+            return;
           if (hitTest(param.point.x)) return; // a profile is covering this trade
           const r = hitRect(param.point.x, param.point.y);
           if (r) cb(r);
@@ -1182,6 +1538,14 @@ export function CandlestickChart({
         };
         debugRaf = requestAnimationFrame(showDebug);
       }
+    } else if (initialRangeRef.current) {
+      // A continuous multi-session tape: open on the selected day's span rather
+      // than fitting every loaded session. Off-grid endpoints are fine — the
+      // scale snaps them onto the nearest bars.
+      chart.timeScale().setVisibleRange({
+        from: initialRangeRef.current.from as Time,
+        to: initialRangeRef.current.to as Time,
+      });
     } else {
       chart.timeScale().fitContent();
     }
@@ -1193,10 +1557,13 @@ export function CandlestickChart({
 
     return () => {
       if (debugRaf) cancelAnimationFrame(debugRaf);
+      chartApiRef.current = null;
       applyRef.current = null;
       armApplyRef.current = null;
       rulerApplyRef.current = null;
       rulerClearRef.current = () => {};
+      avwapApplyRef.current = null;
+      avwapDrawRef.current = null;
       paintRef.current = null;
       host.removeEventListener("mousedown", onDown);
       window.removeEventListener("mousemove", onMove);
@@ -1213,14 +1580,20 @@ export function CandlestickChart({
     vwapWeekly,
     profileGlobex,
     profileNy,
+    ema9,
+    ema20,
+    ema50,
+    ema200,
+    rsi,
     atrPoints,
     cvd,
+    cvdDivergences,
     markers,
     touches,
     vaSnaps,
     priceLines,
     levels,
-    ib,
+    ibList,
     tradeRects,
     focusOnTrade,
     debugZoom,
@@ -1230,6 +1603,21 @@ export function CandlestickChart({
     pointValue,
     height,
   ]);
+
+  // Re-frame on a new selected day without rebuilding: when the tape spans many
+  // sessions and only the focus span changes (same bars), scroll to it in place
+  // so the user's zoom into a neighbour isn't thrown away. Skipped under
+  // `focusOnTrade`, which owns the viewport; the initial frame is set in the
+  // build effect above, so this only fires on subsequent changes.
+  useEffect(() => {
+    if (focusOnTrade || !initialTimeRange) return;
+    const chart = chartApiRef.current;
+    if (!chart) return;
+    chart.timeScale().setVisibleRange({
+      from: initialTimeRange.from as Time,
+      to: initialTimeRange.to as Time,
+    });
+  }, [initialTimeRange, focusOnTrade]);
 
   const legendItems: LegendItem[] = [];
   if (vwapGlobex && vwapGlobex.length > 0)
@@ -1250,6 +1638,12 @@ export function CandlestickChart({
       label: "VWAP · Weekly ±1σ ±2σ",
       color: vwapPalette.weekly.middle,
     });
+  if (avwapAnchor != null)
+    legendItems.push({
+      key: "vwapAnchored",
+      label: "VWAP · Anchored ±1σ ±2σ",
+      color: vwapPalette.anchored.middle,
+    });
   if (profileGlobex && profileGlobex.length > 0)
     legendItems.push({
       key: "developingProfileGlobex",
@@ -1262,13 +1656,25 @@ export function CandlestickChart({
       label: "Developing VA · NY VAH/POC/VAL",
       color: profilePalette.ny.edge,
     });
+  // One legend row per EMA so each hides/shows on its own (see emaSeries above).
+  const emaLegend: { key: IndicatorKey; pts?: EmaPoint[]; label: string; color: string }[] = [
+    { key: "ema9", pts: ema9, label: "EMA 9 · 1-minute", color: emaPalette.fast },
+    { key: "ema20", pts: ema20, label: "EMA 20 · 1-minute", color: emaPalette.slow },
+    { key: "ema50", pts: ema50, label: "EMA 50 · 1-minute", color: emaPalette.trend50 },
+    { key: "ema200", pts: ema200, label: "EMA 200 · 1-minute", color: emaPalette.trend200 },
+  ];
+  for (const e of emaLegend)
+    if (e.pts && e.pts.length > 0)
+      legendItems.push({ key: e.key, label: e.label, color: e.color });
   if (atrPoints && atrPoints.length > 0)
     legendItems.push({ key: "atr", label: "ATR 14", color: palette.gold });
   if (cvd && cvd.length > 0)
     legendItems.push({ key: "cvd", label: "CVD · cumulative delta", color: palette.blue });
+  if (rsi && rsi.length > 0)
+    legendItems.push({ key: "rsi", label: "RSI 14", color: palette.violet });
   if (levels && levels.length > 0)
     legendItems.push({ key: "levels", label: "Session levels", color: palette.blue });
-  if (ib) {
+  if (ibList.length > 0) {
     legendItems.push({
       key: "initialBalance",
       label: "Initial Balance · first 60m H/L",
@@ -1297,37 +1703,62 @@ export function CandlestickChart({
   return (
     <div style={{ position: "relative", width: "100%" }}>
       <div className="chart-tools">
-        <button
-          className={`chart-tool${armed ? " on" : ""}`}
+        <ChartToolButton
+          icon="📊"
+          label={armed ? "Drag a range…" : "Fixed range VP"}
+          on={armed}
           onClick={() => arm(!armed)}
           title={
             armed
               ? "Drag across the chart to profile that range (Esc to cancel)"
               : "Fixed-range volume profile — drag across a range to profile it. Drag its edges to resize, its body to move, Del to remove."
           }
-        >
-          {armed ? "Drag a range…" : "+ Fixed range VP"}
-        </button>
-        <button
-          className={`chart-tool${rulerArmed ? " on" : ""}`}
+        />
+        <ChartToolButton
+          icon="📏"
+          label={rulerArmed ? "Measuring…" : "Measure"}
+          on={rulerArmed}
           onClick={() => armRuler(!rulerArmed)}
           title={
             rulerArmed
               ? "Drag (or click, move, click) between two points to measure (Esc to cancel)"
               : "Ruler — measure between two points: points/ticks/%, $ per lot, bars and time. Click the chart or press Esc to dismiss."
           }
-        >
-          {rulerArmed ? "Measuring…" : "📏 Measure"}
-        </button>
+        />
+        <ChartToolButton
+          icon="⚓"
+          label={avwapArmed ? "Click a bar…" : "Anchored VWAP"}
+          on={avwapArmed}
+          onClick={() => armAvwap(!avwapArmed)}
+          title={
+            avwapArmed
+              ? "Click a bar to anchor the VWAP there (Esc to cancel)"
+              : "Anchored VWAP — click any bar to draw a VWAP + ±1σ/±2σ bands from that point forward. σ is bar-derived (not tick-exact). Click again to re-anchor."
+          }
+        />
+        {avwapAnchor != null && (
+          <ChartToolButton
+            icon="⚓✕"
+            label="Clear VWAP"
+            onClick={clearAvwap}
+            title="Remove the anchored VWAP"
+          />
+        )}
         {selected != null && (
-          <button className="chart-tool" onClick={deleteSelected} title="Remove this profile (Del)">
-            Delete
-          </button>
+          <ChartToolButton
+            icon="🗑"
+            label="Delete"
+            onClick={deleteSelected}
+            title="Remove this profile (Del)"
+          />
         )}
         {ranges.length > 1 && (
-          <button className="chart-tool" onClick={clearRanges} title="Remove every fixed-range profile">
-            Clear all
-          </button>
+          <ChartToolButton
+            icon="🧹"
+            label="Clear all"
+            onClick={clearRanges}
+            title="Remove every fixed-range profile"
+          />
         )}
       </div>
       <div ref={ref} style={{ width: "100%" }} />

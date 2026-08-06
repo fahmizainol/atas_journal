@@ -24,6 +24,8 @@ import { ConfigForm } from "../components/strategies/ConfigForm";
 import { GateAuditPanel } from "../components/strategies/GateAuditPanel";
 import { RegimePnlPanel } from "../components/strategies/RegimePnlPanel";
 import { RunEdgesPanel } from "../components/strategies/RunEdgesPanel";
+import { StrategyExplainer } from "../components/strategies/StrategyExplainer";
+import { strategyExplainers } from "../lib/strategyExplainers";
 import {
   EMPTY_TRADE_FILTER,
   filterTrades,
@@ -33,7 +35,15 @@ import {
 import { RunRegimeCalendar } from "../components/strategies/RunRegimeCalendar";
 import { useRegimeDay } from "../hooks/useRegime";
 import { CLASS_LABEL, type RegimeDay } from "../lib/regimeTypes";
-import type { TradeRect } from "../lib/chartTypes";
+import type { ChartResolution, TradeRect } from "../lib/chartTypes";
+import { TimeframeControl, MINUTE_TFS } from "../components/charts/TimeframeControl";
+import {
+  DIV_TICKS_OPTIONS,
+  loadChartResolution,
+  loadDivTicks,
+  saveChartResolution,
+  saveDivTicks,
+} from "../lib/chartPrefs";
 import {
   describeDiff,
   diffConfig,
@@ -95,28 +105,113 @@ const vwapCaption = (globex: boolean) =>
     ? "Tick candles from the 18:00 ET Globex open through the bell. The engine traded the gray Globex-anchored VWAP ±1σ (dev1) and ±2σ (dev2), computed from ticks — those are the bands the rules fired on. The purple NY-anchored VWAP is drawn for context only (it starts at the bell) and no rule reads it, as is the orange weekly-anchored VWAP (anchored at the week's first Globex open; drawn only when the whole week's ticks are cached). The overnight bars feed the bands and the profile only; acceptance and the invalidations are read from RTH closes alone."
     : "Tick candles from the 18:00 ET Globex open through the bell, shown whenever the overnight ticks are cached. The engine traded the purple NY-anchored VWAP ±1σ (dev1) and ±2σ (dev2), computed from ticks — those are the bands the rules fired on, and only the RTH candles are the ones it closed on (the overnight leg is context, built separately so the session's own candle boundaries stay exactly as the engine saw them). The gray Globex-anchored VWAP and the orange weekly-anchored VWAP (anchored at the week's first Globex open) are drawn for context only and no rule reads them. Toggle any off in the legend.";
 
+// The resolution ladder for the strategy charts: the engine's own n-tick bars
+// (the candles it actually traded) first, then the shared 1m/3m/5m/15m minute
+// views over the same ticks. Built per-run so the tick label reads the config's
+// ticks_per_bar. The choice is shared across the day and by-trade charts.
+const resolutionOptions = (ticksPerBar: number) => [
+  { key: "tick", label: `${ticksPerBar}t` },
+  ...MINUTE_TFS,
+];
+
+// CVD-divergence swing size (ticks): how far price must retrace to count a swing
+// pivot the divergence scan compares against. Bigger = fewer, larger-swing
+// divergences; smaller = more, noisier. Sticks per user like the resolution; the
+// pivots are found server-side, so a change refetches the chart.
+function DivTicksToggle({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  return (
+    <div
+      style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}
+      title="CVD divergence swing size — how far price must retrace to count a swing pivot"
+    >
+      <span style={{ fontSize: 11, color: "var(--muted)" }}>CVD div swing</span>
+      <div className="radio-group">
+        {DIV_TICKS_OPTIONS.map((n) => (
+          <button
+            key={n}
+            type="button"
+            className={value === n ? "active" : ""}
+            onClick={() => onChange(n)}
+          >
+            {n}t
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // Chart for one simulated trade. Same CandlestickChart the journal uses for real
 // trades — the sim just feeds it tick bars and tick-derived VWAP instead.
-function RunTradeChart({ slug, runId, tradeNo }: { slug: string; runId: string; tradeNo: number }) {
+function RunTradeChart({
+  slug,
+  runId,
+  tradeNo,
+  resolution,
+  onResolutionChange,
+  divTicks,
+  onDivTicksChange,
+  ticksPerBar,
+}: {
+  slug: string;
+  runId: string;
+  tradeNo: number;
+  resolution: ChartResolution;
+  onResolutionChange: (r: ChartResolution) => void;
+  divTicks: number;
+  onDivTicksChange: (n: number) => void;
+  ticksPerBar: number;
+}) {
   const { scope } = useFilters();
-  const { data, isLoading } = useRunTradeChart(slug, runId, tradeNo, scope.tz || "");
+  const { data, isLoading } = useRunTradeChart(
+    slug, runId, tradeNo, scope.tz || "", resolution, divTicks);
   const rects = useMemo(() => (data?.trade_rect ? [data.trade_rect] : []), [data?.trade_rect]);
-
-  if (isLoading) return <div className="notice">Loading chart…</div>;
-  if (!data?.available || !data.bars?.length)
-    return <div className="notice">No market data for this trade.</div>;
 
   return (
     <div className="panel">
+      <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+        <TimeframeControl
+          value={resolution}
+          onChange={(tf) => onResolutionChange(tf as ChartResolution)}
+          options={resolutionOptions(ticksPerBar)}
+        />
+        <DivTicksToggle value={divTicks} onChange={onDivTicksChange} />
+      </div>
+      {isLoading ? (
+        <div className="notice">Loading chart…</div>
+      ) : !data?.available || !data.bars?.length ? (
+        <div className="notice">No market data for this trade.</div>
+      ) : (
+        <RunTradeChartBody data={data} rects={rects} />
+      )}
+    </div>
+  );
+}
+
+function RunTradeChartBody({
+  data,
+  rects,
+}: {
+  data: NonNullable<ReturnType<typeof useRunTradeChart>["data"]>;
+  rects: TradeRect[];
+}) {
+  return (
+    <>
       <CandlestickChart
-        bars={data.bars}
+        bars={data.bars ?? []}
         vwapGlobex={data.vwap_globex}
         vwapNy={data.vwap_ny}
         vwapWeekly={data.vwap_weekly}
         profileGlobex={data.profile_globex}
         profileNy={data.profile_ny}
-        atrPoints={[]}
+        ema9={data.ema9}
+        ema20={data.ema20}
+        ema50={data.ema50}
+        ema200={data.ema200}
+        rsi={data.rsi}
+        atrPoints={data.atr_points}
         cvd={data.cvd}
+        cvdDivergences={data.cvd_divergences}
         markers={data.markers}
         priceLines={data.price_lines}
         levels={[]}
@@ -151,7 +246,7 @@ function RunTradeChart({ slug, runId, tradeNo }: { slug: string; runId: string; 
           </>
         )}
       </div>
-    </div>
+    </>
   );
 }
 
@@ -216,44 +311,87 @@ function RunDayChart({
   symbol,
   day,
   onTradeClick,
+  resolution,
+  onResolutionChange,
+  divTicks,
+  onDivTicksChange,
+  ticksPerBar,
 }: {
   slug: string;
   runId: string;
   symbol: string;
   day: string;
   onTradeClick: (r: TradeRect) => void;
+  resolution: ChartResolution;
+  onResolutionChange: (r: ChartResolution) => void;
+  divTicks: number;
+  onDivTicksChange: (n: number) => void;
+  ticksPerBar: number;
 }) {
   const { scope } = useFilters();
   const tz = scope.tz || "";
-  const { data, isLoading } = useRunDayChart(slug, runId, day, tz);
+  const { data, isLoading } = useRunDayChart(slug, runId, day, tz, resolution, divTicks);
   const { data: regime } = useRegimeDay(symbol, day, tz);
-
-  if (isLoading) return <div className="notice">Loading session…</div>;
-  if (!data?.available || !data.bars?.length)
-    return <div className="notice">No market data for this day.</div>;
 
   return (
     <>
       {regime && (
         <div style={{ marginBottom: 12 }}>
-          <KpiGrid cards={regimeCards(regime)} template="repeat(4, 1fr)" />
+          <KpiGrid cards={regimeCards(regime)} template="repeat(4, 1fr)" className="lab-kpi" />
         </div>
       )}
       <div className="panel">
+        <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <TimeframeControl
+            value={resolution}
+            onChange={(tf) => onResolutionChange(tf as ChartResolution)}
+            options={resolutionOptions(ticksPerBar)}
+          />
+          <DivTicksToggle value={divTicks} onChange={onDivTicksChange} />
+        </div>
+        {isLoading ? (
+          <div className="notice">Loading session…</div>
+        ) : !data?.available || !data.bars?.length ? (
+          <div className="notice">No market data for this day.</div>
+        ) : (
+          <RunDayChartBody data={data} regime={regime} onTradeClick={onTradeClick} />
+        )}
+      </div>
+    </>
+  );
+}
+
+function RunDayChartBody({
+  data,
+  regime,
+  onTradeClick,
+}: {
+  data: NonNullable<ReturnType<typeof useRunDayChart>["data"]>;
+  regime: RegimeDay | undefined;
+  onTradeClick: (r: TradeRect) => void;
+}) {
+  return (
+    <>
         {data.trades?.length === 0 && (
           <div className="notice" style={{ marginBottom: 8 }}>
             No trades this session — the setup never armed and filled.
           </div>
         )}
         <CandlestickChart
-          bars={data.bars}
+          bars={data.bars ?? []}
           vwapGlobex={data.vwap_globex}
           vwapNy={data.vwap_ny}
           vwapWeekly={data.vwap_weekly}
           profileGlobex={data.profile_globex}
           profileNy={data.profile_ny}
-          atrPoints={[]}
+          ema9={data.ema9}
+          ema20={data.ema20}
+          ema50={data.ema50}
+          ema200={data.ema200}
+          rsi={data.rsi}
+          atrPoints={data.atr_points}
           cvd={data.cvd}
+          cvdDivergences={data.cvd_divergences}
           markers={data.markers}
           priceLines={[]}
           levels={[]}
@@ -293,7 +431,6 @@ function RunDayChart({
             </>
           )}
         </div>
-      </div>
     </>
   );
 }
@@ -382,7 +519,13 @@ function ConfigSection({
           {open ? "Hide config" : "Show config"}
         </button>
         {!open && (
-          <span className="muted" style={{ fontSize: 12, fontFamily: "monospace" }}>
+          // minWidth:0 lets this flex item shrink; overflowWrap breaks the
+          // space-free JSON blobs (nested configs) that would otherwise force a
+          // phone-width page to scroll sideways.
+          <span
+            className="muted"
+            style={{ fontSize: 12, fontFamily: "monospace", minWidth: 0, overflowWrap: "anywhere" }}
+          >
             {changed.length === 0
               ? `identical to ${referenceName}`
               : `vs ${referenceName}: ${changed.map((k) => `${k}=${js(config[k])}`).join("  ")}`}
@@ -510,11 +653,6 @@ function NewRunPanel({
   const [label, setLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pf, setPf] = useState<Preflight | null>(null);
-  // Every run buys the overnight (18:00 → 09:30 ET) on top of RTH, so its charts
-  // can draw the night and the Globex-anchored VWAP — even on an RTH strategy,
-  // which still *trades* RTH ticks alone. Tick this to buy the NY session only.
-  // A globex strategy can't honour it: the night is its input, not its garnish.
-  const [rthOnly, setRthOnly] = useState(false);
   const preflight = usePreflight(slug);
   const createRun = useCreateRun(slug);
 
@@ -565,7 +703,6 @@ function NewRunPanel({
       const res = await createRun.mutateAsync({
         config: config as unknown as SimConfig,
         label: labelValue || undefined,
-        rthOnly,
       });
       onStarted(res.run_id);
     } catch (e) {
@@ -579,7 +716,6 @@ function NewRunPanel({
     try {
       const res = await preflight.mutateAsync({
         config: config as unknown as SimConfig,
-        rthOnly,
       });
       if (res.exists) {
         // Identical config + code = the same immutable run; just open it.
@@ -636,24 +772,10 @@ function NewRunPanel({
       </div>
 
       <div className="field" style={{ marginTop: 12 }}>
-        <label className="cfg-check">
-          <input
-            type="checkbox"
-            checked={session === "globex" ? false : rthOnly}
-            disabled={session === "globex"}
-            onChange={(e) => {
-              setRthOnly(e.target.checked);
-              setPf(null); // the estimate below was priced for the other scope
-            }}
-          />
-          <span>Fetch the NY session only (09:30 – 16:00 ET)</span>
-        </label>
-        <div className="section-cap" style={{ marginTop: 4 }}>
+        <div className="section-cap">
           {session === "globex"
-            ? "This strategy reads the overnight — its VWAP is anchored at the Globex open — so the night is always fetched."
-            : rthOnly
-              ? "Cheaper, but this run's charts can't draw the overnight candles or the Globex-anchored VWAP: charts only ever read the tick cache, they never buy."
-              : "Runs also buy the overnight (18:00 → 09:30 ET) so their charts can draw the night and the Globex-anchored VWAP. It changes nothing the engine trades — this strategy still simulates on RTH ticks alone."}
+            ? "This strategy reads the overnight — its VWAP is anchored at the Globex open — so the night is part of what it trades."
+            : "Runs buy each session whole (18:00 → 18:00 ET), so their charts can draw the night and the Globex-anchored VWAP and the cross-session anchors see the 16:00 hour. It changes nothing the engine trades — this strategy still simulates on RTH ticks alone."}
         </div>
       </div>
 
@@ -693,16 +815,12 @@ function NewRunPanel({
             <> (estimated <strong>${pf.est_cost_usd.toFixed(2)}</strong>)</>
           )}
           .
-          {session !== "globex" && rthOnly ? null : (
-            <>
-              {" "}
-              Each of those sessions pulls the overnight segment (18:00 → 09:30 ET) on top of RTH
-              — roughly two and a half times the tick data of an RTH-only run.{" "}
-              {session === "globex"
-                ? "This strategy anchors its VWAP at the Globex open, so it cannot run without the night."
-                : "Tick “Fetch the NY session only” above to skip it."}
-            </>
-          )}
+          {" "}
+          Each of those sessions is bought whole (18:00 → 18:00 ET) — the overnight and the
+          post-close hour on top of RTH, roughly half as much again as the RTH ticks alone.{" "}
+          {session === "globex"
+            ? "This strategy anchors its VWAP at the Globex open, so it cannot run without the night."
+            : "The extra windows are what the charts and the weekly anchor read; the engine still trades RTH alone."}
           <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
             <button type="button" className="btn-accent" onClick={() => void start()}>
               Download & run
@@ -787,6 +905,14 @@ function RunView({
   // Client-side filter over the by-trade list (entry/exit time, exit reason, R).
   // Deliberately not in the URL: it's a skimming aid, not navigable state.
   const [tradeFilter, setTradeFilter] = useState<TradeFilter>(EMPTY_TRADE_FILTER);
+
+  // Candle resolution, shared by the day and by-trade charts so the choice
+  // carries across views. Sticky across reloads like the indicator toggles, but
+  // kept out of the URL — it's a viewing preference, not navigable state.
+  const [resolution, setResolution] = useState<ChartResolution>(loadChartResolution);
+  useEffect(() => saveChartResolution(resolution), [resolution]);
+  const [divTicks, setDivTicks] = useState<number>(loadDivTicks);
+  useEffect(() => saveDivTicks(divTicks), [divTicks]);
   const allTrades = detail?.trades ?? [];
   const tagsByNo = detail?.trade_tags ?? {};
   const tagVocab = detail?.tag_vocab ?? [];
@@ -837,6 +963,38 @@ function RunView({
         cell: (c) => {
           const r = c.getValue() as number;
           return <span className={tone(r)}>{r.toFixed(2)}</span>;
+        },
+      },
+      {
+        accessorKey: "mfe_r",
+        // Furthest the trade ever ran in profit before the exit — what was left
+        // on the table. Absent on runs predating excursion tracking.
+        header: "MFE",
+        cell: (c) => {
+          const r = c.getValue() as number | undefined;
+          if (r == null) return "—";
+          const pts = c.row.original.mfe_points;
+          return (
+            <span className={tone(r)} title={pts != null ? `${pts.toFixed(2)} pts` : undefined}>
+              {r.toFixed(2)}
+            </span>
+          );
+        },
+      },
+      {
+        accessorKey: "mae_r",
+        // Deepest heat the trade sat through — the worst it went against before
+        // working (or stopping). Negative; absent on pre-excursion runs.
+        header: "MAE",
+        cell: (c) => {
+          const r = c.getValue() as number | undefined;
+          if (r == null) return "—";
+          const pts = c.row.original.mae_points;
+          return (
+            <span className={tone(r)} title={pts != null ? `${pts.toFixed(2)} pts` : undefined}>
+              {r.toFixed(2)}
+            </span>
+          );
         },
       },
       {
@@ -907,7 +1065,7 @@ function RunView({
         referenceName={referenceName}
       />
 
-      <KpiGrid cards={kpiCards(m)} template="repeat(4, 1fr)" />
+      <KpiGrid cards={kpiCards(m)} template="repeat(4, 1fr)" className="lab-kpi" />
 
       {m.trades > 0 && m.trades < THIN_SAMPLE && (
         <div className="notice" style={{ marginTop: 12 }}>
@@ -1046,6 +1204,11 @@ function RunView({
               symbol={cfg.contract}
               day={activeDay}
               onTradeClick={openTradeFromRect}
+              resolution={resolution}
+              onResolutionChange={setResolution}
+              divTicks={divTicks}
+              onDivTicksChange={setDivTicks}
+              ticksPerBar={cfg.ticks_per_bar}
             />
           )}
         </>
@@ -1090,7 +1253,16 @@ function RunView({
                   Close ✕
                 </button>
               </div>
-              <RunTradeChart slug={slug} runId={run.run_id} tradeNo={openTrade} />
+              <RunTradeChart
+                slug={slug}
+                runId={run.run_id}
+                tradeNo={openTrade}
+                resolution={resolution}
+                onResolutionChange={setResolution}
+                divTicks={divTicks}
+                onDivTicksChange={setDivTicks}
+                ticksPerBar={cfg.ticks_per_bar}
+              />
             </div>
           )}
           {(detail?.vetoed_trades?.length ?? 0) > 0 && (
@@ -1408,7 +1580,11 @@ export function StrategyDetail() {
         <h2 className="section-title" style={{ marginBottom: 4 }}>{strat.name}</h2>
         <span className="muted">engine v{strat.version}</span>
       </div>
-      <div className="section-cap" style={{ marginBottom: 16 }}>{strat.description}</div>
+      {strategyExplainers[strat.slug] ? (
+        <StrategyExplainer spec={strategyExplainers[strat.slug]} description={strat.description} />
+      ) : (
+        <div className="section-cap" style={{ marginBottom: 16 }}>{strat.description}</div>
+      )}
 
       {staleBaseline && (
         <div className="notice" style={{ marginBottom: 12 }}>

@@ -20,8 +20,9 @@ from typing import Callable
 
 from . import engine
 from .rules import (
-    DriftFadeConfig, FadeConfig, GlobexBounceConfig, OrbConfig,
-    ProfilePullbackConfig, SimConfig, ValueRotationConfig,
+    DriftFadeConfig, DriftFadeGlobexConfig, EmaPullbackConfig, FadeConfig,
+    GlobexBounceConfig, OrbConfig,
+    ProfilePullbackConfig, SimConfig, ValueRotationConfig, WeeklyTraverseConfig,
 )
 
 
@@ -146,7 +147,12 @@ STRATEGIES: dict[str, Strategy] = {
             # False (the default) never arms and simulates identically to v12, but
             # the exit rides the base rule path, so v12 runs are quarantined rather
             # than trusted.
-            version="13",
+            # v14: added underwater_exit_after_s — flatten the open trade once it has
+            # been continuously below breakeven that long. 0 (the default) never
+            # evaluates and simulates identically to v13, but it is the first per-tick
+            # exit trigger on the base rule path, so v13 runs are quarantined rather
+            # than trusted.
+            version="14",
             confluences=("volume_profile", "regime", "vwap_slope", "vwap_cross",
                          "upper_occupancy", "gx_rescue", "gx_floor", "on_high",
                          "gx_value", "gx_poc_shape", "ny_poc_floor",
@@ -215,9 +221,18 @@ STRATEGIES: dict[str, Strategy] = {
             # v13: added daily_loss_exit_open — see vwap-upper-band-bounce v13.
             # Rides the shared run_session; False (the default) simulates
             # identically to v12.
-            version="13",
+            # v14: added underwater_exit_after_s — see vwap-upper-band-bounce
+            # v14. Rides the shared run_session; 0 (the default) simulates
+            # identically to v13.
+            version="14",
             config_cls=GlobexBounceConfig,
-            confluences=("volume_profile",),
+            # vwap_slope joined for the 2026-07 regime study: the invert-on
+            # long's split-half-stable bleed is confined to trend-down days,
+            # and ny_vwap_slope_ppm@09:45 was the only checkpoint read whose
+            # post-checkpoint veto recovered it post-hoc (bbr did not).
+            # Allowed-gate additions don't touch the base rule path, so no
+            # version bump and existing runs stay trusted.
+            confluences=("volume_profile", "vwap_slope"),
             run_session=engine.run_session_globex,
             session="globex",
         ),
@@ -240,7 +255,10 @@ STRATEGIES: dict[str, Strategy] = {
                 "exit_below_vah_bars counts closes ABOVE the VAL. The on_high and "
                 "gx_value confluences mirror onto this side too: the fill must be "
                 "within reach of the overnight LOW, and beyond (below) the "
-                "developing Globex VAL."
+                "developing Globex VAL. The regime_mirror confluence stands "
+                "the strategy down from its checkpoint on days whose morning "
+                "did not live below both anchored VWAPs — the long's regime "
+                "gate mirrored onto this side's habitat."
             ),
             # v2: added the step trail (trail_step_ticks), which moves the stop
             # on the base rule path — v1 runs are quarantined rather than trusted.
@@ -266,8 +284,13 @@ STRATEGIES: dict[str, Strategy] = {
             # v10: added daily_loss_exit_open — see vwap-upper-band-bounce v13.
             # Rides the shared run_session (via run_session_short); False (the
             # default) simulates identically to v9.
-            version="10",
-            confluences=("volume_profile", "on_high", "gx_value"),
+            # v11: added underwater_exit_after_s — see vwap-upper-band-bounce
+            # v14. Rides the shared run_session (via run_session_short); on a
+            # short "underwater" is the rip against the position, the signed
+            # mirror. 0 (the default) simulates identically to v10.
+            version="11",
+            confluences=("volume_profile", "on_high", "gx_value",
+                         "regime_mirror"),
             run_session=engine.run_session_short,
         ),
         # vwap-globex-lower-bounce retired: its short is now vwap-globex-bounce
@@ -440,6 +463,61 @@ STRATEGIES: dict[str, Strategy] = {
             session="globex",
         ),
         Strategy(
+            slug="ema-pullback-long",
+            name="EMA 9/20 Pullback (Upper Band)",
+            description=(
+                "Long the pullback-from-above onto any enabled 1-minute EMA "
+                "(use_ema9/use_ema20/use_ema50/use_ema200 — each enabled line is "
+                "its own candidate level) while the EMA sits in the configured "
+                "region of the NY VWAP upper channel, so the line and the fill "
+                "on it are both inside the bands. The EMAs are the repo's "
+                "charted lines: 1-minute bars over the overnight+RTH stream, "
+                "ewm(adjust=False), the same lines the chart draws — the engine "
+                "trades what you see. It is the profile pullback with EMAs "
+                "standing in for the developing profile levels: no acceptance "
+                "candle, no arming stretch — the EMA in force is the setup. Two "
+                "entries share the pullback classification: variant A rests a "
+                "limit on each enabled EMA and fills on the crossing back down to "
+                "it (price must first have cleared the line by rearm_ticks from "
+                "above; the fill is the transition to at-or-through, never the "
+                "standing inequality — a line rising up to meet a flat market "
+                "disarms rather than fills); variant B waits for the first bar to "
+                "close confirm_ticks back above the EMA after a touch — the bounce "
+                "confirmed — and enters at market. Exits are a fixed-tick stop and "
+                "an R-multiple or fixed-tick target, with the bounce's optional "
+                "trail. band_region is the band condition — 'channel' (inside "
+                "dev1..dev2), 'above_dev1' or 'above_dev2' (open the fill into the "
+                "overextended zone above the far band), or 'off'. require_stacked "
+                "demands the 9 sit at or above the 20 (the stacked-bull context — "
+                "the 20 below the 9); min_ema_gap_ticks skips fills where the two "
+                "lines have converged (a squeeze reads as chop the pullback has no "
+                "trend to lean on); and min_band_width_ticks skips a pinched "
+                "channel. open_stack_veto is the session-level regime gate from "
+                "the 20/50/200 study: the 1-minute 20/50/200 EMA ordering at the "
+                "close of the 09:35 bar classifies the day, and a vetoed day "
+                "(bear-stacked open, or anything-but-bull under 'not_bull') takes "
+                "no trades at all — whole-day on/off, no intraday re-arm chain "
+                "perturbation."
+            ),
+            # v2: added open_stack_veto — the ema-20-50-200-behavior study's one
+            # survivor (bear-stacked 09:35 open = the v1 run's loss engine,
+            # −$15.4k PF 0.68 vs bull +$23.1k PF 1.91 on bc875e6a). "off" (the
+            # default) takes the identical code path to v1 — the veto block and
+            # the causality floor are only entered when the knob is set — so v1
+            # runs remain comparable rather than quarantined.
+            # v3: added use_ema50/use_ema200 — the 50/200 join the 9/20 as
+            # independent candidate levels (same in-force mapping, same fill
+            # discipline). Both default False, adding no code on the traded
+            # path, so v2 (and v1) runs remain comparable.
+            version="3",
+            config_cls=EmaPullbackConfig,
+            run_session=engine.run_session_ema_pullback,
+            # Globex session: the overnight warms the 9/20 EMA exactly as the
+            # chart overlay warms, so the traded line matches the drawn one. The
+            # NY VWAP bands anchor at the bell; trading lives in RTH only.
+            session="globex",
+        ),
+        Strategy(
             slug="value-rotation",
             name="Value Rotation",
             description=(
@@ -554,9 +632,13 @@ STRATEGIES: dict[str, Strategy] = {
                 "a fixed distance. max_touches_per_zone caps fills to each "
                 "zone's first N touches. One position at a time; simultaneous "
                 "and while-in-trade drift touches ride the exit rules as "
-                "in_trade ghosts in the missed rows."
+                "in_trade ghosts in the missed rows. approach_mom_veto_min "
+                "skips with-move touches (net move in the trade's direction "
+                "over the trailing window positive at the fill); its A/B "
+                "failed — most drift touches arrive with-move and the vetoed "
+                "cohort finishes positive — so it ships off."
             ),
-            version="1",
+            version="2",
             config_cls=DriftFadeConfig,
             run_session=engine.run_session_drift_fade,
             # Globex session: the overnight feeds the Globex developing profile
@@ -590,9 +672,10 @@ STRATEGIES: dict[str, Strategy] = {
                 "idea'; this one says 'adverse excursion from my price kills "
                 "it'. Everything else — sources, warmup, touch debounce, "
                 "stability guard, entry variants, targets, trail, daily "
-                "governor — reads identically to drift-touch-fade."
+                "governor, the approach-momentum veto — reads identically to "
+                "drift-touch-fade."
             ),
-            version="1",
+            version="2",
             config_cls=DriftFadeConfig,
             run_session=engine.run_session_drift_fade_entry_stop,
             # Same data needs as the original: overnight feeds the Globex
@@ -601,6 +684,106 @@ STRATEGIES: dict[str, Strategy] = {
             # Same single-sided-only gate support as the original.
             confluences=("regime", "vwap_slope", "vwap_slope_cap", "ib_in_on",
                          "ib_width", "wk_ext", "chop", "structure_clarity"),
+        ),
+        Strategy(
+            slug="drift-touch-fade-globex",
+            name="Drift-Touch Fade (Globex Session)",
+            description=(
+                "The entry-stop drift-touch fade run over the WHOLE Globex "
+                "session, from the 18:00 ET open, instead of RTH alone. The "
+                "event and the trade are the entry-stop sibling's: a drift "
+                "touch is contact where, over the trailing GAP_LOOKBACK_BARS "
+                "bars, price's net move toward the level plus the level's net "
+                "move toward price is <= 0 (profile.gap_closer) — price was "
+                "already loitering by the level and wiggled into contact — and "
+                "the fade enters away from it with stop_ticks measured from the "
+                "FILL, target toward value. What differs is when it may fire, "
+                "which is the whole idea: the RTH siblings confine every signal "
+                "to bars closing at or after 09:30 and use the overnight as "
+                "indicator input only. Three readings had to change for the "
+                "night to be tradeable rather than merely visible. The target "
+                "is the Globex-anchored VWAP mid (gx_vwap), the session's own "
+                "value line — there is no NY VWAP at 21:00, and the RTH engine "
+                "drops any signal whose target is absent, so lifting the window "
+                "alone would have traded nothing. ONH and ONL develop — the "
+                "night's high and low SO FAR, settling at the bell — because "
+                "the RTH path's finished-night constant is only free of "
+                "lookahead if you never trade before the bell. And the Globex "
+                "profile gets its own warm-up: mature by 09:30, but degenerate "
+                "at 18:05, exactly the objection level_warmup_min raises for NY "
+                "value. The NY levels and the session open need no special "
+                "handling — they are absent before the bell either way, so they "
+                "simply switch on partway through the session. Trades are NOT "
+                "flattened at the bell: an overnight fill runs to its stop, its "
+                "target or flat_by, and since the engine holds one position it "
+                "can block the morning's signals behind it as in_trade ghosts, "
+                "which the vetoed rows record. No confluence gates — every gate "
+                "this family supports anchors to an RTH checkpoint or the NY "
+                "value edge, which an overnight fill has no reading of."
+            ),
+            version="1",
+            config_cls=DriftFadeGlobexConfig,
+            run_session=engine.run_session_drift_fade_globex,
+            # Globex session: the overnight is traded, not just read.
+            session="globex",
+        ),
+        Strategy(
+            slug="weekly-lower1-deep-traverse-long",
+            name="Weekly −1σ Deep-Traverse Long",
+            description=(
+                "Buy the session leg that ran from the weekly mid (or higher) "
+                "all the way down into the weekly −1σ band — promoted from the "
+                "weekly-lower1-deep-traverse-long draft, the strongest cell of "
+                "the weekly-band touch-context study and the only one that "
+                "survived the next-bar race correction. The event: a 1-minute "
+                "bar whose range spans the developing weekly −1σ, approached "
+                "from above, with strictly fewer than max_res_below_min prior "
+                "1-min closes below the band this session (no prior residence "
+                "— a day living under the band is a breakdown, not a "
+                "traverse), and a σ-position that reached min_origin_sigma "
+                "inside the trailing origin lookback (the leg started at the "
+                "mid or better). A touched band only re-arms after a full bar "
+                "trades clear by rearm_sigma weekly sigmas, so a choppy hour "
+                "hugging it is one touch. Entry is a market order on the tick "
+                "after the signal bar closes (the draft's next-bar-open, at "
+                "tick resolution); a fill already at or past either race "
+                "threshold is skipped — the race was decided before the trade "
+                "existed. Exits are the study's race made tradeable: the stop "
+                "a σ-fraction below the level (or a fixed distance below the "
+                "fill), the target a σ-fraction above it (or the weekly mid "
+                "tracked live, or an R multiple), and a max-hold flatten at "
+                "the study's outcome horizon. Long only by construction: the "
+                "mirror cell (upper1 deep traverse) is REVERSED, so there is "
+                "no side knob. The week's first session and any session "
+                "without an honest weekly line (a hole in the week, no cached "
+                "overnight) take no trades — absent, not approximated. "
+                "Signals while a position is open ride the exit rules as "
+                "in_trade ghosts in the missed rows. trail_stop_ticks turns "
+                "the fixed stop into the bounce's ratchet (first click at "
+                "trail_breakeven_ticks past the entry, stepping on "
+                "trail_step_ticks; the R-multiple stays measured against the "
+                "initial stop), and daily_loss_stop is the bounce's session "
+                "governor — no new entries once the session's realized net "
+                "hits the limit, and with daily_loss_exit_open the open trade "
+                "is flattened against it too."
+            ),
+            # v2: added the step trail (trail_stop_ticks family) and the daily
+            # loss stop (daily_loss_stop / daily_loss_exit_open). All off by
+            # default and a config that leaves them off simulates identically
+            # to v1 — but the trail moves the stop and the halt refuses fills
+            # on the base rule path, so v1 runs are quarantined rather than
+            # trusted.
+            # v3: added underwater_exit_after_s — flatten the open trade once it
+            # has been continuously below breakeven that long. 0 (the default)
+            # never evaluates and simulates identically to v2, but the exit rides
+            # the base rule path, so v2 runs are quarantined rather than trusted.
+            version="3",
+            config_cls=WeeklyTraverseConfig,
+            run_session=engine.run_session_weekly_traverse,
+            # Globex session: the overnight feeds the weekly anchor and the
+            # study's frame is the whole session — entries may fill overnight
+            # (rth_only confines them), which no other strategy does yet.
+            session="globex",
         ),
     ]
 }

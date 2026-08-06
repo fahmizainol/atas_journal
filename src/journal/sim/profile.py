@@ -92,17 +92,38 @@ class DevelopingProfile:
 
 
 def _value_area(hist: np.ndarray, poc: int, total: float, pct: float) -> tuple[int, int]:
-    """(lo, hi) level indices enclosing ``pct`` of ``total``, expanding from the POC."""
+    """(lo, hi) level indices enclosing ``pct`` of ``total``, expanding from the POC.
+
+    The expansion is bounded by the levels that have actually *traded*, not by the
+    length of ``hist``. That distinction is load-bearing for the developing case:
+    ``developing_profile`` sizes its array from the whole session's price range up
+    front, so at bar *k* every level above the running high (and below the running
+    low) is a zero the area could still walk into. The pair-step hops over runs of
+    empty levels, so once both neighbouring pairs are zero it used to march to the
+    array edge and report a VAH/VAL at the session's *eventual* extreme — a price
+    nothing had traded at yet, chosen by data from the future.
+
+    Measured on NQU6 2026-06-30 that put the developing VAH at 30599.75 (the day's
+    final high) from bar 403, while nothing above 30197.75 had printed. It moved
+    ~3.7% of all bars / 1.7% of RTH bars, by a median 82 points. Because the level
+    lands *away* from price it can only ever suppress a touch, never invent one —
+    so it silently dropped VAH/VAL entries on exactly the days that later ran far,
+    which flattered the drift-fade variants by ~4-5% of net.
+    """
+    nz = np.flatnonzero(hist)
+    if nz.size == 0:
+        return poc, poc
+    bot, top = int(nz[0]), int(nz[-1])
+
     target = total * pct
     acc = float(hist[poc])
     lo = hi = poc
-    top = len(hist) - 1
 
-    while acc < target and (lo > 0 or hi < top):
+    while acc < target and (lo > bot or hi < top):
         # Volume of the next two levels beyond each edge; -1 marks an edge that
         # has run out of levels, so the other side always wins the comparison.
         up = float(hist[hi + 1] + (hist[hi + 2] if hi + 2 <= top else 0.0)) if hi < top else -1.0
-        down = float(hist[lo - 1] + (hist[lo - 2] if lo - 2 >= 0 else 0.0)) if lo > 0 else -1.0
+        down = float(hist[lo - 1] + (hist[lo - 2] if lo - 2 >= bot else 0.0)) if lo > bot else -1.0
         if up < 0 and down < 0:
             break
         if up >= down:
@@ -113,7 +134,7 @@ def _value_area(hist: np.ndarray, poc: int, total: float, pct: float) -> tuple[i
                 acc += float(hist[hi])
         else:
             for _ in range(2):
-                if lo <= 0:
+                if lo <= bot:
                     break
                 lo -= 1
                 acc += float(hist[lo])

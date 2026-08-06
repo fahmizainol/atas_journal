@@ -11,7 +11,11 @@ const FILL_ALPHA = 0.3; // 70% transparent
 
 class BandRenderer {
   constructor(
-    private points: VwapPoint[],
+    // Read through an accessor, not a captured array: the Simulator's replay
+    // grows its band a point per bar and swaps the array in as the tape plays,
+    // so the renderer must always draw the current points, not the ones that
+    // existed when the primitive was attached.
+    private points: () => VwapPoint[],
     private rgb: string,
     private chart: IChartApi,
     private series: ISeriesApi<"Candlestick">,
@@ -19,7 +23,8 @@ class BandRenderer {
   ) {}
 
   draw(target: any) {
-    if (!this.visible() || this.points.length < 2) return;
+    const points = this.points();
+    if (!this.visible() || points.length < 2) return;
     target.useMediaCoordinateSpace((scope: any) => {
       const ctx: CanvasRenderingContext2D = scope.context;
       const ts = this.chart.timeScale();
@@ -28,17 +33,26 @@ class BandRenderer {
       // outside the visible scale) breaks the ribbon into a separate polygon
       // rather than closing across the gap.
       const cols: { x: number; inner: number; outer: number }[][] = [[], []];
-      for (const p of this.points) {
-        const x = ts.timeToCoordinate(p.time as Time);
-        const yU1 = this.series.priceToCoordinate(p.upper1);
-        const yU2 = this.series.priceToCoordinate(p.upper2);
-        const yL1 = this.series.priceToCoordinate(p.lower1);
-        const yL2 = this.series.priceToCoordinate(p.lower2);
+      for (const p of points) {
+        // A non-finite point is a session-boundary break (see Interactions.tsx) —
+        // split the ribbon here so the fill stops at the anchor's end rather than
+        // washing across the gap to the next session.
+        const x =
+          Number.isFinite(p.upper1) &&
+          Number.isFinite(p.upper2) &&
+          Number.isFinite(p.lower1) &&
+          Number.isFinite(p.lower2)
+            ? ts.timeToCoordinate(p.time as Time)
+            : null;
         if (x == null) {
           cols[0].push(null as any);
           cols[1].push(null as any);
           continue;
         }
+        const yU1 = this.series.priceToCoordinate(p.upper1);
+        const yU2 = this.series.priceToCoordinate(p.upper2);
+        const yL1 = this.series.priceToCoordinate(p.lower1);
+        const yL2 = this.series.priceToCoordinate(p.lower2);
         cols[0].push(yU1 == null || yU2 == null ? (null as any) : { x, inner: yU1, outer: yU2 });
         cols[1].push(yL1 == null || yL2 == null ? (null as any) : { x, inner: yL1, outer: yL2 });
       }
@@ -70,7 +84,7 @@ class BandRenderer {
 class BandPaneView {
   private _renderer: BandRenderer;
   constructor(
-    points: VwapPoint[],
+    points: () => VwapPoint[],
     rgb: string,
     chart: IChartApi,
     series: ISeriesApi<"Candlestick">,
@@ -107,12 +121,20 @@ export class VwapBandPrimitive {
     this.requestUpdate?.();
   }
 
+  // Replace the points and repaint. The journal charts set their band once at
+  // build time; the Simulator calls this on every snapshot and playback step, so
+  // the fill develops with the tape exactly like the σ lines it shades between.
+  setPoints(points: VwapPoint[]) {
+    this.points = points;
+    this.requestUpdate?.();
+  }
+
   attached(param: any) {
     this.chart = param.chart;
     this.series = param.series;
     this.requestUpdate = param.requestUpdate;
     this.views = [
-      new BandPaneView(this.points, this.rgb, this.chart, this.series, () => this.visible),
+      new BandPaneView(() => this.points, this.rgb, this.chart, this.series, () => this.visible),
     ];
     this.requestUpdate?.();
   }

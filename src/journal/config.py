@@ -31,6 +31,15 @@ for _d in (IMPORTS_DIR, BACKTEST_DIR, LIVE_DIR, REPLAY_DIR, CACHE_DIR):
 # counts as settled without needing to survive a tick unchanged.
 WATCH_INTERVAL_S = 60
 WATCH_SETTLED_AGE_S = 120
+# Background auto-import scanning of IMPORTS_DIR. Off by default; imports are
+# driven manually via the Imports UI / scan_now endpoint. Set WATCH_ENABLED=1
+# (or true/yes/on) to re-enable the polling loop.
+WATCH_ENABLED = os.environ.get("WATCH_ENABLED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # --- Timezones -----------------------------------------------------------
 # ATAS Journal/Executions timestamps are local Asia/Kuala_Lumpur (UTC+8).

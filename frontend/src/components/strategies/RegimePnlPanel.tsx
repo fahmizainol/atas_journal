@@ -44,47 +44,49 @@ interface Row {
 
 function SummaryTable({ rows, head }: { rows: Row[]; head: string }) {
   return (
-    <table className="data-table">
-      <thead>
-        <tr>
-          <th style={th}>{head}</th>
-          <th style={th}>Days</th>
-          <th style={th}>Net</th>
-          <th style={th}>Avg / day</th>
-          <th style={th}>Trades</th>
-          <th style={th}>Win rate</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.label}>
-            <td>
-              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                {r.color && (
-                  <span
-                    style={{
-                      width: 10,
-                      height: 10,
-                      borderRadius: 3,
-                      background: r.color,
-                      flex: "0 0 auto",
-                    }}
-                  />
-                )}
-                {r.label}
-              </span>
-            </td>
-            <td>{r.days}</td>
-            <td className={tone(r.net)} style={{ fontWeight: 600 }}>
-              {fmt(r.net)}
-            </td>
-            <td className={tone(r.net)}>{r.avgNet == null ? "—" : fmt(r.avgNet)}</td>
-            <td>{r.trades}</td>
-            <td>{r.winRate == null ? "—" : fmtPct(r.winRate, 0)}</td>
+    <div className="table-scroll-x">
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th style={th}>{head}</th>
+            <th style={th}>Days</th>
+            <th style={th}>Net</th>
+            <th style={th}>Avg / day</th>
+            <th style={th}>Trades</th>
+            <th style={th}>Win rate</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <td>
+                <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {r.color && (
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 3,
+                        background: r.color,
+                        flex: "0 0 auto",
+                      }}
+                    />
+                  )}
+                  {r.label}
+                </span>
+              </td>
+              <td>{r.days}</td>
+              <td className={tone(r.net)} style={{ fontWeight: 600 }}>
+                {fmt(r.net)}
+              </td>
+              <td className={tone(r.net)}>{r.avgNet == null ? "—" : fmt(r.avgNet)}</td>
+              <td>{r.trades}</td>
+              <td>{r.winRate == null ? "—" : fmtPct(r.winRate, 0)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -111,57 +113,59 @@ function Leaderboard({
 
   return (
     <>
-      <table className="data-table">
-        <thead>
-          <tr>
-            <th style={th}>KPI @ {cp}</th>
-            <th style={th}>Days</th>
-            <th style={th} title="Spearman rank correlation with the day's net">
-              ρ
-            </th>
-            <th style={th} title="Avg net of a day in the KPI's top third, minus one in its bottom third">
-              Top ⅓ − bottom ⅓ / day
-            </th>
-            <th style={th} title="Win-rate points, top third minus bottom third">
-              Win rate Δ
-            </th>
-            <th style={th} title="How often shuffled P&L produces a correlation this strong">
-              Luck
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr
-              key={r.key}
-              onClick={() => onPick(r.key)}
-              className={r.key === selected ? "selected" : undefined}
-              style={{ cursor: "pointer", opacity: r.holds ? 1 : 0.55 }}
-              title="Show this KPI's bands below"
-            >
-              <td>{r.label}</td>
-              <td>{r.days}</td>
-              <td className={tone(r.rho)}>{sign(r.rho, 2)}</td>
-              <td className={tone(r.edge)} style={{ fontWeight: 600 }}>
-                {r.edge >= 0 ? "+" : ""}
-                {fmt(r.edge)}
-              </td>
-              <td className={tone(r.win_edge)}>{sign(r.win_edge)} pts</td>
-              <td>
-                {r.holds ? (
-                  <span className="badge badge-sm" title="Survives the multiple-testing bar">
-                    holds
-                  </span>
-                ) : (
-                  <span className="muted" title="Shuffled P&L produces this often — treat as noise">
-                    {r.luck < 0.01 ? "<1%" : `${Math.round(r.luck * 100)}%`}
-                  </span>
-                )}
-              </td>
+      <div className="table-scroll-x">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th style={th}>KPI @ {cp}</th>
+              <th style={th}>Days</th>
+              <th style={th} title="Spearman rank correlation with the day's net">
+                ρ
+              </th>
+              <th style={th} title="Avg net of a day in the KPI's top third, minus one in its bottom third">
+                Top ⅓ − bottom ⅓ / day
+              </th>
+              <th style={th} title="Win-rate points, top third minus bottom third">
+                Win rate Δ
+              </th>
+              <th style={th} title="How often shuffled P&L produces a correlation this strong">
+                Luck
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr
+                key={r.key}
+                onClick={() => onPick(r.key)}
+                className={r.key === selected ? "selected" : undefined}
+                style={{ cursor: "pointer", opacity: r.holds ? 1 : 0.55 }}
+                title="Show this KPI's bands below"
+              >
+                <td>{r.label}</td>
+                <td>{r.days}</td>
+                <td className={tone(r.rho)}>{sign(r.rho, 2)}</td>
+                <td className={tone(r.edge)} style={{ fontWeight: 600 }}>
+                  {r.edge >= 0 ? "+" : ""}
+                  {fmt(r.edge)}
+                </td>
+                <td className={tone(r.win_edge)}>{sign(r.win_edge)} pts</td>
+                <td>
+                  {r.holds ? (
+                    <span className="badge badge-sm" title="Survives the multiple-testing bar">
+                      holds
+                    </span>
+                  ) : (
+                    <span className="muted" title="Shuffled P&L produces this often — treat as noise">
+                      {r.luck < 0.01 ? "<1%" : `${Math.round(r.luck * 100)}%`}
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <div className="section-cap" style={{ marginTop: 6 }}>
         Ranked by what a day in the KPI's top third pays over one in its bottom third — click a row
         to see its bands. <strong>“Luck”</strong> is how often shuffled P&amp;L produces a

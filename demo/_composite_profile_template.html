@@ -1,0 +1,585 @@
+<meta charset="utf-8"/>
+<title>Composite volume profiles — which sessions belong together</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0e13; color:#cbd5e1; font:14px/1.5 Inter,system-ui,sans-serif; }
+  #wrap { max-width:1240px; margin:0 auto; padding:18px 20px 48px; }
+  h1 { font-size:20px; font-weight:600; margin:0 0 4px; }
+  .lede { color:#64748b; font-size:12.5px; margin:0 0 14px; max-width:940px; }
+  .lede b { color:#94a3b8; }
+  .warn { display:flex; gap:10px; padding:10px 13px; margin:0 0 16px; font-size:12.5px;
+          background:#1a1410; border:1px solid #3a2a18; border-radius:8px; color:#c8a06a; }
+  .warn b { color:#e0b878; }
+  .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 26px; padding:12px 14px;
+              background:#11151d; border:1px solid #1c2230; border-radius:8px; margin:0 0 14px; }
+  .ctl { display:flex; align-items:center; gap:9px; font-size:12.5px; color:#94a3b8; }
+  .ctl b { color:#e2e8f0; font-weight:600; }
+  .seg { display:flex; border:1px solid #1c2230; border-radius:6px; overflow:hidden; }
+  .seg button { background:#0b0e13; color:#94a3b8; border:none; padding:5px 12px; font:inherit; font-size:12px; cursor:pointer; }
+  .seg button.on { background:#1c2230; color:#e2e8f0; }
+  .scoreboard { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin:0 0 16px; }
+  .card { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; font-size:12px; color:#94a3b8; cursor:pointer; }
+  .card.on { border-color:#3c4a63; background:#161b26; }
+  .card h3 { margin:0 0 5px; font-size:12.5px; color:#e2e8f0; font-weight:600; }
+  .card .big { font-size:19px; color:#e2e8f0; font-weight:600; }
+  .card .bad { color:#e0b878; }
+  .card .good { color:#21c07a; }
+  .tabs { display:flex; flex-wrap:wrap; gap:7px; margin:0 0 14px; }
+  .tab { padding:6px 12px; cursor:pointer; border:1px solid #1c2230; border-radius:6px;
+         background:#11151d; color:#94a3b8; font:inherit; font-size:12px; }
+  .tab.active { background:#1c2230; color:#e2e8f0; border-color:#3c4a63; }
+  .tab .flag { color:#e0b878; }
+  .info { display:flex; flex-wrap:wrap; gap:6px 22px; margin:0 0 10px; padding:11px 14px;
+          background:#11151d; border:1px solid #1c2230; border-radius:8px; font-size:12.5px; }
+  .info b { color:#e2e8f0; }
+  svg { display:block; width:100%; height:auto; background:#0b0e13;
+        border:1px solid #1c2230; border-radius:8px; }
+  .legend { display:flex; flex-wrap:wrap; gap:18px; margin:8px 2px 0; font-size:12px; color:#64748b; }
+  .key { display:inline-block; width:16px; height:0; border-top-width:2px; margin-right:6px; vertical-align:middle; }
+  .sw { display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:6px; vertical-align:middle; }
+  .scorecard { margin-top:12px; padding:11px 14px; background:#11151d; border:1px solid #1c2230;
+               border-radius:8px; font-size:12.5px; color:#94a3b8; }
+  .scorecard:empty { display:none; }
+  .scorecard b { color:#e2e8f0; }
+  .scorecard table { border-collapse:collapse; margin-top:7px; font-size:12px; }
+  .scorecard td, .scorecard th { padding:2.5px 16px 2.5px 0; text-align:right; font-weight:400; }
+  .scorecard th { color:#64748b; font-size:11px; }
+  .scorecard td:first-child, .scorecard th:first-child { text-align:left; }
+  .note { margin-top:22px; padding:12px 14px; background:#11151d; border:1px solid #1c2230;
+          border-radius:8px; font-size:12px; color:#64748b; }
+  .note b { color:#94a3b8; }
+  .note ul { margin:6px 0 0; padding-left:18px; } .note li { margin:4px 0; }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#94a3b8; }
+  .amber { color:#e0b878; } .muted { color:#64748b; }
+  input[type=range] { accent-color:#8b5cf6; }
+</style>
+
+<div id="wrap">
+  <h1>Composite volume profiles</h1>
+  <p class="lede">A composite merges several sessions into one distribution, and you read levels off the result.
+    The unasked question is <b>which sessions belong in it</b>. Four rules, same data — watch the <b>shape</b>,
+    not the levels. Stretch the window and the value area inflates until it stops naming a location: ~226 pt under the
+    balance rule, ~1630 pt over 20 sessions. A value-area edge that wide is not a level.</p>
+
+  <div class="warn"><b>This is a viewer, not a study.</b>
+    <span>Nothing here is scored against forward returns. It shows what each compositing rule produces so the rule
+    can be chosen on structure rather than convention. Our own VP-level work has repeatedly come back null —
+    see the notes at the foot before treating any of these levels as tradeable.</span></div>
+
+  <div class="controls">
+    <div class="ctl"><b>view</b><span class="seg" id="modeSeg"></span></div>
+    <div class="ctl" id="ruleWrap"><b>compositing rule</b><span class="seg" id="ruleSeg"></span></div>
+    <div class="ctl"><b>candles</b><span class="seg" id="tfSeg"></span></div>
+    <div class="ctl"><b>node prominence</b><span class="seg" id="promSeg"></span></div>
+    <div class="ctl"><b>smoothing</b><span class="seg" id="smoothSeg"></span></div>
+    <div class="ctl"><b>events</b><span class="seg" id="evSeg"></span></div>
+    <div class="ctl" id="evMinWrap"><b>size</b><span class="seg" id="evMinSeg"></span></div>
+    <div class="ctl" id="scrubWrap" style="flex:1 1 260px"><b>time</b>
+      <input id="scrub" type="range" min="0" max="1" step="1" value="0" style="flex:1"/>
+      <b id="scrubLabel" style="min-width:44px">09:30</b></div>
+    <div class="ctl muted">__N_SESSIONS__ sessions · __FIRST_DAY__ → __LAST_DAY__ · __VA_PCT__% value area</div>
+  </div>
+
+  <div class="scoreboard" id="score"></div>
+  <div class="tabs" id="tabs"></div>
+  <div class="info" id="info"></div>
+  <div id="canvas"></div>
+  <div class="legend">
+    <span><i class="sw" style="background:#8b5cf6"></i>composite profile</span>
+    <span><i class="sw" style="background:#e0b878"></i>HVN hump</span>
+    <span><i class="key" style="border-top:2px dashed #38bdf8"></i>LVN trough</span>
+    <span><i class="key" style="border-top:2px solid #f5455f"></i>composite POC</span>
+    <span><i class="key" style="border-top:2px dashed #21c07a"></i>composite VAH / VAL</span>
+    <span><i class="sw" style="background:#1e2a3d"></i>each session's own value area</span>
+    <span><i class="sw" style="background:#38bdf8"></i>live view: today's developing profile</span>
+    <span><i class="sw" style="background:#ff7a45"></i>sweep burst (aggressive size)</span>
+    <span><i class="sw" style="background:#e879f9"></i>absorption (size, no travel)</span>
+  </div>
+  <div class="scorecard" id="scorecard"></div>
+
+  <div class="note">
+    <b>How this is put together</b>
+    <ul>
+      <li><b>Data</b> — the existing tick cache only (<code>data/cache/ticks/*.parquet</code>), RTH. Nothing is fetched.</li>
+      <li><b>The balance rule</b> — accumulate sessions while each new one's value area still touches the composite-so-far's;
+        restart on a clean break (new value entirely above or below). Capped at __CAP__ sessions as a runaway guard.
+        This is the orthodox Market Profile construction: the market sets the boundary, not a lookback constant.</li>
+      <li><b>HVN / LVN by prominence, not height</b> — a hump counts only if it stands clear of the deeper valley flanking it by
+        the <b>prominence</b> setting, measured against the tallest hump; <b>smoothing</b> is the rolling window as a share of the
+        price range. Both are live controls, because the right setting is not knowable in advance — that is the thing to feel out.
+        At 15% prominence almost everything is a node; at 60% only the dominant hump survives. Raw height would call every shoulder on the POC a second node. LVNs are read only
+        <em>between</em> two accepted humps; a trough at the edge is just where the auction stopped.</li>
+      <li><b>What the width means.</b> The headline on each card is the median 70% value-area width that rule produces.
+        The point of a composite level is that it names a price; once "value" spans most of the range, VAH/VAL are describing
+        the market's whole excursion rather than anywhere it agreed on.</li>
+      <li><b>The validity check is a split value area, not bimodality</b> — and it does <em>not</em> discriminate between the rules
+        here, because NQ sessions are frequently split on their own. It is shown because it is true of the data, not because it
+        settles anything. Bimodality alone proves even less — a single-session
+        double distribution is a textbook trend-day shape, and ~30% of lone NQ sessions print two prominent humps even at a strict
+        threshold. What actually breaks a composite is a deep trough <em>inside its own value area</em>: flagged when the lowest point
+        between VAL and VAH falls under __SPLIT__% of the tallest hump. Then VAH/VAL are still real boundaries, but the band between
+        them is two pockets of acceptance with rejected prices in the middle, and its POC is not "the fair price of this auction".</li>
+      <li><b>The live view</b> answers the usage question the static view can't: the composite is <b>frozen at the prior close</b>
+        and today is measured against it. Scrub through the session in __LIVE_STEP__-minute steps — the composite profile grows right
+        from the centre line, today's developing profile grows left, and the read-out names the relationship (accepting inside prior
+        value, extending through VAH/VAL, building value clear of it). Letting today feed the composite would be circular: the POC
+        would drift toward wherever price sat, so the level could never be meaningfully violated. Every checkpoint is strictly
+        cumulative from the open, so nothing reports a level the session had not yet built.</li>
+      <li><b>Events are a stand-in, and a leaky one.</b> Pulcini's step 2 is an event <em>at</em> the level —
+        an MBO-labelled iceberg or stop-run, which is exactly the feed we don't have. Two things reachable from
+        trade prints stand in for different halves of it. A <b>sweep burst</b> is aggressive size arriving at once:
+        consecutive same-side fills glue into one order-shaped sweep, sweeps over __SWEEP_LOTS__ lots that land within
+        __BURST_GAP__ s and __BURST_SPAN__ pt of each other glue into a burst, and a burst needs __BURST_LOTS__ lots
+        to count — the stop-run half. <b>Absorption</b> is size trading with nowhere to go: a __ABSORB_WIN__-second
+        window whose lots-per-point-traversed runs __ABSORB_MULT__× the session's own median — the iceberg half.
+        Neither is the MBO label. A sweep is the aggressor's footprint, not the resting order that refilled;
+        absorption cannot tell a refilling iceberg from a thick crowd of small passive orders. The threshold is
+        relative to the session on purpose — a 4-point band means nothing on a day whose median 15-second range is
+        12 points, and an absolute one finds everything or nothing depending on the regime. The <b>size</b> switch is
+        in units of each kind's own floor, so <code>2×</code> means twice the burst minimum and twice the
+        concentration multiple.</li>
+      <li><b>Why there is a null next to the overlay.</b> Events land where price traded, and price traded most
+        where the composite says value is — so "the events stack at the POC" is true of <em>any</em> subset of the
+        tape, including a random one. The read-out therefore puts the events' distance-to-nearest-level beside the
+        same distance for the session's own volume distribution. If the events aren't nearer than that, the picture
+        is showing where the market <em>was</em>, not where it <em>reacted</em>. Distances use POC / VAH / VAL only,
+        so the number doesn't move when the HVN/LVN knobs do. In the static view the comparison is circular — those
+        sessions built the level — so it is only scored in the live view, where the composite was frozen before the
+        events printed.</li>
+      <li><b>The price panel</b> — bars laid end to end with session gaps removed, so the x-axis is
+        sequence, not clock. The timeframe switch is cosmetic: profiles, value areas and nodes are all computed from raw ticks at
+        0.25-point resolution, never from candles. Each session's own value area is shaded behind it, which is what the balance rule is reading.</li>
+      <li><b>Prior results</b> — HVN/LVN is the most-tested layer in this repo and it has not survived:
+        structure-break × node was <em>refuted</em> (LVN breaks net worse; thin zones are symmetric volatility, not direction),
+        LVN-retrace lost to a random-pullback null, VP levels don't hold better than fresh ones, and there is no POC magnet.
+        The multi-session composite is the one VP cell that hasn't been null-checked — which is the reason to look at it, and
+        the reason to null-check it before building anything.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const DATA = __DATA_JSON__;
+const RULES = __RULES_JSON__;
+const PROMS = __PROMS_JSON__, SMOOTHS = __SMOOTHS_JSON__, TFS = __BAR_MINS_JSON__;
+const LIVE_STEP = __LIVE_STEP__;
+const EV_MODES = ['off', 'sweeps', 'absorption', 'both'];
+const STRENGTHS = __STRENGTHS_JSON__, NEAR = __NEAR__;
+
+let mode = 'composite';
+let rule = "__DEFAULT_RULE__";
+let prom = "__DEFAULT_PROM__";
+let smooth = "__DEFAULT_SMOOTH__";
+let tf = "__DEFAULT_BAR_MIN__";
+let evMode = "__DEFAULT_EVENTS__", evMin = "__DEFAULT_STRENGTH__";
+let sel = 0, liveSel = 0, cp = 0;
+
+// Node readings are swept at build time; this picks the cell.
+const V = c => c.variants[prom + '|' + smooth];
+
+const C = { up:'#21c07a', dn:'#f5455f', prof:'#8b5cf6', hvn:'#e0b878', lvn:'#38bdf8',
+            poc:'#f5455f', va:'#21c07a', dayva:'#1e2a3d', today:'#38bdf8',
+            sweep:'#ff7a45', absorb:'#e879f9' };
+const G = { x0:58, x1:742, px0:762, px1:1092, y0:22, y1:540, W:1120, H:576 };
+
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const clock = m => {                       // minutes past 09:30 → ET wall clock
+  const t = 9 * 60 + 30 + m;
+  return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0');
+};
+// Bars live once per session and are pulled per timeframe, so four timeframes
+// cost one copy rather than one per rule per composite.
+const barsOf = (day, n) => {
+  const b = DATA.sessions[day].bars[tf];
+  return n == null ? b : b.slice(0, Math.max(1, Math.min(n, b.length)));
+};
+
+// --- events ---------------------------------------------------------------
+// The MBO stand-ins. `maxMin` is the live view's scrub: an event is only shown
+// once it has printed, the same causality rule the developing profile obeys.
+const KINDS = { sweeps: ['sweep'], absorption: ['absorb'], both: ['sweep', 'absorb'] };
+function evOf(day, maxMin) {
+  const want = KINDS[evMode];
+  if (!want) return [];
+  return DATA.sessions[day].events.filter(e =>
+    want.includes(e.k) && e.st >= +evMin && (maxMin == null || e.min <= maxMin));
+}
+// Event mass binned onto the price axis — the marginal that lines a burst up
+// with the hump it landed in.
+function marginal(evs, lo, hi, bins) {
+  const w = new Array(bins).fill(0);
+  const span = (hi - lo) || 1;
+  evs.forEach(e => {
+    const a = Math.max(0, Math.floor((e.lo - lo) / span * bins));
+    const b = Math.min(bins - 1, Math.floor((e.hi - lo) / span * bins));
+    // A zone spans prices, so its lots are spread over the buckets it covered
+    // rather than dropped on its midpoint.
+    for (let i = a; i <= b; i++) w[i] += e.lots / (b - a + 1);
+  });
+  const top = Math.max(...w, 1e-9);
+  return w.map(v => v / top);
+}
+// Distance to the composite's structural levels. POC/VAH/VAL only, so the
+// number doesn't move when the HVN/LVN knobs do.
+const distTo = (p, c) => Math.min(Math.abs(p - c.poc), Math.abs(p - c.vah), Math.abs(p - c.val));
+function wmedian(xs, ws) {
+  const o = xs.map((x, i) => [x, ws[i]]).sort((a, b) => a[0] - b[0]);
+  const half = o.reduce((s, r) => s + r[1], 0) / 2;
+  let acc = 0;
+  for (const [x, w] of o) { acc += w; if (acc >= half) return x; }
+  return NaN;
+}
+
+// --- shared SVG helpers ---------------------------------------------------
+function pen(out) {
+  const f = n => (+n).toFixed(1);
+  return {
+    line: (x1,y1,x2,y2,col,w,dash) => out.push(
+      `<line x1="${f(x1)}" y1="${f(y1)}" x2="${f(x2)}" y2="${f(y2)}" stroke="${col}" `
+      + `stroke-width="${w||1}"${dash?` stroke-dasharray="${dash}"`:''}/>`),
+    rect: (x,y,w,h,col,op) => out.push(
+      `<rect x="${f(x)}" y="${f(y)}" width="${f(Math.max(w,0.4))}" height="${f(Math.max(h,0.4))}" `
+      + `fill="${col}"${op!=null?` fill-opacity="${op}"`:''}/>`),
+    text: (x,y,t,col,anchor,size) => out.push(
+      `<text x="${f(x)}" y="${f(y)}" fill="${col}" font-size="${size||10.5}" `
+      + `text-anchor="${anchor||'start'}" font-family="ui-monospace,Menlo,monospace">${esc(t)}</text>`),
+    poly: (pts,col,w) => out.push(
+      `<polyline points="${pts.map(([a,b]) => f(a)+','+f(b)).join(' ')}" fill="none" `
+      + `stroke="${col}" stroke-width="${w||1.2}" stroke-linejoin="round"/>`),
+  };
+}
+// Event zones on the price panel: a band at the prices the event printed
+// across, at the bar it landed in. Opacity carries strength, so a 4x burst
+// reads louder than one scraping the floor.
+function drawEvents(p, y, evs, x0, bw, offset) {
+  evs.forEach(e => {
+    const x = x0 + (offset + e.b[tf] + 0.5) * bw;
+    const w = Math.max(bw * 0.8, 3.5);
+    const yh = y(e.hi), yl = y(e.lo);
+    const col = C[e.k];
+    p.rect(x - w/2, yh, w, Math.max(yl - yh, 2), col, Math.min(0.28 + 0.16 * e.st, 0.85));
+    p.line(x - w/2, (yh + yl)/2, x + w/2, (yh + yl)/2, col, 1);
+  });
+}
+// The same events as a distribution against the price axis, drawn as an
+// outline over the profile so hump and event mass can be compared directly.
+function drawMarginal(p, y, evs, lo, hi, xBase, width, dir) {
+  if (!evs.length) return;
+  const bins = 46, span = (hi - lo) || 1;
+  ['sweep', 'absorb'].forEach(kind => {
+    const sub = evs.filter(e => e.k === kind);
+    if (!sub.length) return;
+    const m = marginal(sub, lo, hi, bins);
+    // Bins march up in price, so each one is emitted low edge first: the other
+    // order sends every segment back down the screen across the bin below it,
+    // and the crossings read as a row of triangles rather than a staircase.
+    const pts = [];
+    m.forEach((v, i) => {
+      const q0 = lo + span * i / bins, q1 = lo + span * (i + 1) / bins;
+      const x = xBase + dir * v * width;
+      pts.push([x, y(q0)], [x, y(q1)]);
+    });
+    p.poly(pts, C[kind], 1.3);
+  });
+}
+function axis(p, y, lo, hi, x1) {
+  for (let i = 0; i <= 6; i++) {
+    const v = lo + (hi - lo) * i / 6;
+    p.line(G.x0, y(v), x1, y(v), '#141a24', 1);
+    p.text(G.x0 - 6, y(v) + 3.4, v.toFixed(0), '#475569', 'end');
+  }
+}
+function candles(p, y, bars, x0, w, faded) {
+  const bw = w / (bars.length || 1);
+  bars.forEach((b, i) => {
+    const x = x0 + i * bw, col = b.c >= b.o ? C.up : C.dn;
+    p.line(x + bw/2, y(b.h), x + bw/2, y(b.l), col, 1, null);
+    p.rect(x + bw*0.2, y(Math.max(b.o,b.c)), bw*0.6, Math.abs(y(b.o)-y(b.c)) || 0.8,
+           col, faded ? 0.35 : 1);
+  });
+}
+const svg = body => `<svg viewBox="0 0 ${G.W} ${G.H}" preserveAspectRatio="xMidYMid meet">${body}</svg>`;
+
+// --- static composite view ------------------------------------------------
+function draw(c) {
+  const v = V(c), lo = c.lo, hi = c.hi, span = (hi - lo) || 1;
+  const y = q => G.y0 + (hi - q) / span * (G.y1 - G.y0);
+  const out = [];
+  const p = pen(out);
+  out.unshift(`<rect x="${G.px0}" y="${G.y0}" width="${G.px1-G.px0}" height="${G.y1-G.y0}" fill="#0d1219"/>`);
+  axis(p, y, lo, hi, G.px1);
+
+  const all = c.days.flatMap(d => barsOf(d));
+  const bw = (G.x1 - G.x0) / (all.length || 1);
+  let at = 0;
+  const offsets = [];
+  c.days.forEach((d, i) => {
+    const n = barsOf(d).length, va = c.day_va[i];
+    p.rect(G.x0 + at*bw, y(va.vah), n*bw, y(va.val) - y(va.vah), C.dayva);
+    if (i) p.line(G.x0 + at*bw, G.y0, G.x0 + at*bw, G.y1, '#222b3a', 1);
+    if (n*bw > 26) p.text(G.x0 + at*bw + 3, G.y0 + 11, d.slice(5), '#475569', 'start', 9.5);
+    offsets.push(at);
+    at += n;
+  });
+  candles(p, y, all, G.x0, G.x1 - G.x0);
+  const evs = c.days.flatMap((d, i) => {
+    const e = evOf(d);
+    drawEvents(p, y, e, G.x0, bw, offsets[i]);
+    return e;
+  });
+
+  const bh = Math.max(1.1, (G.y1 - G.y0) / (c.hist.length || 1));
+  const tol = span / (c.hist.length || 1) * 2.5;
+  c.hist.forEach(h => {
+    const hot = v.hvn.some(d => Math.abs(d.price - h.p) <= tol);
+    p.rect(G.px0, y(h.p) - bh/2, h.v * (G.px1 - G.px0), bh,
+           hot ? C.hvn : C.prof, hot ? 0.95 : 0.55);
+  });
+
+  p.line(G.x0, y(c.poc), G.px1, y(c.poc), C.poc, 1.6);
+  p.text(G.px1 + 4, y(c.poc) + 3.4, 'POC', C.poc);
+  [['VAH', c.vah], ['VAL', c.val]].forEach(([lab, q]) => {
+    p.line(G.x0, y(q), G.px1, y(q), C.va, 1.2, '5 4');
+    p.text(G.px1 + 4, y(q) + 3.4, lab, C.va);
+  });
+  v.lvn.forEach(d => {
+    p.line(G.px0, y(d.price), G.px1, y(d.price), C.lvn, 1.2, '3 3');
+    p.text(G.px0 - 4, y(d.price) + 3.4, 'LVN', C.lvn, 'end');
+  });
+  v.hvn.forEach((d, i) => p.text(G.px0 - 4, y(d.price) + 3.4, i ? 'HVN' : 'HVN*', C.hvn, 'end'));
+  drawMarginal(p, y, evs, lo, hi, G.px0, G.px1 - G.px0, 1);
+  return svg(out.join(''));
+}
+
+// --- live view: frozen composite vs today's developing profile ------------
+function drawLive(f) {
+  const k = f.checkpoints[Math.min(cp, f.checkpoints.length - 1)];
+  const c = f.comp, v = V(c);
+  const lo = Math.min(c.lo, k.lo), hi = Math.max(c.hi, k.hi), span = (hi - lo) || 1;
+  const y = q => G.y0 + (hi - q) / span * (G.y1 - G.y0);
+  const cx = (G.px0 + G.px1) / 2;
+  const out = [];
+  const p = pen(out);
+  out.unshift(`<rect x="${G.px0}" y="${G.y0}" width="${G.px1-G.px0}" height="${G.y1-G.y0}" fill="#0d1219"/>`);
+  axis(p, y, lo, hi, G.px1);
+
+  // price panel: the composite's sessions faded, then today up to the scrub
+  const prior = f.comp_days.flatMap(d => barsOf(d));
+  const today = barsOf(f.day, k.bars[tf]);
+  const total = prior.length + today.length;
+  const bw = (G.x1 - G.x0) / (total || 1);
+  p.rect(G.x0, G.y0, prior.length * bw, G.y1 - G.y0, '#0e131c');
+  candles(p, y, prior, G.x0, prior.length * bw, true);
+  const tx = G.x0 + prior.length * bw;
+  p.line(tx, G.y0, tx, G.y1, '#3c4a63', 1.4);
+  p.rect(tx, y(k.vah), today.length * bw, y(k.val) - y(k.vah), C.today, 0.10);
+  candles(p, y, today, tx, today.length * bw);
+  // Only today's events: the question the live view asks is whether an event
+  // lands on a level that was already frozen, not whether the sessions that
+  // built the level had events in them.
+  const evs = evOf(f.day, k.min);
+  drawEvents(p, y, evs, tx, bw, 0);
+  p.text(G.x0 + 3, G.y0 + 11, 'composite ' + f.comp_days.length + ' session'
+    + (f.comp_days.length > 1 ? 's' : ''), '#475569', 'start', 9.5);
+  p.text(tx + 4, G.y0 + 11, f.day.slice(5) + ' · ' + clock(k.min), C.today, 'start', 9.5);
+
+  // profile panel: composite grows right from centre, today grows left
+  const cbh = Math.max(1.1, (G.y1 - G.y0) / (c.hist.length || 1) * (span ? (c.hi - c.lo) / span : 1));
+  const tol = span / (c.hist.length || 1) * 2.5;
+  c.hist.forEach(h => {
+    const hot = v.hvn.some(d => Math.abs(d.price - h.p) <= tol);
+    p.rect(cx, y(h.p) - cbh/2, h.v * (G.px1 - cx), cbh, hot ? C.hvn : C.prof, hot ? 0.95 : 0.55);
+  });
+  const step = (k.hi - k.lo) / (k.hist.length || 1);
+  const tbh = Math.max(1.1, (G.y1 - G.y0) * step / span);
+  k.hist.forEach((val, i) => {
+    const q = k.lo + step * (i + 0.5), w = val * (cx - G.px0);
+    p.rect(cx - w, y(q) - tbh/2, w, tbh, C.today, 0.7);
+  });
+  p.line(cx, G.y0, cx, G.y1, '#2a3346', 1);
+  p.text(cx + 4, G.y1 - 6, 'composite →', '#64748b', 'start', 9.5);
+  p.text(cx - 4, G.y1 - 6, '← today', C.today, 'end', 9.5);
+
+  // frozen composite levels run across everything; today's VA is the box
+  p.line(G.x0, y(c.poc), G.px1, y(c.poc), C.poc, 1.6);
+  p.text(G.px1 + 4, y(c.poc) + 3.4, 'POC', C.poc);
+  [['VAH', c.vah], ['VAL', c.val]].forEach(([lab, q]) => {
+    p.line(G.x0, y(q), G.px1, y(q), C.va, 1.2, '5 4');
+    p.text(G.px1 + 4, y(q) + 3.4, lab, C.va);
+  });
+  drawMarginal(p, y, evs, lo, hi, cx, cx - G.px0, -1);
+  return svg(out.join(''));
+}
+
+// Are today's events nearer the frozen levels than today's volume is?
+// Events cluster where price traded, and price traded most where the composite
+// says value is — so "events stack at the POC" is true of any subset of the
+// tape. The session's own volume distribution is the control.
+function nullCheck(f, k, evs) {
+  const c = f.comp;
+  const step = (k.hi - k.lo) / (k.hist.length || 1);
+  const vd = k.hist.map((_, i) => distTo(k.lo + step * (i + 0.5), c));
+  const vw = k.hist.slice();
+  const vTot = vw.reduce((s, w) => s + w, 0) || 1;
+  const out = {
+    volMed: wmedian(vd, vw),
+    volNear: 100 * vd.reduce((s, d, i) => s + (d <= NEAR ? vw[i] : 0), 0) / vTot,
+    n: evs.length,
+  };
+  if (evs.length) {
+    const ed = evs.map(e => distTo((e.lo + e.hi) / 2, c));
+    out.evMed = wmedian(ed, ed.map(() => 1));
+    out.evNear = 100 * ed.filter(d => d <= NEAR).length / ed.length;
+  }
+  return out;
+}
+
+function verdict(f, k) {
+  const c = f.comp;
+  if (k.val >= c.val && k.vah <= c.vah)
+    return ['accepting inside prior value', '#94a3b8'];
+  if (k.val > c.vah) return ['building value ABOVE prior value', C.up];
+  if (k.vah < c.val) return ['building value BELOW prior value', C.dn];
+  if (k.vah > c.vah) return ['value extending up through prior VAH', C.up];
+  if (k.val < c.val) return ['value extending down through prior VAL', C.dn];
+  return ['overlapping prior value', '#94a3b8'];
+}
+
+// --- render ---------------------------------------------------------------
+function render() {
+  const isLive = mode === 'live';
+  document.getElementById('score').style.display = isLive ? 'none' : '';
+  document.getElementById('ruleWrap').style.display = isLive ? 'none' : '';
+  document.getElementById('scrubWrap').style.display = isLive ? '' : 'none';
+  document.getElementById('evMinWrap').style.display = evMode === 'off' ? 'none' : '';
+
+  if (isLive) return renderLive();
+
+  const cs = DATA.rules[rule];
+  if (sel >= cs.length) sel = 0;
+  const c = cs[sel], v = V(c);
+
+  document.getElementById('tabs').innerHTML = cs.map((x, i) =>
+    `<button class="tab${i === sel ? ' active' : ''}" data-i="${i}">`
+    + `${esc(x.days[0].slice(5))}${x.n_days > 1 ? '–' + esc(x.days[x.n_days-1].slice(5)) : ''}`
+    + ` <span class="muted">${x.n_days}d</span>`
+    + `${V(x).split_va ? ` <span class="flag">◆${V(x).modes}</span>` : ''}</button>`).join('');
+  document.querySelectorAll('.tab').forEach(t =>
+    t.onclick = () => { sel = +t.dataset.i; render(); });
+
+  document.getElementById('info').innerHTML = `
+    <span><b>${esc(c.symbol)}</b> ${esc(c.days[0])}${c.n_days > 1 ? ' → ' + esc(c.days[c.n_days-1]) : ''}</span>
+    <span>${c.n_days} session${c.n_days > 1 ? 's' : ''}</span>
+    <span>POC <b>${c.poc}</b></span>
+    <span>value <b>${c.val} – ${c.vah}</b> (${c.va_width} pt)</span>
+    <span>${v.modes} HVN${v.modes === 1 ? '' : 's'}, ${v.lvn.length} LVN${v.lvn.length === 1 ? '' : 's'}</span>
+    <span>${v.split_va
+      ? `<span class="amber">◆ value area is split — deepest point inside it is ${Math.round(100*v.va_floor)}% of the peak</span>`
+      : `<span style="color:#21c07a">value area holds together (floor ${Math.round(100*v.va_floor)}% of peak)</span>`}</span>`;
+  document.getElementById('canvas').innerHTML = draw(c);
+  document.getElementById('scorecard').innerHTML = evMode === 'off' ? '' : `
+    <b>Events here are drawn, not scored.</b> These sessions <em>are</em> the composite —
+    their volume built the POC and value area, so an event landing on a level is partly the event
+    putting the level there. The honest cut is the <b>live view</b>, where the composite was frozen
+    before the events printed; its read-out compares them against the session's own volume.
+    ${scoreTable(DATA.scorecard)}`;
+
+  document.getElementById('score').innerHTML = RULES.map(r => {
+    const g = DATA.rules[r], mm = g.filter(x => V(x).split_va).length;
+    const pct = g.length ? Math.round(100 * mm / g.length) : 0;
+    const med = a => [...a].sort((x, y) => x - y)[a.length >> 1];
+    const w = g.length ? med(g.map(x => x.va_width)) : 0;
+    return `<div class="card${r === rule ? ' on' : ''}" data-r="${r}">
+      <h3>${esc(r)}</h3>
+      <div class="big ${w > 600 ? 'bad' : 'good'}">${Math.round(w)} pt</div>
+      median value-area width<br/>
+      <span class="muted">${g.length} composites · median ${med(g.map(x => x.n_days))} sessions
+        · ${pct}% split value</span></div>`;
+  }).join('');
+  document.querySelectorAll('.card').forEach(card =>
+    card.onclick = () => { rule = card.dataset.r; sel = 0; render(); });
+  syncers.forEach(f => f());
+}
+
+function renderLive() {
+  const F = DATA.live;
+  if (liveSel >= F.length) liveSel = 0;
+  const f = F[liveSel];
+  cp = Math.min(cp, f.checkpoints.length - 1);
+  const k = f.checkpoints[cp];
+  const [verd, col] = verdict(f, k);
+
+  document.getElementById('tabs').innerHTML = F.map((x, i) =>
+    `<button class="tab${i === liveSel ? ' active' : ''}" data-i="${i}">`
+    + `${esc(x.day.slice(5))} <span class="muted">vs ${x.comp_days.length}d</span></button>`).join('');
+  document.querySelectorAll('.tab').forEach(t =>
+    t.onclick = () => { liveSel = +t.dataset.i; cp = 0; render(); });
+
+  const sc = document.getElementById('scrub');
+  sc.max = f.checkpoints.length - 1;
+  sc.value = cp;
+  document.getElementById('scrubLabel').textContent = clock(k.min);
+
+  document.getElementById('info').innerHTML = `
+    <span><b>${esc(DATA.sessions[f.day].symbol)}</b> ${esc(f.day)} at <b>${clock(k.min)}</b> ET</span>
+    <span class="muted">composite frozen at the prior close · ${f.comp_days.length} session${f.comp_days.length > 1 ? 's' : ''}</span>
+    <span>prior value <b>${f.comp.val} – ${f.comp.vah}</b></span>
+    <span style="color:${C.today}">today so far <b>${k.val} – ${k.vah}</b> (POC ${k.poc})</span>
+    <span style="color:${col}"><b>${verd}</b></span>`;
+  document.getElementById('canvas').innerHTML = drawLive(f);
+
+  const evs = evOf(f.day, k.min);
+  const n = nullCheck(f, k, evs);
+  const fmt = x => Number.isFinite(x) ? x.toFixed(1) : '—';
+  document.getElementById('scorecard').innerHTML = evMode === 'off' ? '' : `
+    <b>${evs.length} event${evs.length === 1 ? '' : 's'} by ${clock(k.min)}</b>, measured against the
+    frozen composite's POC / VAH / VAL — and against where today's volume actually traded, because
+    events cluster where price was.
+    <table>
+      <tr><th></th><th>median distance</th><th>within ${NEAR} pt</th></tr>
+      <tr><td>events</td><td>${fmt(n.evMed)} pt</td><td>${fmt(n.evNear)}%</td></tr>
+      <tr><td>today's volume</td><td>${fmt(n.volMed)} pt</td><td>${fmt(n.volNear)}%</td></tr>
+    </table>
+    <span class="muted">One session, a handful of events — this is a read-out, not a sample.
+    The whole-run version is in the terminal summary and the write-up.</span>`;
+  syncers.forEach(g => g());
+}
+
+function scoreTable(sc) {
+  if (!sc) return '';
+  const row = (label, d) => !d || !d.n ? '' : `<tr><td>${label}</td><td>${d.n}</td>`
+    + `<td>${d.median} pt</td><td>${d.near}%</td>`
+    + `<td style="color:${d.paired == null ? '#64748b' : d.paired < 0 ? C.up : C.dn}">`
+    + `${d.paired == null ? '—' : (d.paired > 0 ? '+' : '') + d.paired + ' pt'}</td>`
+    + `<td>${d.sessions == null ? '—' : d.closer + '/' + d.sessions}</td></tr>`;
+  return `<table>
+      <tr><th>whole run, at each close</th><th>n</th><th>median distance</th>
+        <th>within ${NEAR} pt</th><th>vs that session's volume</th><th>sessions nearer</th></tr>
+      ${row('sweep bursts', sc.sweep)}${row('absorption', sc.absorb)}
+      ${row("volume null", sc.null)}</table>
+    <span class="muted">Negative in the fifth column would mean events really did land nearer the
+    frozen level than the session's own tape did. They don't: both proxies sit <em>further</em> out,
+    and barely more than a third of sessions run the other way. Read the overlay as a picture of
+    where size arrived, not as evidence that the levels attract it.</span>`;
+}
+
+// --- controls -------------------------------------------------------------
+function makeSeg(id, values, get, set, fmt) {
+  const el = document.getElementById(id);
+  el.innerHTML = values.map(v => `<button data-v="${v}">${fmt ? fmt(v) : esc(v)}</button>`).join('');
+  [...el.children].forEach(b => b.onclick = () => { set(b.dataset.v); render(); });
+  return () => [...el.children].forEach(b => b.classList.toggle('on', b.dataset.v === get()));
+}
+const syncers = [
+  makeSeg('modeSeg', ['composite', 'live'], () => mode, v => { mode = v; cp = 0; }),
+  makeSeg('ruleSeg', RULES, () => rule, v => { rule = v; sel = 0; }),
+  makeSeg('tfSeg', TFS, () => tf, v => { tf = v; }, v => v + 'm'),
+  makeSeg('promSeg', PROMS, () => prom, v => { prom = v; }, v => Math.round(v*100) + '%'),
+  makeSeg('smoothSeg', SMOOTHS, () => smooth, v => { smooth = v; }, v => Math.round(v*100) + '%'),
+  makeSeg('evSeg', EV_MODES, () => evMode, v => { evMode = v; }),
+  makeSeg('evMinSeg', STRENGTHS, () => evMin, v => { evMin = v; },
+          v => v === '1' ? 'all' : v + '×'),
+];
+document.getElementById('scrub').oninput = e => { cp = +e.target.value; render(); };
+render();
+</script>

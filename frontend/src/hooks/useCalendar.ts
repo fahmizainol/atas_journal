@@ -84,12 +84,25 @@ export function useDayNote(date: string | null) {
   });
 }
 
+// Every day's note+tags keyed by ISO date, in one request — for views that show
+// per-day tags across many days at once (the Interactions Sessions table).
+export type DayNoteMap = Record<string, Note>;
+
+export function useAllDayNotes() {
+  return useQuery({
+    queryKey: qk.dayNotesAll,
+    queryFn: () => apiGet<DayNoteMap>("/day-notes"),
+    staleTime: 30_000,
+  });
+}
+
 export function useSaveDayNote(date: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: Note) => apiSend<{ ok: boolean }>("PUT", `/day-notes/${date}`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.dayNote(date) });
+      qc.invalidateQueries({ queryKey: qk.dayNotesAll });
       qc.invalidateQueries({ queryKey: ["filters"] });
     },
   });

@@ -43,6 +43,7 @@ from datetime import date, time
 import numpy as np
 import pandas as pd
 
+from ..atr import atr_series
 from ..config import CACHE_DIR, ET_TZ, point_value, root_symbol, tick_size
 from . import bars as barmod
 from . import ib as ibmod
@@ -229,11 +230,13 @@ def _strictly_increasing(times: np.ndarray) -> np.ndarray:
 
 def _vwap_pos_rows(bands: pd.DataFrame, pos: np.ndarray, times: np.ndarray) -> list[dict]:
     """VWAP-band row at each bar's close, sampled by positional index into the
-    per-tick band frame. A negative position — a bar that closed before this
-    anchor started — is skipped rather than drawn off a made-up level."""
+    per-tick band frame. A position outside the frame — a bar that closed before
+    this anchor started (negative), or after it ended (>= len, e.g. a post-RTH
+    16:00-17:00 bar sampled against the RTH-only NY anchor) — is skipped rather
+    than drawn off a made-up level."""
     out = []
     for tm, p in zip(times, pos):
-        if p < 0:
+        if p < 0 or p >= len(bands):
             continue
         r = bands.iloc[int(p)]
         if not _finite(r["mid"]):
@@ -1023,7 +1026,11 @@ def study(cfg: InteractionConfig) -> dict:
         "coverage": {
             "requested_days": len(requested), "ran_days": ran, "skipped": skipped,
         },
-        "events": {"touches": touches, "va_snaps": snaps, "band_state": band_state},
+        # band_state (per-RTH-minute VWAP-band occupancy) is the input to the
+        # band aggregates below and is never read again — not persisted, so a
+        # snapshot is ~30% smaller on disk (and the events read parses that much
+        # less). The aggregate fns take the live `band_state` var, still in scope.
+        "events": {"touches": touches, "va_snaps": snaps},
         "aggregates": {
             "by_source": _agg_touches(touches, lambda t: t["sources"]),
             "by_nth_touch": _agg_touches(touches, _nth_bucket),
@@ -1059,9 +1066,49 @@ def read(cfg: InteractionConfig) -> dict | None:
     return d if d.get("interactions_version") == INTERACTIONS_VERSION else None
 
 
+# The Saved-runs list only needs a few summary fields per run, but a snapshot is
+# tens of MB — so `list_runs()` used to parse the whole cache (500MB+, ~3.4s) to
+# build a 1KB list, which the auto-load then waits on before it can even fetch a
+# chart. Each snapshot now gets a tiny `<run_id>.meta.json` sidecar carrying just
+# that summary; listing reads the sidecars, not the blobs. Sidecars are pure
+# derived data — delete them and the next listing rebuilds them from source.
+
+_SUMMARY_CONFIG_KEYS = (
+    "symbol", "start", "end", "bin_size", "va_pct", "sources",
+    "outcome_window_min", "zone_cluster_pts",
+)
+
+
+def _meta_path(run_id: str):
+    return INTERACTIONS_DIR / f"{run_id}.meta.json"
+
+
+def _summary(run_id: str, d: dict) -> dict:
+    """The Saved-runs summary for one snapshot. Defensive (`.get`) so it can also
+    digest an older-version file during backfill without KeyError-ing."""
+    ev = d.get("events", {})
+    return {
+        "run_id": run_id,
+        "interactions_version": d.get("interactions_version"),
+        "config": {k: d.get(k) for k in _SUMMARY_CONFIG_KEYS},
+        "coverage": d.get("coverage", {}),
+        "n_touches": len(ev.get("touches", [])),
+        "n_snaps": len(ev.get("va_snaps", [])),
+    }
+
+
+def _write_meta(run_id: str, d: dict) -> None:
+    try:
+        _meta_path(run_id).write_text(json.dumps(_summary(run_id, d), indent=2))
+    except OSError:
+        pass  # a missing sidecar just means the next listing re-derives it
+
+
 def write(cfg: InteractionConfig, result: dict) -> None:
     INTERACTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    run_id = cfg.run_id()
     _path(cfg).write_text(json.dumps(result, indent=2))
+    _write_meta(run_id, result)
 
 
 def get(cfg: InteractionConfig, refresh: bool = False) -> dict:
@@ -1072,37 +1119,147 @@ def get(cfg: InteractionConfig, refresh: bool = False) -> dict:
     return result
 
 
+# The full snapshot the study produces is dominated by three blocks the default
+# Sessions / chart view doesn't need up front: the per-minute ``band_state``
+# stream (~20MB/yr, never sent to the client at all), the raw ``touches`` list
+# (~21MB/yr — the biggest chunk), and the ``aggregates``. Splitting the response
+# lets the auto-loaded run render the chart from a ~1MB payload (VA-snaps + a day
+# index of touch/snap counts) instead of shipping the whole file every refresh.
+# The detail — touches (chart dots + per-day table) and aggregates — is fetched
+# on demand by the Stats tab's button, off the same cached snapshot.
+
+
+def events_view(result: dict) -> dict:
+    """The lean run payload for the Sessions / chart drill-down: VA-snaps, the
+    per-day touch/snap counts and coverage. Drops ``band_state`` (only used to
+    build aggregates, server-side), the raw ``touches`` (deferred to
+    ``stats_view`` — the chart's touch dots and the touches table load with the
+    stats button), and the aggregates."""
+    out = {k: v for k, v in result.items() if k != "aggregates"}
+    out["events"] = {
+        k: v for k, v in result["events"].items() if k not in ("band_state", "touches")
+    }
+    return out
+
+
+def stats_view(result: dict) -> dict:
+    """The on-demand detail: the aggregate tables plus the raw ``touches`` (which
+    back the chart's touch markers and the per-day touches table). Read straight
+    off the cached snapshot, so it's a config-hash disk read, not a recompute."""
+    return {
+        "aggregates": result["aggregates"],
+        "touches": result["events"]["touches"],
+    }
+
+
 def list_runs() -> list[dict]:
-    """Summaries of every snapshot on disk, newest first. Loads each file in
-    full (the events dominate the size), so this is a listing endpoint, not
-    something to poll — fine for the handful of snapshots a lab accumulates."""
+    """Summaries of every current-version snapshot on disk, newest first. Reads
+    the per-run `.meta.json` sidecars, not the (tens-of-MB) blobs; a snapshot
+    missing its sidecar is parsed once and its sidecar written, so the first
+    listing after an upgrade is slow and every one after is a KB read. A
+    stale-version run gets a sidecar too — so it's *skipped* without re-parsing
+    the blob next time — but is left out of the result."""
     if not INTERACTIONS_DIR.exists():
         return []
+    # The snapshots are the `*.json` that aren't sidecars.
+    snapshots = [p for p in INTERACTIONS_DIR.glob("*.json")
+                 if not p.name.endswith(".meta.json")]
     runs = []
-    for p in sorted(INTERACTIONS_DIR.glob("*.json"),
-                    key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            d = json.loads(p.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if d.get("interactions_version") != INTERACTIONS_VERSION:
+    for p in sorted(snapshots, key=lambda p: p.stat().st_mtime, reverse=True):
+        run_id = p.stem
+        meta = _read_meta(run_id)
+        if meta is None:
+            try:
+                d = json.loads(p.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            meta = _summary(run_id, d)
+            _write_meta(run_id, d)  # self-heal — even stale files, so we never re-parse them
+        if meta.get("interactions_version") != INTERACTIONS_VERSION:
             continue
         runs.append({
-            "run_id": p.stem,
-            "config": {k: d[k] for k in (
-                "symbol", "start", "end", "bin_size", "va_pct", "sources",
-                "outcome_window_min", "zone_cluster_pts",
-            )},
-            "coverage": d["coverage"],
-            "n_touches": len(d["events"]["touches"]),
-            "n_snaps": len(d["events"]["va_snaps"]),
+            "run_id": run_id,
+            "config": meta["config"],
+            "coverage": meta["coverage"],
+            "n_touches": meta["n_touches"],
+            "n_snaps": meta["n_snaps"],
             "saved_at": p.stat().st_mtime,
         })
     return runs
 
 
+def _read_meta(run_id: str) -> dict | None:
+    mp = _meta_path(run_id)
+    if not mp.exists():
+        return None
+    try:
+        return json.loads(mp.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None  # a corrupt sidecar is re-derived from the blob
+
+
 def _finite(x) -> bool:
     return bool(np.isfinite(x))
+
+
+def _ema_rows(closes: np.ndarray, times: np.ndarray, span: int) -> list[dict]:
+    """A 1-minute EMA as ``{time, value}`` rows — the 9/20 the institutional
+    day-trading convention watches. Recursive EMA (``adjust=False``), so each
+    value depends only on prior closes: the same line a live 1-minute chart
+    draws. Seeded from the first close, so it is defined from the first bar
+    (early values are biased toward the seed, negligible by the RTH open)."""
+    if len(closes) == 0:
+        return []
+    ema = pd.Series(closes, dtype="float64").ewm(span=span, adjust=False).mean().to_numpy()
+    return [{"time": int(t), "value": round(float(v), 2)}
+            for t, v in zip(times, ema) if _finite(v)]
+
+
+def _rsi_rows(closes: np.ndarray, times: np.ndarray, period: int = 14) -> list[dict]:
+    """A 1-minute Wilder RSI as ``{time, value}`` rows — the momentum oscillator
+    the whole RSI/StochRSI/Connors family is built on, bounded 0-100. Uses
+    Wilder's own recursive smoothing (his 1978 definition), seeded from the mean
+    of the first ``period`` deltas, so a value is defined from the ``period``-th
+    minute on; earlier bars carry no RSI and are dropped. Context only — no engine
+    trades it, it's drawn under the candles like the EMA and CVD."""
+    n = len(closes)
+    if n <= period:
+        return []
+    delta = np.diff(closes.astype("float64"))
+    gain = np.where(delta > 0.0, delta, 0.0)
+    loss = np.where(delta < 0.0, -delta, 0.0)
+    avg_gain = float(gain[:period].mean())
+    avg_loss = float(loss[:period].mean())
+    rows: list[dict] = []
+
+    def _emit(idx: int, ag: float, al: float) -> None:
+        # No losses over the window ⇒ RSI pins to 100 (Wilder's convention).
+        rsi = 100.0 if al == 0.0 else 100.0 - 100.0 / (1.0 + ag / al)
+        rows.append({"time": int(times[idx]), "value": round(rsi, 2)})
+
+    _emit(period, avg_gain, avg_loss)                 # first RSI at close index `period`
+    for i in range(period + 1, n):
+        avg_gain = (avg_gain * (period - 1) + gain[i - 1]) / period
+        avg_loss = (avg_loss * (period - 1) + loss[i - 1]) / period
+        _emit(i, avg_gain, avg_loss)
+    return rows
+
+
+def _atr_rows(bars: pd.DataFrame, times: np.ndarray, period: int = 14) -> list[dict]:
+    """Wilder ATR(period) over the *drawn* bars as ``{time, atr}`` rows — the
+    volatility yardstick in index points, drawn in its own pane like the journal's
+    charts (same ``journal.atr`` computation, so a Lab and a Journal chart of the
+    same session read the same number on the same timeframe).
+
+    Like the RSI — and unlike the 1-minute EMA — it tracks the drawn timeframe:
+    ATR(14) means the true range of 14 of the candles on screen. Bars before the
+    smoothing has converged come back NaN and are dropped, so the line begins
+    where it is honest. Context only: no engine reads it."""
+    if bars is None or bars.empty:
+        return []
+    atr = atr_series(bars, period).to_numpy()
+    return [{"time": int(t), "atr": round(float(v), 2)}
+            for t, v in zip(times, atr) if np.isfinite(v)]
 
 
 def _day_chart_tickbars(
@@ -1126,12 +1283,17 @@ def _day_chart_tickbars(
     bar built here need not match ATAS tick-for-tick — see journal.sim.bars.
     """
     on = tickmod.cached_overnight(contract, day)
+    post = tickmod.cached_post(contract, day)
     has_on = on is not None and not on.empty
-    if has_on:
-        full = pd.concat([on, rth], ignore_index=True)
-        rth_i0 = len(on)
+    has_post = post is not None and not post.empty
+    rth_i0 = len(on) if has_on else 0
+    rth_n = len(rth)                       # RTH occupies full[rth_i0 : rth_i0 + rth_n]
+    # overnight + RTH + the recovered 16:00-17:00 post hour, one continuous stream.
+    if has_on or has_post:
+        parts = ([on] if has_on else []) + [rth] + ([post] if has_post else [])
+        full = pd.concat(parts, ignore_index=True)
     else:
-        full, rth_i0 = rth, 0
+        full = rth
 
     b_all = barmod.tick_bars(full, n)
     if b_all.empty:
@@ -1167,12 +1329,15 @@ def _day_chart_tickbars(
     # NY anchor: the same stream restarted at the bell. A bar that closed overnight
     # has a negative shifted position and is dropped, so the line begins at the open.
     if "ny" in sources:
-        rth_ticks = full.iloc[rth_i0:].reset_index(drop=True)
+        rth_ticks = full.iloc[rth_i0:rth_i0 + rth_n].reset_index(drop=True)  # RTH only
         ny_pos = bar_pos - rth_i0
         result["vwap_ny"] = _vwap_pos_rows(vwapmod.vwap_bands(rth_ticks), ny_pos, times)
-        ny_bars = b_all.assign(end_idx=ny_pos)
+        # NY profile only over bars inside RTH — overnight (pos<0) and post-hour
+        # (pos>=rth_n) bars carry no NY anchor.
+        in_rth = (ny_pos >= 0) & (ny_pos < rth_n)
+        ny_bars = b_all[in_rth].reset_index(drop=True).assign(end_idx=ny_pos[in_rth])
         result["profile_ny"] = _profile_pos_rows(
-            profmod.developing_profile(rth_ticks, ny_bars, binsz, va_pct), times)
+            profmod.developing_profile(rth_ticks, ny_bars, binsz, va_pct), times[in_rth])
 
     # Globex anchor: accumulates from the 18:00 open over the whole stream — only
     # meaningful, and only drawn, when the night is actually on disk.
@@ -1189,6 +1354,23 @@ def _day_chart_tickbars(
         if wk_seed is not None:
             result["vwap_weekly"] = _vwap_pos_rows(
                 vwapmod.vwap_bands(full, seed=wk_seed), bar_pos, times)
+
+    # 9/20 EMA on the 1-minute grid — *not* the tick-bar grid: the convention is
+    # a 1-minute moving average, so it is computed over minute bars of the same
+    # overnight+RTH stream and the frontend samples it onto the tick-bar grid.
+    mins = minute_bars(full)
+    if not mins.empty:
+        tmin = (mins["ts_utc"].astype("int64") // 1_000_000_000).to_numpy()
+        closes = mins["close"].to_numpy()
+        result["ema9"] = _ema_rows(closes, tmin, 9)
+        result["ema20"] = _ema_rows(closes, tmin, 20)
+        result["ema50"] = _ema_rows(closes, tmin, 50)
+        result["ema200"] = _ema_rows(closes, tmin, 200)
+    # RSI tracks the drawn timeframe (see day_chart), so on this path it's computed
+    # on the tick-bar closes themselves — RSI(14) = 14 of the tick bars on screen —
+    # not the 1-minute grid the EMA uses. ATR follows the same rule.
+    result["rsi"] = _rsi_rows(b_all["close"].to_numpy(), times, 14)
+    result["atr_points"] = _atr_rows(b_all, times, 14)
     return result
 
 
@@ -1199,6 +1381,7 @@ def day_chart(
     va_pct: float = profmod.VALUE_AREA_PCT,
     sources: tuple[str, ...] = ("ny", "globex"),
     ticks_per_bar: int | None = None,
+    bar_minutes: int | None = None,
 ) -> dict:
     """A day's candles + both anchored VWAPs + both developing profiles, built
     from the *same tick engine* as the interaction events — so the overlay dots
@@ -1206,9 +1389,12 @@ def day_chart(
     trade-independent: works for any cached session, traded or not.
 
     ``ticks_per_bar`` swaps the 1-minute candles for n-tick bars (the strategies'
-    native timeframe); left None it stays on minute bars. The interaction events
-    themselves are unchanged (they are computed on the minute grid) — the frontend
-    snaps their marks onto whichever bar grid is drawn.
+    native timeframe); left None it stays on minute bars. ``bar_minutes`` widens
+    those minute candles to N-minute time bars (e.g. 5) — the per-tick VWAP/profile
+    frames sampled at the wider bar boundaries stay the true developing values, and
+    the 9/20 EMA stays on the 1-minute grid (see below), so only the candle stream
+    coarsens. The interaction events themselves are unchanged (they are computed on
+    the minute grid) — the frontend snaps their marks onto whichever grid is drawn.
     """
     contract = tickmod.contract_for_cached(symbol, day)
     if contract is None:
@@ -1222,8 +1408,12 @@ def day_chart(
         return _day_chart_tickbars(
             symbol, contract, rth, day, binsz, va_pct, sources, int(ticks_per_bar))
 
+    # 1-minute unless widened to N-minute bars (the 5m view). The EMA is kept on
+    # the 1-minute grid regardless (below), matching the tick-bar path.
+    freq = f"{int(bar_minutes)}min" if bar_minutes and bar_minutes > 1 else "1min"
+
     # RTH minute bars — the NY anchor develops over exactly these.
-    bars_ny = minute_bars(rth)
+    bars_ny = minute_bars(rth, freq)
     if bars_ny.empty:
         return {"available": True, "instrument": contract, "bars": []}
     t_ny = (bars_ny["ts_utc"].astype("int64") // 1_000_000_000).to_numpy()
@@ -1233,10 +1423,16 @@ def day_chart(
     # alone. The overnight is context and shows regardless of the sources toggle,
     # which only governs which level overlays are drawn.
     on = tickmod.cached_overnight(contract, day)
+    post = tickmod.cached_post(contract, day)
     has_on = on is not None and not on.empty
-    if has_on:
-        glob = pd.concat([on, rth], ignore_index=True)
-        bars_draw = minute_bars(glob)
+    has_post = post is not None and not post.empty
+    # Drawn stream = overnight + RTH + the recovered 16:00-17:00 post hour, so the
+    # Globex and weekly anchors carry through the whole session (NY stays RTH-only,
+    # computed over `rth`/`bars_ny` below).
+    if has_on or has_post:
+        parts = ([on] if has_on else []) + [rth] + ([post] if has_post else [])
+        glob = pd.concat(parts, ignore_index=True)
+        bars_draw = minute_bars(glob, freq)
         t_draw = (bars_draw["ts_utc"].astype("int64") // 1_000_000_000).to_numpy()
     else:
         glob, bars_draw, t_draw = rth, bars_ny, t_ny
@@ -1303,6 +1499,24 @@ def day_chart(
         if wk_seed is not None:
             result["vwap_weekly"] = vwap_rows(
                 _sample_bands(vwapmod.vwap_bands(glob, seed=wk_seed), bars_draw), t_draw)
+
+    # 9/20 EMA on the 1-minute grid of the overnight+RTH stream — the institutional
+    # day-trading convention is a 1-minute moving average, so it is *not* recomputed
+    # on a coarser candle grid (matching the tick-bar path); at 1m this is exactly
+    # `bars_draw`. The frontend samples the line onto whichever candles are drawn.
+    mins = bars_draw if freq == "1min" else minute_bars(glob)
+    t_min = (mins["ts_utc"].astype("int64") // 1_000_000_000).to_numpy()
+    closes_min = mins["close"].to_numpy()
+    result["ema9"] = _ema_rows(closes_min, t_min, 9)
+    result["ema20"] = _ema_rows(closes_min, t_min, 20)
+    result["ema50"] = _ema_rows(closes_min, t_min, 50)
+    result["ema200"] = _ema_rows(closes_min, t_min, 200)
+    # RSI, unlike the EMA, tracks the *drawn* timeframe — RSI(14) means 14 of the
+    # candles on screen (14 min at 1m, 70 min at 5m), the universal convention. So
+    # it's computed on the drawn-bar closes, not the 1-minute grid. ATR(14) is the
+    # same story in price units: the range of 14 of the candles on screen.
+    result["rsi"] = _rsi_rows(bars_draw["close"].to_numpy(), t_draw, 14)
+    result["atr_points"] = _atr_rows(bars_draw, t_draw, 14)
     return result
 
 
@@ -1311,7 +1525,13 @@ def coverage(symbol: str, start: date, end: date) -> dict:
     days = []
     for day in tickmod.session_dates(start, end):
         contract = tickmod.contract_for_cached(symbol, day)
-        rth = contract is not None and tickmod._cache_path(contract, day, "rth").exists()
-        on = contract is not None and tickmod._cache_path(contract, day, "on").exists()
+        # Two cache layouts: legacy per-segment files and the whole-day file
+        # the fetcher writes now — either one makes the session readable
+        # (same resolution rule as the simulator's day listing).
+        whole = contract is not None and tickmod._cache_path(contract, day, "day").exists()
+        rth = whole or (contract is not None
+                        and tickmod._cache_path(contract, day, "rth").exists())
+        on = whole or (contract is not None
+                       and tickmod._cache_path(contract, day, "on").exists())
         days.append({"date": day.isoformat(), "rth": bool(rth), "on": bool(on)})
     return {"symbol": symbol, "days": days}

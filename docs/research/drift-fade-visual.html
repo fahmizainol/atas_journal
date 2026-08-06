@@ -1,0 +1,553 @@
+<title>Drift-Touch Fade — visual explainer mockup</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --bg-2: #15171f;
+    --card: #1a1d27;
+    --card-2: #202432;
+    --card-border: #262a36;
+    --accent: #6c5ce7;
+    --accent-soft: rgba(108, 92, 231, 0.16);
+    --green: #21c07a;
+    --red: #f5455f;
+    --text: #e6e8ee;
+    --muted: #8a8f9c;
+    --grid: #2a2e38;
+    --gold: #e0a52a;
+    --ny: #c4b5fd;
+    --blue: #3b82f6;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+    color: var(--text);
+    font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  .wrap {
+    max-width: 940px;
+    margin: 0 auto;
+    padding: 2.4rem 1.4rem 4rem;
+  }
+
+  .mockup-note {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-bottom: 1.1rem;
+  }
+  .mockup-note .tag {
+    font-size: 0.66rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid rgba(108, 92, 231, 0.35);
+    padding: 3px 8px;
+    border-radius: 5px;
+  }
+
+  /* ---- Panel (mirrors the app .panel) ---- */
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    padding: 20px 22px 24px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  }
+
+  .strat-head {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 10px 12px;
+    margin-bottom: 4px;
+  }
+  .strat-title {
+    font-size: 1.5rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .strat-ver { color: var(--muted); font-size: 0.85rem; }
+  .badge {
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--card-border);
+    color: var(--muted);
+    background: var(--bg-2);
+  }
+  .badge.session {
+    color: var(--gold);
+    border-color: rgba(224, 165, 42, 0.35);
+    background: rgba(224, 165, 42, 0.08);
+  }
+
+  .tagline {
+    color: var(--muted);
+    font-size: 0.92rem;
+    margin: 2px 0 16px;
+    max-width: 62ch;
+  }
+
+  /* ---- View toggle ---- */
+  .toggle {
+    display: inline-flex;
+    background: var(--bg-2);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 3px;
+    gap: 3px;
+    margin-bottom: 20px;
+  }
+  .toggle button {
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 550;
+    color: var(--muted);
+    background: transparent;
+    border: 0;
+    padding: 6px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .toggle button:hover { color: var(--text); }
+  .toggle button[aria-selected="true"] {
+    background: var(--accent);
+    color: #fff;
+    box-shadow: 0 1px 6px rgba(108, 92, 231, 0.4);
+  }
+  .toggle button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ---- Rule rail ---- */
+  .rail {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+    gap: 10px;
+    margin-bottom: 24px;
+  }
+  .rule {
+    background: var(--bg-2);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 11px 13px;
+  }
+  .rule .k {
+    font-size: 0.64rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    font-weight: 650;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 5px;
+  }
+  .rule .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    display: inline-block;
+  }
+  .rule .v { font-size: 0.86rem; color: var(--text); }
+  .rule .v em { color: var(--muted); font-style: normal; }
+
+  /* ---- Chart figures ---- */
+  .charts { display: flex; flex-direction: column; gap: 22px; }
+  figure { margin: 0; }
+  .fig-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .fig-num {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 5px;
+    padding: 2px 7px;
+  }
+  .fig-title { font-size: 0.98rem; font-weight: 600; }
+  figcaption {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin-top: 8px;
+    max-width: 70ch;
+  }
+  .chart-card {
+    background: var(--bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 8px;
+    overflow-x: auto;
+  }
+  .chart-card.split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
+  .sub {
+    background: var(--bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 8px 8px 4px;
+  }
+  .sub .sub-cap {
+    font-size: 0.74rem;
+    padding: 2px 6px 6px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--muted);
+  }
+  .sub .verdict {
+    font-weight: 700;
+    font-size: 0.82rem;
+  }
+  .verdict.skip { color: var(--red); }
+  .verdict.take { color: var(--green); }
+
+  svg { display: block; width: 100%; height: auto; }
+  svg text { font-family: "Inter", system-ui, sans-serif; }
+
+  /* ---- Definition (demoted text) ---- */
+  .definition { display: none; }
+  .definition p {
+    color: var(--muted);
+    font-size: 0.9rem;
+    line-height: 1.65;
+    max-width: 74ch;
+  }
+  .definition .lead { color: var(--text); }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 640px) {
+    .chart-card.split { grid-template-columns: 1fr; }
+    .strat-title { font-size: 1.3rem; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .toggle button { transition: none; }
+  }
+</style>
+
+<div class="wrap">
+  <div class="mockup-note">
+    <span class="tag">Mockup</span>
+    <span>Strategy detail header — a visual explainer in place of the paragraph. Toggle to compare.</span>
+  </div>
+
+  <div class="panel">
+    <div class="strat-head">
+      <h1 class="strat-title">Drift-Touch Fade</h1>
+      <span class="strat-ver">engine v2</span>
+      <span class="badge session">globex · afternoon edge</span>
+    </div>
+    <p class="tagline">Fade a level that price <strong>drifted into</strong> rather than approached — contact with no impulse behind it has nothing to carry it through.</p>
+
+    <div class="toggle" role="tablist" aria-label="Description view">
+      <button role="tab" id="tab-visual" aria-selected="true" aria-controls="view-visual">Visual</button>
+      <button role="tab" id="tab-text" aria-selected="false" aria-controls="view-text">Definition</button>
+    </div>
+
+    <!-- VISUAL VIEW -->
+    <div id="view-visual" role="tabpanel" aria-labelledby="tab-visual">
+      <div class="rail">
+        <div class="rule">
+          <div class="k"><span class="dot" style="background:var(--gold)"></span>Setup</div>
+          <div class="v">Slow drift into a developing level <em>— not a momentum approach</em></div>
+        </div>
+        <div class="rule">
+          <div class="k"><span class="dot" style="background:var(--accent)"></span>Side</div>
+          <div class="v">Fade the side price hugged <em>— long above, short below</em></div>
+        </div>
+        <div class="rule">
+          <div class="k"><span class="dot" style="background:var(--green)"></span>Entry</div>
+          <div class="v"><strong>A</strong> touch-bar close · <strong>B</strong> confirm close beyond it</div>
+        </div>
+        <div class="rule">
+          <div class="k"><span class="dot" style="background:var(--red)"></span>Stop</div>
+          <div class="v">Behind the zone <em>— measured from the level</em></div>
+        </div>
+        <div class="rule">
+          <div class="k"><span class="dot" style="background:var(--ny)"></span>Target</div>
+          <div class="v">NY VWAP <em>— or fixed R / fixed distance</em></div>
+        </div>
+      </div>
+
+      <div class="charts">
+        <figure>
+          <div class="fig-head">
+            <span class="fig-num">01</span>
+            <span class="fig-title">Does the touch qualify?</span>
+          </div>
+          <div class="chart-card split">
+            <div class="sub">
+              <div class="sub-cap"><span class="verdict skip">✕ Skip</span> fast approach — a momentum test</div>
+              <svg id="svg-approach" viewBox="0 0 340 250" role="img" aria-label="Fast momentum candles diving into a support level"></svg>
+            </div>
+            <div class="sub">
+              <div class="sub-cap"><span class="verdict take">✓ Fade</span> drift touch — loitered, then wiggled in</div>
+              <svg id="svg-drift" viewBox="0 0 340 250" role="img" aria-label="Small candles loitering above a level then drifting into a touch"></svg>
+            </div>
+          </div>
+          <figcaption>A drift touch means the level already absorbed minutes of trade next to it without breaking, so price wiggles into contact with no net momentum. A fast approach is a momentum test — nothing has stalled at the level, so there's nothing to fade.</figcaption>
+        </figure>
+
+        <figure>
+          <div class="fig-head">
+            <span class="fig-num">02</span>
+            <span class="fig-title">The trade — support fade (long)</span>
+          </div>
+          <div class="chart-card">
+            <svg id="svg-trade" viewBox="0 0 720 360" role="img" aria-label="Full drift-touch fade trade: drift touch, variant B confirm, entry, stop, and NY VWAP target"></svg>
+          </div>
+          <figcaption>Price hugs above a developing level, drifts down and touches it. <strong>Variant&nbsp;B</strong> waits for a bar to close back beyond the touch bar before filling long. The stop sits behind the zone (from the level, not the fill); the target fades toward value at the NY VWAP.</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <!-- DEFINITION VIEW -->
+    <div id="view-text" class="definition" role="tabpanel" aria-labelledby="tab-text" hidden>
+      <p class="lead">The current description — dense, and easy to skim past.</p>
+      <p>Fade a level that price drifted into rather than approached. A drift touch is contact where, over the trailing GAP_LOOKBACK_BARS bars, price's net move toward the level plus the level's net move toward price is &lt;= 0 (profile.gap_closer) — price was already loitering by the level and wiggled into contact, a slow re-test of a hugged zone. A fast approach is a momentum test with no edge; a drift touch means the level has already absorbed minutes of adjacent trade without breaking, so contact without impulse has nothing to carry it through. The candidate levels are developing NY and Globex POC/VAH/VAL and the static session references (ONH/ONL, the prior day's POC/VAH/VAL and close, the session open), per the config's sources. A bar touches a level within touch_tol; a re-approach is a fresh touch only after touch_gap_bars clear of the zone, and min_level_stability_min skips a drift signal on a developing level that only just relocated to its price. The fade side is which side price hugged: above the level (support) goes long, below it (resistance) short, filtered by side. Entry variant A takes a market order on the drift-touch bar's close (filled the next tick); variant B waits for a bar to close confirm_ticks beyond the touch bar's extreme on the fade side first. The stop sits stop_ticks behind the zone, measured from the LEVEL not the fill; the target fades toward value — the NY VWAP (tracked live, with the crossing discipline and the min_room_ticks trivial-rotation guard), a fixed R multiple, or a fixed distance. max_touches_per_zone caps fills to each zone's first N touches. One position at a time; simultaneous and while-in-trade drift touches ride the exit rules as in_trade ghosts in the missed rows.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+  const NS = "http://www.w3.org/2000/svg";
+  const C = {
+    bg: "#0e1117", grid: "#2a2e38", gridSoft: "#20242e",
+    green: "#21c07a", red: "#f5455f", text: "#e6e8ee", muted: "#8a8f9c",
+    gold: "#e0a52a", ny: "#c4b5fd", white: "#d7dae2", accent: "#8f7bff",
+  };
+
+  function el(tag, attrs, text) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  // spec: { pMin, pMax, candles:[{o,h,l,c}], pad:{l,r,t,b},
+  //   hlines:[{p,color,label,dash,side}], zones:[{pTop,pBot,i0,i1,color,label}],
+  //   vwaps:[{pts:[p...],color,width,dash,label}],
+  //   markers:[{i,p,glyph,color,dy,label,labelDx,labelDy,anchor}] }
+  function drawChart(svg, spec) {
+    const vb = svg.viewBox.baseVal;
+    const W = vb.width, H = vb.height;
+    const pad = Object.assign({ l: 10, r: 12, t: 14, b: 16 }, spec.pad || {});
+    const x0 = pad.l, x1 = W - pad.r, y0 = pad.t, y1 = H - pad.b;
+    const n = spec.candles.length;
+    const px = (i) => x0 + (i + 0.5) * (x1 - x0) / n;
+    const py = (p) => y1 - (p - spec.pMin) * (y1 - y0) / (spec.pMax - spec.pMin);
+    const cw = Math.min(16, 0.56 * (x1 - x0) / n);
+
+    // faint plot frame baseline
+    svg.appendChild(el("line", { x1: x0, y1: y1, x2: x1, y2: y1, stroke: C.gridSoft, "stroke-width": 1 }));
+
+    // zones (behind everything)
+    (spec.zones || []).forEach((z) => {
+      const zx0 = px(z.i0) - cw, zx1 = px(z.i1) + cw;
+      svg.appendChild(el("rect", {
+        x: zx0, y: py(z.pTop), width: zx1 - zx0, height: py(z.pBot) - py(z.pTop),
+        fill: z.color, opacity: z.opacity != null ? z.opacity : 0.14, rx: 3,
+      }));
+      if (z.label) {
+        const t = el("text", {
+          x: (zx0 + zx1) / 2, y: py(z.pBot) + 12, fill: z.labelColor || C.gold,
+          "font-size": 10, "font-weight": 600, "text-anchor": "middle",
+        }, z.label);
+        svg.appendChild(t);
+      }
+    });
+
+    // horizontal reference lines
+    (spec.hlines || []).forEach((h) => {
+      svg.appendChild(el("line", {
+        x1: x0, y1: py(h.p), x2: x1, y2: py(h.p), stroke: h.color,
+        "stroke-width": h.width || 1.4, "stroke-dasharray": h.dash || "none", opacity: h.opacity || 1,
+      }));
+      if (h.label) {
+        const anchor = h.side === "left" ? "start" : "end";
+        const lx = h.side === "left" ? x0 + 4 : x1 - 4;
+        // label chip
+        svg.appendChild(el("text", {
+          x: lx, y: py(h.p) - 4, fill: h.color, "font-size": 10.5,
+          "font-weight": 650, "text-anchor": anchor, "letter-spacing": "0.03em",
+        }, h.label));
+      }
+    });
+
+    // vwap polylines
+    (spec.vwaps || []).forEach((v) => {
+      const pts = v.pts.map((p, i) => `${px(i)},${py(p)}`).join(" ");
+      svg.appendChild(el("polyline", {
+        points: pts, fill: "none", stroke: v.color, "stroke-width": v.width || 1.6,
+        "stroke-dasharray": v.dash || "none", opacity: v.opacity || 1,
+        "stroke-linecap": "round", "stroke-linejoin": "round",
+      }));
+      if (v.label) {
+        svg.appendChild(el("text", {
+          x: px(n - 1) + 3, y: py(v.pts[n - 1]) + (v.labelDy || -4), fill: v.color,
+          "font-size": 10.5, "font-weight": 650, "text-anchor": "end",
+        }, v.label));
+      }
+    });
+
+    // candles
+    spec.candles.forEach((k, i) => {
+      const up = k.c >= k.o;
+      const col = k.col || (up ? C.green : C.red);
+      const cx = px(i);
+      // wick
+      svg.appendChild(el("line", {
+        x1: cx, y1: py(k.h), x2: cx, y2: py(k.l), stroke: col, "stroke-width": 1.3, opacity: k.dim ? 0.5 : 1,
+      }));
+      // body
+      const yTop = py(Math.max(k.o, k.c));
+      const yBot = py(Math.min(k.o, k.c));
+      svg.appendChild(el("rect", {
+        x: cx - cw / 2, y: yTop, width: cw, height: Math.max(1.4, yBot - yTop),
+        fill: col, rx: 1, opacity: k.dim ? 0.5 : 1,
+      }));
+      // optional ring highlight around a candle
+      if (k.ring) {
+        svg.appendChild(el("rect", {
+          x: cx - cw / 2 - 3, y: py(k.h) - 3, width: cw + 6, height: py(k.l) - py(k.h) + 6,
+          fill: "none", stroke: k.ring, "stroke-width": 1.4, rx: 3, "stroke-dasharray": "3 2",
+        }));
+      }
+    });
+
+    // markers (glyph + optional label with leader)
+    (spec.markers || []).forEach((m) => {
+      const cx = px(m.i), cy = py(m.p);
+      if (m.glyph) {
+        svg.appendChild(el("text", {
+          x: cx + (m.gdx || 0), y: cy + (m.dy || 0), fill: m.color, "font-size": m.size || 15,
+          "font-weight": 800, "text-anchor": "middle", "dominant-baseline": "middle",
+        }, m.glyph));
+      }
+      if (m.label) {
+        const lx = cx + (m.labelDx || 0), ly = cy + (m.labelDy || 0);
+        if (m.leader) {
+          svg.appendChild(el("line", {
+            x1: cx, y1: cy, x2: lx, y2: ly + (m.labelDy < 0 ? 4 : -4),
+            stroke: m.color, "stroke-width": 1, opacity: 0.55,
+          }));
+        }
+        svg.appendChild(el("text", {
+          x: lx, y: ly, fill: m.color, "font-size": 10.5, "font-weight": 650,
+          "text-anchor": m.anchor || "middle",
+        }, m.label));
+      }
+    });
+  }
+
+  // ---------- Chart 01a: fast approach (skip) ----------
+  drawChart(document.getElementById("svg-approach"), {
+    pMin: 20993, pMax: 21033, pad: { l: 10, r: 12, t: 16, b: 20 },
+    candles: [
+      { o: 21028, h: 21030, l: 21024, c: 21025 },
+      { o: 21025, h: 21026, l: 21016, c: 21017 },
+      { o: 21017, h: 21018, l: 21007, c: 21008 },
+      { o: 21008, h: 21009, l: 20999, c: 21001, ring: C.red },
+    ],
+    hlines: [{ p: 21000, color: C.gold, dash: "5 3", label: "level", side: "left" }],
+    markers: [
+      { i: 3, p: 20999, glyph: "✕", color: C.red, dy: 20, size: 15 },
+      { i: 1.5, p: 21023, color: C.muted, label: "momentum", anchor: "middle", labelDx: 0, labelDy: 0 },
+    ],
+  });
+
+  // ---------- Chart 01b: drift touch (fade) ----------
+  drawChart(document.getElementById("svg-drift"), {
+    pMin: 20993, pMax: 21033, pad: { l: 10, r: 12, t: 16, b: 20 },
+    candles: [
+      { o: 21012, h: 21014, l: 21010, c: 21011 },
+      { o: 21011, h: 21013, l: 21008, c: 21010 },
+      { o: 21010, h: 21012, l: 21007, c: 21009 },
+      { o: 21009, h: 21010, l: 21005, c: 21007 },
+      { o: 21007, h: 21008, l: 21002, c: 21004 },
+      { o: 21004, h: 21005, l: 20999, c: 21003, ring: C.green },
+    ],
+    hlines: [{ p: 21000, color: C.gold, dash: "5 3", label: "level", side: "left" }],
+    zones: [{ pTop: 21001.5, pBot: 20998.5, i0: 3, i1: 5, color: C.gold, opacity: 0.16 }],
+    markers: [
+      { i: 5, p: 20999, glyph: "✓", color: C.green, dy: 20, size: 15 },
+      { i: 2, p: 21012, color: C.muted, label: "loiter", anchor: "middle" },
+    ],
+  });
+
+  // ---------- Chart 02: full trade ----------
+  drawChart(document.getElementById("svg-trade"), {
+    pMin: 20985, pMax: 21031, pad: { l: 14, r: 132, t: 22, b: 24 },
+    candles: [
+      { o: 21022, h: 21026, l: 21018, c: 21020 },
+      { o: 21020, h: 21022, l: 21014, c: 21015 },
+      { o: 21015, h: 21017, l: 21009, c: 21011 },
+      { o: 21011, h: 21013, l: 21005, c: 21007 },
+      { o: 21007, h: 21009, l: 21001, c: 21003 },
+      { o: 21003, h: 21004, l: 20999, c: 21001, ring: C.gold }, // drift touch
+      { o: 21001, h: 21008, l: 21000, c: 21007, ring: C.green }, // confirm bar (variant B)
+      { o: 21007, h: 21014, l: 21006, c: 21012 },
+      { o: 21012, h: 21020, l: 21011, c: 21018 },
+      { o: 21018, h: 21026, l: 21016, c: 21024 }, // hits target
+    ],
+    hlines: [
+      { p: 21024, color: C.ny, width: 1.6, label: "TARGET · NY VWAP", side: "right" },
+      { p: 21000, color: C.gold, dash: "5 3", width: 1.5, label: "developing level", side: "right" },
+      { p: 20992, color: C.red, dash: "5 3", width: 1.5, label: "STOP · behind zone", side: "right" },
+    ],
+    zones: [
+      { pTop: 21001.8, pBot: 20998.2, i0: 5, i1: 6, color: C.gold, opacity: 0.16, label: "drift touch", labelColor: C.gold },
+    ],
+    vwaps: [
+      { pts: [21019, 21019.6, 21020.2, 21020.8, 21021.4, 21022, 21022.6, 21023.1, 21023.6, 21024], color: C.ny, width: 1.7 },
+      { pts: [21014, 21013.6, 21013.2, 21012.9, 21012.6, 21012.3, 21012.1, 21012, 21011.9, 21011.8], color: C.white, width: 1.2, opacity: 0.45 },
+    ],
+    markers: [
+      { i: 6, p: 20998, glyph: "▲", color: C.green, dy: 6, size: 15,
+        label: "enter long", labelDx: 0, labelDy: 26, anchor: "middle" },
+      { i: 6.15, p: 21008, color: C.green, label: "confirm close (B)", anchor: "start", labelDx: 6, labelDy: -4 },
+      { i: 9, p: 21024, glyph: "✓", color: C.ny, dy: -14, size: 14 },
+    ],
+  });
+
+  // ---------- Toggle behaviour ----------
+  const tabs = {
+    visual: { btn: document.getElementById("tab-visual"), panel: document.getElementById("view-visual") },
+    text: { btn: document.getElementById("tab-text"), panel: document.getElementById("view-text") },
+  };
+  function select(which) {
+    for (const key in tabs) {
+      const on = key === which;
+      tabs[key].btn.setAttribute("aria-selected", on ? "true" : "false");
+      tabs[key].panel.hidden = !on;
+    }
+  }
+  tabs.visual.btn.addEventListener("click", () => select("visual"));
+  tabs.text.btn.addEventListener("click", () => select("text"));
+</script>

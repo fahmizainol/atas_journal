@@ -18,7 +18,7 @@ from journal import databento_client as dbn
 from journal.atr import atr_series
 from journal.config import ET_TZ, point_value, tick_size
 
-_RULE = {"1m": "1min", "5m": "5min", "15m": "15min"}
+_RULE = {"1m": "1min", "3m": "3min", "5m": "5min", "15m": "15min"}
 _ATR_PERIOD = 14
 # Extra resampled bars pulled *before* the plotted window so Wilder's ATR has
 # converged by the time the visible candles start (period + smoothing margin).

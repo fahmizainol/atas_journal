@@ -1,16 +1,40 @@
 """Databento trade ticks with on-disk parquet caching.
 
 Mirrors ``databento_client`` (per-symbol, per-day parquet + lru_cache over the
-read) but fetches the ``trades`` schema, cached per session in two segments:
+read) but fetches the ``trades`` schema. A session is carved into three windows:
 
   - ``rth``  09:30 → 16:00 ET — what every strategy reads today;
   - ``on``   18:00 (prev calendar day) → 09:30 ET — the Globex overnight,
-    fetched only for strategies that declare ``session="globex"``.
+    read by strategies that declare ``session="globex"``.
+  - ``post`` 16:00 → 18:00 ET — the post-RTH Globex hour (16:00-17:00 is live
+    trading, the last hour before the 17:00-18:00 maintenance halt; the halt
+    itself just returns no trades). The original two windows left this hour
+    uncovered, so cumulative *cross-session* anchors (the weekly VWAP) silently
+    dropped it. Spliced into the weekly seed — never into the single-session
+    18:00 Globex anchor, which is anchored at 18:00 by design.
 
-Segments are separate files so adding the overnight later never re-buys the RTH
-data already on disk: Databento bills by the data in the requested range, and
-the ranges don't overlap (get_range is end-exclusive, so on/rth meet at 09:30
-with no gap and no duplicate).
+They chain contiguously (18:00… | …09:30 | 09:30…16:00 | 16:00…18:00) with no
+gap and no duplicate, since ``get_range`` is end-exclusive. Together they are the
+whole trading day: prev 18:00 → 18:00 ET.
+
+TWO CACHE LAYOUTS live here, and every read goes through the same resolver:
+
+  - ``day``  one parquet per session holding all three windows. What new fetches
+    write, and the layout the cache was migrated to.
+  - ``rth`` / ``on`` / ``post`` — one parquet per window. The original layout,
+    still read (and still *topped up*) wherever it is what's on disk, so the
+    migration never had to re-buy a tick.
+
+The window is baked into the filename in both layouts, so widening one later
+invalidates rather than silently serving a short day.
+
+READ CONTRACT — the load-bearing invariant. Callers get exactly the window they
+asked for, whichever layout backs it: ``get_day_ticks(include_overnight=False)``
+returns 09:30→16:00 and nothing else. The engine builds its tick bars and its
+VWAP over the whole frame it is handed (``vwap_bands`` accumulates from row 0),
+so a frame that quietly carried the overnight in front would re-phase every bar
+and move the NY anchor to 18:00 — silently, with no error, changing the numbers
+of every RTH strategy. Slice before you return, always.
 
 Every fetch here is for a *raw* contract (``NQZ5``), never Databento's continuous
 symbol — but which raw contract is decided per session, so a window may span a
@@ -33,17 +57,29 @@ from functools import lru_cache
 
 import pandas as pd
 
-from ..config import (CACHE_DIR, CONTRACT_SPECS, DATABENTO_DATASET, ET_TZ,
-                      continuous_symbol, databento_key, root_symbol)
+from ..config import (CACHE_DIR, CONTRACT_SPECS, DATA_DIR, DATABENTO_DATASET,
+                      ET_TZ, continuous_symbol, databento_key, root_symbol)
 from ..databento_client import DatabentoUnavailable
 
 TICK_CACHE_DIR = CACHE_DIR / "ticks"
+
+# Recorded live ticks — a store deliberately DISJOINT from the Databento cache
+# above. Nothing written here ever grows the backtest corpus, which is what
+# makes "do live signals match the backtest" a question with an answer: the
+# reference the live day is checked against must not be partly made of the live
+# day. See docs/live-shadow-plan.md decisions 3 and 4.
+#
+# Note this is not ``config.LIVE_DIR`` — that is the ATAS import drop folder,
+# and the collision is only in the word.
+LIVE_TICK_DIR = DATA_DIR / "live" / "ticks"
 
 # The windows we fetch and cache. Each segment is baked into its cache
 # filename, so widening a window later invalidates rather than silently serves
 # a short day.
 RTH_OPEN = time(9, 30)
 RTH_CLOSE = time(16, 0)
+POST_OPEN = time(16, 0)    # RTH close; Globex keeps trading to the 17:00 halt
+POST_CLOSE = time(18, 0)   # Globex reopen after the daily maintenance break
 GLOBEX_OPEN = time(18, 0)  # previous calendar day (Sunday, for Monday sessions)
 
 TICK_COLS = ["ts_utc", "price", "size", "side"]
@@ -63,8 +99,64 @@ def overnight_bounds_utc(day: date) -> tuple[pd.Timestamp, pd.Timestamp]:
     return open_et.tz_convert("UTC"), session_bounds_utc(day)[0]
 
 
+def post_bounds_utc(day: date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """The post-RTH Globex hour: 16:00 → 18:00 ET *on the session date*, as UTC.
+
+    16:00-17:00 is live trading (the last hour before the 17:00-18:00 maintenance
+    halt); the halt returns no trades, so the fetched frame is ~one hour. This is
+    the hour the rth (…→16:00) and on (18:00→…) segments left uncovered."""
+    open_et = pd.Timestamp(datetime.combine(day, POST_OPEN), tz=ET_TZ)
+    close_et = pd.Timestamp(datetime.combine(day, POST_CLOSE), tz=ET_TZ)
+    return open_et.tz_convert("UTC"), close_et.tz_convert("UTC")
+
+
+def day_bounds_utc(day: date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """The whole trading day — prev 18:00 ET → 18:00 ET — as UTC instants.
+
+    Exactly the union of the on/rth/post windows, and exactly the boundary
+    ``contract_for`` quantizes the roll to. That second property is what makes a
+    single whole-day fetch safe: one range can never straddle two contracts, so
+    the seam that motivated splitting the fetch in the first place cannot appear
+    inside a day file.
+    """
+    return overnight_bounds_utc(day)[0], post_bounds_utc(day)[1]
+
+
+def session_date_for(ts: pd.Timestamp) -> date:
+    """Which ET session date an instant belongs to.
+
+    The inverse of ``day_bounds_utc``: a session runs prev 18:00 → 18:00 ET, so
+    anything at or after 18:00 belongs to the *next* session. This is what a live
+    feed rolls on — and it rolls on the tick clock, never the wall clock, so the
+    boundary is wherever the exchange says it is and a host whose clock has
+    drifted still cuts the day in the right place.
+
+    Saturday is unreachable: the week ends at Friday 17:00 ET and reopens Sunday
+    18:00, so 18:00-Friday-onwards resolves forward to Monday, and the Sunday
+    evening session is Monday's — which is exactly what ``overnight_bounds_utc``
+    already assumes when it keys Monday's night to Sunday.
+    """
+    et = ts.tz_convert(ET_TZ)
+    d = et.date()
+    if et.time() >= GLOBEX_OPEN:
+        d += timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
 def _cache_path(symbol: str, day: date, segment: str = "rth"):
     return TICK_CACHE_DIR / f"{symbol}_{day.isoformat()}_{segment}.parquet"
+
+
+def _empty_marker(symbol: str, day: date, segment: str):
+    """Sentinel recording that a segment's pull came back genuinely empty (an
+    early close before the post hour, a holiday night). Only ever written for
+    the on/post segments: an empty RTH pull stays uncached so the runner's
+    broken-window guard can keep reading "an rth file that exists is a file
+    with ticks". Without this, every run re-bought the same 13 empty post
+    segments from Databento — ~7s of network each, ~90s of the startup stall."""
+    return TICK_CACHE_DIR / f"{symbol}_{day.isoformat()}_{segment}.empty"
 
 
 # --- roll -------------------------------------------------------------------
@@ -289,16 +381,19 @@ def market_closed(contract: str, day: date) -> bool:
     return day.isoformat() in _load_roll(root_symbol(contract))["closed"]
 
 
-def estimate_cost(symbol: str, start: date, end: date,
-                  include_overnight: bool = False) -> float:
-    """USD cost of the trades pull for [start, end], before fetching anything."""
+def estimate_cost(symbol: str, start: date, end: date) -> float:
+    """USD cost of the trades pull for [start, end], before fetching anything.
+
+    Priced over whole sessions (prev 18:00 → 18:00 ET), which is what a cold day
+    now buys. The old signature quoted overnight→RTH-close and so under-quoted
+    every run by the post hour."""
     import databento as dbn
 
     key = databento_key()
     if key is None:
         raise DatabentoUnavailable("DATABENTO_API_KEY not set")
-    s = overnight_bounds_utc(start)[0] if include_overnight else session_bounds_utc(start)[0]
-    _, e = session_bounds_utc(end)
+    s, _ = day_bounds_utc(start)
+    _, e = day_bounds_utc(end)
     return dbn.Historical(key).metadata.get_cost(
         dataset=DATABENTO_DATASET, schema="trades", stype_in="raw_symbol",
         symbols=[symbol], start=s.to_pydatetime(), end=e.to_pydatetime(),
@@ -333,22 +428,218 @@ def _fetch_range(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Data
     return df.sort_values("ts_utc", kind="stable").reset_index(drop=True)
 
 
-@lru_cache(maxsize=32)
-def _read_day_parquet(symbol: str, day: date, segment: str = "rth") -> pd.DataFrame:
+@lru_cache(maxsize=8)
+def _read_parquet_cached(symbol: str, day: date, segment: str = "rth") -> pd.DataFrame:
     """In-memory cache over the parquet read. Treat the result as READ-ONLY —
-    the frame is shared with every other caller for the life of the process."""
+    the frame is shared with every other caller for the life of the process.
+
+    Small maxsize on purpose: in the day layout this is a *staging* read that
+    exists to be sliced by ``_read_segment_cached`` (which caches the slices), so
+    holding many whole-day frames would keep ~4x the ticks any caller actually
+    wants. The runner walks days in order, so a handful of entries still catches
+    all three slices of a day from one read."""
     return pd.read_parquet(_cache_path(symbol, day, segment))
 
 
-def _get_segment(symbol: str, day: date, segment: str, use_cache: bool) -> pd.DataFrame:
-    cache = _cache_path(symbol, day, segment)
-    if use_cache and cache.exists():
-        return _read_day_parquet(symbol, day, segment)
-    bounds = overnight_bounds_utc(day) if segment == "on" else session_bounds_utc(day)
-    df = _fetch_range(symbol, *bounds)
+_SEGMENT_BOUNDS = {
+    "on": overnight_bounds_utc,
+    "post": post_bounds_utc,
+    "rth": session_bounds_utc,
+    "day": day_bounds_utc,
+}
+
+SEGMENTS = ("on", "rth", "post")
+
+# Which window each tick belongs to, stored *in* the day file rather than
+# re-derived from its timestamp on every read. See _assign_segments.
+SEG_COL = "seg"
+
+
+def _assign_segments(df: pd.DataFrame, day: date) -> pd.DataFrame:
+    """Label every tick of a whole-day frame with its window.
+
+    A three-way cut at the two interior boundaries, deliberately with no outer
+    bound: the first and last ticks of the frame are whatever the fetch returned,
+    and a rule that dropped ticks outside [18:00, 18:00) would silently lose the
+    edges (see below for why they don't line up exactly). Every tick lands in
+    exactly one window, so the labels always partition the day.
+    """
+    if df.empty:
+        return df.assign(**{SEG_COL: pd.Series(dtype="object")})
+    rth_open = session_bounds_utc(day)[0]
+    post_open = post_bounds_utc(day)[0]
+    ts = df["ts_utc"]
+    seg = pd.Series("post", index=df.index, dtype="object")
+    seg[ts < post_open] = "rth"
+    seg[ts < rth_open] = "on"
+    return df.assign(**{SEG_COL: seg})
+
+
+def _slice_window(df: pd.DataFrame, day: date, segment: str) -> pd.DataFrame:
+    """Carve one window out of a whole-day frame.
+
+    Prefers the stored ``seg`` label over re-deriving the split from timestamps,
+    because the two do not agree on the legacy cache. ``_fetch_range`` asks
+    Databento for a range of ``ts_recv`` but stores and sorts on ``ts_event``,
+    and ts_event <= ts_recv, so a window's first ticks can carry an event stamp a
+    few milliseconds *before* the window it was fetched as. On the old
+    three-request layout that makes rth and post genuinely overlap at 16:00 — on
+    56% of cached days, by 1-7 ticks. Re-deriving the cut from ts_event would
+    quietly pull those ticks back into RTH and change what every RTH strategy
+    traded, so migration records where each tick actually came from and this
+    reads the label. A single whole-day fetch has no interior seam to disagree
+    about, so its labels and its timestamps say the same thing.
+
+    The index is reset because a segment parquet reads back with a 0-based
+    RangeIndex and callers position into these frames (``engine`` searchsorts for
+    the RTH boundary and uses the result as an offset) — a sliced frame carrying
+    its parent's index would put every one of those offsets out by the length of
+    the overnight. ``seg`` is dropped so callers see exactly the columns a
+    segment file has always given them.
+    """
+    if df.empty:
+        return df.drop(columns=[SEG_COL], errors="ignore")
+    if SEG_COL in df.columns:
+        out = df[df[SEG_COL] == segment].drop(columns=[SEG_COL])
+        return out.reset_index(drop=True)
+    lo, hi = _SEGMENT_BOUNDS[segment](day)
+    ts = df["ts_utc"]
+    a = int(ts.searchsorted(lo, side="left"))
+    b = int(ts.searchsorted(hi, side="left"))
+    return df.iloc[a:b].reset_index(drop=True)
+
+
+def _day_path(symbol: str, day: date):
+    return _cache_path(symbol, day, "day")
+
+
+def have_segment(symbol: str, day: date, segment: str) -> bool:
+    """Is this window on disk in *either* layout? Never fetches."""
+    return _day_path(symbol, day).exists() or _cache_path(symbol, day, segment).exists()
+
+
+def day_complete(symbol: str, day: date) -> bool:
+    """True when every window of this session is settled on disk — a day file, or
+    all three segments present (counting a confirmed-empty marker as settled).
+
+    This is the "would a run have to spend money here?" test.
+    """
+    if _day_path(symbol, day).exists():
+        return True
+    return all(_cache_path(symbol, day, s).exists()
+               or _empty_marker(symbol, day, s).exists() for s in SEGMENTS)
+
+
+def has_rth(symbol: str, day: date) -> bool:
+    """Is a *non-empty* RTH window on disk? The runner's broken-window guard.
+
+    Cheap enough to ask once per day of a window. The legacy layout answers from
+    the filename alone — an empty RTH pull is never cached, so the file existing
+    is the answer — and the day layout reads back only the label column instead
+    of a million rows of ticks.
+    """
+    if _cache_path(symbol, day, "rth").exists():
+        return True
+    p = _day_path(symbol, day)
+    if not p.exists():
+        return False
+    try:
+        return bool((pd.read_parquet(p, columns=[SEG_COL])[SEG_COL] == "rth").any())
+    except Exception:  # noqa: BLE001 — a day file written before seg existed
+        return not _read_segment_cached(symbol, day, "rth").empty
+
+
+def _any_segment(symbol: str, day: date) -> bool:
+    """True when the legacy layout holds *part* of this session. Such a day is
+    topped up window by window rather than re-bought whole — the bytes already on
+    disk were paid for once already."""
+    return any(_cache_path(symbol, day, s).exists()
+               or _empty_marker(symbol, day, s).exists() for s in SEGMENTS)
+
+
+@lru_cache(maxsize=96)
+def _read_segment_cached(symbol: str, day: date, segment: str) -> pd.DataFrame:
+    """One window, resolved across both layouts. READ-ONLY, like the parquet read
+    it wraps. Cached at the *slice* so the day layout doesn't re-slice a
+    million-row frame on every gate lookup."""
+    if _cache_path(symbol, day, segment).exists():
+        return _read_parquet_cached(symbol, day, segment)
+    return _slice_window(_read_parquet_cached(symbol, day, "day"), day, segment)
+
+
+def _read_day_parquet(symbol: str, day: date, segment: str = "rth") -> pd.DataFrame:
+    """The parquet read, as callers outside this module have always known it.
+
+    Kept as a plain function wrapping the cached one so that
+    ``_read_day_parquet.cache_clear()`` — the invalidation every test and caller
+    already reaches for — clears *both* layers. A second lru_cache that the
+    existing call sites didn't know to clear would leave stale slices behind
+    exactly where someone had carefully invalidated the read.
+    """
+    return _read_parquet_cached(symbol, day, segment)
+
+
+def _clear_tick_caches() -> None:
+    _read_parquet_cached.cache_clear()
+    _read_segment_cached.cache_clear()
+    _clear_live_caches()
+
+
+_read_day_parquet.cache_clear = _clear_tick_caches  # type: ignore[attr-defined]
+
+
+def _fetch_day(symbol: str, day: date) -> pd.DataFrame:
+    """Buy the whole session in one range and cache it as one parquet.
+
+    An empty pull is not cached: a day with no ticks is either a holiday (the
+    roll probe already knows, see ``market_closed``) or a data problem the run
+    must fail on, and writing a file for it would make the difference
+    unreadable afterwards."""
+    df = _fetch_range(symbol, *day_bounds_utc(day))
     if not df.empty:
+        df = _assign_segments(df, day)
         TICK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(_day_path(symbol, day), index=False)
+    return df
+
+
+def _get_segment(symbol: str, day: date, segment: str, use_cache: bool) -> pd.DataFrame:
+    """One window, fetching what isn't cached.
+
+    Resolution order matters: a legacy segment file wins over the day file (it is
+    the same ticks, already narrowed), the day file is sliced when it is what's
+    there, and only a session with nothing on disk reaches Databento — where it
+    buys the *whole* day, not the one window asked for, because that is the
+    layout going forward and the extra two windows are what every chart and the
+    weekly seed would have had to buy separately anyway.
+    """
+    if use_cache:
+        if _cache_path(symbol, day, segment).exists() or _day_path(symbol, day).exists():
+            return _read_segment_cached(symbol, day, segment)
+        if _empty_marker(symbol, day, segment).exists():
+            return pd.DataFrame(columns=TICK_COLS)
+        # A part-cached legacy day: top up this window alone rather than re-buying
+        # the night (or the RTH) sitting next to it.
+        if _any_segment(symbol, day):
+            return _get_legacy_segment(symbol, day, segment)
+    df = _fetch_day(symbol, day)
+    return _slice_window(df, day, segment)
+
+
+def _get_legacy_segment(symbol: str, day: date, segment: str) -> pd.DataFrame:
+    """Fetch and cache a single window in the old per-segment layout.
+
+    Only reached for a session the old layout already partly holds. Keeps the
+    original empty-marker behaviour: an empty RTH pull stays uncached so the
+    runner's broken-window guard still reads "an rth file that exists is a file
+    with ticks", while an empty on/post is recorded so it is never re-bought."""
+    cache = _cache_path(symbol, day, segment)
+    df = _fetch_range(symbol, *_SEGMENT_BOUNDS[segment](day))
+    TICK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if not df.empty:
         df.to_parquet(cache, index=False)
+    elif segment != "rth":
+        _empty_marker(symbol, day, segment).touch()
     return df
 
 
@@ -370,7 +661,43 @@ def get_day_ticks(symbol: str, day: date, use_cache: bool = True,
         return rth
     # Both segments are sorted and the windows meet end-exclusive at 09:30,
     # so concatenation is already globally ordered with no duplicate tick.
+    # Note the post hour is deliberately absent even here: a Globex strategy is
+    # anchored at 18:00 and trades to the bell, and appending 16:00-18:00 would
+    # extend every session past the close it was written against.
     return pd.concat([on, rth], ignore_index=True)
+
+
+def ensure_day(symbol: str, day: date) -> bool:
+    """Buy and cache the whole session — night, RTH, and the post hour — in one
+    range. True if the session is settled on disk afterwards.
+
+    This is the one place a cold session is paid for. It replaces the old pair of
+    ``ensure_overnight`` / ``ensure_post`` calls (kept below for callers that want
+    one window): the run form used to choose whether to buy the night, and now a
+    run always buys the day, because the default already did and the charts, the
+    weekly seed and every cross-session anchor were the things going without.
+
+    Errors propagate, unlike the two helpers below. On a cold session there is
+    nothing to degrade *to* — a run whose RTH never arrived cannot report metrics
+    over a window it did not test, and the runner's guard turns that into a
+    failed run. On a part-cached legacy session the top-up is best-effort for the
+    night and the post hour exactly as it was, so a Databento outage still leaves
+    the run standing on the RTH it already had.
+    """
+    if day_complete(symbol, day):
+        return True
+    if _any_segment(symbol, day):
+        for seg in SEGMENTS:
+            if _cache_path(symbol, day, seg).exists() or _empty_marker(symbol, day, seg).exists():
+                continue
+            try:
+                _get_legacy_segment(symbol, day, seg)
+            except Exception:  # noqa: BLE001 — garnish for a day we can already trade
+                if seg == "rth":
+                    raise
+        return day_complete(symbol, day)
+    _fetch_day(symbol, day)
+    return _day_path(symbol, day).exists()
 
 
 def ensure_overnight(symbol: str, day: date) -> bool:
@@ -389,12 +716,139 @@ def ensure_overnight(symbol: str, day: date) -> bool:
     whose RTH ticks are all present must not land in 'error' because Databento was
     unreachable for the garnish — it simulated exactly the trades it claims. The
     session just gets drawn without its overnight, as it was before this existed.
+
+    Answered from disk when it can be: a cached night (or a confirmed-empty one)
+    is already ensured, and reading the parquet back just to prove it exists was
+    ~2.7s of thrown-away I/O per run across a full window.
     """
+    if have_segment(symbol, day, "on"):
+        return True
+    if _empty_marker(symbol, day, "on").exists():
+        return False
     try:
         _get_segment(symbol, day, "on", use_cache=True)
     except Exception:  # noqa: BLE001 — see above: the charts degrade, the run stands
         return False
-    return _cache_path(symbol, day, "on").exists()
+    return have_segment(symbol, day, "on")
+
+
+def ensure_post(symbol: str, day: date) -> bool:
+    """Buy and cache the post-RTH Globex hour (16:00→18:00 ET) for a session.
+
+    The twin of ``ensure_overnight``: context the charts and the weekly seed want
+    but the rules never read, so failure is not fatal — a run whose RTH ticks are
+    all present must not error because Databento was unreachable for this hour. It
+    just leaves the 16:00-17:00 hour out of any cross-session anchor for that day,
+    exactly as it was before this segment existed. Like ensure_overnight, answered
+    from disk when a cached or confirmed-empty hour already settles it."""
+    if have_segment(symbol, day, "post"):
+        return True
+    if _empty_marker(symbol, day, "post").exists():
+        return False
+    try:
+        _get_segment(symbol, day, "post", use_cache=True)
+    except Exception:  # noqa: BLE001 — see ensure_overnight: garnish, not an input
+        return False
+    return have_segment(symbol, day, "post")
+
+
+# --- the live store ---------------------------------------------------------
+#
+# Recorded days live under LIVE_TICK_DIR/{SYMBOL}/{DATE}/ as a set of sealed
+# chunk parquets. Three properties carry the design, and all three exist so a
+# reader and a writer can share a directory with no coordination:
+#
+#   - a chunk is IMMUTABLE once named. The recorder writes to a temp file and
+#     renames, so a chunk is either absent or complete — never half-read.
+#   - the DIRECTORY IS THE TRUTH, not the manifest. ``session.json`` is a
+#     heartbeat (is the recorder alive, when did it last see a print); a chunk on
+#     disk counts whether or not the manifest has caught up with it. That removes
+#     the whole ordering hazard of "which file do I update first".
+#   - chunk names sort in write order, so the concatenation is already the tape.
+#
+# Reads are cached on the chunk *set*, so a day that grows invalidates itself
+# without anyone having to remember to clear anything — the failure the sums
+# cache and the segment LRU both had to be designed against.
+
+_LIVE_CHUNK_GLOB = "[0-9]*.parquet"
+
+
+def live_day_dir(symbol: str, day: date):
+    return LIVE_TICK_DIR / symbol / day.isoformat()
+
+
+def live_chunks(symbol: str, day: date) -> tuple[str, ...]:
+    """The sealed chunks of a recorded day, in tape order. () if there are none."""
+    d = live_day_dir(symbol, day)
+    if not d.is_dir():
+        return ()
+    return tuple(sorted(p.name for p in d.glob(_LIVE_CHUNK_GLOB)))
+
+
+def have_live_day(symbol: str, day: date) -> bool:
+    """Is any of this session recorded? Never touches the Databento cache."""
+    return bool(live_chunks(symbol, day))
+
+
+@lru_cache(maxsize=8)
+def _read_live_cached(symbol: str, day: date, chunks: tuple[str, ...]) -> pd.DataFrame:
+    """A recorded day, concatenated. READ-ONLY, like every other cached read.
+
+    ``chunks`` is part of the key rather than derived inside: it is what makes a
+    growing day invalidate its own cache entry, and passing it in means the
+    caller's view of the directory and the frame it gets back are the same view.
+
+    SORTED, NOT MERELY CONCATENATED. Chunk names sort in *write* order, and that
+    stopped being time order when the feed learned to backfill: connect at 07:08
+    and a chunk of 07:08 prints is written; reconnect later and the replay of the
+    night from 18:00 is written *after* it. Both are the day, and the day is
+    their union in time order — so the sort is what the file names cannot say.
+    Stable, so prints sharing a stamp keep the order they were recorded in, and
+    cheap in practice: the read is cached on the chunk set, so it happens once
+    per change rather than once per caller.
+    """
+    d = live_day_dir(symbol, day)
+    parts = [pd.read_parquet(d / c) for c in chunks]
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return pd.DataFrame(columns=TICK_COLS)
+    df = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
+    if not df["ts_utc"].is_monotonic_increasing:
+        df = df.sort_values("ts_utc", kind="stable", ignore_index=True)
+    return df[[c for c in TICK_COLS if c in df.columns]]
+
+
+def live_day_ticks(symbol: str, day: date) -> pd.DataFrame | None:
+    """Everything recorded for a session — night, RTH and post hour, in order.
+
+    None when nothing was recorded. This is the raw store; the segment readers
+    below are what the engine and the charts see.
+    """
+    chunks = live_chunks(symbol, day)
+    if not chunks:
+        return None
+    df = _read_live_cached(symbol, day, chunks)
+    return None if df.empty else df
+
+
+def live_segment(symbol: str, day: date, segment: str) -> pd.DataFrame | None:
+    """One window of a recorded day, or None if nothing recorded falls in it.
+
+    The cut is derived from the timestamps, with no stored ``seg`` label — and
+    unlike the Databento cache that is not a shortcut. The label exists there
+    because three separately-fetched windows disagreed at their seams (see
+    ``_slice_window``); a recorded day is one time-ordered stream with no
+    interior seam to disagree about, so the boundary IS the timestamp.
+    """
+    df = live_day_ticks(symbol, day)
+    if df is None:
+        return None
+    out = _slice_window(df, day, segment)
+    return None if out.empty else out
+
+
+def _clear_live_caches() -> None:
+    _read_live_cached.cache_clear()
 
 
 def cached_rth(symbol: str, day: date) -> pd.DataFrame | None:
@@ -403,10 +857,16 @@ def cached_rth(symbol: str, day: date) -> pd.DataFrame | None:
     ``get_day_ticks`` buys what it doesn't find, which is right for a run and
     wrong for anything served from a GET. The regime KPIs are read straight off
     the tick cache by the charts, so they need the read half without the wallet.
+
+    Falls back to the live store, and in that order: a day that was *bought*
+    reads as the bought day even if it was also recorded. That direction is the
+    load-bearing one — it means recording a session can never change what a
+    backtest over that session says, and it leaves the Databento corpus as the
+    independent reference Phase 6 reconciles against.
     """
-    if not _cache_path(symbol, day, "rth").exists():
-        return None
-    df = _read_day_parquet(symbol, day, "rth")
+    if not have_segment(symbol, day, "rth"):
+        return live_segment(symbol, day, "rth")
+    df = _read_segment_cached(symbol, day, "rth")
     return None if df.empty else df
 
 
@@ -419,10 +879,28 @@ def cached_overnight(symbol: str, day: date) -> pd.DataFrame | None:
     thing that spends money at Databento. So a session whose overnight was never
     bought simply doesn't get the second anchor drawn, and nothing is bought to
     draw it. Runs are where ticks get paid for; charts only ever read.
+
+    Falls back to the live store — see ``cached_rth`` for why in that order, and
+    note this is the read the ten ``gx_*`` gate sites make. They blind-fail-closed
+    on a missing night, so on a live day with nothing behind this call every
+    Globex strategy vetoes everything and says nothing about why. That is the
+    single reason ticks-on-disk could not be cut from Phase 5.
     """
-    if not _cache_path(symbol, day, "on").exists():
-        return None
-    df = _read_day_parquet(symbol, day, "on")
+    if not have_segment(symbol, day, "on"):
+        return live_segment(symbol, day, "on")
+    df = _read_segment_cached(symbol, day, "on")
+    return None if df.empty else df
+
+
+def cached_post(symbol: str, day: date) -> pd.DataFrame | None:
+    """The post-RTH Globex hour (16:00→18:00 ET), only if already on disk — never
+    a fetch. Backs the weekly seed and full-day charts from a GET; a session whose
+    post hour was never bought simply contributes on+rth to its cross-session
+    anchors, as before. Falls back to the live store, Databento first — see
+    ``cached_rth``."""
+    if not have_segment(symbol, day, "post"):
+        return live_segment(symbol, day, "post")
+    df = _read_segment_cached(symbol, day, "post")
     return None if df.empty else df
 
 

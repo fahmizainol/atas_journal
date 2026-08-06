@@ -191,7 +191,15 @@ export interface SimTrade {
    * stop was pulled in to underwater_stop_ticks behind the entry and then hit.
    * "daily_loss" = the daily-loss flatten: realized net plus the open trade marked
    * to price reached the daily loss stop, so the position left at market
-   * (daily_loss_exit_open). */
+   * (daily_loss_exit_open).
+   * "source" = the drift fade's return-to-source exit: a bar closed back through
+   * the drift level by exit_return_to_source_ticks on the losing side, so the
+   * position left at market (an early stop in front of the fixed one).
+   * "maxhold" = the drift fade's grind cap: held max_hold_min with the target
+   * unmet, flattened at market.
+   * "uw_exit" = the underwater flatten: the position sat continuously below
+   * breakeven for underwater_exit_after_s, so it left at market. Distinct from
+   * "uw_stop", which only tightens the stop and still dies as a stop. */
   exit_reason:
     | "target"
     | "stop"
@@ -201,9 +209,19 @@ export interface SimTrade {
     | "trail"
     | "panic"
     | "uw_stop"
-    | "daily_loss";
+    | "uw_exit"
+    | "daily_loss"
+    | "source"
+    | "maxhold";
   points: number;
   r_multiple: number;
+  /** Maximum favorable/adverse excursion — the furthest the trade ever ran in
+   * profit (what the exit left on the table) and the deepest heat it sat
+   * through — in points and in R. Absent on runs made before excursion tracking. */
+  mfe_points?: number;
+  mae_points?: number;
+  mfe_r?: number;
+  mae_r?: number;
   band_width_ticks: number;
   duration_s: number;
   gross_pnl: number;

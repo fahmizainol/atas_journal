@@ -9,7 +9,10 @@ Run directly:  ``.venv/bin/python tests/test_ib.py``
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -207,6 +210,123 @@ def test_chart_overlay_absent_when_the_window_never_completes():
     print("chart overlay honest absence ok")
 
 
+def test_width_bucket_edges():
+    lo, hi = ibmod.WIDTH_TERCILE_EDGES
+    assert ibmod.width_bucket(None) is None  # no adr14 denominator yet
+    assert ibmod.width_bucket(lo - 0.01) == "narrow"
+    assert ibmod.width_bucket(lo) == "mid"  # edges are inclusive into mid
+    assert ibmod.width_bucket(hi) == "mid"
+    assert ibmod.width_bucket(hi + 0.01) == "wide"
+    print("width buckets ok")
+
+
+@contextmanager
+def _snapshot_dir(snapshots):
+    """Point ``IB_DIR`` at a temp dir holding the given snapshots.
+
+    Each snapshot is (symbol, start, end, ib_minutes, days) and carries only the
+    fields ``session_widths`` reads. A context manager rather than a pytest
+    fixture so this file still runs as a plain script (see the module docstring).
+    """
+    real = ibmod.IB_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        ibmod.IB_DIR = Path(tmp)
+        for symbol, start, end, ib_minutes, days in snapshots:
+            blob = {"ib_version": ibmod.IB_VERSION, "symbol": symbol,
+                    "start": start, "end": end, "ib_minutes": ib_minutes,
+                    "days": days}
+            (Path(tmp) / f"{symbol}_{start}-{end}_{ib_minutes}.json").write_text(
+                json.dumps(blob))
+        try:
+            yield Path(tmp)
+        finally:
+            ibmod.IB_DIR = real
+
+
+def test_session_widths_reads_the_widest_snapshot():
+    # A one-month snapshot and a full-window one covering the same day with a
+    # *different* ib_vs_adr — the wide one must win, because its adr14 chain is
+    # the longer one and the chip has to mean the same thing in every window.
+    with _snapshot_dir([
+        ("NQ", "2025-06-01", "2025-06-30", 60,
+         [{"day": "2025-06-10", "ib_range": 100.0, "ib_vs_adr": 0.30, "adr14": 333.0}]),
+        ("NQ", "2025-02-01", "2026-06-30", 60,
+         [{"day": "2025-06-10", "ib_range": 100.0, "ib_vs_adr": 0.80, "adr14": 125.0},
+          {"day": "2025-06-11", "ib_range": 90.0, "ib_vs_adr": None, "adr14": None},
+          {"day": "2026-01-05", "ib_range": 400.0, "ib_vs_adr": 0.55, "adr14": 727.0}]),
+    ]):
+        out = ibmod.session_widths("NQ", date(2025, 6, 1), date(2025, 6, 30))
+    assert out["source"]["start"] == "2025-02-01"
+    assert out["tercile_edges"] == list(ibmod.WIDTH_TERCILE_EDGES)
+    # Sliced to the requested range: the January day is in the snapshot, not the ask.
+    assert set(out["days"]) == {"2025-06-10", "2025-06-11"}
+    assert out["days"]["2025-06-10"]["width"] == "wide"
+    # Inside the ADR warm-up: present, but with no bucket rather than a made-up one.
+    assert out["days"]["2025-06-11"]["width"] is None
+    print("session widths snapshot pick ok")
+
+
+def test_session_widths_honest_absence():
+    # Wrong symbol, and a right-symbol snapshot at a non-default IB window: the
+    # terciles were cut on 60-minute widths, so a 30-minute study can't feed them.
+    with _snapshot_dir([
+        ("ES", "2025-02-01", "2026-06-30", 60,
+         [{"day": "2025-06-10", "ib_range": 50.0, "ib_vs_adr": 0.9, "adr14": 55.0}]),
+        ("NQ", "2025-02-01", "2026-06-30", 30,
+         [{"day": "2025-06-10", "ib_range": 100.0, "ib_vs_adr": 0.9, "adr14": 111.0}]),
+    ]):
+        out = ibmod.session_widths("NQ", date(2025, 6, 1), date(2025, 6, 30))
+        # No snapshots to read at all, but the pinned edges still come back so
+        # the UI can render its caption over an empty column.
+        gone = ibmod.session_widths("XX", date(2030, 1, 1), date(2030, 1, 2))
+    assert out["run_id"] is None and out["source"] is None and out["days"] == {}
+    assert gone["days"] == {} and gone["tercile_edges"] == list(ibmod.WIDTH_TERCILE_EDGES)
+    print("session widths honest absence ok")
+
+
+def test_day_context_reads_the_widest_snapshot():
+    # Same rule as session_widths and for the same reason: the adr14 chain makes
+    # a day's denominator a property of the window it was computed in, so the
+    # simulator has to be handed the full run's number, not the short run's.
+    with _snapshot_dir([
+        ("NQ", "2025-06-01", "2025-06-30", 60,
+         [{"day": "2025-06-10", "ib_range": 100.0, "ib_vs_adr": 0.30, "adr14": 333.0}]),
+        ("NQ", "2025-02-01", "2026-06-30", 60,
+         [{"day": "2025-06-10", "ib_range": 100.0, "ib_vs_adr": 0.80, "adr14": 125.0},
+          {"day": "2025-06-11", "ib_range": 90.0, "ib_vs_adr": None, "adr14": None}]),
+    ]):
+        got = ibmod.day_context("NQ", date(2025, 6, 10))
+        warmup = ibmod.day_context("NQ", date(2025, 6, 11))
+        uncovered = ibmod.day_context("NQ", date(2030, 1, 1))
+    assert got["adr14"] == 125.0
+    assert got["source"]["start"] == "2025-02-01"
+    # Honest absence twice: inside the ADR warm-up, and outside the study.
+    assert warmup["adr14"] is None
+    assert uncovered["adr14"] is None and uncovered["source"] is not None
+    print("day context snapshot pick ok")
+
+
+def test_day_context_cache_follows_the_files():
+    # The lookup is cached (a per-session endpoint calls it), so the cache must
+    # not outlive the snapshots it read. Two directories in a row, same symbol
+    # and same day, different answers.
+    with _snapshot_dir([
+        ("NQ", "2025-02-01", "2026-06-30", 60,
+         [{"day": "2025-06-10", "ib_range": 100.0, "ib_vs_adr": 0.8, "adr14": 125.0}]),
+    ]):
+        first = ibmod.day_context("NQ", date(2025, 6, 10))
+    with _snapshot_dir([
+        ("NQ", "2025-02-01", "2026-06-30", 60,
+         [{"day": "2025-06-10", "ib_range": 100.0, "ib_vs_adr": 0.4, "adr14": 250.0}]),
+    ]):
+        second = ibmod.day_context("NQ", date(2025, 6, 10))
+        # And with no snapshots at all there is nothing to hand back.
+        empty = ibmod.day_context("ES", date(2025, 6, 10))
+    assert first["adr14"] == 125.0 and second["adr14"] == 250.0
+    assert empty["adr14"] is None and empty["source"] is None
+    print("day context cache invalidation ok")
+
+
 if __name__ == "__main__":
     test_normal_day_no_break()
     test_normal_variation_up()
@@ -219,4 +339,9 @@ if __name__ == "__main__":
     test_orb_windows_and_r()
     test_gap_and_globex_context()
     test_aggregates_shapes()
+    test_width_bucket_edges()
+    test_session_widths_reads_the_widest_snapshot()
+    test_session_widths_honest_absence()
+    test_day_context_reads_the_widest_snapshot()
+    test_day_context_cache_follows_the_files()
     print("all ib tests passed")

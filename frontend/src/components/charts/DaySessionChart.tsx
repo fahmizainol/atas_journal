@@ -3,7 +3,7 @@ import { useMeta } from "../../hooks/useMeta";
 import { useDayChart } from "../../hooks/useCharts";
 import type { FilterScope } from "../../lib/queryKeys";
 import { CandlestickChart } from "./CandlestickChart";
-import { TimeframeRadio } from "./TimeframeRadio";
+import { TimeframeControl, MINUTE_TFS } from "./TimeframeControl";
 
 // Full-day session candlestick: every trade's fills + an outcome-tinted holding
 // rectangle (reuses the Phase-4 CandlestickChart + TradeRectanglePrimitive).
@@ -29,7 +29,7 @@ export function DaySessionChart({
 
   return (
     <div className="panel">
-      <TimeframeRadio value={tf} onChange={setTf} />
+      <TimeframeControl value={tf} onChange={setTf} options={MINUTE_TFS} />
       <CandlestickChart
         bars={data.bars}
         vwapGlobex={data.vwap_globex}

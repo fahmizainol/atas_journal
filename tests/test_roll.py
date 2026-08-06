@@ -139,13 +139,13 @@ def test_preflight_prices_each_contract_separately(cache, monkeypatch):
 
     asked: list[tuple] = []
 
-    def fake_cost(symbol, start, end, include_overnight=False):
+    def fake_cost(symbol, start, end):
         asked.append((symbol, start, end))
         return 1.0
 
     monkeypatch.setattr(ticks, "estimate_cost", fake_cost)
     cfg = SimConfig(contract="NQ", start_date=date(2025, 12, 15), end_date=date(2025, 12, 19))
-    pf = runner.preflight(cfg, fetch_overnight=False)
+    pf = runner.preflight(cfg)
 
     assert pf["contracts"] == ["NQH6", "NQZ5"]
     assert sorted(asked) == [
@@ -164,7 +164,7 @@ def test_preflight_does_not_price_a_closed_day(cache, monkeypatch):
                         lambda *a: {"2025-12-24": "NQH6", "2025-12-26": "NQH6"})
     monkeypatch.setattr(ticks, "estimate_cost", lambda *a, **k: 1.0)
     cfg = SimConfig(contract="NQ", start_date=date(2025, 12, 24), end_date=date(2025, 12, 26))
-    pf = runner.preflight(cfg, fetch_overnight=False)
+    pf = runner.preflight(cfg)
     assert pf["sessions_total"] == 3  # the window still spans the holiday
     assert pf["uncached_days"] == ["2025-12-24", "2025-12-26"]
 

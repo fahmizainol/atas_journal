@@ -46,6 +46,25 @@ def _checkpoint(section: dict, default: str) -> str:
     return v
 
 
+def _regime_art(ctx: "SessionCtx") -> dict | None:
+    """The session's regime artifact — injected by the caller, or read from cache.
+
+    Every regime-reading gate used to call ``get_regime`` itself. On a settled
+    session that is harmless (the artifact is cached, so all ten callers get the
+    same dict), but it is the "gate builds its own view of the session" that
+    ``SessionCtx`` exists to forbid, and it cannot answer at all for a session
+    that has not settled: ``get_regime`` computes from the *whole cached day*, and
+    a day still in progress has no such file.
+
+    ``ctx.regime`` is where a caller that already knows puts it. Falling back to
+    the cached read leaves every existing run byte-identical and keeps the read
+    lazy — a config with no regime gate still never triggers a compute.
+    """
+    if ctx.regime is not None:
+        return ctx.regime
+    return regmod.get_regime(ctx.cfg.contract, ctx.day)
+
+
 def _veto_from(ctx: "SessionCtx", minute: int) -> np.ndarray:
     """Mask of ticks at or after the given ET wall-clock minute. Overnight ticks
     in a globex frame also read past mid-morning on a wall clock, but entries
@@ -221,7 +240,7 @@ class VwapSlopeGate:
         self._blocked: np.ndarray | None = None
 
     def prepare(self, ctx: "SessionCtx") -> None:
-        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        art = _regime_art(ctx)
         slope = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
                  or {}).get("ny_vwap_slope_ppm")
         if slope is not None and slope > self.slope_min:
@@ -323,7 +342,7 @@ class VwapSlopeCapGate:
         # one. u flips the sign so one threshold serves both — the short's
         # behaviour is the u=+1 case, unchanged.
         u = 1.0 if ctx.band_side() == "upper" else -1.0
-        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        art = _regime_art(ctx)
         slope = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
                  or {}).get("ny_vwap_slope_ppm")
         if slope is not None and u * slope < self.slope_max:
@@ -430,7 +449,7 @@ class VwapFlatGate:
     def prepare(self, ctx: "SessionCtx") -> None:
         # A magnitude read needs no band frame: flat is flat on both sides, so
         # the short and the long fade read the same number the same way.
-        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        art = _regime_art(ctx)
         slope = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
                  or {}).get("ny_vwap_slope_ppm")
         if slope is not None and abs(slope) < self.grade_max:
@@ -515,7 +534,7 @@ class GxRescueGate:
         self._blocked: np.ndarray | None = None
 
     def prepare(self, ctx: "SessionCtx") -> None:
-        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        art = _regime_art(ctx)
         if art is not None and not art.get("partial"):
             ratio = (art.get("checkpoints", {}).get(self._CHECKPOINT)
                      or {}).get("gx_upper_rescue_ratio")
@@ -618,7 +637,7 @@ class GxRescueCapGate:
         # ceiling a fade-long buys into. Same event, mirrored.
         key = ("gx_upper_rescue_ratio" if ctx.band_side() == "upper"
                else "gx_lower_rescue_ratio")
-        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        art = _regime_art(ctx)
         if art is not None and not art.get("partial"):
             ratio = (art.get("checkpoints", {}).get(self.checkpoint)
                      or {}).get(key)
@@ -1298,9 +1317,89 @@ class RegimeGate:
         self._blocked: np.ndarray | None = None
 
     def prepare(self, ctx: "SessionCtx") -> None:
-        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        art = _regime_art(ctx)
         bbr = ((art or {}).get("checkpoints", {}).get(self.checkpoint) or {}).get("bbr")
         if bbr is not None and bbr < self.bbr_max:
+            self._blocked = None  # the morning qualified; the gate is inert today
+            return
+        # Stood down (or blind — see class docstring): veto every tick at or
+        # after the checkpoint, by ET wall clock.
+        self._blocked = _veto_from(ctx, CHECKPOINT_MINUTES[self.checkpoint])
+
+    def allows(self, i: int, fill: float) -> bool:
+        return self._blocked is None or not self._blocked[i]
+
+
+class RegimeMirrorGate:
+    """Veto every entry after its checkpoint ET on a day whose morning has NOT
+    lived below the VWAPs — the regime gate mirrored for the short side.
+
+    The idea it enforces: the lower-band short needs price residing below value
+    to have anything to lean on, the exact inversion of the bounce's
+    requirement. Where ``regime`` stands the long down when the morning's
+    below-both ratio (``bbr``) runs high, this gate stands the short down when
+    it runs low — a morning that held above the VWAPs is the long's habitat,
+    not the fade-down's. The 2026-07 scouting pass put the mirror's habitat at
+    bbr@10:30 ≥ 0.65: 76 sessions (23%) no live strategy touches.
+
+    Config section::
+
+        {"regime_mirror": {"enabled": true, "bbr_min": 0.65, "checkpoint": "10:30"}}
+
+    ``bbr_min`` is the qualifying floor: below it, no entries for the rest of
+    the session. The 0.65 default is the scouting pass's habitat boundary, the
+    mirror of classify()'s trend convention — not a threshold tuned on
+    strategy P&L.
+
+    Blind days — no regime artifact, or a bbr the checkpoint cannot carry —
+    are vetoed after the checkpoint, same doctrine as ``regime``: "no data"
+    must not read as "confirmed".
+    """
+
+    name = "regime_mirror"
+    needs_profile = False
+
+    SCHEMA: tuple[Field, ...] = (
+        Field("enabled", "bool", name, "Stand down off below-VWAP mornings",
+              default=False,
+              help="After the checkpoint ET, vetoes every entry on a day whose "
+                   "morning did not spend long enough below both anchored "
+                   "VWAPs — the regime in which the short has nothing to lean "
+                   "on. The long-side regime gate, mirrored."),
+        Field("bbr_min", "float", name, "Min below-both-VWAPs ratio",
+              min=0.0, max=1.0, default=0.65, depends_on=("enabled", True),
+              help="Share of the morning spent below both VWAPs below which "
+                   "the rest of the session is stood down, read at the "
+                   "checkpoint. The default is the 2026-07 scouting pass's "
+                   "habitat boundary; it was not fitted to strategy P&L."),
+        Field("checkpoint", "enum", name, "Checkpoint",
+              choices=_CHECKPOINT_CHOICES, default="10:30",
+              depends_on=("enabled", True),
+              help="When the bbr is read, and from when the stand-down "
+                   "applies. 09:45 is the earliest read the NY anchor can "
+                   "carry — the only one that reaches the open-driven morning."),
+    )
+
+    KNOBS = {f.name for f in SCHEMA}
+
+    def __init__(self, section: dict):
+        unknown = set(section) - self.KNOBS
+        if unknown:
+            raise ValueError(
+                f"unknown regime_mirror knobs {sorted(unknown)} "
+                f"(available: {sorted(self.KNOBS)})"
+            )
+        v = section.get("bbr_min", 0.65)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
+            raise ValueError(f"bbr_min must be a number in [0, 1], got {v!r}")
+        self.bbr_min = float(v)
+        self.checkpoint = _checkpoint(section, "10:30")
+        self._blocked: np.ndarray | None = None
+
+    def prepare(self, ctx: "SessionCtx") -> None:
+        art = _regime_art(ctx)
+        bbr = ((art or {}).get("checkpoints", {}).get(self.checkpoint) or {}).get("bbr")
+        if bbr is not None and bbr >= self.bbr_min:
             self._blocked = None  # the morning qualified; the gate is inert today
             return
         # Stood down (or blind — see class docstring): veto every tick at or
@@ -1386,7 +1485,7 @@ class VwapCrossGate:
         self._blocked: np.ndarray | None = None
 
     def prepare(self, ctx: "SessionCtx") -> None:
-        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        art = _regime_art(ctx)
         rate = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
                 or {}).get("ny_vwap_cross_rate")
         if rate is not None and rate < self.cross_max:
@@ -1475,7 +1574,7 @@ class UpperOccupancyGate:
         self._blocked: np.ndarray | None = None
 
     def prepare(self, ctx: "SessionCtx") -> None:
-        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        art = _regime_art(ctx)
         occ = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
                or {}).get("ny_upper_channel_occupancy")
         if occ is not None and occ > self.occupancy_min:
@@ -1572,7 +1671,7 @@ class UpperOccupancyCapGate:
         # reads as "channel occupancy on the faded side" (see VolumeProfileGate).
         key = ("ny_upper_channel_occupancy" if ctx.band_side() == "upper"
                else "ny_lower_channel_occupancy")
-        art = regmod.get_regime(ctx.cfg.contract, ctx.day)
+        art = _regime_art(ctx)
         occ = ((art or {}).get("checkpoints", {}).get(self.checkpoint)
                or {}).get(key)
         if occ is not None and occ < self.occupancy_max:

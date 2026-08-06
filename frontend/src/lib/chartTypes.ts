@@ -7,6 +7,11 @@ export interface Bar {
   volume: number;
 }
 
+// Candle resolution for the strategy charts. "tick" is the engine's own
+// tick-count bars (the candles it actually traded); the minute resolutions
+// rebuild them as clock-time bars over the same ticks as a familiar context view.
+export type ChartResolution = "tick" | "1m" | "3m" | "5m" | "15m";
+
 // Anchored VWAP with both deviation bands. Emitted once per anchor (Globex
 // 18:00 ET, NY 09:30 ET) — see api/charts_data.VWAP_ANCHORS.
 export interface VwapPoint {
@@ -21,6 +26,24 @@ export interface VwapPoint {
 export interface ATRPoint {
   time: number;
   atr: number;
+}
+
+// A moving-average point (currently the 9/20 EMA on the 1-minute grid). Stamped
+// on the minute the value was computed on; on a tick-bar chart the frontend
+// samples it onto the drawn bar grid. Only the Interactions day-chart sends it.
+export interface EmaPoint {
+  time: number;
+  value: number;
+}
+
+// A Wilder RSI point — the momentum oscillator (0-100) the RSI family is built on.
+// Unlike the EMA it tracks the drawn timeframe: the backend computes it on the
+// drawn-bar closes (14 min at 1m, 70 min at 5m, 14 tick-bars on tick charts), so
+// each point is stamped on its bar. Drawn in its own pane under the candles. Only
+// the Interactions day-chart sends it.
+export interface RsiPoint {
+  time: number;
+  value: number;
 }
 
 // Developing volume profile: the value area as it stood at each bar's close,
@@ -44,6 +67,18 @@ export interface ProfilePoint {
 export interface CvdPoint {
   time: number;
   value: number;
+}
+
+// A regular price/CVD divergence: between two swing pivots, price and
+// cumulative delta printed opposite-sloping highs (bear) or lows (bull).
+// Endpoints are in CVD coordinates — v1/v2 are delta values, t1/t2 bar times —
+// so the A→B line is drawn on the CVD pane. See api/sim_charts._cvd_divergences.
+export interface CvdDivergence {
+  kind: "bear" | "bull";
+  t1: number;
+  v1: number;
+  t2: number;
+  v2: number;
 }
 
 export interface ChartMarker {
@@ -129,6 +164,15 @@ export interface TradeChartData {
   vwap_anchor?: "globex" | "ny";
   profile_globex?: ProfilePoint[];
   profile_ny?: ProfilePoint[];
+  /** 9/20/50/200 EMA on the 1-minute grid — day-trading convention, context
+   * only. 9/20 are the fast pullback pair, 50/200 the slower trend reference. */
+  ema9?: EmaPoint[];
+  ema20?: EmaPoint[];
+  ema50?: EmaPoint[];
+  ema200?: EmaPoint[];
+  /** Wilder RSI(14) on the drawn timeframe, in its own pane. Context only.
+   * Only the sim's trade chart sends it — the journal reconstruction omits it. */
+  rsi?: RsiPoint[];
   atr_points?: ATRPoint[];
   markers?: ChartMarker[];
   price_lines?: PriceLineSpec[];
@@ -138,6 +182,7 @@ export interface TradeChartData {
   excursion?: Omit<Excursion, "available">;
   footprint?: Footprint;
   cvd?: CvdPoint[];
+  cvd_divergences?: CvdDivergence[];
   tick_size?: number;
   /** Dollars per full point per contract (contract spec) — for the ruler's $/lot. */
   point_value?: number;
@@ -158,12 +203,21 @@ export interface DayChartData {
   profile_globex?: ProfilePoint[];
   profile_ny?: ProfilePoint[];
   atr_points?: ATRPoint[];
+  /** 9/20/50/200 EMA on the 1-minute grid — day-trading convention, context
+   * only. 9/20 are the fast pullback pair, 50/200 the slower trend reference. */
+  ema9?: EmaPoint[];
+  ema20?: EmaPoint[];
+  ema50?: EmaPoint[];
+  ema200?: EmaPoint[];
+  /** Wilder RSI(14) on the drawn timeframe, in its own pane. Context only. */
+  rsi?: RsiPoint[];
   markers?: ChartMarker[];
   levels?: PriceLineSpec[];
   ib?: IbOverlay | null;
   trades?: TradeRect[];
   footprint?: Footprint;
   cvd?: CvdPoint[];
+  cvd_divergences?: CvdDivergence[];
   tick_size?: number;
   /** Dollars per full point per contract (contract spec) — for the ruler's $/lot. */
   point_value?: number;

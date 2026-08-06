@@ -1,12 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { apiGet } from "../lib/api";
 import type { DayChartData } from "../lib/chartTypes";
 import type {
   Coverage,
   IbParams,
   IbResult,
+  IbSessionWidths,
   InteractionParams,
   InteractionResult,
+  InteractionStats,
   SavedRun,
   WeeklyVwapParams,
   WeeklyVwapResult,
@@ -19,11 +21,30 @@ import type {
 //
 // `params` is null until the user hits Run; the query is deferred until then. A
 // month's first compute is a few seconds server-side; every call after is instant.
+//
+// This is the *events* view: touches, VA-snaps, day index — what the Sessions
+// grid and chart drill-down need. The heavy per-minute band_state and the
+// aggregate tables are left off the payload (the aggregates come from
+// `useInteractionStats` on demand), so the auto-loaded run renders the chart
+// without shipping the full snapshot every refresh.
 export function useInteractions(params: InteractionParams | null) {
   return useQuery({
     queryKey: ["interactions", "run", params],
     queryFn: () => apiGet<InteractionResult>("/interactions", { ...params }),
     enabled: !!params,
+    retry: false,
+  });
+}
+
+// The aggregate tables for a committed run, fetched on demand: deferred until
+// `enabled` (the Stats tab's "Compute stats" button) so the Sessions view never
+// waits on them. Same config as the events query, so the server answers from the
+// one cached snapshot — the stats are a few-KB slice of a file already on disk.
+export function useInteractionStats(params: InteractionParams | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["interactions", "stats", params],
+    queryFn: () => apiGet<InteractionStats>("/interactions", { ...params, stats: true }),
+    enabled: !!params && enabled,
     retry: false,
   });
 }
@@ -38,6 +59,22 @@ export function useIbStudy(params: IbParams | null) {
     queryFn: () => apiGet<IbResult>("/interactions/ib", { ...params }),
     enabled: !!params,
     retry: false,
+  });
+}
+
+// Per-session IB width for the Sessions table. Unlike `useIbStudy` this needs no
+// Run button and no committed config: it is a read of the widest saved snapshot,
+// keyed by (symbol, range) like the regime queries, so it is shared across every
+// run over the same window and costs a file slice. Absent days render as a dash.
+export function useIbSessionWidths(
+  symbol: string | null,
+  start: string | null,
+  end: string | null,
+) {
+  return useQuery({
+    queryKey: ["interactions", "ib-sessions", symbol, start, end],
+    queryFn: () => apiGet<IbSessionWidths>("/interactions/ib/sessions", { symbol, start, end }),
+    enabled: !!symbol && !!start && !!end,
   });
 }
 
@@ -77,6 +114,42 @@ export function useInteractionCoverage(
   });
 }
 
+// One session's day-chart query — factored out so the single-day hook and the
+// multi-day run-chart hook below share the *exact same* key (and therefore the
+// same cache entry): opening a day the continuous chart already loaded is a cache
+// hit, and vice-versa.
+function dayChartQueryOptions(
+  symbol: string | null,
+  day: string | null,
+  binSize?: number,
+  sources?: string[],
+  ticksPerBar?: number,
+  barMinutes?: number,
+) {
+  return {
+    queryKey: [
+      "interactions",
+      "day-chart",
+      symbol,
+      day,
+      binSize ?? null,
+      sources,
+      ticksPerBar ?? null,
+      barMinutes ?? null,
+    ],
+    queryFn: () =>
+      apiGet<DayChartData>(`/interactions/day-chart/${day}`, {
+        symbol,
+        bin_size: binSize,
+        sources,
+        ticks_per_bar: ticksPerBar,
+        bar_minutes: barMinutes,
+      }),
+    enabled: !!symbol && !!day,
+    retry: false,
+  };
+}
+
 // A single session's candles + both anchored VWAPs + both developing profiles,
 // built from the same tick engine as the events so the overlay lines up. Keyed by
 // (symbol, day, bin, sources) to match the run the touches came from.
@@ -86,25 +159,27 @@ export function useInteractionDayChart(
   binSize?: number,
   sources?: string[],
   ticksPerBar?: number,
+  barMinutes?: number,
 ) {
-  return useQuery({
-    queryKey: [
-      "interactions",
-      "day-chart",
-      symbol,
-      day,
-      binSize ?? null,
-      sources,
-      ticksPerBar ?? null,
-    ],
-    queryFn: () =>
-      apiGet<DayChartData>(`/interactions/day-chart/${day}`, {
-        symbol,
-        bin_size: binSize,
-        sources,
-        ticks_per_bar: ticksPerBar,
-      }),
-    enabled: !!symbol && !!day,
-    retry: false,
+  return useQuery(dayChartQueryOptions(symbol, day, binSize, sources, ticksPerBar, barMinutes));
+}
+
+// The same day-chart for a *window* of sessions, fetched in parallel — the data
+// behind the continuous session chart. Each day is an independent query sharing
+// the single-day cache above, so a fresh window is one burst of (cached-forever)
+// requests and re-opening one is instant. Returns the raw results in `days`
+// order; the caller stitches the available ones into one tape.
+export function useInteractionRunChart(
+  symbol: string | null,
+  days: string[],
+  binSize?: number,
+  sources?: string[],
+  ticksPerBar?: number,
+  barMinutes?: number,
+): UseQueryResult<DayChartData>[] {
+  return useQueries({
+    queries: days.map((d) =>
+      dayChartQueryOptions(symbol, d, binSize, sources, ticksPerBar, barMinutes),
+    ),
   });
 }

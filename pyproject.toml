@@ -12,7 +12,16 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
+    # Live shadow mode's market-data feed (docs/live-shadow-plan.md phase 5).
+    # Market data only: journal.live.rithmic opens TICKER_PLANT explicitly and
+    # never the order plant.
+    "async_rithmic>=1.6",
 ]
+
+[dependency-groups]
+# Declared so `uv sync` stops pruning it — it was installed ad hoc and vanished
+# the first time the lock was resolved from this file.
+dev = ["pytest>=8.0"]
 
 [tool.uv]
 package = false

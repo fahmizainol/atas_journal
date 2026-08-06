@@ -57,3 +57,46 @@ def tick_bars(ticks: pd.DataFrame, n: int = 500) -> pd.DataFrame:
         "start_idx": starts,
         "end_idx": starts + n - 1,
     })
+
+
+def time_bars(ticks: pd.DataFrame, freq: str = "1min") -> pd.DataFrame:
+    """Aggregate a tick frame into fixed-*time* bars (default one minute).
+
+    A context alternative to :func:`tick_bars` for the charts — the same columns
+    and the same stamping convention, so nothing downstream has to change. In
+    particular ``ts_utc`` is the **last** tick in the bucket (the instant the bar
+    closed, exactly as tick_bars stamps it, not the minute's open) and
+    ``start_idx``/``end_idx`` are inclusive positions back into ``ticks``. The
+    chart pipeline looks up VWAP, the developing profile, the footprint and CVD
+    by ``end_idx``, so a time bar drops straight into all of them.
+
+    Empty buckets — a clock minute nothing traded — are not emitted: no bar
+    exists for a minute with no close, and skipping them keeps the rows
+    contiguous by tick index, which is what the ``searchsorted``-by-``end_idx``
+    lookups downstream assume.
+    """
+    if ticks.empty:
+        return pd.DataFrame(columns=BAR_COLS)
+
+    ts = ticks["ts_utc"]
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC")
+    bucket = ts.dt.floor(freq).to_numpy()
+    df = pd.DataFrame({
+        "bucket": bucket,
+        "price": ticks["price"].to_numpy(),
+        "size": ticks["size"].to_numpy(),
+        "pos": np.arange(len(ticks)),
+        "ts": ts.to_numpy(),
+    })
+    g = df.groupby("bucket", sort=True)
+    return pd.DataFrame({
+        "ts_utc": pd.to_datetime(g["ts"].last().to_numpy(), utc=True),
+        "open": g["price"].first().to_numpy(),
+        "high": g["price"].max().to_numpy(),
+        "low": g["price"].min().to_numpy(),
+        "close": g["price"].last().to_numpy(),
+        "volume": g["size"].sum().to_numpy().astype("float64"),
+        "start_idx": g["pos"].first().to_numpy(),
+        "end_idx": g["pos"].last().to_numpy(),
+    })

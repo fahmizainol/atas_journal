@@ -36,7 +36,7 @@ from . import ticks as tickmod
 # Bump when a definition here changes meaning. A snapshot written under an older
 # number is recomputed rather than served — the same guard REGIME_VERSION applies
 # to the artifacts this reads.
-STATS_VERSION = 2
+STATS_VERSION = 3
 
 PERMUTATIONS = 500
 SEED = 0x5EED
@@ -75,6 +75,16 @@ KPIS: list[dict] = [
     {"key": "on_vwap_slope_deg", "label": "Overnight VWAP slope (°, ATR-norm)"},
     {"key": "on_range_pts", "label": "Overnight range (pts)"},
     {"key": "open_z", "label": "Open in Globex σ-terms"},
+    # The v8 structure layer (swing pivots → BOS/CHoCH state machine, ATR-scaled
+    # major/fine tiers) plus the session-level bar-overlap chop. See regime.py.
+    {"key": "st_bias", "label": "Structure bias (major, +1 up)"},
+    {"key": "st_bias_age_min", "label": "Structure bias age (min since flip)"},
+    {"key": "st_bias_share", "label": "Structure bias share (up − down)"},
+    {"key": "st_break_rate", "label": "Major structure breaks / hr"},
+    {"key": "st_bos_share", "label": "BOS share of major breaks", "pct": True},
+    {"key": "st_choch_rate", "label": "Fine CHoCH / hr (whipsaw)"},
+    {"key": "chop_occ_30m", "label": "Chop occupancy, last 30m", "pct": True},
+    {"key": "chop_occ_rth", "label": "Chop occupancy, RTH", "pct": True},
 ]
 
 CLASS_LABEL = {
@@ -280,6 +290,19 @@ def daily_pnl(trades: pd.DataFrame) -> dict[str, dict]:
     return by
 
 
+def _bucket(ds: list[dict]) -> dict:
+    net = sum(d["net"] for d in ds)
+    trades = sum(d["trades"] for d in ds)
+    return {
+        "days": len(ds),
+        "net": net,
+        "avg_net": net / len(ds),
+        "trades": trades,
+        "win_rate": (sum(d["wins"] for d in ds) / trades * 100) if trades else None,
+        "dates": [d["date"] for d in ds],
+    }
+
+
 def _class_buckets(days: list[dict]) -> list[dict]:
     """Traded days grouped by the day's regime class — always the end-of-day call,
     whatever checkpoint the KPIs are read at, because the class is a description of
@@ -288,20 +311,23 @@ def _class_buckets(days: list[dict]) -> list[dict]:
     by: dict[str, list[dict]] = {}
     for d in days:
         by.setdefault(d["class"], []).append(d)
-    out = []
-    for k, ds in by.items():
-        net = sum(d["net"] for d in ds)
-        trades = sum(d["trades"] for d in ds)
-        out.append({
-            "class": k,
-            "label": CLASS_LABEL.get(k, k),
-            "days": len(ds),
-            "net": net,
-            "avg_net": net / len(ds),
-            "trades": trades,
-            "win_rate": (sum(d["wins"] for d in ds) / trades * 100) if trades else None,
-            "dates": [d["date"] for d in ds],
-        })
+    out = [{"class": k, "label": CLASS_LABEL.get(k, k), **_bucket(ds)}
+           for k, ds in by.items()]
+    return sorted(out, key=lambda b: b["net"], reverse=True)
+
+
+def _class_texture_grid(days: list[dict]) -> list[dict]:
+    """The 2D cut: regime class × texture, both end-of-day calls.
+
+    The texture axis exists because chop was a real stop predictor that failed
+    as a flat per-trade veto — the open question is whether it only bites
+    inside certain classes, and that question is a grid, not a threshold.
+    """
+    by: dict[tuple[str, str], list[dict]] = {}
+    for d in days:
+        by.setdefault((d["class"], d.get("texture", "unknown")), []).append(d)
+    out = [{"class": c, "label": CLASS_LABEL.get(c, c), "texture": t, **_bucket(ds)}
+           for (c, t), ds in by.items()]
     return sorted(out, key=lambda b: b["net"], reverse=True)
 
 
@@ -332,7 +358,8 @@ def study(symbol: str, start: date, end: date, trades: pd.DataFrame) -> dict:
         if not s:
             continue
         traded.append({
-            "date": r["date"], "class": r["class"], "partial": r["partial"],
+            "date": r["date"], "class": r["class"],
+            "texture": r.get("texture", "unknown"), "partial": r["partial"],
             "net": s["net"], "trades": s["trades"], "wins": s["wins"],
             "checkpoints": r["checkpoints"],
         })
@@ -380,5 +407,6 @@ def study(symbol: str, start: date, end: date, trades: pd.DataFrame) -> dict:
         "skipped": skipped,
         "days": [{k: v for k, v in d.items() if k != "checkpoints"} for d in traded],
         "class_buckets": _class_buckets(traded),
+        "class_texture_grid": _class_texture_grid(traded),
         "boards": boards,
     }

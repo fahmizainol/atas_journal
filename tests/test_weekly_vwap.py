@@ -130,6 +130,34 @@ def test_session_sums_invalidate_when_the_night_arrives_later():
     np.testing.assert_allclose(both, expect, rtol=1e-12)
 
 
+def test_weekly_seed_reads_the_whole_day_layout():
+    """The fetcher writes one file per session now ({SYM}_{DATE}_day.parquet)
+    rather than a parquet per window. A week held that way is a whole week —
+    reading only the per-window names makes every such day look like a hole,
+    which is how the weekly anchor quietly came off recent charts.
+    """
+    days = [MONDAY, MONDAY + timedelta(days=1)]
+    with _week("TEST", days) as wk:
+        legacy = weekly.weekly_seed("TEST", days[1])
+        assert legacy is not None
+
+        # Re-lay exactly the same ticks as day files, and take away both the
+        # per-window parquets and the sums they were cached under.
+        for d in days:
+            n_on = len(_ticks(d, seed=100 + days.index(d)))
+            frame = wk.frames[d].assign(
+                **{tickmod.SEG_COL: ["on"] * n_on + ["rth"] * (len(wk.frames[d]) - n_on)})
+            frame.to_parquet(tickmod._day_path("TEST", d), index=False)
+            for seg in ("on", "rth"):
+                tickmod._cache_path("TEST", d, seg).unlink()
+            weekly._sums_path("TEST", d).unlink(missing_ok=True)
+        tickmod._read_day_parquet.cache_clear()
+        weekly._day_file_segments.cache_clear()
+
+        assert weekly._segments_on_disk("TEST", days[0]) == ["on", "rth"]
+        np.testing.assert_allclose(weekly.weekly_seed("TEST", days[1]), legacy, rtol=1e-12)
+
+
 def test_a_roll_restarts_the_weekly_anchor():
     """Mon/Tue trade the old contract, Wed rolls: Thursday's seed must contain
     Wednesday alone — never an average across a ~100-point contract seam."""

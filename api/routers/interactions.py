@@ -29,6 +29,7 @@ def interactions_run(
     sources: str = Query("ny,globex,session_refs"),
     outcome_window_min: int | None = Query(None),
     zone_cluster_pts: float | None = Query(None),
+    stats: bool = Query(False),
     refresh: bool = Query(False),
 ) -> dict:
     cfg = inter.InteractionConfig.build(
@@ -41,7 +42,11 @@ def interactions_run(
         outcome_window_min=outcome_window_min,
         zone_cluster_pts=zone_cluster_pts,
     )
-    return inter.get(cfg, refresh=refresh)
+    # The Sessions / chart view fetches the lean events payload (default); the
+    # Stats tab requests `stats=true` on the same config for the aggregates only.
+    # Both read one cached-or-computed snapshot, so the stats call is a disk slice.
+    result = inter.get(cfg, refresh=refresh)
+    return inter.stats_view(result) if stats else inter.events_view(result)
 
 
 @router.get("/interactions/runs")
@@ -72,6 +77,20 @@ def ib_run(
 @router.get("/interactions/ib/runs")
 def ib_runs() -> list[dict]:
     return ibmod.list_runs()
+
+
+@router.get("/interactions/ib/sessions")
+def ib_sessions(
+    symbol: str = Query(...),
+    start: str = Query(...),
+    end: str = Query(...),
+) -> dict:
+    """Per-session IB width for the Sessions table — a slice of the widest
+    saved IB snapshot, never a fresh study (the `adr14` denominator chains
+    through prior sessions, so a narrow window would rescale the terciles).
+    Days outside the snapshot come back absent rather than recomputed."""
+    return ibmod.session_widths(symbol, date.fromisoformat(start),
+                                date.fromisoformat(end))
 
 
 @router.get("/interactions/weekly-vwap")
@@ -114,6 +133,7 @@ def interactions_day_chart(
     va_pct: float = Query(inter.profmod.VALUE_AREA_PCT),
     sources: str = Query("ny,globex"),
     ticks_per_bar: int | None = Query(None),
+    bar_minutes: int | None = Query(None),
 ) -> dict:
     return inter.day_chart(
         symbol,
@@ -122,4 +142,5 @@ def interactions_day_chart(
         va_pct=va_pct,
         sources=tuple(s for s in sources.split(",") if s) or ("ny", "globex"),
         ticks_per_bar=ticks_per_bar,
+        bar_minutes=bar_minutes,
     )

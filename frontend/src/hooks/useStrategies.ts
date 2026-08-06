@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiSend } from "../lib/api";
-import type { DayChartData, TradeChartData } from "../lib/chartTypes";
+import { DEFAULT_DIV_TICKS } from "../lib/chartPrefs";
+import type { ChartResolution, DayChartData, TradeChartData } from "../lib/chartTypes";
 import type {
   Preflight,
   RunDetail,
@@ -41,11 +42,17 @@ export function useRunTradeChart(
   runId: string | null,
   tradeNo: number | null,
   tz: string,
+  resolution: ChartResolution = "tick",
+  divTicks: number = DEFAULT_DIV_TICKS,
 ) {
   return useQuery({
-    queryKey: ["strategies", "trade-chart", slug, runId, tradeNo, tz],
+    queryKey: ["strategies", "trade-chart", slug, runId, tradeNo, tz, resolution, divTicks],
     queryFn: () =>
-      apiGet<TradeChartData>(`/strategies/${slug}/runs/${runId}/trade-chart/${tradeNo}`, { tz }),
+      apiGet<TradeChartData>(`/strategies/${slug}/runs/${runId}/trade-chart/${tradeNo}`, {
+        tz,
+        resolution,
+        div_ticks: divTicks,
+      }),
     enabled: !!slug && !!runId && tradeNo != null,
   });
 }
@@ -55,11 +62,17 @@ export function useRunDayChart(
   runId: string | null,
   day: string | null,
   tz: string,
+  resolution: ChartResolution = "tick",
+  divTicks: number = DEFAULT_DIV_TICKS,
 ) {
   return useQuery({
-    queryKey: ["strategies", "day-chart", slug, runId, day, tz],
+    queryKey: ["strategies", "day-chart", slug, runId, day, tz, resolution, divTicks],
     queryFn: () =>
-      apiGet<DayChartData>(`/strategies/${slug}/runs/${runId}/day-chart/${day}`, { tz }),
+      apiGet<DayChartData>(`/strategies/${slug}/runs/${runId}/day-chart/${day}`, {
+        tz,
+        resolution,
+        div_ticks: divTicks,
+      }),
     enabled: !!slug && !!runId && !!day,
   });
 }
@@ -69,15 +82,14 @@ function useInvalidateStrategies() {
   return () => qc.invalidateQueries({ queryKey: ["strategies"] });
 }
 
-// `rthOnly` skips the overnight segment a run otherwise buys for its charts. It
-// rides beside the config rather than inside it: it decides what gets downloaded,
-// not what gets simulated, so it must not change the run's identity hash.
+// A run buys each session whole, so there is nothing to choose here any more —
+// the old `rthOnly` flag rode beside the config (it decided what got downloaded,
+// not what got simulated, so it never entered the run's identity hash).
 export function usePreflight(slug: string) {
   return useMutation({
-    mutationFn: (v: { config: SimConfig; rthOnly: boolean }) =>
+    mutationFn: (v: { config: SimConfig }) =>
       apiSend<Preflight>("POST", `/strategies/${slug}/preflight`, {
         config: v.config,
-        rth_only: v.rthOnly,
       }),
   });
 }
@@ -85,11 +97,11 @@ export function usePreflight(slug: string) {
 export function useCreateRun(slug: string) {
   const invalidate = useInvalidateStrategies();
   return useMutation({
-    mutationFn: (v: { config: SimConfig; label?: string; rthOnly?: boolean }) =>
+    mutationFn: (v: { config: SimConfig; label?: string }) =>
       apiSend<{ run_id: string; status: string; already_existed: boolean }>(
         "POST",
         `/strategies/${slug}/runs`,
-        { config: v.config, label: v.label, rth_only: v.rthOnly ?? false },
+        { config: v.config, label: v.label },
       ),
     onSuccess: invalidate,
   });

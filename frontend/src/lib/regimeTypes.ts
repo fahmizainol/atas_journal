@@ -152,6 +152,39 @@ export interface RegimeRange {
   skipped: string[];
 }
 
+// --- the daily-ATR vol clock ------------------------------------------------
+//
+// A second axis over the same (symbol, date) key: the day-type above says what
+// shape the session traded, this says how fast its clock ran. Mirrors
+// src/journal/sim/vol_regime.py — see docs/research/vol-clock.md for what the
+// terciles were measured to mean.
+
+/** Tercile of the trailing-60-session percentile of daily ATR(14). */
+export type VolRegimeLabel = "quiet" | "mid" | "hot";
+
+export interface VolRegimeDay {
+  date: string;
+  /** Wilder ATR(14) of the globex-day range *through the prior session*, in
+   * points — causal, so a day never sees its own range. Null until the ATR has
+   * warmed up. */
+  atr: number | null;
+  /** Where that ATR sits in the trailing 60 sessions (0..1). */
+  pctl: number | null;
+  /** Null when the percentile window is too short to tercile. */
+  label: VolRegimeLabel | null;
+  /** The session's own realised true range, in points — the hindsight number the
+   * causal label is trying to anticipate. */
+  tr_pts: number | null;
+}
+
+export interface VolRegimeRange {
+  days: VolRegimeDay[];
+  /** In-range sessions with no cached ticks — a hole, never fetched. */
+  skipped: string[];
+  period: number;
+  pctl_window: number;
+}
+
 // --- the regime-vs-P&L study ------------------------------------------------
 //
 // All of it is computed server-side (journal.sim.regime_pnl) and snapshotted to

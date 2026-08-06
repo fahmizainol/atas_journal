@@ -29,8 +29,8 @@ from journal.sim import engine, ticks  # noqa: E402
 from journal.sim import profile as profmod  # noqa: E402
 from journal.sim import vwap as vwapmod  # noqa: E402
 from journal.sim.rules import (  # noqa: E402
-    DriftFadeConfig, FadeConfig, GlobexBounceConfig, ProfilePullbackConfig,
-    SimConfig)
+    DriftFadeConfig, DriftFadeGlobexConfig, FadeConfig, GlobexBounceConfig,
+    ProfilePullbackConfig, SimConfig, WeeklyTraverseConfig)
 
 TICK = 0.25
 DAY = date(2025, 10, 13)
@@ -1896,6 +1896,388 @@ def test_drift_r_multiple_target_is_a_fixed_distance():
         s = 1.0 if tr["direction"] == "Long" else -1.0
         want = tr["avg_entry"] + s * 1.5 * cfg.stop_ticks * TICK
         assert abs(tr["avg_exit"] - want) < 1e-6, (tr["avg_exit"], want)
+
+
+# --- drift-touch fade, Globex scope -------------------------------------------
+#
+# Same engine, scope="globex": the night is traded rather than merely read. The
+# assertions below are the three readings that had to change for that to be
+# honest, plus the floor itself — everything else is covered by the RTH tests
+# above, which run the same code path.
+
+# DAY's session takes one RTH trade and nothing overnight, so it cannot exercise
+# a scope whose whole subject is the night. These two are picked for what they
+# contain: GX_DAY fades ONH twice before the bell (the developing-extreme path),
+# and GX_WARM_DAY is the one cached session whose Globex-level fills land close
+# enough to a settable warm-up for the mask to be observable.
+GX_DAY = date(2025, 12, 18)
+GX_WARM_DAY = date(2025, 10, 16)
+
+
+def _have_ticks_for(day) -> bool:
+    """Cache guard for the Globex fixtures. Written against the segment files
+    that actually exist: _cache_path still defaults to the retired 'rth' name."""
+    sym = ticks.contract_for("NQ", day)
+    return any(
+        (ticks.TICK_CACHE_DIR / f"{sym}_{day.isoformat()}_{seg}.parquet").exists()
+        for seg in ("day", "rth"))
+
+
+def _rth_i0(day=GX_DAY) -> tuple[pd.DataFrame, int]:
+    """The session's ticks (overnight spliced in) and the index of the bell."""
+    t = ticks.get_day_ticks(ticks.contract_for("NQ", day), day, include_overnight=True)
+    return t, int(t["ts_utc"].searchsorted(ticks.session_bounds_utc(day)[0], side="left"))
+
+
+def _drift_gx(day=GX_DAY, **over):
+    """One real-session Globex-scope drift-fade run."""
+    cfg = DriftFadeGlobexConfig(instrument="NQ", contract="NQ",
+                                start_date=day, end_date=day, **over)
+    trades, vetoed, _, _ = engine.run_session_drift_fade_globex(cfg, day)
+    return cfg, trades, vetoed
+
+
+def test_globex_scope_actually_trades_the_night():
+    """The whole point: with the 18:00 window at least one fill lands before the
+    bell. The RTH siblings cannot produce one at all — their floor drops every
+    bar closing before 09:30 — so a run with no overnight trade here means the
+    floor never lifted, or the gx_vwap target silently dropped every signal the
+    way ny_vwap's NaN did."""
+    if not _have_ticks_for(GX_DAY):
+        print("   (skipped: tick cache cold)")
+        return
+    _, trades, _ = _drift_gx()
+    assert trades, "the fixture must actually trade"
+    _, i0 = _rth_i0()
+    overnight = [t for t in trades if t["entry_idx"] < i0]
+    assert overnight, f"no fill before the bell (entry_idx < {i0}): {[t['entry_idx'] for t in trades]}"
+
+
+def test_rth_scope_still_takes_nothing_before_the_bell():
+    """The floor the siblings keep. Same session and the same sources — but the
+    RTH engine drops every bar closing before the bell, so on the session that
+    fades ONH twice overnight in Globex scope it takes none of them."""
+    if not _have_ticks_for(GX_DAY):
+        print("   (skipped: tick cache cold)")
+        return
+    cfg = DriftFadeConfig(instrument="NQ", contract="NQ",
+                          start_date=GX_DAY, end_date=GX_DAY)
+    trades, _, _, _ = engine.run_session_drift_fade_entry_stop(cfg, GX_DAY)
+    _, i0 = _rth_i0()
+    assert all(t["entry_idx"] >= i0 for t in trades), \
+        "an RTH-scope fill landed overnight — the scope floor leaked"
+
+
+def test_globex_window_wraps_midnight():
+    """entry_open later than entry_close means the window crosses midnight, so
+    01:00 is inside 18:00->15:00. Read against the same window written the
+    non-wrapping way (09:45->15:00), which must admit no overnight fill at all —
+    if the wrap were ignored the two runs would be identical."""
+    if not _have_ticks_for(GX_DAY):
+        print("   (skipped: tick cache cold)")
+        return
+    _, i0 = _rth_i0()
+    _, wrapped, _ = _drift_gx()
+    _, plain, _ = _drift_gx(entry_open=time(9, 45), entry_close=time(15, 0))
+    assert any(t["entry_idx"] < i0 for t in wrapped)
+    assert all(t["entry_idx"] >= i0 for t in plain), \
+        "a non-wrapping window admitted an overnight fill"
+
+
+def test_globex_overnight_extremes_are_causal():
+    """ONH/ONL DEVELOP in Globex scope. The RTH path broadcasts the finished
+    night's high and low to every tick, which is only lookahead-free because it
+    never trades before the bell; here a fill at 01:00 must read the extreme the
+    night had made BY THEN. Asserted on the entry price itself: an overnight
+    short faded off ONH cannot have entered above a high that had not printed
+    yet, and every ONH/ONL fill's level must equal the running extreme at its
+    own fill index."""
+    if not _have_ticks_for(GX_DAY):
+        print("   (skipped: tick cache cold)")
+        return
+    t, i0 = _rth_i0()
+    px = t["price"].to_numpy(dtype="float64")
+    run_hi = np.maximum.accumulate(px[:i0])
+    run_lo = np.minimum.accumulate(px[:i0])
+    _, trades, _ = _drift_gx()
+    checked = 0
+    for tr in trades:
+        i = tr["entry_idx"]
+        if tr["entry_reason"] not in ("ONH", "ONL") or i >= i0:
+            continue
+        checked += 1
+        # The touch that armed this fill had to reach the level, so the fill sits
+        # within touch_tol of the RUNNING extreme — not of the night's final one.
+        # Under the old broadcast a 22:00 short off "ONH" could be armed by a
+        # high printed at 04:00, which shows up here as a fill nowhere near
+        # run_hi[i] while being flush against run_hi[-1].
+        near = run_hi[i] if tr["entry_reason"] == "ONH" else run_lo[i]
+        assert abs(px[i] - near) <= 40.0, (
+            f"{tr['entry_reason']} fill at {px[i]} is not at the running extreme "
+            f"{near} (night's final extreme {run_hi[-1] if tr['entry_reason'] == 'ONH' else run_lo[-1]})")
+        # And the running extreme at the fill is genuinely partial: it can only
+        # ever be inside the finished night's, never beyond it.
+        if tr["entry_reason"] == "ONH":
+            assert run_hi[i] <= run_hi[-1] + 1e-9
+        else:
+            assert run_lo[i] >= run_lo[-1] - 1e-9
+    assert checked, "the fixture must fade an overnight ONH/ONL — it is the point"
+
+
+def test_globex_profile_warmup_masks_only_the_globex_levels():
+    """The Globex profile is degenerate at 18:05 (POC=VAH=VAL on the open print),
+    exactly the objection level_warmup_min raises for NY value — and the RTH
+    siblings need no equivalent, because by 09:30 it is ~15h mature.
+
+    Drift touches on Globex value are late in practice, so the mask is exercised
+    at the age the fixture's own fills actually land: raising the warm-up past a
+    Globex fill's age must drop that fill and no other. A warm-up wired to the
+    wrong series would take the prior-day refs down with it, or nothing at all."""
+    if not _have_ticks_for(GX_WARM_DAY):
+        print("   (skipped: tick cache cold)")
+        return
+    t = ticks.get_day_ticks(ticks.contract_for("NQ", GX_WARM_DAY), GX_WARM_DAY,
+                            include_overnight=True)
+    t0 = t["ts_utc"].iloc[0]
+
+    def _ages(warm):
+        _, trades, _ = _drift_gx(day=GX_WARM_DAY, globex_warmup_min=warm)
+        return [(tr["entry_reason"],
+                 (tr["entry_ts_utc"] - t0).total_seconds() / 60.0) for tr in trades]
+
+    base = _ages(0)
+    gx = [(r, a) for r, a in base if r.startswith("Globex")]
+    assert gx, "the warm-up fixture must fade a Globex level"
+    first = min(a for _, a in gx)
+
+    # Past the first Globex fill's age: that fill is gone, every Globex fill that
+    # survives is older than the mask, and no fill lands inside it.
+    later = _ages(first + 5)
+    assert not any(r.startswith("Globex") and a < first + 5 for r, a in later), \
+        f"a Globex-level fill survived inside the warm-up: {later}"
+    assert len([1 for r, _ in later if r.startswith("Globex")]) < len(gx), \
+        "raising the warm-up past a Globex fill's age changed nothing"
+
+    # Past every Globex fill: the Globex source goes silent and no other source
+    # is suppressed — the mask is on that series alone. Not an equality: the
+    # engine holds one position, so removing a Globex fill un-shadows touches it
+    # was occupying the slot for (here a pd VAH two minutes later). Fills may
+    # therefore be ADDED; the test is that none of the survivors goes missing.
+    beyond = _ages(max(a for _, a in gx) + 60)
+    assert not [r for r, _ in beyond if r.startswith("Globex")]
+    kept = {(r, round(a, 6)) for r, a in beyond}
+    for r, a in base:
+        if r.startswith("Globex"):
+            continue
+        assert (r, round(a, 6)) in kept, \
+            f"the warm-up suppressed a non-Globex fill ({r} at {a:.1f} min): {beyond}"
+
+
+def test_globex_target_is_the_globex_vwap_not_the_ny_one():
+    """gx_vwap fades to the mid of the VWAP anchored at the 18:00 open. Checked
+    on a target fill: the exit price is that mid at the exit tick (the crossing
+    discipline books a limit fill AT the level), and — for an overnight exit —
+    the NY mid does not exist there at all, which is why ny_vwap could not be
+    the target."""
+    if not _have_ticks_for(GX_DAY):
+        print("   (skipped: tick cache cold)")
+        return
+    t, i0 = _rth_i0()
+    gx_mid = vwapmod.vwap_bands(t)["mid"].to_numpy()
+    ny_mid = np.full(len(t), np.nan)
+    ny_mid[i0:] = vwapmod.vwap_bands(t.iloc[i0:].reset_index(drop=True))["mid"].to_numpy()
+    # The reason gx_vwap had to exist: the RTH target is simply absent overnight,
+    # and _open drops any signal whose room to target is NaN.
+    assert np.isfinite(gx_mid[:i0]).all(), \
+        "the Globex mid must exist across the whole night — that is the point"
+    assert not np.isfinite(ny_mid[:i0]).any(), \
+        "the NY mid must NOT exist overnight — otherwise this scope needs no new target"
+
+    _, trades, _ = _drift_gx()
+    hit = [tr for tr in trades if tr["exit_reason"] == "target"]
+    assert hit, "the fixture must produce a target fill"
+    for tr in hit:
+        j = tr["exit_idx"]
+        # Either a limit fill at the mid, or a market fill at the print when the
+        # mid relocated across price — both land at or beyond the mid, never short of it.
+        s = 1.0 if tr["direction"] == "Long" else -1.0
+        assert s * (tr["avg_exit"] - gx_mid[j]) >= -1e-6, (tr["avg_exit"], gx_mid[j])
+
+
+def test_globex_fills_are_not_flattened_at_the_bell():
+    """The scope's deliberate choice: an overnight fill runs to its stop, its
+    target or flat_by. Nothing forces it out at 09:30, so a trade opened before
+    the bell is allowed to carry into RTH."""
+    if not _have_ticks_for(GX_DAY):
+        print("   (skipped: tick cache cold)")
+        return
+    _, i0 = _rth_i0()
+    _, trades, _ = _drift_gx()
+    crossers = [t for t in trades if t["entry_idx"] < i0 <= t["exit_idx"]]
+    assert crossers, "the fixture must carry an overnight fill across the bell"
+    for tr in crossers:
+        assert tr["exit_reason"] in ("stop", "trail", "target", "maxhold",
+                                     "source", "daily_loss", "time"), tr["exit_reason"]
+
+
+def test_scope_and_target_mode_must_agree():
+    """A config cannot ask for a value line its scope does not have: ny_vwap is
+    meaningless overnight, and gx_vwap would silently retarget an RTH sibling."""
+    gx = DriftFadeGlobexConfig(start_date=DAY, end_date=DAY, target_mode="ny_vwap")
+    try:
+        engine.run_session_drift_fade_globex(gx, DAY)
+    except ValueError as e:
+        assert "target_mode" in str(e)
+    else:
+        raise AssertionError("ny_vwap must be refused in Globex scope")
+    rth = DriftFadeConfig(start_date=DAY, end_date=DAY, target_mode="gx_vwap")
+    try:
+        engine.run_session_drift_fade(rth, DAY)
+    except ValueError as e:
+        assert "target_mode" in str(e)
+    else:
+        raise AssertionError("gx_vwap must be refused in RTH scope")
+
+
+def test_globex_drift_is_deterministic():
+    if not _have_ticks_for(GX_DAY):
+        print("   (skipped: tick cache cold)")
+        return
+    _, a, _ = _drift_gx()
+    _, b, _ = _drift_gx()
+    assert _same_trades(a, b)
+
+
+# --- the underwater flatten (underwater_exit_after_s) ---------------------------
+
+def test_underwater_exit_off_changes_nothing():
+    """The regression guard the version bump is about: 0 never evaluates, so a run
+    with the knob off must simulate exactly as it did before the exit existed."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    base, _, _, _ = engine.run_session(SimConfig(), DAY)
+    off, _, _, _ = engine.run_session(SimConfig(underwater_exit_after_s=0), DAY)
+    assert _same_trades(base, off)
+
+
+def test_underwater_exit_flattens_after_a_continuous_red_run():
+    """Fill the dev1 limit at 20030, then sit red — never recovering — well past
+    the threshold but never reaching the hard stop. Off, the trade rides to the
+    forced time exit; on, it leaves at market under 'uw_exit', earlier and above
+    its own stop."""
+    # 300s of drift down to 20016, then 300s parked there: a long red stretch that
+    # never touches the 75-tick stop (20011.25).
+    rth = _grid((20000, 20050, 100), (20050, 20030, 100),
+                (20030, 20016, 300), (20016, 20016, 300))
+    with _globex_cache(ON_SQUARE, 100, rth, 1) as cfg:
+        b_tr, _, _, _ = engine.run_session_globex(cfg, DAY)
+        e_tr, _, _, _ = engine.run_session_globex(
+            replace(cfg, underwater_exit_after_s=60), DAY)
+    assert len(b_tr) == 1 and len(e_tr) == 1, (b_tr, e_tr)
+    b, e = b_tr[0], e_tr[0]
+    # The fixture must exercise the rule: off, the trade never stops out.
+    assert b["exit_reason"] == "time", b
+    assert e["exit_reason"] == "uw_exit", e
+    assert e["avg_exit"] > e["stop_price"], "must leave before the hard stop"
+    assert e["exit_idx"] < b["exit_idx"]
+    # It fires on the continuous run, not miles past it: one market order filled on
+    # the next print, so the exit lands within a tick or two of the 60s boundary.
+    held_s = (e["exit_ts_utc"] - e["entry_ts_utc"]).total_seconds()
+    assert 60 <= held_s <= 63, held_s
+
+
+def test_underwater_exit_run_resets_when_price_recovers():
+    """The continuous-run semantics, which is the whole difference from the
+    cumulative underwater_s column: a trade that dips, returns to breakeven, and
+    dips again restarts the clock. Two 40s red stretches either side of a real
+    recovery total 80s underwater but contain no 60s unbroken run, so a 60s knob
+    must NOT fire — while a 30s knob (which each stretch does clear) must."""
+    # Fill at 20030, then step (not ramp) between levels so each stretch is
+    # unambiguously all-red or all-green: 40s parked at 20020, 40s parked at
+    # 20040 (a real recovery above the entry), 40s back at 20020, then the run
+    # to the target. A ramp would still be underwater while it climbed, which
+    # is what makes the naive fixture trip the 60s rule before it recovers.
+    # The last leg starts ABOVE the entry too: a leg that ramped up from 20020
+    # would keep the third stretch red while it climbed, merging it into one
+    # long run and tripping the 60s rule for the wrong reason.
+    rth = _grid((20000, 20050, 100), (20050, 20030, 100),
+                (20020, 20020, 40), (20040, 20040, 40),
+                (20020, 20020, 40), (20040, 20090, 400))
+    with _globex_cache(ON_SQUARE, 100, rth, 1) as cfg:
+        long_tr, _, _, _ = engine.run_session_globex(
+            replace(cfg, underwater_exit_after_s=60), DAY)
+        short_tr, _, _, _ = engine.run_session_globex(
+            replace(cfg, underwater_exit_after_s=30), DAY)
+    assert long_tr and short_tr, (long_tr, short_tr)
+    # 80s cumulative red, but no unbroken 60s run — the long threshold never trips,
+    # and the trade is allowed to reach its target.
+    assert long_tr[0]["exit_reason"] == "target", long_tr[0]
+    # The trade really was underwater long enough in total to fool a cumulative rule.
+    assert long_tr[0]["underwater_s"] >= 60, long_tr[0]["underwater_s"]
+    # Each individual stretch clears 30s, so the short threshold trips inside the
+    # first one — and the early flatten frees the session to re-arm, which is why
+    # this arm may book more than one trade.
+    assert short_tr[0]["exit_reason"] == "uw_exit", short_tr[0]
+    assert short_tr[0]["exit_idx"] < long_tr[0]["exit_idx"]
+
+
+def test_underwater_exit_mirrors_onto_a_short():
+    """Signed with the trade: on a short the heat is the RALLY, so the same knob
+    must flatten a short that sits continuously above its entry. The long fixture
+    reflected — sell off, pull back up to dev1, fill at ~19970, then drift 14
+    points UP (against the short) without reaching its stop at 19988.7."""
+    rth = _grid((20000, 19950, 100), (19950, 19970, 100),
+                (19970, 19984, 300), (19984, 19984, 300))
+    with _globex_cache(ON_SQUARE, 100, rth, 1) as cfg:
+        short = replace(cfg, side="short")
+        b_tr, _, _, _ = engine.run_session_globex(short, DAY)
+        e_tr, _, _, _ = engine.run_session_globex(
+            replace(short, underwater_exit_after_s=60), DAY)
+    assert len(b_tr) == 1 and len(e_tr) == 1, (b_tr, e_tr)
+    b, e = b_tr[0], e_tr[0]
+    assert b["direction"] == "Short" and e["direction"] == "Short", (b, e)
+    assert b["exit_reason"] == "time", b
+    assert e["exit_reason"] == "uw_exit", e
+    # A short's heat is upward: the flatten lands ABOVE its entry but still short
+    # of the stop, which would have booked its own reason.
+    assert e["avg_exit"] > e["avg_entry"], e
+    assert e["avg_exit"] < e["stop_price"], e
+    assert e["net_pnl"] < 0 and e["net_pnl"] > b["net_pnl"]
+    held_s = (e["exit_ts_utc"] - e["entry_ts_utc"]).total_seconds()
+    assert 60 <= held_s <= 63, held_s
+
+
+def test_underwater_exit_on_the_weekly_traverse():
+    """The knob rides a second engine (run_session_weekly_traverse), so it needs
+    its own guard there: off must be inert, and on must book its own reason.
+
+    2025-10-14 is the fixture because it shows the rule's real cost — that
+    session's trade reaches its TARGET untouched, and the flatten cuts it for an
+    84s red patch on the way. A knob that only ever saved losers would not need
+    the warning attached to it."""
+    day = date(2025, 10, 14)
+    cfg = WeeklyTraverseConfig(start_date=day, end_date=day)
+    try:
+        base, _, _, _ = engine.run_session_weekly_traverse(cfg, day)
+    except Exception as exc:  # pragma: no cover - cold cache / no weekly seed
+        print(f"   (skipped: {exc})")
+        return
+    if not base:
+        print("   (skipped: no traverse signal on the fixture session)")
+        return
+    off, _, _, _ = engine.run_session_weekly_traverse(
+        replace(cfg, underwater_exit_after_s=0), day)
+    assert _same_trades(base, off)
+    assert base[0]["exit_reason"] == "target", base[0]
+
+    on, _, _, _ = engine.run_session_weekly_traverse(
+        replace(cfg, underwater_exit_after_s=60, max_hold_min=0), day)
+    assert len(on) == 1, on
+    assert on[0]["exit_reason"] == "uw_exit", on[0]
+    # It left early, and it left a winner on the table — the documented cost.
+    assert on[0]["exit_idx"] < base[0]["exit_idx"]
+    assert on[0]["net_pnl"] < base[0]["net_pnl"]
 
 
 if __name__ == "__main__":

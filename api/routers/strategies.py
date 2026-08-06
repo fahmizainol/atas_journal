@@ -163,16 +163,11 @@ class ConfigIn(BaseModel):
     # against baseline ("stop 50, trail 75"), which beats a list of hashes when
     # you are ten experiments deep. Ignored by /preflight.
     label: str | None = None
-    # Buy the RTH segment only, skipping the overnight a run otherwise pulls for
-    # its charts. Deliberately NOT part of `config`: it buys data, it does not
-    # change a rule, so it must not enter the run's identity hash — the same knobs
-    # over the same window are the same run whether or not you also paid for the
-    # night. A globex strategy ignores it; it cannot simulate without the night.
-    rth_only: bool = False
-
-
-def _fetch_overnight(strat: registry.Strategy, body: ConfigIn) -> bool:
-    return strat.session == "globex" or not body.rth_only
+    # There used to be an `rth_only` flag here, buying the RTH window alone and
+    # skipping the night. A run now always buys the whole session in one range, so
+    # the flag is gone; a client that still sends it is simply ignored. (The
+    # unrelated `rth_only` *rule* knob inside `config` — RTH entries only — is
+    # untouched.)
 
 
 @router.post("/strategies/{slug}/preflight")
@@ -181,7 +176,7 @@ def preflight(slug: str, body: ConfigIn) -> dict:
     paid Databento pulls. Call before POSTing the run; nothing is fetched."""
     strat = _strategy(slug)
     cfg = _parse_config(strat, body.config)
-    pf = runner.preflight(cfg, strat.session, _fetch_overnight(strat, body))
+    pf = runner.preflight(cfg)
     rid = store.run_id(cfg, strat.version)
     return {**pf, "run_id": rid, "exists": store.read_state(slug, rid) is not None}
 
@@ -220,8 +215,7 @@ def create_run(slug: str, body: ConfigIn, background: BackgroundTasks) -> dict:
         raise HTTPException(400, str(exc)) from exc
     if body.label:
         store.write_meta(slug, rid, label=body.label)
-    background.add_task(runner.run_to_completion, strat, cfg, rid,
-                        fetch_overnight=_fetch_overnight(strat, body))
+    background.add_task(runner.run_to_completion, strat, cfg, rid)
     return {"run_id": rid, "status": "running", "already_existed": False}
 
 
@@ -484,19 +478,42 @@ def _edge_scopes(traded, vetoed, with_luck: bool) -> dict:
     return out
 
 
+# The charts draw the engine's own tick bars by default ("tick"); the minute
+# resolutions rebuild every candle as clock-time bars over the same ticks as a
+# context view (sim_charts feeds the freq straight to time_bars). Anything
+# unrecognised falls back to the honest default rather than erroring.
+_RES = {"1m": "1min", "3m": "3min", "5m": "5min", "15m": "15min"}
+
+
+def _resolution(res: str | None) -> str:
+    return _RES.get(res or "", "tick")
+
+
+# CVD-divergence swing size, in ticks: how far price must retrace to count a
+# swing pivot. A per-view override of the DIV_ZZ_TICKS default — bigger = fewer,
+# larger divergences; smaller = more, noisier. None leaves the server default.
+_DIV_TICKS = Query(None, ge=1, le=2000)
+
+
 @router.get("/strategies/{slug}/runs/{run_id}/trade-chart/{trade_no}")
-def trade_chart(slug: str, run_id: str, trade_no: int, tz: str | None = Query(None)) -> dict:
+def trade_chart(slug: str, run_id: str, trade_no: int, tz: str | None = Query(None),
+                resolution: str | None = Query(None),
+                div_ticks: int | None = _DIV_TICKS) -> dict:
     _strategy(slug)
-    payload = sim_charts.sim_trade_chart(slug, run_id, trade_no, _tz(tz))
+    payload = sim_charts.sim_trade_chart(slug, run_id, trade_no, _tz(tz),
+                                         _resolution(resolution), div_ticks)
     if not payload.get("available"):
         raise HTTPException(404, f"No chart for {run_id} trade #{trade_no}")
     return payload
 
 
 @router.get("/strategies/{slug}/runs/{run_id}/day-chart/{day}")
-def day_chart(slug: str, run_id: str, day: date, tz: str | None = Query(None)) -> dict:
+def day_chart(slug: str, run_id: str, day: date, tz: str | None = Query(None),
+              resolution: str | None = Query(None),
+              div_ticks: int | None = _DIV_TICKS) -> dict:
     _strategy(slug)
-    payload = sim_charts.sim_day_chart(slug, run_id, day, _tz(tz))
+    payload = sim_charts.sim_day_chart(slug, run_id, day, _tz(tz),
+                                       _resolution(resolution), div_ticks)
     if not payload.get("available"):
         raise HTTPException(404, f"No chart for {run_id} on {day}")
     return payload

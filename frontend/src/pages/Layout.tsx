@@ -3,57 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Sidebar } from "../components/Sidebar";
 import { FilterBar } from "../components/FilterBar";
 import { useImportFeed } from "../hooks/useBacktests";
-
-// The app is really two products sharing one shell: a retrospective Journal
-// (scoped by the FilterBar) and a prospective Lab (market-data research that
-// ignores the FilterBar). Group the tabs by workspace so the two modes stop
-// interleaving, and only show the FilterBar where it actually drives the page.
-type Tab = { to: string; label: string; end?: boolean };
-type Workspace = { id: string; label: string; filterBar: boolean; tabs: Tab[] };
-
-const WORKSPACES: Workspace[] = [
-  {
-    id: "journal",
-    label: "Journal",
-    filterBar: true,
-    tabs: [
-      { to: "/", label: "Overview", end: true },
-      { to: "/calendar", label: "Calendar" },
-      { to: "/edges", label: "Edges" },
-      { to: "/trades", label: "Trades" },
-      { to: "/models", label: "Models" },
-      { to: "/ai", label: "AI Review" },
-      { to: "/cross-check", label: "ATAS Cross-check" },
-    ],
-  },
-  {
-    id: "lab",
-    label: "Lab",
-    filterBar: false,
-    tabs: [
-      { to: "/strategies", label: "Strategies" },
-      { to: "/interactions", label: "Interactions" },
-      { to: "/backtests", label: "Backtests" },
-      { to: "/research", label: "Research" },
-    ],
-  },
-];
-
-// Which workspace owns a given path? Derived from the URL (not stored) so deep
-// links, bookmarks, and back/forward all land in the right mode. Defaults to
-// the first workspace for unknown paths.
-function workspaceForPath(pathname: string): Workspace {
-  for (const ws of WORKSPACES) {
-    for (const tab of ws.tabs) {
-      if (tab.to === "/") {
-        if (pathname === "/") return ws;
-      } else if (pathname === tab.to || pathname.startsWith(tab.to + "/")) {
-        return ws;
-      }
-    }
-  }
-  return WORKSPACES[0];
-}
+import { WORKSPACES, workspaceForPath } from "../lib/workspaces";
 
 export function Layout() {
   const { pathname, search } = useLocation();
@@ -66,43 +16,63 @@ export function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const active = workspaceForPath(pathname);
   return (
-    <div className="app-shell">
-      {sidebarOpen && <Sidebar />}
+    // The workspace id rides on the shell so mobile styling can target one
+    // product at a time — the Lab is tuned for phones; the Journal isn't (yet).
+    <div className={`app-shell ws-${active.id}`}>
+      {/* The data sidebar is import/timezone plumbing over ATAS exports — a
+          chart page reads the tick cache and has no use for it, and both of them
+          hardcode their timezone. Gated on `chrome` rather than left mounted so
+          an open drawer doesn't follow you onto a chart. */}
+      {active.chrome && sidebarOpen && <Sidebar />}
+      {active.chrome && sidebarOpen && (
+        // On phones the drawer overlays the content; this scrim closes it on a
+        // tap outside. Hidden on desktop, where the sidebar sits in the flow.
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="Close the data panel"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
       <main className="app-main">
-        <div className="app-topbar">
-          <button
-            type="button"
-            className="sidebar-toggle"
-            onClick={() => setSidebarOpen((o) => !o)}
-            title={sidebarOpen ? "Hide the data panel" : "Show the data panel"}
-            aria-label={sidebarOpen ? "Hide the data panel" : "Show the data panel"}
-          >
-            ☰
-          </button>
-          <div className="workspace-switch" role="tablist" aria-label="Workspace">
-            {WORKSPACES.map((ws) => (
+        {active.chrome && (
+          <>
+            <div className="app-topbar">
               <button
-                key={ws.id}
                 type="button"
-                role="tab"
-                aria-selected={ws.id === active.id}
-                className={ws.id === active.id ? "active" : ""}
-                // Switching workspace lands on its first tab; keep the current
-                // querystring so Journal's FilterBar scope survives the hop.
-                onClick={() => navigate({ pathname: ws.tabs[0].to, search })}
+                className="sidebar-toggle"
+                onClick={() => setSidebarOpen((o) => !o)}
+                title={sidebarOpen ? "Hide the data panel" : "Show the data panel"}
+                aria-label={sidebarOpen ? "Hide the data panel" : "Show the data panel"}
               >
-                {ws.label}
+                ☰
               </button>
-            ))}
-          </div>
-        </div>
-        <nav className="tabs">
-          {active.tabs.map((t) => (
-            <NavLink key={t.to} to={{ pathname: t.to, search }} end={t.end}>
-              {t.label}
-            </NavLink>
-          ))}
-        </nav>
+              <div className="workspace-switch" role="tablist" aria-label="Workspace">
+                {WORKSPACES.map((ws) => (
+                  <button
+                    key={ws.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={ws.id === active.id}
+                    className={ws.id === active.id ? "active" : ""}
+                    // Switching workspace lands on its first tab; keep the current
+                    // querystring so Journal's FilterBar scope survives the hop.
+                    onClick={() => navigate({ pathname: ws.tabs[0].to, search })}
+                  >
+                    {ws.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <nav className="tabs">
+              {active.tabs.map((t) => (
+                <NavLink key={t.to} to={{ pathname: t.to, search }} end={t.end}>
+                  {t.label}
+                </NavLink>
+              ))}
+            </nav>
+          </>
+        )}
         {active.filterBar && <FilterBar />}
         <Suspense fallback={<div className="page-fallback" />}>
           <Outlet />

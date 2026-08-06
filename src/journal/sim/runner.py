@@ -96,20 +96,15 @@ def _simulate_session(slug: str, cfg, day: date) -> tuple[list[dict], list[dict]
     return t, v
 
 
-def preflight(cfg, session: str = "rth",
-              fetch_overnight: bool = True) -> dict:
+def preflight(cfg) -> dict:
     """What would this run touch? Sessions in the window, how many lack a tick
     cache (each of those is a Databento download that costs real money), and a
     cost estimate when the API can price it. Nothing is fetched or simulated.
 
-    ``session`` comes from the strategy registry: "globex" strategies *need* the
-    overnight segment to simulate at all. ``fetch_overnight`` is the run form's
-    choice, and by default every run buys the night whether its engine reads it
-    or not — the charts do (ticks.ensure_overnight). Either way a day with only
-    its RTH file cached still counts as uncached, and the estimate then prices
-    both segments, so the guard errs high rather than under-quoting."""
-    overnight = fetch_overnight or session == "globex"
-    segments = ("rth", "on") if overnight else ("rth",)
+    Every run buys whole sessions now, so a day counts as cached only when all
+    three of its windows are settled — a day holding just its RTH file is still a
+    purchase waiting to happen, and gets priced as one. The estimate is quoted
+    over whole days too, so the guard errs high rather than under-quoting."""
     days = tickmod.session_dates(cfg.start_date, cfg.end_date)
     try:
         tickmod.ensure_roll_map(cfg.contract, cfg.start_date, cfg.end_date)
@@ -120,8 +115,7 @@ def preflight(cfg, session: str = "rth",
     uncached = [
         d for d in days
         if not tickmod.market_closed(cfg.contract, d)  # a holiday has nothing to buy
-        and (d not in by_day
-             or not all(tickmod._cache_path(by_day[d], d, s).exists() for s in segments))
+        and (d not in by_day or not tickmod.day_complete(by_day[d], d))
     ]
 
     est_cost = None
@@ -130,7 +124,7 @@ def preflight(cfg, session: str = "rth",
             # One range query per contiguous block *of a single contract*: a range
             # that straddled the roll would be priced against the wrong symbol.
             est_cost = sum(
-                tickmod.estimate_cost(sym, grp[0], grp[-1], include_overnight=overnight)
+                tickmod.estimate_cost(sym, grp[0], grp[-1])
                 for sym, ds in _by_contract(uncached, by_day).items()
                 for grp in _contiguous(ds)
             )
@@ -238,8 +232,7 @@ def start(strategy: Strategy, cfg) -> str:
     return store.init_run(strategy.slug, cfg, strategy.version, len(days))
 
 
-def run_to_completion(strategy: Strategy, cfg, rid: str,
-                      fetch_overnight: bool = True) -> None:
+def run_to_completion(strategy: Strategy, cfg, rid: str) -> None:
     """The actual work; runs in a background thread for API calls, inline for
     the CLI. All failures land in state.json — a run can never just vanish.
 
@@ -252,10 +245,11 @@ def run_to_completion(strategy: Strategy, cfg, rid: str,
     is small), which is byte-identical to the old inline loop: ``finalize`` sorts
     the rows by entry time, so completion order can't change the result.
 
-    ``fetch_overnight`` buys the Globex segment for each session even when the
-    engine won't read it — that is what lets the charts draw the night. It cannot
+    The fetch pass buys each session *whole* — night, RTH and the post hour in one
+    range — even though most engines read RTH alone. That is what lets the charts
+    draw the night and the cross-session anchors see the 16:00 hour, and it cannot
     change a single trade: the engine's own tick pull is decided by the strategy's
-    entry point, not by this."""
+    entry point, not by what the run happened to cache."""
     from . import engine
 
     try:
@@ -267,9 +261,9 @@ def run_to_completion(strategy: Strategy, cfg, rid: str,
         # also lands the roll map on disk, so every worker resolves contracts from
         # the file rather than re-probing Databento.
         tickmod.ensure_roll_map(cfg.contract, cfg.start_date, cfg.end_date)
-        # A globex-anchored engine reads the overnight itself, so the night must be
-        # cached for it whether or not the run form asked for it (an RTH engine only
-        # needs it for the charts, which is what fetch_overnight is for).
+        # A globex-anchored engine reads the overnight itself; an RTH engine only
+        # wants it for the charts. Either way the night is bought, so this now only
+        # decides what the engine is *handed*, not what gets cached.
         engine_overnight = strategy.session == "globex"
 
         # --- phase 1: serial fetch + window validation --------------------------
@@ -285,19 +279,18 @@ def run_to_completion(strategy: Strategy, cfg, rid: str,
                 closed += 1
                 continue
             sym = tickmod.contract_for(cfg.contract, day)
-            if fetch_overnight or engine_overnight:
-                tickmod.ensure_overnight(sym, day)
-            # Only reach for the ticks when the RTH segment isn't already on disk:
-            # an empty pull is never cached (see ticks._get_segment), so a file that
-            # exists is a file with ticks. This is the one place a cold day is bought
-            # — serially — and the guard that fails a broken window before phase 2.
-            # Loading a cached frame here just to count it would be wasted I/O; the
-            # workers read it from disk themselves.
-            if not tickmod._cache_path(sym, day, "rth").exists():
-                if not len(tickmod.get_day_ticks(
-                        sym, day, include_overnight=engine_overnight)):
-                    raise RuntimeError(
-                        f"no ticks for {day} ({sym}) — cannot report metrics over this window")
+            # One range buys the whole session: the night and the post hour the
+            # charts and the weekly seed need, alongside the RTH the engine trades.
+            # This is the one place a cold day is paid for, and it is serial so the
+            # parallel pass below never issues a concurrent buy.
+            tickmod.ensure_day(sym, day)
+            # The broken-window guard: a day that should have RTH ticks and doesn't
+            # must fail before phase 2, or the run reports metrics over a window it
+            # never tested. Asked without loading the ticks — the workers read those
+            # from disk themselves, and counting them here would be wasted I/O.
+            if not tickmod.has_rth(sym, day):
+                raise RuntimeError(
+                    f"no ticks for {day} ({sym}) — cannot report metrics over this window")
             work_days.append(day)
 
         # Closed days are done the moment we've skipped them — seed the bar there.
@@ -391,9 +384,8 @@ def _snapshot_regime_pnl(slug: str, rid: str, cfg, trades: pd.DataFrame) -> None
         pass
 
 
-def execute(strategy: Strategy, cfg,
-            fetch_overnight: bool = True) -> str:
+def execute(strategy: Strategy, cfg) -> str:
     """Synchronous start + run; the CLI path."""
     rid = start(strategy, cfg)
-    run_to_completion(strategy, cfg, rid, fetch_overnight=fetch_overnight)
+    run_to_completion(strategy, cfg, rid)
     return rid

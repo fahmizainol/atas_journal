@@ -43,7 +43,7 @@ from . import vwap as vwapmod
 from . import weekly as weeklymod
 from .regime import minute_bars
 
-WEEKLY_VWAP_VERSION = 1
+WEEKLY_VWAP_VERSION = 2  # v2: seed includes the 16:00-17:00 'post' segment
 WEEKLY_VWAP_DIR = CACHE_DIR / "weekly_vwap"
 
 # The levels a session can interact with, as (name, band-frame column, sign of

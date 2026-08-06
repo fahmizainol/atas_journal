@@ -5,6 +5,8 @@
 - **Data:** NQ tick cache 2025-02-03 → 2026-06-30 (367 sessions; 363 ran, 283 "seasoned" = not the week's first session). Trade comparison against the v10 baseline `20250201-20260630-v10-0ae01934` (398 trades, net $122.5k).
 - **History note:** Backlog item 2 in `lab-backlog.md`. Study module `src/journal/sim/weekly_vwap.py`, served at `/interactions/weekly-vwap`, UI panel in the Interactions Lab.
 
+> **⚠ STATUS (2026-07-22): results pending re-run — data gap.** The weekly line here was computed on a tick cache missing the live **16:00–17:00 ET hour every weekday** (see §1 "Known gap"). The seed compounds that hole across the week (~4 hrs by Friday), so every level, band and σ below is mis-stated. Originally judged "slight"; a 2026-07-22 ATAS cross-check disproved that (on the pdl anchor it moved lower-dev2 by 16–21 pts, flipping an inside-band reading to a dev2 tag). The `wk_ext` A/B *failed* — knob left off, conservative — so the standing risk is a **false negative** (a real filter discarded on wrong numbers). **Re-run once the hour is bought before trusting any figure below.**
+
 ## TL;DR
 
 The weekly anchor is built, drawn on every chart, and studied. Three findings:
@@ -17,7 +19,7 @@ The weekly anchor is built, drawn on every chart, and studied. Three findings:
 
 - `weekly.py`: each prior session collapses to (Σv, Σpv, Σp²v) cached beside the tick parquets (`*_sums.json`, keyed by which segments were summed); `vwap_bands(ticks, seed=...)` accumulates today's ticks on top. Algebraically identical to concatenating the week's ticks.
 - Honesty rules, inherited from the Globex anchor: a week with a hole (a prior session whose ticks aren't cached) or a session without its overnight is **absent, not approximated**; a contract roll restarts the anchor at the roll session (never averaged across the seam). The week's first session has a zero seed — its weekly line coincides with its Globex line, which is what a weekly anchor genuinely looks like on a Monday.
-- Known gap: the tick cache covers 18:00→16:00 ET, so each completed day's 16:00–17:00 hour is not in the seed. ATAS's weekly VWAP includes it; ours will differ slightly. Lowest-volume hour of the day; buying it retroactively is a cost decision not yet made.
+- **Known gap (ESCALATED 2026-07-22):** the tick cache covers 18:00→16:00 ET, so each completed day's live 16:00–17:00 hour is not in the seed, and the seed *compounds* that hole across the week (~4 hrs by Friday). Originally judged "slight (lowest-volume hour)"; a 2026-07-22 ATAS cross-check disproved that — on the pdl anchor the missing hour moved lower-dev2 by 16–21 pts and flipped an inside-band reading into a dev2 tag. **Material for every cross-session anchor.** Cost to buy it retroactively is now scoped (~$4 for the whole cache, 16:00–17:00 only); study to be re-run after.
 - Drawn on every sim/Lab chart as a third band (orange), own legend toggle, context-only (`vwap_anchor` never says "weekly").
 
 ## 2. Session-level study (283 seasoned sessions, 60m outcome window)

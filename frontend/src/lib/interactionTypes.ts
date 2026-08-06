@@ -137,7 +137,19 @@ export interface InteractionResult {
   outcome_window_min: number;
   zone_cluster_pts: number;
   coverage: { requested_days: number; ran_days: number; skipped: string[] };
-  events: { touches: Touch[]; va_snaps: VaSnap[]; band_state: BandState[] };
+  // The lean events view: VA-snaps only. band_state (server-side aggregate
+  // input) and the raw touches (the biggest block — chart dots + touches table)
+  // are dropped; touch *counts* per day still come from day_index below.
+  events: { va_snaps: VaSnap[] };
+  day_index: Record<string, { n_touches: number; n_snaps: number }>;
+}
+
+// The on-demand detail — fetched by the Stats tab's "Compute stats" button
+// rather than shipped with every run, so the Sessions/chart view loads without
+// waiting on it. Carries the aggregate tables plus the raw touches (which back
+// the chart's touch markers and the per-day touches table).
+export interface InteractionStats {
+  touches: Touch[];
   aggregates: {
     by_source: AggRow[];
     by_nth_touch: AggRow[];
@@ -154,7 +166,6 @@ export interface InteractionResult {
     vasnap_confluence: VaSnapAggRow[]; // lone vs same-minute multi-level snaps
     vasnap_continuation: VaSnapContRow[];
   };
-  day_index: Record<string, { n_touches: number; n_snaps: number }>;
 }
 
 export interface CoverageDay {
@@ -301,6 +312,28 @@ export interface IbResult {
     gap_cuts: IbOrbRow[];
     weekday: IbCutRow[];
   };
+}
+
+// Per-session IB width for the Sessions table, sliced out of the widest saved IB
+// snapshot (never recomputed for the shown window — `adr14` chains through prior
+// sessions, so a narrow window would rescale the terciles). Days the snapshot
+// doesn't cover are absent from `days`; days inside its ADR warm-up are present
+// with a null `ib_vs_adr`/`width`.
+export type IbWidthBucket = "narrow" | "mid" | "wide";
+
+export interface IbSessionWidth {
+  ib_range: number;
+  ib_vs_adr: number | null;
+  adr14: number | null;
+  width: IbWidthBucket | null;
+}
+
+export interface IbSessionWidths {
+  symbol: string;
+  run_id: string | null; // null when no snapshot exists for the symbol yet
+  source: { start: string; end: string; ib_minutes: number } | null;
+  tercile_edges: [number, number]; // pinned ADR-unit edges (vol-clock §10c)
+  days: Record<string, IbSessionWidth>;
 }
 
 export interface IbParams {

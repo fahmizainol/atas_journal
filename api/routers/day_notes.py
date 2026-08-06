@@ -19,6 +19,22 @@ class DayNoteIn(BaseModel):
     tags: list[str] = []
 
 
+@router.get("/day-notes")
+def list_day_notes() -> dict:
+    """Every day's note+tags in one shot, keyed by ISO date — lets a table (the
+    Interactions Sessions grid) show per-day tags without a request per row."""
+    conn = deps.get_conn()
+    with deps.db_lock():
+        df = db.all_day_notes(conn).fillna("")
+    out: dict[str, dict] = {}
+    for r in df.itertuples(index=False):
+        out[str(r.day)] = {
+            "note": r.note or "",
+            "tags": json.loads(r.tags_json or "[]"),
+        }
+    return out
+
+
 @router.get("/day-notes/{day}")
 def get_day_note(day: str) -> dict:
     conn = deps.get_conn()

@@ -11,10 +11,16 @@
 import type { ISeriesApi } from "lightweight-charts";
 import { palette } from "../../theme";
 import type { VolumeProfile } from "../../lib/volumeProfile";
+import { drawEventMarginal } from "../../lib/eventMarginal";
+import type { TapeEvent } from "../../lib/replayEngine";
 
-// Fraction of the pane the widest (POC) row spans. Wide enough to read, narrow
-// enough that it never swallows the price action it sits behind.
-const MAX_WIDTH_FRAC = 0.2;
+// Fraction of the pane the widest (POC) row spans. The shape is the reading —
+// where the shelves are, not how long the bars get — so this is kept to the
+// narrowest that still resolves a hump from its shoulder, and the price action
+// keeps the rest of the pane. (The two range-pinned profiles run the same rule
+// against their own span: see RangeProfilePrimitive and
+// CompositeProfilePrimitive.)
+const MAX_WIDTH_FRAC = 0.11;
 const GAP = 1; // px between rows, so they read as a histogram not a block
 
 const FILL_VA = "rgba(59, 130, 246, 0.42)"; // inside the value area
@@ -61,6 +67,21 @@ class ProfileRenderer {
       // scale and gives the rows something to sit against.
       ctx.fillStyle = palette.grid;
       ctx.fillRect(right - 1, 0, 1, scope.mediaSize.height);
+
+      // The event marginal, measured off this histogram's own baseline and
+      // width so the outline and the bars can never drift apart. Empty on every
+      // chart but the Simulator's, which is the only one with a tape to find
+      // events on.
+      drawEventMarginal(
+        ctx,
+        (price) => series.priceToCoordinate(price),
+        this.host.events,
+        profile.rows[0].low,
+        profile.rows[profile.rows.length - 1].high,
+        right,
+        maxWidth,
+        -1,
+      );
     });
   }
 }
@@ -86,7 +107,16 @@ export class VolumeProfilePrimitive {
   private requestUpdate?: () => void;
   private visible = true;
 
+  /** Tape events to draw as a marginal over the histogram. Already filtered by
+   *  the caller (strength floor, per-kind toggles) — this only draws. */
+  public events: TapeEvent[] = [];
+
   constructor(public profile: VolumeProfile | null) {}
+
+  setEvents(events: TapeEvent[]) {
+    this.events = events;
+    this.requestUpdate?.();
+  }
 
   // The profile is recomputed as the user pans/zooms (it covers the visible
   // bars), so unlike the VWAP band this primitive's data is mutable.

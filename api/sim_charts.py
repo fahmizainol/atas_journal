@@ -16,6 +16,7 @@ import pandas as pd
 from journal.config import point_value, tick_size
 from journal.sim import bars as barmod
 from journal.sim import ib as ibmod
+from journal.sim.interactions import _atr_rows, _rsi_rows
 from journal.sim import profile as profmod
 from journal.sim import registry, store
 from journal.sim import ticks as tickmod
@@ -129,7 +130,16 @@ def _footprint(t: pd.DataFrame, b: pd.DataFrame, ts_size: float) -> list[list[li
     return out
 
 
-def _cvd(t: pd.DataFrame, b: pd.DataFrame, times: np.ndarray) -> list[dict]:
+# Swing size for CVD-divergence pivots, in ticks: a swing counts once price
+# retraces this far from its running extreme. The structure-clarity gate runs
+# the same zigzag at 40 ticks, but that classifies *every bar's* trend state —
+# for discrete marks it fires ~65×/session (intrabar noise). 120 ticks (30 NQ
+# points) keeps the marks on session-scale swings — a handful of the notable
+# order-flow non-confirmations per session rather than a wall of circles.
+DIV_ZZ_TICKS = 120
+
+
+def _cvd_series(t: pd.DataFrame, b: pd.DataFrame) -> np.ndarray | None:
     """Cumulative volume delta per bar: the running sum of signed aggressor
     volume (buy market orders minus sell market orders) as of each bar's close.
 
@@ -139,25 +149,113 @@ def _cvd(t: pd.DataFrame, b: pd.DataFrame, times: np.ndarray) -> list[dict]:
     else the bell) and accumulated across the whole session: one line to read
     order-flow pressure against price.
 
-    When the feed carried no aggressor side (every tick ``"N"`` — an older cache,
-    or a symbol the vendor never tagged) there is nothing to accumulate, so the
-    series comes back empty and the pane and its legend toggle simply don't
-    appear rather than drawing a flat zero line.
+    Returns the per-bar cumulative series aligned 1:1 with ``b``, or ``None``
+    when the feed carried no aggressor side (every tick ``"N"`` — an older
+    cache, or a symbol the vendor never tagged): there is nothing to accumulate.
     """
     n = len(b)
     side = t["side"].to_numpy()
     size = t["size"].to_numpy().astype(float)
     signed = np.where(side == "B", size, np.where(side == "A", -size, 0.0))
     if not signed.any():
-        return []
+        return None
     # Same bar assignment as _footprint: a tick belongs to the bar whose end it
     # falls before; trailing ticks past the last full bar land at n and drop.
     bar_of = np.searchsorted(b["end_idx"].to_numpy(), np.arange(len(t)), side="left")
     keep = bar_of < n
     per_bar = np.zeros(n)
     np.add.at(per_bar, bar_of[keep], signed[keep])
-    cvd = np.cumsum(per_bar)
+    return np.cumsum(per_bar)
+
+
+def _cvd_rows(cvd: np.ndarray | None, times: np.ndarray) -> list[dict]:
+    """The CVD series as ``{time, value}`` rows for the chart's own pane. Empty
+    when there was no aggressor side, so the pane and its legend toggle simply
+    don't appear rather than drawing a flat zero line."""
+    if cvd is None:
+        return []
     return [{"time": int(tm), "value": float(v)} for tm, v in zip(times, cvd)]
+
+
+def _cvd_divergences(
+    b: pd.DataFrame, cvd: np.ndarray | None, times: np.ndarray, thr: float
+) -> list[dict]:
+    """Regular price/CVD divergences, via the same causal zigzag the
+    structure-clarity gate uses to find swings.
+
+    A swing where price prints a *higher high* while cumulative delta prints a
+    *lower high* is bearish — price extended but the aggressive buying behind it
+    didn't confirm; the mirror (a *lower low* in price against a *higher low* in
+    delta) is bullish. CVD is read at each price pivot, so the two series are
+    compared at the same bar. ``thr`` is a price distance: a swing counts once
+    price retraces that far from its running extreme.
+
+    Unlike the gate — which only trusts a pivot the moment a *later* bar's close
+    confirms it, because it decides live entries — this is a completed-session
+    review chart, so each endpoint sits on the actual swing bar.
+
+    Returns one dict per divergence carrying *both* swing points in CVD
+    coordinates (``v1``/``v2`` are cumulative-delta values, ``t1``/``t2`` bar
+    times), so the frontend can draw the A→B line on the CVD pane that makes the
+    non-confirmation legible — the delta line sloping the opposite way to price.
+    """
+    if cvd is None:
+        return []
+    highs = b["high"].to_numpy()
+    lows = b["low"].to_numpy()
+
+    # Causal zigzag → pivots as (bar index of the extreme, price, kind).
+    pivots: list[tuple[int, float, str]] = []
+    direction, max_i, min_i = 0, 0, 0
+    for i in range(len(highs)):
+        if highs[i] >= highs[max_i]:
+            max_i = i
+        if lows[i] <= lows[min_i]:
+            min_i = i
+        if direction >= 0 and highs[max_i] - lows[i] >= thr:
+            pivots.append((max_i, float(highs[max_i]), "H"))
+            direction, min_i = -1, i
+        elif direction <= 0 and highs[i] - lows[min_i] >= thr:
+            pivots.append((min_i, float(lows[min_i]), "L"))
+            direction, max_i = 1, i
+
+    # Compare each pivot with the previous one of its kind: price vs the CVD
+    # value sampled at that same swing bar. A hit emits the A→B segment.
+    out: list[dict] = []
+    last_h: tuple[int, float, float] | None = None  # (idx, price, cvd) prev high
+    last_l: tuple[int, float, float] | None = None  # (idx, price, cvd) prev low
+    for idx, price, kind in pivots:
+        c = float(cvd[idx])
+        if kind == "H":
+            if last_h is not None and price > last_h[1] and c < last_h[2]:
+                out.append({
+                    "kind": "bear",
+                    "t1": int(times[last_h[0]]), "v1": last_h[2],
+                    "t2": int(times[idx]), "v2": c,
+                })
+            last_h = (idx, price, c)
+        else:
+            if last_l is not None and price < last_l[1] and c > last_l[2]:
+                out.append({
+                    "kind": "bull",
+                    "t1": int(times[last_l[0]]), "v1": last_l[2],
+                    "t2": int(times[idx]), "v2": c,
+                })
+            last_l = (idx, price, c)
+    return out
+
+
+def _ema_rows(closes: np.ndarray, times: np.ndarray, span: int) -> list[dict]:
+    """A 1-minute EMA as ``{time, value}`` rows — the 9/20 the institutional
+    day-trading convention watches. Recursive EMA (``adjust=False``), so each
+    value depends only on prior closes: the same line a live 1-minute chart
+    draws. Computed on the minute grid regardless of the drawn candle timeframe;
+    the frontend samples it onto the tick-bar grid when the chart is tick bars."""
+    if len(closes) == 0:
+        return []
+    ema = pd.Series(closes, dtype="float64").ewm(span=span, adjust=False).mean().to_numpy()
+    return [{"time": int(t), "value": round(float(v), 2)}
+            for t, v in zip(times, ema) if np.isfinite(v)]
 
 
 def _vwap_rows(w: pd.DataFrame, pos: np.ndarray, times: np.ndarray) -> list[dict]:
@@ -166,7 +264,7 @@ def _vwap_rows(w: pd.DataFrame, pos: np.ndarray, times: np.ndarray) -> list[dict
     anchor even started) is simply not drawn."""
     rows = []
     for tm, p in zip(times, pos):
-        if p < 0:
+        if p < 0 or p >= len(w):
             continue
         r = w.iloc[int(p)]
         rows.append({
@@ -217,12 +315,27 @@ def _lead_bars(on: pd.DataFrame, n: int) -> pd.DataFrame:
     return lead.assign(start_idx=lead["start_idx"] + off, end_idx=lead["end_idx"] + off)
 
 
-def _session_frame(cfg, day, tz, overnight: bool = False):
+def _post_bars(post: pd.DataFrame, n: int, offset: int) -> pd.DataFrame:
+    """Post-RTH (16:00-17:00 ET) context candles, chunked forward from 16:00.
+
+    The mirror of ``_lead_bars`` on the far side of the session: pure context the
+    engine never traded (like the overnight lead), so a partial last candle at the
+    17:00 halt is fine — it is the session's final candle. Indices are offset to
+    sit right after RTH in ``full``."""
+    pb = barmod.tick_bars(post, n)
+    if pb.empty:
+        return pb
+    return pb.assign(start_idx=pb["start_idx"] + offset, end_idx=pb["end_idx"] + offset)
+
+
+def _session_frame(cfg, day, tz, overnight: bool = False, resolution: str = "tick",
+                   div_ticks: int | None = None):
     """One session's bars + the anchored VWAPs + display times, shared by the
     per-trade and full-day payloads. Returns
     (ticks, bars_rows, vwap_gx_rows, vwap_ny_rows, vwap_wk_rows,
-    profile_gx_rows, profile_ny_rows, bar_time, ib, footprint, cvd_rows), or
-    None if no data.
+    profile_gx_rows, profile_ny_rows, bar_time, ib, footprint, cvd_rows,
+    divergences, ema9_rows, ema20_rows, ema50_rows, ema200_rows, rsi_rows,
+    atr_rows), or None if no data.
 
     Every strategy's chart shows the same thing: the overnight candles from 18:00
     ET, the RTH session, both anchored VWAPs, and both developing profiles. What
@@ -280,6 +393,31 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
             eng = b.assign(start_idx=b["start_idx"] + rth_i0, end_idx=b["end_idx"] + rth_i0)
             b_all = pd.concat([lead, eng], ignore_index=True)
 
+    # Splice the recovered 16:00-17:00 post hour as a context tail: the Globex and
+    # weekly anchors carry through it and its candles are drawn (its own context
+    # bars in tick mode; time_bars picks it up for a minute chart). NY is clipped to
+    # [rth_i0, rth_end) below, so it still ends at the bell's close.
+    rth_end = len(full)
+    post = tickmod.cached_post(sym, day)
+    if post is not None and not post.empty:
+        if resolution == "tick":
+            b_all = pd.concat([b_all, _post_bars(post, cfg.ticks_per_bar, rth_end)],
+                              ignore_index=True)
+        full = pd.concat([full, post], ignore_index=True)
+
+    # Time-resolution view is a context alternative to the engine's tick bars:
+    # every drawn candle is rebuilt as clock bars over the whole `full` frame.
+    # The engine still traded the tick bars above — this deliberately trades the
+    # "the candles you see are the candles it traded" guarantee for a familiar
+    # minute picture, so it is opt-in. start_idx/end_idx still index into `full`,
+    # so every VWAP, profile, footprint and CVD lookup below is unchanged, and
+    # the two-piece overnight construction above is simply moot: one continuous
+    # stream is exactly what a minute chart wants.
+    if resolution != "tick":
+        b_all = barmod.time_bars(full, resolution)
+        if b_all.empty:
+            return None
+
     bar_pos = b_all["end_idx"].to_numpy()
 
     # Globex-anchored: accumulates from the first tick of `full`. Only meaningful
@@ -288,7 +426,7 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
     # NY-anchored: the same accumulation restarted at the bell. For a session
     # strategy this slice IS the engine's own tick frame, so the numbers match
     # exactly what it traded.
-    w_ny = vwapmod.vwap_bands(full.iloc[rth_i0:].reset_index(drop=True))
+    w_ny = vwapmod.vwap_bands(full.iloc[rth_i0:rth_end].reset_index(drop=True))
     # Weekly-anchored: the Globex accumulation seeded with the week's prior
     # sessions. Same honesty rule as the Globex anchor — absent, not
     # approximated, when the night isn't on disk or the week has a hole
@@ -326,10 +464,12 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
         _profile_rows(profmod.developing_profile(full, b_all, tsz), times)
         if rth_i0 > 0 else []
     )
-    ny_bars = b_all.assign(end_idx=b_all["end_idx"] - rth_i0)
+    ny_shift = b_all["end_idx"].to_numpy() - rth_i0
+    ny_in = (ny_shift >= 0) & (ny_shift < rth_end - rth_i0)   # RTH bars only (drop post)
+    ny_bars = b_all[ny_in].reset_index(drop=True).assign(end_idx=ny_shift[ny_in])
     profile_ny_rows = _profile_rows(
-        profmod.developing_profile(full.iloc[rth_i0:].reset_index(drop=True), ny_bars, tsz),
-        times,
+        profmod.developing_profile(full.iloc[rth_i0:rth_end].reset_index(drop=True), ny_bars, tsz),
+        times[ny_in],
     )
 
     # Snap trade instants (tick times) onto the bar grid: the frontend's
@@ -345,15 +485,44 @@ def _session_frame(cfg, day, tz, overnight: bool = False):
     # The Initial Balance (first 60 min of RTH), measured on the same RTH ticks
     # the engine traded and the same window as the IB/ORB study — what the chart
     # draws is what the study's break/extension stats were measured against.
-    ib = ibmod.chart_overlay(full.iloc[rth_i0:], day, b_all["ts_utc"], times)
+    ib = ibmod.chart_overlay(full.iloc[rth_i0:rth_end], day, b_all["ts_utc"], times)
+
+    # 9/20 EMA on the 1-minute grid (over the whole `full` stream, overnight
+    # included), independent of whether the drawn candles are tick or minute
+    # bars — the convention is a 1-minute average. Stamped in the same local
+    # epoch as `times`, so the frontend samples it onto the drawn bar grid.
+    m = barmod.time_bars(full, "1min")
+    if m.empty:
+        ema9_rows = ema20_rows = ema50_rows = ema200_rows = []
+    else:
+        m_times = np.asarray(_epoch_local(m["ts_utc"], tz))
+        m_closes = m["close"].to_numpy()
+        ema9_rows = _ema_rows(m_closes, m_times, 9)
+        ema20_rows = _ema_rows(m_closes, m_times, 20)
+        ema50_rows = _ema_rows(m_closes, m_times, 50)
+        ema200_rows = _ema_rows(m_closes, m_times, 200)
+
+    # One CVD pass feeds both the pane series and the divergence marks, so they
+    # can't drift out of sync. thr is a price distance off the contract's grid.
+    cvd_arr = _cvd_series(full, b_all)
+    cvd_rows = _cvd_rows(cvd_arr, times)
+    divergences = _cvd_divergences(b_all, cvd_arr, times, (div_ticks or DIV_ZZ_TICKS) * tsz)
+
+    # RSI(14) and ATR(14) on the *drawn* timeframe — the tick bars on screen, like
+    # the Interactions/Drafts charts — not the 1-minute grid the EMA uses, so both
+    # read against the same candles they sit under.
+    rsi_rows = _rsi_rows(b_all["close"].to_numpy(), times, 14)
+    atr_rows = _atr_rows(b_all, times, 14)
 
     return (full, bars_rows, vwap_gx_rows, vwap_ny_rows, vwap_wk_rows,
             profile_gx_rows, profile_ny_rows, bar_time, ib,
             _footprint(full, b_all, tick_size(cfg.contract)),
-            _cvd(full, b_all, times))
+            cvd_rows, divergences, ema9_rows, ema20_rows,
+            ema50_rows, ema200_rows, rsi_rows, atr_rows)
 
 
-def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
+def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz, resolution: str = "tick",
+                    div_ticks: int | None = None) -> dict:
     r = store.read_run(slug, run_id)
     if r is None:
         return {"available": False}
@@ -370,11 +539,13 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
     entry_ts, exit_ts = _utc(trade["entry_ts_utc"]), _utc(trade["exit_ts_utc"])
     day = entry_ts.tz_convert("America/New_York").date()
 
-    frame = _session_frame(cfg, day, tz, overnight=globex)
+    frame = _session_frame(cfg, day, tz, overnight=globex, resolution=resolution,
+                           div_ticks=div_ticks)
     if frame is None:
         return {"available": False}
     (t, bars_rows, vwap_gx, vwap_ny, vwap_wk, profile_gx, profile_ny,
-     bar_time, ib, footprint, cvd) = frame
+     bar_time, ib, footprint, cvd, divergences, ema9, ema20,
+     ema50, ema200, rsi, atr) = frame
 
     entry_t, exit_t = bar_time(entry_ts), bar_time(exit_ts)
 
@@ -425,7 +596,12 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
         "bars": bars_rows,
         **_vwap_slots(vwap_gx, vwap_ny, vwap_wk, globex),
         **_profile_slots(profile_gx, profile_ny),
-        "atr_points": [],
+        "ema9": ema9,
+        "ema20": ema20,
+        "ema50": ema50,
+        "ema200": ema200,
+        "rsi": rsi,
+        "atr_points": atr,
         "markers": markers,
         "price_lines": price_lines,
         "levels": [],
@@ -435,6 +611,7 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz) -> dict:
         "instrument": tickmod.contract_for(cfg.contract, day),
         "footprint": footprint,
         "cvd": cvd,
+        "cvd_divergences": divergences,
         "tick_size": tick_size(cfg.contract),
         "point_value": point_value(cfg.contract),
     }
@@ -470,7 +647,8 @@ def _trade_rect(tr, entry_t: int, exit_t: int, tz, cfg) -> dict:
     }
 
 
-def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
+def sim_day_chart(slug: str, run_id: str, day, tz, resolution: str = "tick",
+                  div_ticks: int | None = None) -> dict:
     """Whole-session chart with every trade of that day drawn at once.
 
     Deliberately sparser per trade than the single-trade view: rect + marker
@@ -485,11 +663,13 @@ def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
     cfg = store.config_from_json(cfg_json, registry.get(slug).config_cls)
     globex = _is_globex(slug)
 
-    frame = _session_frame(cfg, day, tz, overnight=globex)
+    frame = _session_frame(cfg, day, tz, overnight=globex, resolution=resolution,
+                           div_ticks=div_ticks)
     if frame is None:
         return {"available": False}
     (_, bars_rows, vwap_gx, vwap_ny, vwap_wk, profile_gx, profile_ny,
-     bar_time, ib, footprint, cvd) = frame
+     bar_time, ib, footprint, cvd, divergences, ema9, ema20,
+     ema50, ema200, rsi, atr) = frame
 
     day_trades = trades
     if not trades.empty:
@@ -511,13 +691,19 @@ def sim_day_chart(slug: str, run_id: str, day, tz) -> dict:
         "bars": bars_rows,
         **_vwap_slots(vwap_gx, vwap_ny, vwap_wk, globex),
         **_profile_slots(profile_gx, profile_ny),
-        "atr_points": [],
+        "ema9": ema9,
+        "ema20": ema20,
+        "ema50": ema50,
+        "ema200": ema200,
+        "rsi": rsi,
+        "atr_points": atr,
         "markers": markers,
         "levels": [],
         "ib": ib,
         "trades": rects,
         "footprint": footprint,
         "cvd": cvd,
+        "cvd_divergences": divergences,
         "tick_size": tick_size(cfg.contract),
         "point_value": point_value(cfg.contract),
     }

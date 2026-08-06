@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS
 from journal.sim import regime as regmod
 from journal.sim import ticks as tickmod
+from journal.sim import vol_regime as volmod
 
 router = APIRouter()
 
@@ -65,6 +66,24 @@ def regime_range(
             "checkpoints": r["checkpoints"],
         })
     return {"days": days, "skipped": skipped}
+
+
+@router.get("/vol-regime")
+def vol_regime_range(
+    start: str = Query(...),
+    end: str = Query(...),
+    symbol: str = Query(...),
+) -> dict:
+    """The daily-ATR vol-clock label per cached session in [start, end].
+
+    A second, orthogonal axis to the day-type above: `class` says what shape the
+    day traded, this says how fast its clock ran. Causal by construction — the
+    ATR is through the prior session — so the label is what was knowable at the
+    bell. See journal.sim.vol_regime and docs/research/vol-clock.md.
+    """
+    return volmod.range_labels(
+        symbol, date.fromisoformat(start), date.fromisoformat(end),
+    )
 
 
 @router.get("/regime/{day}")

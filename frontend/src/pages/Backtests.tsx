@@ -155,7 +155,7 @@ function MetricGrid({ m }: { m: Metrics }) {
     ["Max drawdown", fmt(m.max_drawdown)],
   ];
   return (
-    <div className="kpi-grid kpi-compact" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
+    <div className="kpi-grid kpi-compact bt-metric-grid">
       {cells.map(([label, value]) => (
         <div key={label} className="kpi-card">
           <div className="kpi-label">{label}</div>
@@ -213,36 +213,38 @@ function ComparisonTable({ comparison }: { comparison: Record<string, SlimMetric
         Same model, three arenas. The whole point of a backtest: does replay/live
         performance track what the sample promised?
       </div>
-      <table className="data-table">
-        <thead>
-          <tr>
-            <th>Mode</th>
-            <th>Trades</th>
-            <th>Win rate</th>
-            <th>Expectancy</th>
-            <th>Profit factor</th>
-            <th>Avg win</th>
-            <th>Avg loss</th>
-            <th>Max DD</th>
-            <th>Net PnL</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(({ mode, m }) => (
-            <tr key={mode}>
-              <td>{MODE_LABEL[mode]}</td>
-              <td>{fmtInt(m.trades)}</td>
-              <td>{m.trades ? fmtPct(m.win_rate) : "—"}</td>
-              <td>{m.trades ? fmt(m.expectancy) : "—"}</td>
-              <td>{m.trades ? fmt(m.profit_factor, false) : "—"}</td>
-              <td>{m.trades ? fmt(m.avg_win) : "—"}</td>
-              <td>{m.trades ? fmt(m.avg_loss) : "—"}</td>
-              <td>{m.trades ? fmt(m.max_drawdown) : "—"}</td>
-              <td>{m.trades ? <Pnl v={m.net_pnl as number} /> : "—"}</td>
+      <div className="table-scroll-x">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Mode</th>
+              <th>Trades</th>
+              <th>Win rate</th>
+              <th>Expectancy</th>
+              <th>Profit factor</th>
+              <th>Avg win</th>
+              <th>Avg loss</th>
+              <th>Max DD</th>
+              <th>Net PnL</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map(({ mode, m }) => (
+              <tr key={mode}>
+                <td>{MODE_LABEL[mode]}</td>
+                <td>{fmtInt(m.trades)}</td>
+                <td>{m.trades ? fmtPct(m.win_rate) : "—"}</td>
+                <td>{m.trades ? fmt(m.expectancy) : "—"}</td>
+                <td>{m.trades ? fmt(m.profit_factor, false) : "—"}</td>
+                <td>{m.trades ? fmt(m.avg_win) : "—"}</td>
+                <td>{m.trades ? fmt(m.avg_loss) : "—"}</td>
+                <td>{m.trades ? fmt(m.max_drawdown) : "—"}</td>
+                <td>{m.trades ? <Pnl v={m.net_pnl as number} /> : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -283,62 +285,64 @@ function SessionsTable({ rows }: { rows: BacktestSessionRow[] }) {
       </div>
     );
   return (
-    <table className="data-table">
-      <thead>
-        <tr>
-          <th>Export</th>
-          <th>Days</th>
-          <th>Trades</th>
-          <th>Win rate</th>
-          <th>Expectancy</th>
-          <th>Net PnL</th>
-          <th>Imported</th>
-          <th>Note</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((s) => (
-          <Fragment key={s.source_file}>
-            <tr style={s.archived ? { opacity: 0.55 } : undefined}>
-              <td style={{ wordBreak: "break-all" }}>
-                {s.source_file}
-                {s.archived && <span className="muted"> (archived)</span>}
-              </td>
-              <td style={{ whiteSpace: "nowrap" }}>
-                {s.first_day
-                  ? s.first_day === s.last_day
-                    ? s.first_day
-                    : `${s.first_day} → ${s.last_day}`
-                  : "—"}
-              </td>
-              <td>{fmtInt(s.metrics.trades)}</td>
-              <td>{s.metrics.trades ? fmtPct(s.metrics.win_rate) : "—"}</td>
-              <td>{s.metrics.trades ? fmt(s.metrics.expectancy) : "—"}</td>
-              <td>{s.metrics.trades ? <Pnl v={s.metrics.net_pnl as number} /> : "—"}</td>
-              <td style={{ whiteSpace: "nowrap" }}>{fmtDateTime(s.imported_at).slice(0, 16)}</td>
-              <td style={{ width: 1, whiteSpace: "nowrap" }}>
-                <button
-                  type="button"
-                  className={openNote === s.source_file ? "active" : ""}
-                  onClick={() =>
-                    setOpenNote((o) => (o === s.source_file ? null : s.source_file))
-                  }
-                >
-                  {s.note ? "▸ edit" : "▸ add"}
-                </button>
-              </td>
-            </tr>
-            {openNote === s.source_file && (
-              <tr>
-                <td colSpan={8}>
-                  <SessionNote row={s} />
+    <div className="table-scroll-x">
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>Export</th>
+            <th>Days</th>
+            <th>Trades</th>
+            <th>Win rate</th>
+            <th>Expectancy</th>
+            <th>Net PnL</th>
+            <th>Imported</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((s) => (
+            <Fragment key={s.source_file}>
+              <tr style={s.archived ? { opacity: 0.55 } : undefined}>
+                <td style={{ wordBreak: "break-all" }}>
+                  {s.source_file}
+                  {s.archived && <span className="muted"> (archived)</span>}
+                </td>
+                <td style={{ whiteSpace: "nowrap" }}>
+                  {s.first_day
+                    ? s.first_day === s.last_day
+                      ? s.first_day
+                      : `${s.first_day} → ${s.last_day}`
+                    : "—"}
+                </td>
+                <td>{fmtInt(s.metrics.trades)}</td>
+                <td>{s.metrics.trades ? fmtPct(s.metrics.win_rate) : "—"}</td>
+                <td>{s.metrics.trades ? fmt(s.metrics.expectancy) : "—"}</td>
+                <td>{s.metrics.trades ? <Pnl v={s.metrics.net_pnl as number} /> : "—"}</td>
+                <td style={{ whiteSpace: "nowrap" }}>{fmtDateTime(s.imported_at).slice(0, 16)}</td>
+                <td style={{ width: 1, whiteSpace: "nowrap" }}>
+                  <button
+                    type="button"
+                    className={openNote === s.source_file ? "active" : ""}
+                    onClick={() =>
+                      setOpenNote((o) => (o === s.source_file ? null : s.source_file))
+                    }
+                  >
+                    {s.note ? "▸ edit" : "▸ add"}
+                  </button>
                 </td>
               </tr>
-            )}
-          </Fragment>
-        ))}
-      </tbody>
-    </table>
+              {openNote === s.source_file && (
+                <tr>
+                  <td colSpan={8}>
+                    <SessionNote row={s} />
+                  </td>
+                </tr>
+              )}
+            </Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

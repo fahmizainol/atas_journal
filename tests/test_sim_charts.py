@@ -162,7 +162,7 @@ def test_session_chart_draws_the_night_without_moving_the_engines_candles():
         t = tickmod.get_day_ticks(cfg.contract, DAY)   # the engine's own ticks
         eng = barmod.tick_bars(t, PER_BAR)             # the engine's own bars
         (full, bars, gx, ny, wk, prof_gx, prof_ny, _, ib, fp,
-         _cvd_rows) = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+         _cvd_rows, divs, _ema9, _ema20, _rsi) = _session_frame(cfg, DAY, ET_TZ, overnight=False)
 
     lead = len(bars) - len(eng)
     assert lead == 2 and len(eng) == 4, (lead, len(eng))
@@ -187,6 +187,10 @@ def test_session_chart_draws_the_night_without_moving_the_engines_candles():
     # The fixture's RTH is ~3 minutes of ticks — the IB window (60 min) never
     # completes, so the overlay is absent rather than a made-up IB.
     assert ib is None, "an IB was drawn for a session whose data ends inside the window"
+    # CVD divergences ride the same frame as marks to fold into: always a list,
+    # never draws a mark on a session the CVD series couldn't be built for.
+    assert isinstance(divs, list)
+    assert _cvd_rows or not divs, "divergences without a CVD series to diverge from"
 
 
 def test_profile_is_drawn_even_when_no_rule_read_it():
@@ -194,7 +198,7 @@ def test_profile_is_drawn_even_when_no_rule_read_it():
     looking at it is the run's config, not the picture."""
     with _cache(n_on=1000, n_rth=2000) as cfg:
         assert not confmod.needs_profile(cfg), "the fixture must be a run that ignores the profile"
-        _, _, _, _, _, prof_gx, prof_ny, _, _, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+        _, _, _, _, _, prof_gx, prof_ny, _, _, _, _, _, _, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
     assert prof_gx and prof_ny, "a value area was withheld from a run that did not read it"
 
 
@@ -207,7 +211,7 @@ def test_session_chart_survives_a_missing_night():
         t = tickmod.get_day_ticks(cfg.contract, DAY)
         eng = barmod.tick_bars(t, PER_BAR)
         (_, bars, gx, ny, wk, prof_gx, prof_ny, _, _ib, _,
-         _cvd_rows) = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+         _cvd_rows, _divs, _ema9, _ema20, _rsi) = _session_frame(cfg, DAY, ET_TZ, overnight=False)
 
     assert len(bars) == len(eng)
     assert gx == [], "no night on disk, so there is no Globex anchor to draw"

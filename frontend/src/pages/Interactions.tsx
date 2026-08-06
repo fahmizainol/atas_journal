@@ -1,23 +1,37 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { type ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "../components/DataTable";
+import { BadgeInput } from "../components/BadgeInput";
 import { InitialBalancePanel } from "../components/InitialBalancePanel";
 import { WeeklyVwapPanel } from "../components/WeeklyVwapPanel";
 import { CandlestickChart } from "../components/charts/CandlestickChart";
+import { TimeframeControl, MINUTE_TFS } from "../components/charts/TimeframeControl";
 import {
   useInteractions,
+  useInteractionStats,
   useInteractionCoverage,
-  useInteractionDayChart,
+  useInteractionRunChart,
   useInteractionRuns,
+  useIbSessionWidths,
 } from "../hooks/useInteractions";
-import { useRegimeRange } from "../hooks/useRegime";
-import { CLASS_LABEL, type RegimeClass } from "../lib/regimeTypes";
-import { regimePalette } from "../theme";
+import { useAllDayNotes, useSaveDayNote } from "../hooks/useCalendar";
+import { useFilters } from "../hooks/useFilters";
+import { useFiltersData } from "../hooks/useMeta";
+import { useRegimeRange, useVolRegimeRange } from "../hooks/useRegime";
+import {
+  CLASS_LABEL,
+  type RegimeClass,
+  type VolRegimeDay,
+  type VolRegimeLabel,
+} from "../lib/regimeTypes";
+import { ibPalette, regimePalette } from "../theme";
 import type {
   AggRow,
   BandContextRow,
   BandOccupancyRow,
+  IbSessionWidth,
+  IbWidthBucket,
   InteractionParams,
   SavedRun,
   Touch,
@@ -25,46 +39,336 @@ import type {
   VaSnapAggRow,
   VaSnapContRow,
 } from "../lib/interactionTypes";
+import type {
+  ATRPoint,
+  Bar,
+  EmaPoint,
+  IbOverlay,
+  ProfilePoint,
+  RsiPoint,
+  VwapPoint,
+} from "../lib/chartTypes";
 import { fmt, fmtInt, fmtPct } from "../lib/format";
 
-// One session's candles with the developing NY + Globex levels and the touch /
-// VA-snap overlay, built from the same tick engine as the events.
-function DayChart({
+// The interactions day-chart sends bar/level/event timestamps as raw UTC epoch
+// seconds, but lightweight-charts renders a numeric time *as UTC* — so the axis
+// would read UTC, hours off from the Strategies-tab charts (which shift to New
+// York wall-clock server-side via api.charts_data._epoch_local). Match them by
+// adding the ET offset to every timestamp on the way into the chart. The offset
+// is constant across a single session (DST only flips ~2am on a weekend), so one
+// probe at midday ET for `day` is exact for the whole overnight+RTH span. Doing
+// it here — the one place bars (live endpoint) and events (cached snapshot) meet
+// — keeps them aligned without touching the API or the on-disk run cache.
+function etWallOffsetSec(day: string): number {
+  const probeMs = Date.parse(`${day}T17:00:00Z`); // ~noon ET, safely inside the day
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const p: Record<string, string> = {};
+  for (const part of dtf.formatToParts(new Date(probeMs))) p[part.type] = part.value;
+  // Intl can emit hour "24" at midnight; normalise so Date.UTC doesn't roll over.
+  const hour = p.hour === "24" ? "00" : p.hour;
+  const wallMs = Date.UTC(+p.year, +p.month - 1, +p.day, +hour, +p.minute, +p.second);
+  return Math.round((wallMs - probeMs) / 1000);
+}
+
+// Concatenate one session's overlay rows onto the running tape, each timestamp
+// reprojected onto ET wall-clock by that session's own offset.
+function pushShifted<T extends { time: number }>(dest: T[], rows: T[] | undefined, off: number) {
+  if (!rows) return;
+  for (const r of rows) dest.push({ ...r, time: r.time + off });
+}
+
+// Break sentinels: a point whose values are non-finite terminates a per-session
+// anchor at the session boundary. The band-fill primitive splits its ribbon at
+// NaN, and the line renderer paints the segment leaving the last real point
+// transparent (lightweight-charts lines have no native gaps — whitespace items
+// are dropped from a line series and the neighbours join straight across, see
+// CandlestickChart.gappedLineData). Used only for the RTH-anchored NY overlays
+// (VWAP + developing profile), which run 9:30→16:00 while the drawn tape
+// continues; the Globex/weekly overlays span the whole stream and re-anchor
+// cleanly at 18:00.
+const vwapBreak = (time: number): VwapPoint => ({
+  time,
+  middle: NaN,
+  upper1: NaN,
+  lower1: NaN,
+  upper2: NaN,
+  lower2: NaN,
+});
+const profileBreak = (time: number): ProfilePoint => ({
+  time,
+  poc: NaN,
+  vah: NaN,
+  val: NaN,
+});
+
+// How many sessions the continuous chart loads at once, centred on the selected
+// day — up to 7 before and 7 after. Keeps the opening burst small; a run longer
+// than this loads a window that recentres (fetching newly-entered days, which are
+// cached) as you open days nearer its ends.
+const MAX_SESSIONS = 15;
+
+// The window of covered sessions to load around `selectedDay`: up to MAX_SESSIONS
+// of them, clamped so the window never runs off either end of the list. Returns
+// `dayList` itself (same reference) when the whole run fits, so opening different
+// days inside a small run doesn't re-key the queries.
+function sessionWindow(dayList: string[], selectedDay: string): string[] {
+  if (dayList.length <= MAX_SESSIONS) return dayList;
+  const idx = Math.max(0, dayList.indexOf(selectedDay));
+  const half = Math.floor(MAX_SESSIONS / 2);
+  const hi = Math.min(dayList.length, Math.max(0, idx - half) + MAX_SESSIONS);
+  return dayList.slice(Math.max(0, hi - MAX_SESSIONS), hi);
+}
+
+// The session drill-down, as one continuous tape. Instead of a single day it
+// loads a window of the run's sessions (each an independent, cached day-chart)
+// and stitches the available ones into one candle stream — overnight+RTH gaps
+// collapse natively, so dragging left/right walks into the adjacent session. It
+// opens framed on `selectedDay`; the tables below stay pinned to that day.
+//
+// The per-session anchored overlays (NY/Globex/weekly VWAP, developing profiles,
+// EMAs) reset at every session boundary by design — each re-anchors at its own
+// bell/18:00, so on the tape they read as a sawtooth. The Initial Balance overlay
+// is dropped here: the chart draws one IB, and a many-session tape has one per
+// day. Touch / VA-snap marks are drawn for every loaded session.
+function SessionChart({
   symbol,
-  day,
+  selectedDay,
+  dayList,
   binSize,
   sources,
   ticksPerBar,
+  barMinutes,
   touches,
   vaSnaps,
 }: {
   symbol: string;
-  day: string;
+  selectedDay: string;
+  dayList: string[];
   binSize?: number;
   sources?: string[];
   ticksPerBar?: number;
+  barMinutes?: number;
   touches: Touch[];
   vaSnaps: VaSnap[];
 }) {
-  const { data, isLoading } = useInteractionDayChart(symbol, day, binSize, sources, ticksPerBar);
-  if (isLoading) return <div className="notice">Loading session…</div>;
-  if (!data || !data.available) return <div className="notice">No cached ticks for this session.</div>;
-  if (!data.bars || data.bars.length === 0) return <div className="notice">No bars for this session.</div>;
+  const windowDays = useMemo(() => sessionWindow(dayList, selectedDay), [dayList, selectedDay]);
+  const results = useInteractionRunChart(
+    symbol,
+    windowDays,
+    binSize,
+    sources,
+    ticksPerBar,
+    barMinutes,
+  );
+
+  // useQueries returns a fresh array each render, so the heavy merge is keyed off
+  // a signature (which days, their cache versions, whether all resolved) and reads
+  // the live results/window through refs — recomputing only when the data changes,
+  // never on an unrelated re-render.
+  const resultsRef = useRef(results);
+  resultsRef.current = results;
+  const windowRef = useRef(windowDays);
+  windowRef.current = windowDays;
+
+  const settled = results.every((r) => !r.isLoading);
+  const sig = results.map((r, i) => `${windowDays[i]}:${r.status}:${r.dataUpdatedAt}`).join("|");
+
+  // The stitched tape + per-day time spans. Independent of `selectedDay` on
+  // purpose: within one loaded window, switching the focused day must not change
+  // `bars` (that would rebuild the chart and lose the zoom) — only the frame moves.
+  const merged = useMemo(() => {
+    if (!settled) return null;
+    const wd = windowRef.current;
+    const rs = resultsRef.current;
+    const bars: Bar[] = [];
+    const vwapGlobex: VwapPoint[] = [];
+    const vwapWeekly: VwapPoint[] = [];
+    const profileGlobex: ProfilePoint[] = [];
+    const ema9: EmaPoint[] = [];
+    const ema20: EmaPoint[] = [];
+    const ema50: EmaPoint[] = [];
+    const ema200: EmaPoint[] = [];
+    const rsi: RsiPoint[] = [];
+    const atr: ATRPoint[] = [];
+    // One Initial Balance per session, each shifted into its slot on the tape so
+    // its bell→close segments stay inside that session (see CandlestickChart).
+    const ibs: IbOverlay[] = [];
+    // The NY VWAP + developing profile are RTH-anchored, so each session is one
+    // contiguous 9:30→16:00 run. They are collected as per-session segments and
+    // joined into one series *after* the whole tape is built (see `joinNy`
+    // below), so the break sentinel between two sessions can land on the next
+    // session's first overnight bar when this one has no post-hour bar of its
+    // own — the case that used to let the line drag across to the next open.
+    const nyVwapSegs: VwapPoint[][] = [];
+    const nyProfSegs: ProfilePoint[][] = [];
+    const spans = new Map<string, { from: number; to: number }>();
+    const offsets = new Map<string, number>();
+    let tickSize: number | undefined;
+    let pointValue: number | undefined;
+    for (let i = 0; i < wd.length; i++) {
+      const cd = rs[i]?.data;
+      if (!cd || !cd.available || !cd.bars || cd.bars.length === 0) continue;
+      const day = wd[i];
+      const off = etWallOffsetSec(day);
+      offsets.set(day, off);
+      const db = cd.bars.map((b) => ({ ...b, time: b.time + off }));
+      spans.set(day, { from: db[0].time, to: db[db.length - 1].time });
+      for (const b of db) bars.push(b);
+      pushShifted(vwapGlobex, cd.vwap_globex, off);
+      pushShifted(vwapWeekly, cd.vwap_weekly, off);
+      pushShifted(profileGlobex, cd.profile_globex, off);
+      pushShifted(ema9, cd.ema9, off);
+      pushShifted(ema20, cd.ema20, off);
+      pushShifted(ema50, cd.ema50, off);
+      pushShifted(ema200, cd.ema200, off);
+      pushShifted(rsi, cd.rsi, off);
+      pushShifted(atr, cd.atr_points, off);
+      if (cd.ib)
+        ibs.push({
+          ...cd.ib,
+          start: cd.ib.start + off,
+          formed: cd.ib.formed + off,
+          end: cd.ib.end + off,
+        });
+      // Keep the RTH-anchored NY overlays as per-session segments; they are
+      // stitched with break sentinels after the loop, once the whole tape (and
+      // so every candidate break bar) exists.
+      nyVwapSegs.push((cd.vwap_ny ?? []).map((r) => ({ ...r, time: r.time + off })));
+      nyProfSegs.push((cd.profile_ny ?? []).map((r) => ({ ...r, time: r.time + off })));
+      if (tickSize == null) tickSize = cd.tick_size;
+      if (pointValue == null) pointValue = cd.point_value;
+    }
+    if (bars.length === 0) return null;
+
+    // Join the per-session NY segments into one series, inserting a break
+    // sentinel (NaN → whitespace gap in the renderer) between adjacent sessions
+    // so the RTH-anchored line stops at the close instead of dragging across the
+    // overnight to the next session's 9:30. The break lands on the first drawn
+    // bar strictly inside the gap — this session's 16:00 post-hour bar when it's
+    // on disk, otherwise the *next* session's first overnight bar — so it adds no
+    // empty column. Only when the gap holds no bar at all (no post and no next-day
+    // overnight) does it fall back to one second past the close, a negligible
+    // off-grid gap. `bars` is globally sorted (sessions are chronological and
+    // don't overlap), so the scan can stop once it passes the gap.
+    const firstBarBetween = (a: number, b: number): number | null => {
+      for (const bar of bars) {
+        if (bar.time >= b) break;
+        if (bar.time > a) return bar.time;
+      }
+      return null;
+    };
+    const joinNy = <T extends { time: number }>(
+      segs: T[][],
+      brk: (t: number) => T,
+    ): T[] => {
+      const out: T[] = [];
+      for (const seg of segs) {
+        if (seg.length === 0) continue;
+        if (out.length > 0) {
+          const prevEnd = out[out.length - 1].time;
+          const bt = firstBarBetween(prevEnd, seg[0].time);
+          out.push(brk(bt ?? prevEnd + 1));
+        }
+        for (const p of seg) out.push(p);
+      }
+      return out;
+    };
+    const vwapNy = joinNy(nyVwapSegs, vwapBreak);
+    const profileNy = joinNy(nyProfSegs, profileBreak);
+
+    return {
+      bars,
+      vwapGlobex,
+      vwapNy,
+      vwapWeekly,
+      profileGlobex,
+      profileNy,
+      ema9,
+      ema20,
+      ema50,
+      ema200,
+      rsi,
+      atr,
+      ibs,
+      touches: touches
+        .filter((t) => offsets.has(t.day))
+        .map((t) => ({ ...t, ts: t.ts + offsets.get(t.day)! })),
+      vaSnaps: vaSnaps
+        .filter((s) => offsets.has(s.day))
+        .map((s) => ({ ...s, ts: s.ts + offsets.get(s.day)! })),
+      spans,
+      tickSize,
+      pointValue,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settled, sig, touches, vaSnaps]);
+
+  // A refetch — switching timeframe, or focusing a day whose window pulls in a
+  // session that isn't in the query cache yet — must not swap the chart out for
+  // a notice: unmounting CandlestickChart throws away everything that lives
+  // inside it (the anchored VWAP, any fixed-range profiles, the ruler, the
+  // zoom). So hold the last resolved tape on screen while the next one loads;
+  // the chart stays mounted and only its data changes underneath it.
+  const lastTape = useRef<typeof merged>(null);
+  if (settled) lastTape.current = merged;
+  const tape = merged ?? lastTape.current;
+
+  // The span to open on: the selected day's own bars. Split from the tape so a
+  // new selection re-frames in place (see CandlestickChart.initialTimeRange)
+  // rather than rebuilding it. Null while a just-picked day is still showing
+  // over the previous tape — the frame follows as soon as its bars land.
+  const focusRange = useMemo(
+    () => tape?.spans.get(selectedDay) ?? null,
+    [tape, selectedDay],
+  );
+
+  if (!tape)
+    return (
+      <div className="notice">
+        {settled ? "No cached ticks for these sessions." : "Loading sessions…"}
+      </div>
+    );
   return (
-    <CandlestickChart
-      bars={data.bars}
-      vwapGlobex={data.vwap_globex}
-      vwapNy={data.vwap_ny}
-      vwapWeekly={data.vwap_weekly}
-      profileGlobex={data.profile_globex}
-      profileNy={data.profile_ny}
-      ib={data.ib}
-      touches={touches}
-      vaSnaps={vaSnaps}
-      tickSize={data.tick_size}
-      pointValue={data.point_value}
-      height={560}
-    />
+    <div style={{ position: "relative" }}>
+      {!settled && (
+        <div
+          className="chart-tool"
+          style={{ position: "absolute", top: 8, left: 12, zIndex: 3, cursor: "default" }}
+        >
+          Loading sessions…
+        </div>
+      )}
+      <CandlestickChart
+        bars={tape.bars}
+        vwapGlobex={tape.vwapGlobex}
+        vwapNy={tape.vwapNy}
+        vwapWeekly={tape.vwapWeekly}
+        profileGlobex={tape.profileGlobex}
+        profileNy={tape.profileNy}
+        ema9={tape.ema9}
+        ema20={tape.ema20}
+        ema50={tape.ema50}
+        ema200={tape.ema200}
+        rsi={tape.rsi}
+        atrPoints={tape.atr}
+        ib={tape.ibs}
+        touches={tape.touches}
+        vaSnaps={tape.vaSnaps}
+        initialTimeRange={focusRange}
+        tickSize={tape.tickSize}
+        pointValue={tape.pointValue}
+        height={560}
+      />
+    </div>
   );
 }
 
@@ -115,6 +419,133 @@ function RegimeBadge({ klass, dot }: { klass: RegimeClass; dot?: boolean }) {
       {label}
     </span>
   );
+}
+
+// The vol-clock label for a session: which tercile of the trailing-60-session
+// daily-ATR percentile the day opened in, with the ATR itself alongside — the
+// tercile alone can't tell you whether "hot" meant 400 points or 900. Both are
+// causal (ATR through the prior session), so this is what was knowable at the
+// bell, not a description of what the day went on to do. See vol-clock.md.
+function VolRegimeCell({ vol }: { vol: VolRegimeDay | undefined }) {
+  if (!vol || !vol.label || vol.atr == null) return <span className="muted">—</span>;
+  const label = vol.label as VolRegimeLabel;
+  return (
+    <span
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}
+      title={
+        `Daily ATR(14) through the prior session: ${vol.atr.toFixed(0)} pts` +
+        (vol.pctl == null ? "" : ` · ${(vol.pctl * 100).toFixed(0)}th pctl of the last 60 sessions`) +
+        (vol.tr_pts == null ? "" : ` · realised range ${vol.tr_pts.toFixed(0)} pts`)
+      }
+    >
+      <span
+        style={{
+          background: regimePalette.vol[label],
+          borderRadius: 4,
+          padding: "1px 8px",
+          fontSize: 12,
+          fontWeight: 600,
+        }}
+      >
+        {label}
+      </span>
+      <span className="muted">{vol.atr.toFixed(0)}</span>
+    </span>
+  );
+}
+
+const WIDTH_LABEL: Record<IbWidthBucket, string> = {
+  narrow: "narrow",
+  mid: "mid",
+  wide: "wide",
+};
+
+// How wide the session's first hour was, in ADR units. Like the vol-clock cell
+// beside it this is causal — the IB completes at 10:30 and the ADR denominator
+// runs through the *prior* 14 sessions — but the two axes are orthogonal
+// (corr −0.05), which is why both columns are here rather than one.
+//
+// Reading it (vol-clock §10c): wide leans trend day (60% trend-class vs 47%
+// narrow), narrow leans balance/churn (29% vs 12% balance). That is recognition,
+// not prediction — post-IB expansion is width-flat (~0.4×ADR of new range comes
+// regardless), so this is day character at a glance and nothing more. The built
+// `ib_width` gate stays off; no edge claim is attached to this column.
+function IbWidthCell({ ib, edges }: {
+  ib: IbSessionWidth | undefined;
+  edges: [number, number] | undefined;
+}) {
+  if (!ib) return <span className="muted">—</span>;
+  const bucket = ib.width;
+  return (
+    <span
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}
+      title={
+        `Initial Balance (09:30–10:30 ET) range: ${ib.ib_range.toFixed(0)} pts` +
+        (ib.ib_vs_adr == null || ib.adr14 == null
+          ? " · no ADR(14) yet — the run's first ~14 sessions have no denominator"
+          : ` · ${ib.ib_vs_adr.toFixed(2)}× ADR(14) of ${ib.adr14.toFixed(0)} pts` +
+            (edges ? ` · terciles cut at ${edges[0]}/${edges[1]}× ADR` : "")) +
+        " · day character, not a forecast (vol-clock §10c)"
+      }
+    >
+      {bucket ? (
+        <span
+          style={{
+            background: ibPalette.width[bucket],
+            borderRadius: 4,
+            padding: "1px 8px",
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+        >
+          {WIDTH_LABEL[bucket]}
+        </span>
+      ) : (
+        <span className="muted" style={{ fontSize: 12 }}>—</span>
+      )}
+      <span className="muted">{ib.ib_range.toFixed(0)}</span>
+    </span>
+  );
+}
+
+// Inline per-day tag editor for the Sessions table. Reuses the existing
+// day-notes store (the same tags the calendar's Day journal writes), keyed by
+// ISO date; each edit PATCHes the note+tags and the bulk map refetches, so the
+// badges are always the server's copy — no local mirror. `note` is threaded
+// through so saving tags never clobbers a day's written note. stopPropagation so
+// clicking inside the editor doesn't also toggle the row's session selection.
+function DayTagCell({ day, note, tags, vocab }: {
+  day: string;
+  note: string;
+  tags: string[];
+  vocab: string[];
+}) {
+  const save = useSaveDayNote(day);
+  return (
+    <div className="session-tag-cell" onClick={(e) => e.stopPropagation()}>
+      <BadgeInput
+        value={tags}
+        onChange={(next) => save.mutate({ note, tags: next })}
+        suggestions={vocab}
+        placeholder="tag…"
+      />
+    </div>
+  );
+}
+
+// One row of the Sessions table: a covered day, its touch/snap counts, its
+// (shared) regime class, and its day-note tags joined in from the bulk map.
+interface SessionRow {
+  day: string;
+  n_touches: number;
+  n_snaps: number;
+  klass: RegimeClass | undefined;
+  /** The vol-clock row for the day, when the ATR had warmed up by then. */
+  vol: VolRegimeDay | undefined;
+  /** IB width for the day, when the pinned snapshot covers it. */
+  ib: IbSessionWidth | undefined;
+  note: string;
+  tags: string[];
 }
 
 const aggColumns: ColumnDef<AggRow, any>[] = [
@@ -402,13 +833,24 @@ export function Interactions() {
   const [windowMin, setWindowMin] = useState("10");
   const [committed, setCommitted] = useState<InteractionParams | null>(null);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
-  // Chart timeframe for the session drill-down: null = 1-minute candles, a number
-  // = that many ticks per bar (the strategies' native tick bars). The events are
+  // Which half of the run's output is on screen. Sessions is the working view
+  // (drill into a day, tag it), so it's the default; the aggregate stats — and
+  // the standalone IB / Weekly-VWAP studies — live behind the Stats tab so the
+  // Sessions grid is one click away rather than a scroll past every table.
+  const [tab, setTab] = useState<"stats" | "sessions">("sessions");
+  // Aggregate stats are computed on demand: the run auto-loads the lean events
+  // payload (chart + Sessions grid) and the ~14 aggregate tables are fetched only
+  // when the user asks, so a refresh doesn't wait on stats it may not look at.
+  // Reset to false on every new run so a fresh range never auto-pulls them.
+  const [showStats, setShowStats] = useState(false);
+  // Chart timeframe for the session drill-down: "1m"/"5m" = time bars of that many
+  // minutes, "500t" = 500-tick bars (the strategies' native grid). The events are
   // unchanged; only the candle grid they overlay swaps.
-  const [chartTicks, setChartTicks] = useState<number | null>(null);
+  const [chartTf, setChartTf] = useState<"1m" | "3m" | "5m" | "15m" | "500t">("1m");
 
   const coverage = useInteractionCoverage(symbol, start, end);
   const run = useInteractions(committed);
+  const stats = useInteractionStats(committed, showStats);
   const savedRuns = useInteractionRuns();
   const queryClient = useQueryClient();
 
@@ -426,6 +868,37 @@ export function Interactions() {
     return m;
   }, [regimeRange.data]);
 
+  // The vol clock over the same window — an axis orthogonal to the day-type: the
+  // class says what shape the day traded, this says how fast its clock ran.
+  const volRange = useVolRegimeRange(
+    committed?.symbol ?? null,
+    committed?.start ?? null,
+    committed?.end ?? null,
+  );
+  const volByDay = useMemo(() => {
+    const m = new Map<string, VolRegimeDay>();
+    for (const d of volRange.data?.days ?? []) m.set(d.date, d);
+    return m;
+  }, [volRange.data]);
+
+  // IB width over the same window — a third day-character axis, orthogonal to
+  // both of the above and knowable at 10:30. Served from the widest saved IB
+  // snapshot, so the terciles mean the same thing in every window; days the
+  // snapshot doesn't reach are simply absent.
+  const ibWidths = useIbSessionWidths(
+    committed?.symbol ?? null,
+    committed?.start ?? null,
+    committed?.end ?? null,
+  );
+
+  // Per-day notes/tags (the same store the calendar's Day journal writes) and the
+  // global tag vocabulary for autocomplete — both drive the Sessions table's
+  // editable Tags column.
+  const dayNotes = useAllDayNotes();
+  const { scope } = useFilters();
+  const { data: filtersData } = useFiltersData(scope);
+  const tagVocab = filtersData?.tags ?? [];
+
   // A fresh compute writes a new snapshot server-side — refresh the list so it
   // shows up without a reload.
   useEffect(() => {
@@ -439,6 +912,7 @@ export function Interactions() {
 
   const onRun = () => {
     setSelectedDay(null);
+    setShowStats(false);
     setCommitted({
       symbol,
       start,
@@ -460,6 +934,7 @@ export function Interactions() {
     setWindowMin(String(c.outcome_window_min));
     setSources(c.sources);
     setSelectedDay(null);
+    setShowStats(false);
     setCommitted({
       symbol: c.symbol,
       start: c.start,
@@ -472,14 +947,33 @@ export function Interactions() {
     });
   };
 
+  // On first open, auto-load the saved run with the widest date window so the
+  // page lands on the fullest study instead of an empty "pick a range" state.
+  // Fires once: only while nothing is committed yet, so it never fights a run
+  // the user explicitly kicked off or a chip they clicked.
+  const didAutoLoad = useRef(false);
+  useEffect(() => {
+    if (didAutoLoad.current || committed) return;
+    const runs = savedRuns.data;
+    if (!runs || runs.length === 0) return;
+    const span = (r: SavedRun) =>
+      Date.parse(r.config.end) - Date.parse(r.config.start);
+    const widest = runs.reduce((a, b) => (span(b) > span(a) ? b : a));
+    didAutoLoad.current = true;
+    loadRun(widest);
+  }, [savedRuns.data, committed]);
+
   const data = run.data;
+  const agg = stats.data?.aggregates;
   const dayList = useMemo(
     () => (data ? Object.keys(data.day_index).sort() : []),
     [data],
   );
+  // Touches come from the on-demand stats fetch (the raw list is the payload's
+  // heaviest block), so this is empty until "Compute stats" is clicked.
   const dayTouches = useMemo(
-    () => (data && selectedDay ? data.events.touches.filter((t) => t.day === selectedDay) : []),
-    [data, selectedDay],
+    () => (agg && selectedDay ? (stats.data?.touches ?? []).filter((t) => t.day === selectedDay) : []),
+    [agg, stats.data, selectedDay],
   );
   const daySnaps = useMemo(
     () => (data && selectedDay ? data.events.va_snaps.filter((s) => s.day === selectedDay) : []),
@@ -543,6 +1037,85 @@ export function Interactions() {
   }, [dayList, regimeByDay]);
   const weekdayCols = useMemo(() => weekdayColumns(weekdayMix.classes), [weekdayMix.classes]);
 
+  // The Sessions table: one row per covered day, counts + regime + day tags. The
+  // tags are joined in from the bulk day-notes map so the whole grid renders from
+  // a single request rather than one per row.
+  const sessionRows = useMemo<SessionRow[]>(() => {
+    if (!data) return [];
+    return dayList.map((d) => ({
+      day: d,
+      n_touches: data.day_index[d].n_touches,
+      n_snaps: data.day_index[d].n_snaps,
+      klass: regimeByDay.get(d),
+      vol: volByDay.get(d),
+      ib: ibWidths.data?.days[d],
+      note: dayNotes.data?.[d]?.note ?? "",
+      tags: dayNotes.data?.[d]?.tags ?? [],
+    }));
+  }, [data, dayList, regimeByDay, volByDay, ibWidths.data, dayNotes.data]);
+
+  const sessionColumns = useMemo<ColumnDef<SessionRow, any>[]>(
+    () => [
+      {
+        id: "day",
+        header: "Session",
+        accessorFn: (r) => r.day,
+        cell: (c) => {
+          const r = c.row.original;
+          return (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              {r.klass && <RegimeBadge klass={r.klass} dot />}
+              {r.day}
+            </span>
+          );
+        },
+      },
+      {
+        id: "regime",
+        header: "Regime",
+        accessorFn: (r) => (r.klass ? CLASS_LABEL[r.klass] : "—"),
+        cell: (c) => {
+          const k = c.row.original.klass;
+          return k ? CLASS_LABEL[k] : <span className="muted">—</span>;
+        },
+      },
+      {
+        id: "vol",
+        header: "Vol regime",
+        // Sorted on the percentile, not the raw ATR: the percentile is what the
+        // tercile is cut from, so sorting by it never lands a "hot" row above a
+        // "quiet" one the way an ATR sort across a changing baseline can.
+        accessorFn: (r) => r.vol?.pctl ?? -1,
+        cell: (c) => <VolRegimeCell vol={c.row.original.vol} />,
+      },
+      {
+        id: "ib_width",
+        header: "IB width",
+        // Sorted on the ADR ratio rather than the points, for the same reason the
+        // vol column sorts on the percentile: points are not comparable across a
+        // window whose baseline range doubles, and the ratio is what the chip is
+        // cut from. Uncovered days sort to the bottom.
+        accessorFn: (r) => r.ib?.ib_vs_adr ?? -1,
+        cell: (c) => (
+          <IbWidthCell ib={c.row.original.ib} edges={ibWidths.data?.tercile_edges} />
+        ),
+      },
+      { accessorKey: "n_touches", header: "Touches", cell: (c) => fmtInt(c.getValue() as number) },
+      { accessorKey: "n_snaps", header: "Snaps", cell: (c) => fmtInt(c.getValue() as number) },
+      {
+        id: "tags",
+        header: "Tags",
+        // Editable inline (unlike the by-trade table's read-only cell) — tagging a
+        // day is the whole point, and there's no separate detail slot for it.
+        cell: (c) => {
+          const r = c.row.original;
+          return <DayTagCell day={r.day} note={r.note} tags={r.tags} vocab={tagVocab} />;
+        },
+      },
+    ],
+    [tagVocab, ibWidths.data?.tercile_edges],
+  );
+
   return (
     <div>
       <div className="section-title">Interactions Lab</div>
@@ -589,69 +1162,129 @@ export function Interactions() {
         </div>
       )}
 
-      {/* cache coverage strip */}
-      {coverage.data && (
-        <div className="panel">
-          <div className="section-cap">
-            Cache coverage — {coverage.data.days.filter((d) => d.rth).length}/{coverage.data.days.length} sessions have ticks
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
-            {coverage.data.days.map((d) => (
-              <span
-                key={d.date}
-                title={`${d.date}${d.rth ? " · rth" : ""}${d.on ? " · overnight" : ""}`}
-                style={{
-                  width: 14,
-                  height: 14,
-                  borderRadius: 2,
-                  background: d.rth ? (d.on ? "var(--pos, #3fb950)" : "#6ea8fe") : "#30363d",
-                  opacity: d.rth ? 1 : 0.4,
-                  outline: d.date === selectedDay ? "2px solid #f0f6fc" : "none",
-                }}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Initial Balance & ORB — independent of the touch study; shares the
-          symbol/date inputs above but commits its own (much cheaper) run. */}
-      <InitialBalancePanel symbol={symbol} start={start} end={end} />
-
-      {/* Weekly VWAP envelope — same contract as the IB panel: shares the
-          symbol/date inputs above, commits its own (cheap) run. */}
-      <WeeklyVwapPanel symbol={symbol} start={start} end={end} />
-
       {run.isError && <div className="notice">Run failed: {String((run.error as Error)?.message)}</div>}
       {!committed && <div className="notice">Pick a range and hit Run tracking.</div>}
       {run.isFetching && <div className="notice">Computing interactions…</div>}
 
-      {data && !run.isFetching && (
-        <>
-          <div className="section-cap" style={{ margin: "10px 0" }}>
-            {data.coverage.ran_days}/{data.coverage.requested_days} sessions ·{" "}
-            {data.events.touches.length} touches · {data.events.va_snaps.length} VA-snaps
-            {data.coverage.skipped.length > 0 && ` · skipped ${data.coverage.skipped.length} (no ticks)`}
-          </div>
+      {/* Stats ⇄ Sessions. Sessions is the working view (drill into a day, tag
+          it); the aggregate tables and the standalone IB / Weekly-VWAP studies
+          live under Stats so reaching Sessions is a click, not a scroll. */}
+      <div className="tabs" style={{ marginTop: 16 }}>
+        <button
+          type="button"
+          className={tab === "stats" ? "active" : undefined}
+          onClick={() => setTab("stats")}
+        >
+          Stats
+        </button>
+        <button
+          type="button"
+          className={tab === "sessions" ? "active" : undefined}
+          onClick={() => setTab("sessions")}
+        >
+          Sessions
+        </button>
+      </div>
 
-          {/* aggregates */}
+      {tab === "stats" && (
+        <>
+          {/* cache coverage strip */}
+          {coverage.data && (
+            <div className="panel">
+              <div className="section-cap">
+                Cache coverage — {coverage.data.days.filter((d) => d.rth).length}/{coverage.data.days.length} sessions have ticks
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+                {coverage.data.days.map((d) => (
+                  <span
+                    key={d.date}
+                    title={`${d.date}${d.rth ? " · rth" : ""}${d.on ? " · overnight" : ""}`}
+                    style={{
+                      width: 14,
+                      height: 14,
+                      borderRadius: 2,
+                      background: d.rth ? (d.on ? "var(--pos, #3fb950)" : "#6ea8fe") : "#30363d",
+                      opacity: d.rth ? 1 : 0.4,
+                      outline: d.date === selectedDay ? "2px solid #f0f6fc" : "none",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Initial Balance & ORB — independent of the touch study; shares the
+              symbol/date inputs above but commits its own (much cheaper) run. */}
+          <InitialBalancePanel symbol={symbol} start={start} end={end} />
+
+          {/* Weekly VWAP envelope — same contract as the IB panel: shares the
+              symbol/date inputs above, commits its own (cheap) run. */}
+          <WeeklyVwapPanel symbol={symbol} start={start} end={end} />
+
+          {data && !run.isFetching && (
+            <>
+              <div className="section-cap" style={{ margin: "10px 0" }}>
+                {data.coverage.ran_days}/{data.coverage.requested_days} sessions ·{" "}
+                {Object.values(data.day_index).reduce((s, d) => s + d.n_touches, 0)} touches ·{" "}
+                {data.events.va_snaps.length} VA-snaps
+                {data.coverage.skipped.length > 0 && ` · skipped ${data.coverage.skipped.length} (no ticks)`}
+              </div>
+
+              {/* Regime mix is derived client-side from the (shared) per-day
+                  regime cache, not the run's aggregates — so it needs no stats
+                  fetch and shows straight away. */}
+              <div className="grid-2">
+                <AggTable
+                  title="Regime mix"
+                  data={regimeMix}
+                  columns={regimeMixColumns}
+                  keepOrder
+                  caption="Day-type breakdown across the run's sessions — the same per-day regime class the Strategies tab colours its calendar by."
+                />
+                <AggTable
+                  title="Regime by weekday"
+                  data={weekdayMix.rows}
+                  columns={weekdayCols}
+                  keepOrder
+                  caption="The same day-types cross-cut by weekday (Mon–Fri) — does the window lean trendy early in the week, balanced on Fridays, etc."
+                />
+              </div>
+
+              {/* Touch / VA-snap aggregates — computed on demand so the run
+                  loads the chart first. Button until asked; then the ~14 tables. */}
+              {!agg && (
+                <div className="panel" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <button type="button" onClick={() => setShowStats(true)} disabled={stats.isFetching}>
+                    {stats.isFetching ? "Computing…" : "Compute aggregate stats"}
+                  </button>
+                  <span className="muted">
+                    {stats.isError
+                      ? `Stats failed: ${String((stats.error as Error)?.message)}`
+                      : "Touch & VA-snap aggregates load on request — the run loads the chart first."}
+                  </span>
+                </div>
+              )}
+
+              {agg && (
+                <>
+              {/* aggregates */}
           <AggTable
             title="Outcome by horizon"
-            data={data.aggregates.by_horizon ?? []}
+            data={agg.by_horizon ?? []}
             columns={aggColumns}
             caption="The same touches rescored at fixed 10/30/60-minute windows — how much of the outcome is just the clock."
           />
           <div className="grid-2">
             <AggTable
               title="Upper-band pullback (the cut)"
-              data={data.aggregates.upper_band_pullback ?? []}
+              data={agg.upper_band_pullback ?? []}
               columns={bandContextColumns}
               keepOrder
               caption="Pullback-from-above onto a developing POC/VAH while price holds NY VWAP +1σ..+2σ, scored at 30m with medians. Judge every row against the null baseline: beat its reject rate AND show MFE/MAE asymmetry, or it's noise."
             />
             <AggTable
               title="By band context"
-              data={data.aggregates.by_band_context ?? []}
+              data={agg.by_band_context ?? []}
               columns={bandContextColumns}
               keepOrder
               caption="All touches grouped by where price sat in the NY VWAP bands, per approach side — the same level means different things in different bands."
@@ -660,14 +1293,14 @@ export function Interactions() {
           <div className="grid-2">
             <AggTable
               title="Who closed the gap"
-              data={data.aggregates.who_closed_gap ?? []}
+              data={agg.who_closed_gap ?? []}
               columns={bandContextColumns}
               keepOrder
               caption="Over the last 5 bars before each touch: did price move to the level, or the level to price? A falling band chased by price scores as a fresh 1st touch while price tested nothing — if level-led rows sit at the null, they dilute every touch table."
             />
             <AggTable
               title="Acceptance decay"
-              data={data.aggregates.acceptance_decay ?? []}
+              data={agg.acceptance_decay ?? []}
               columns={bandContextColumns}
               keepOrder
               caption="The same touches by how many times the zone was already tested today. Read Med MFE down the rows — a level touched again and again with shrinking excursion has become fair price, even while it still 'rejects' by the 3-pt threshold."
@@ -676,14 +1309,14 @@ export function Interactions() {
           <div className="grid-2">
             <AggTable
               title="Time in band · NY VWAP"
-              data={withBandTotals(data.aggregates.band_occupancy ?? [])}
+              data={withBandTotals(agg.band_occupancy ?? [])}
               columns={bandOccupancyColumns}
               keepOrder
               caption="How long price spent in each NY VWAP band, tallied per RTH minute. Rows read top-to-bottom like the chart (>+2σ down to <-2σ). Avg min/session is the comparable read — the total scales with the date range."
             />
             <AggTable
               title="Time in band · Globex (ON) VWAP"
-              data={withBandTotals(data.aggregates.band_occupancy_gx ?? [])}
+              data={withBandTotals(agg.band_occupancy_gx ?? [])}
               columns={bandOccupancyColumns}
               keepOrder
               caption="The same per-minute tally against the overnight-anchored Globex VWAP bands. Empty unless 'globex' is among the sources."
@@ -691,25 +1324,25 @@ export function Interactions() {
           </div>
           <div className="grid-2">
             <div>
-              <AggTable title="By level source" data={data.aggregates.by_source} columns={aggColumns} />
-              <AggTable title="By nth-touch" data={data.aggregates.by_nth_touch} columns={aggColumns} />
+              <AggTable title="By level source" data={agg.by_source} columns={aggColumns} />
+              <AggTable title="By nth-touch" data={agg.by_nth_touch} columns={aggColumns} />
             </div>
             <div>
               <AggTable
                 title="Confluence lift"
-                data={data.aggregates.confluence_lift}
+                data={agg.confluence_lift}
                 columns={aggColumns}
                 caption="Reject rate of a lone level vs. one stacked with another source."
               />
               <AggTable
                 title="VA-snap → reversion (fade)"
-                data={data.aggregates.vasnap_reversion}
+                data={agg.vasnap_reversion}
                 columns={vasnapColumns}
                 caption="After a level snapped across price, did price revert to NY VWAP. Rates exclude trivial snaps (already at/through VWAP at the snap bar)."
               />
               <AggTable
                 title="VA-snap → continuation (flip)"
-                data={data.aggregates.vasnap_continuation ?? []}
+                data={agg.vasnap_continuation ?? []}
                 columns={vasnapContColumns}
                 caption="The same snaps traded with the snap direction, stop = a close through NY VWAP. Hold % = never stopped within the window; run = excursion before the stop."
               />
@@ -718,54 +1351,51 @@ export function Interactions() {
           <div className="grid-2">
             <AggTable
               title="VA-snap by class"
-              data={data.aggregates.vasnap_by_class ?? []}
+              data={agg.vasnap_by_class ?? []}
               columns={vasnapColumns}
               caption="The reversion trade cut by snap class: boundary creep (jump < 20 pts) vs node-flip (the value area re-seating on a different volume node). A 4-pt creep and a 195-pt flip are different events."
             />
             <AggTable
               title="VA-snap confluence"
-              data={data.aggregates.vasnap_confluence ?? []}
+              data={agg.vasnap_confluence ?? []}
               columns={vasnapColumns}
               caption="Lone snaps vs same-minute multi-level snaps. Two boundaries re-seating in the same minute is one value-migration event, not two independent signals."
             />
           </div>
+                </>
+              )}
+            </>
+          )}
+        </>
+      )}
 
-          <div className="grid-2">
-            <AggTable
-              title="Regime mix"
-              data={regimeMix}
-              columns={regimeMixColumns}
-              keepOrder
-              caption="Day-type breakdown across the run's sessions — the same per-day regime class the Strategies tab colours its calendar by."
-            />
-            <AggTable
-              title="Regime by weekday"
-              data={weekdayMix.rows}
-              columns={weekdayCols}
-              keepOrder
-              caption="The same day-types cross-cut by weekday (Mon–Fri) — does the window lean trendy early in the week, balanced on Fridays, etc."
-            />
-          </div>
-
-          {/* per-day drill-down */}
+      {tab === "sessions" && data && !run.isFetching && (
+        <>
+          {/* per-day drill-down — a row per session; click to open it below.
+              Add tags per day inline (stored with the calendar's day notes). */}
           <div className="panel">
-            <div className="section-cap">Sessions</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {dayList.map((d) => {
-                const klass = regimeByDay.get(d);
-                return (
-                  <button
-                    key={d}
-                    type="button"
-                    className={d === selectedDay ? "chip selected" : "chip"}
-                    onClick={() => setSelectedDay(d === selectedDay ? null : d)}
-                    style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                  >
-                    {klass && <RegimeBadge klass={klass} dot />}
-                    {d} · {data.day_index[d].n_touches}t/{data.day_index[d].n_snaps}s
-                  </button>
-                );
-              })}
+            <div className="section-cap">
+              Sessions — click a row to drill in; tag the day inline
+              {/* Provenance for the IB-width column: it is a slice of one saved
+                  snapshot, so a dash means "outside that window", not "no data". */}
+              {ibWidths.data?.source && (
+                <span className="muted">
+                  {" · IB width from "}
+                  {ibWidths.data.source.start} → {ibWidths.data.source.end}
+                  {` (${ibWidths.data.source.ib_minutes}m IB, terciles pinned at `}
+                  {ibWidths.data.tercile_edges[0]}/{ibWidths.data.tercile_edges[1]}× ADR)
+                </span>
+              )}
+            </div>
+            <div className="table-scroll compact-table" style={{ maxHeight: 420, overflow: "auto" }}>
+              <DataTable
+                data={sessionRows}
+                columns={sessionColumns}
+                rowKey={(r) => r.day}
+                selectedKey={selectedDay}
+                onRowClick={(r) => setSelectedDay(r.day === selectedDay ? null : r.day)}
+                initialSort={[{ id: "day", desc: false }]}
+              />
             </div>
           </div>
 
@@ -781,32 +1411,46 @@ export function Interactions() {
                       <RegimeBadge klass={regimeByDay.get(selectedDay)!} />
                     )}
                     <span>
-                      {selectedDay} — session · green/red dots = touch reject/accept (ringed = 2+
-                      sources stacked), triangles = VA-snaps
+                      {selectedDay} — session · drag left/right to scan adjacent sessions · triangles
+                      = VA-snaps{agg
+                        ? " · green/red dots = touch reject/accept (ringed = 2+ sources stacked)"
+                        : " · compute stats to mark touches"}
                     </span>
                   </span>
-                  <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                    {([["1m", null], ["500t", 500]] as const).map(([label, n]) => (
-                      <button
-                        key={label}
-                        type="button"
-                        className={chartTicks === n ? "chip selected" : "chip"}
-                        onClick={() => setChartTicks(n)}
-                        title={n == null ? "1-minute candles" : `${n}-tick bars`}
-                      >
-                        {label}
-                      </button>
-                    ))}
+                  <span style={{ display: "flex", flexShrink: 0 }}>
+                    <TimeframeControl
+                      value={chartTf}
+                      onChange={(tf) => setChartTf(tf as typeof chartTf)}
+                      options={[{ key: "500t", label: "500t" }, ...MINUTE_TFS]}
+                    />
                   </span>
                 </div>
-                <DayChart
+                {/* Tag the open session right here, so tagging doesn't mean
+                    scrolling back up to its row in the Sessions table. Same
+                    day-notes store as that column — edits sync both ways. */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <span className="muted" style={{ fontSize: 12, flexShrink: 0 }}>Tags</span>
+                  <div style={{ flex: 1, maxWidth: 520 }}>
+                    <DayTagCell
+                      day={selectedDay}
+                      note={dayNotes.data?.[selectedDay]?.note ?? ""}
+                      tags={dayNotes.data?.[selectedDay]?.tags ?? []}
+                      vocab={tagVocab}
+                    />
+                  </div>
+                </div>
+                <SessionChart
                   symbol={data.symbol}
-                  day={selectedDay}
+                  selectedDay={selectedDay}
+                  dayList={dayList}
                   binSize={committed?.bin_size}
                   sources={committed?.sources}
-                  ticksPerBar={chartTicks ?? undefined}
-                  touches={dayTouches}
-                  vaSnaps={daySnaps}
+                  ticksPerBar={chartTf === "500t" ? 500 : undefined}
+                  barMinutes={
+                    chartTf === "3m" ? 3 : chartTf === "5m" ? 5 : chartTf === "15m" ? 15 : undefined
+                  }
+                  touches={stats.data?.touches ?? []}
+                  vaSnaps={data.events.va_snaps}
                 />
               </div>
               <div className="panel">
@@ -819,7 +1463,14 @@ export function Interactions() {
               </div>
               <div className="panel">
                 <div className="section-cap">{selectedDay} — touches</div>
-                <DataTable data={dayTouches} columns={touchColumns} initialSort={[{ id: "hhmm", desc: false }]} />
+                {agg ? (
+                  <DataTable data={dayTouches} columns={touchColumns} initialSort={[{ id: "hhmm", desc: false }]} />
+                ) : (
+                  <div className="muted">
+                    Touches load with the aggregate stats — hit “Compute aggregate stats” on the Stats
+                    tab to show them here and mark them on the chart.
+                  </div>
+                )}
               </div>
             </>
           )}
