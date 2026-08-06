@@ -137,15 +137,16 @@ export function LiveChart() {
   const [openPos, setOpenPos] = useState<Position | null>(null);
   const [working, setWorking] = useState<WorkingOrderView[]>([]);
   const [setupOpen, setSetupOpen] = useState(false);
-  // Open and pinned by default, unlike the replay's ticket: this rail carries a
-  // feed of what the shelf believed, and a signal you have to remember to go and
-  // look at is the failure mode the whole shadow stack exists to avoid.
+  // Open by default, unlike the replay's ticket: this rail carries a feed of what
+  // the shelf believed, and a signal you have to remember to go and look at is
+  // the failure mode the whole shadow stack exists to avoid. Not on a phone,
+  // where it covers most of the chart it is about.
   //
-  // Not on a phone, though — pinned there it is a column the tape cannot spare,
-  // and unpinned it covers most of the chart it is about.
+  // Unpinned, though — the feed lays over the tape rather than taking a column
+  // off it. Pinning is there when you want to read the two side by side.
   const narrow = () => window.matchMedia("(max-width: 640px)").matches;
   const [signalsOpen, setSignalsOpen] = useState(() => !narrow());
-  const [railPinned, setRailPinned] = useState(() => !narrow());
+  const [railPinned, setRailPinned] = useState(false);
   const [indicators, setIndicators] = useState(true);
   const [size, setSize] = useState(1);
   const [stopTicks, setStopTicks] = useState(40);

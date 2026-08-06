@@ -1742,6 +1742,67 @@ button:disabled {
   }
 }
 
+/* ---- Live status strip ----
+   A footer, not a header: it is state you glance at, not something you act on
+   continuously, and above the chart it pushed the tape down by a row nobody was
+   reading. Half the height it was — 3px of padding either side of 11px text
+   instead of 6px either side of 13px, and no bottom margin.
+
+   nowrap + scroll rather than wrap: the whole point is a fixed, small height,
+   and a strip that grows a row when the recorder has something to say is the
+   thing being fixed. */
+.live-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  /* One row, always. A fixed height is what makes that true regardless of what
+     the recorder has to say: the strip carries up to nine optional children
+     (timing, backfill counts, three separate warnings, Stop), and any of them
+     appearing must not cost the tape a row. Everything over the width scrolls
+     sideways instead. */
+  flex-wrap: nowrap;
+  height: 24px;
+  padding: 0 10px;
+  background: var(--card);
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+/* Nothing in here sets its own height — several children carry inline font sizes
+   and the mode chips are buttons, which would otherwise decide the strip's
+   height between them. */
+.live-status,
+.live-status * {
+  font-size: 11px;
+  line-height: 18px;
+}
+.live-status button {
+  min-height: 0;
+  padding: 1px 7px;
+}
+.live-status::-webkit-scrollbar {
+  display: none;
+}
+.live-status > * {
+  flex: 0 0 auto;
+}
+
+/* Numbers in the top bar — the clock and the mark, which are read continuously
+   and so must not reflow the bar as their digits change. */
+.sim-topbar-num {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.sim-topbar-link {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* ---- chart pages (Replay + Live) ----
    The two pages that fill the viewport instead of scrolling. The height used to
    be measured in JS and published as --sim-fill-h, because the chrome above them
@@ -2274,68 +2335,7 @@ button:disabled {
     display: none;
   }
   /* The rail's icons are the only thing here that can afford to lose height. */
-  /* ---- Live status strip ----
-   A footer, not a header: it is state you glance at, not something you act on
-   continuously, and above the chart it pushed the tape down by a row nobody was
-   reading. Half the height it was — 3px of padding either side of 11px text
-   instead of 6px either side of 13px, and no bottom margin.
-
-   nowrap + scroll rather than wrap: the whole point is a fixed, small height,
-   and a strip that grows a row when the recorder has something to say is the
-   thing being fixed. */
-.live-status {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: none;
-  /* One row, always. A fixed height is what makes that true regardless of what
-     the recorder has to say: the strip carries up to nine optional children
-     (timing, backfill counts, three separate warnings, Stop), and any of them
-     appearing must not cost the tape a row. Everything over the width scrolls
-     sideways instead. */
-  flex-wrap: nowrap;
-  height: 24px;
-  padding: 0 10px;
-  background: var(--card);
-  overflow-x: auto;
-  overflow-y: hidden;
-  white-space: nowrap;
-  scrollbar-width: none;
-}
-/* Nothing in here sets its own height — several children carry inline font sizes
-   and the mode chips are buttons, which would otherwise decide the strip's
-   height between them. */
-.live-status,
-.live-status * {
-  font-size: 11px;
-  line-height: 18px;
-}
-.live-status button {
-  min-height: 0;
-  padding: 1px 7px;
-}
-.live-status::-webkit-scrollbar {
-  display: none;
-}
-.live-status > * {
-  flex: 0 0 auto;
-}
-
-/* Numbers in the top bar — the clock and the mark, which are read continuously
-   and so must not reflow the bar as their digits change. */
-.sim-topbar-num {
-  font-family: monospace;
-  font-size: 12px;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-.sim-topbar-link {
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.sim-rail {
+  .sim-rail {
     padding: 3px 0;
   }
 }
