@@ -6,7 +6,7 @@ is the element-by-element checklist — every control the prototype draws, where
 the app today, and which phase closes the gap. Work that list, not a memory of the
 screenshots.*
 
-* The design this implements is the clickable prototype at
+*The design this implements is the clickable prototype at
 `docs/research/terminal-redesign.html` (built by `demo/terminal_redesign_demo.py`) —
 read that first if the "why" of any phase below is unclear, because the arguments live
 there and are not repeated here.*
