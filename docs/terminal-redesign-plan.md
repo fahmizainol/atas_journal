@@ -1,10 +1,12 @@
 # Terminal redesign — build plan
 
-*Written 2026-08-12. Phases 1–3 are built on `feat/terminal-redesign` and verified;
-phases 4–7 are not started. [Parity with the prototype](#parity-with-the-prototype--the-checklist)
+*Written 2026-08-12; phases 4–7 built the same day. Phases 1–6 are on
+`feat/terminal-redesign` and verified by `tools/browser/panecheck.mjs` (30/30) and
+`tools/browser/smoke.mjs`. **Phase 7 (Live) is built and UNVERIFIED** — `/charts/live`
+is manual-test-only by standing rule, so it has been typechecked and built and
+nothing more. [Parity with the prototype](#parity-with-the-prototype--the-checklist)
 is the element-by-element checklist — every control the prototype draws, where it is in
-the app today, and which phase closes the gap. Work that list, not a memory of the
-screenshots.*
+the app today, and which phase closed the gap.*
 
 *The design this implements is the clickable prototype at
 `docs/research/terminal-redesign.html` (built by `demo/terminal_redesign_demo.py`) —
@@ -25,12 +27,13 @@ all of them.
 | 1 | The layout model (`lib/paneLayout.ts`) | **Built** — `1b32786` |
 | 2 | N panes in the Simulator + the layout picker | **Built** — `1b32786` |
 | 3 | Order pills everywhere; orders from any pane | **Built** — `da176c8` |
-| 4 | Pane linking — crosshair and right-edge sync | Not started |
-| 5 | The focus model | Not started |
-| 6 | The left tool rail | Not started |
-| 7 | Live gets the same layouts | Not started |
+| 4 | Pane linking — crosshair and right-edge sync | **Built** — `3c6786b` |
+| 5 | The focus model | **Built** — `3c6786b` |
+| 6 | The left tool rail | **Built** — `1799b81` |
+| 6b | Ticket knobs, the dock's opener, the <1100px fold | **Built** — `60e837d` |
+| 7 | Live gets the same layouts | **Built, unverified** |
 
-Branch: `feat/terminal-redesign`, three commits, **not pushed**. Master is at `ea97845`.
+Branch: `feat/terminal-redesign`, **not pushed**. Master is at `ea97845`.
 
 ### What phases 1–3 actually did
 
@@ -48,6 +51,23 @@ Branch: `feat/terminal-redesign`, three commits, **not pushed**. Master is at `e
   takes the same order gestures. The ⚓ anchor is the one per-pane gesture.
 - `tools/layoutcheck.mjs` — proves every layout tiles the grid, no browser needed.
 - `tools/browser/panecheck.mjs` — 20/20 against the dev server.
+
+### What phases 4–7 actually did
+
+- `frontend/src/lib/paneLink.ts` — one crosshair and one right edge across the grid.
+  Module state, like `chartFocus`, and it knows nothing about lightweight-charts.
+- `frontend/src/lib/chartTools.ts` + `components/charts/ChartToolRail.tsx` — the tool
+  vocabulary named once, and one rail outside every canvas driving the focused pane
+  through `ReplayChartHandle.armTool`.
+- `components/charts/TicketKnobs.tsx` — size and both bracket legs on the floating
+  ticket, each quoting money as well as ticks.
+- `ReplayChart` gained: `linked` / `onLinkedChange`, `routedTo`, `onFocus`,
+  `onToolsChange`, and four handle methods (`armTool`, `clearAvwap`, `deleteSelected`,
+  `clearDrawings`). A chart handed `onToolsChange` renders no in-canvas rail.
+- `Simulator.tsx` and `LiveChart.tsx` both draw the same grid, the same rail, the same
+  badges and the same top-bar controls. Live keeps its own copy of the six new prefs.
+- `tools/browser/panecheck.mjs` — 30/30, now covering focus, the link both ways round,
+  and the rail following focus.
 
 ### Already in the app before this build started
 
@@ -96,14 +116,32 @@ only feeds its own legend/OHLC readout) and `subscribeVisibleLogicalRangeChange`
 pane's bucketing — a 1-minute timestamp is not a bar on the 1h pane. Use the crosshair's
 time and let the receiving chart snap, and swallow the throw when it can't.
 
-**Verify.** Extend `panecheck.mjs`: hover a price on pane 0, assert the other panes'
-legends print an OHLC readout for the corresponding bar; scroll pane 0 back and assert
-every pane's right edge moved while their spans stayed different.
+**THE ONE THAT COST TIME — write this down.** `setCrosshairPosition` deliberately does
+**not** fire `subscribeCrosshairMove`. It passes `skipEvent` all the way down to
+`setAndSaveCurrentPosition` (lightweight-charts 5.2, `lightweight-charts.development.mjs`
+~7062 / ~13226). So a pane told to follow moves a crosshair with **no numbers beside
+it** — which is exactly the readout you turned the link on for. The OHLC readout is now
+a function (`paintOhlc`) that both the subscription and the link call. Anything else
+built on the assumption that a programmatic crosshair behaves like a real one will hit
+this too.
 
-**Also needs.** A link toggle. The prototype put it on each pane as a `⇄` badge and in
-the top bar. Two views of the same tape at different bucketings should scroll together;
-four charts used as four different questions should not — so it is a toggle, not a
-default.
+**Verify — done.** `panecheck.mjs` hovers pane 0 and asserts panes 1 and 3 print an
+OHLC readout; drags pane 0 and asserts pane 1 repainted; then turns the link off and
+asserts it did not. All three run with the tape **stopped**, which is the only way any
+of them mean anything — a running replay repaints every pane on its own.
+
+*Harness trap found here:* the aiming point matters. The indicator legend is a DOM
+overlay at the top-left and starts open on pane 0, so a pointer at 0.5 of a narrow pane
+lands on the legend. Focus still works from there (the legend is inside the pane) but
+the crosshair never moves — which reads as a broken link when it is a wrong aim. Aim
+`fx ≈ 0.78`.
+
+**Also needs — done.** A link toggle, `⇄`, in the top bar (global) and on each pane
+(that pane's membership). Two views of the same tape at different bucketings should
+scroll together; four charts used as four different questions should not. Default **on**
+and persisted (`sim.prefs.linkOn`, `paneLinked`): reading one moment at four bucketings
+is what the grid is *for*, and a link nobody switched on is a feature nobody finds. With
+one pane it does nothing at all, so the single-chart page is unmoved.
 
 ---
 
@@ -124,8 +162,13 @@ own `TimeframeControl` at bottom-left because the top bar's could not reach it.
   which one the timeframe button is about to change.
 - The top bar's `TimeframeControl` acts on the focused pane. Pane 0's bucketing is the
   page's own `timeframe`; panes 1..n read `paneTfs[i]`. Once the bar can reach every
-  pane, delete the per-pane `.sim-pane-tf` pickers.
-- `1`–`4` focus a pane.
+  pane, delete the per-pane `.sim-pane-tf` pickers. **Done** — the pickers are gone.
+- ~~`1`–`4` focus a pane.~~ **The plan was wrong here**: the bare digits `1`–`8` have
+  picked the *bar size* since before there were panes. Taking a binding away from a page
+  you drive by keyboard is worse than spending a modifier, so focus is **Shift+1…4**,
+  read off `e.code` (shifted digits are punctuation, and which punctuation depends on the
+  keyboard layout). The digits still pick the bar size — of the focused pane now, so the
+  key and the bar cannot disagree.
 
 **Rules carried over from the prototype, both load-bearing:**
 
@@ -163,14 +206,36 @@ Two options, decide before starting:
   through the existing imperative `ReplayChartHandle`. Much smaller diff; the rail
   becomes a remote control rather than the owner.
 
-B is the cheaper first move and is reversible into A. Whichever, the in-canvas rail
-should stay behind a flag until the new one is proven, because it is the only way to
-reach those tools today.
+B is the cheaper first move and is reversible into A. **B is what was built.** The rail
+calls `armTool` on the focused pane's `ReplayChartHandle`, and the chart reports back
+through `onToolsChange` so the rail cannot claim something is armed that isn't.
+
+That reporting is an **effect over rendered state**, not a call inside each `arm*`
+function. That is the load-bearing choice: every path that changes a tool — a rail click,
+a key, Escape, a drawing being deleted, a session landing — reports the same way, which
+is what makes "Esc disarms the rail" true without anyone wiring it up.
+
+**Two things are new rather than moved.** `⌖` cursor (Esc has always disarmed, but Esc
+is not discoverable and a rail with no way back to "just pointing" reads as one you can
+get stuck in — it is lit when nothing else is, so the rail always has exactly one lit
+button); and `＋Order` on a desktop, which in the canvas was touch-only on the grounds
+that Space+click is strictly the better mouse gesture. That is true, and is also why
+nobody with a mouse ever found the tool.
+
+Every tooltip names the pane it would act on. A rail with no addressee is worse than no
+rail.
+
+**The flag turned out to be unnecessary and was not built.** A chart handed
+`onToolsChange` does not render its in-canvas rail at all; a page that draws a single
+chart passes nothing and is untouched. Not rendering rather than hiding matters: a
+`display:none` copy is still a second `[data-tip^="…"]`, which is what broke a strict
+locator in `smoke.mjs`.
 
 **Cost note.** The rail plus a dock is ~358px of 1920 on a 1080p window. It pays for
 itself the moment there are two panes; on a single pane it is a straight loss against
-today's in-canvas rail. If a one-pane layout should keep the old rail, that is a
-deliberate choice to make, not an accident to discover.
+today's in-canvas rail. **Decided: the page rail is always on**, because uniform chrome
+beats a layout-dependent rail — and the in-canvas one floated *over* candles, so the
+trade is 38px of width against covered price action.
 
 ---
 
@@ -185,20 +250,32 @@ pushed to every pane (`brokerViews` already produces the same `WorkingOrderView`
 paper blotter uses, and it carries no x-coordinate, so this is the same one-line-per-site
 change phase 3 was).
 
-**What is genuinely different from Replay:**
+**What is genuinely different from Replay — and how it went:**
 
-- Live has **no transport** and no second engine per pane in the replay sense — the panes
-  are bucketings of a live tape. Check how `LiveChart` builds its bars before assuming
-  `ReplayEngine` per pane is the right shape.
-- Live has its own prefs (`live.chartKnobs`), not `sim.prefs`. The layout needs a home
-  there, with the same migration care phase 2 took.
-- Routing can point at MNQ while the tape is NQ. Panes should wear the
-  `→ MNQU6` badge the prototype drew, so "where would a click on *this* chart send" is
-  never a guess.
+- Live has **no transport**, but it *does* use `ReplayEngine` per pane after all: the
+  page already builds one over the growing tape and re-derives it whenever the header is
+  repaired. An extra pane is the same engine at another bucketing over the same array.
+  Priming mid-session is not a special case — the engine folds from row zero to the
+  clock, and the frame loop carries it on.
+- **The ordering trap.** A pane's chart can mount *before* the first live print. It then
+  reports itself ready to a page with no tape, and nothing would ever come back to it. So
+  `onAppend` primes the panes too, through a ref (it is defined before `primePane` is).
+  The same call repairs them when a corrected header rebuilds pane 0's engine.
+- Live has its own prefs (`live.chartKnobs`), not `sim.prefs` — the grid you watch a
+  session on is not automatically the grid you study a replay on. Six new fields, same
+  validators as the replay's.
+- Routing can point at MNQ while the tape is NQ. Every pane wears a `→ MNQU6` badge —
+  but **only while orders really route**, since paper fills off the tape in front of you
+  whatever routing says, and a badge that is always there stops being read.
+- The floating ticket's knobs price in the **routed** contract on a real account. An MNQ
+  stop read at NQ's $20 a point is ten times the risk that is actually on.
 
-**Verification is manual.** `/charts/live` is manual-test-only by standing rule — gestures
-there reach Rithmic. Do not script that page. Build it, then hand it over to be tested by
-hand, and say plainly in the handover that it is unverified.
+**Verification is manual, and has NOT happened.** `/charts/live` is manual-test-only by
+standing rule — gestures there reach Rithmic. It has been typechecked and production-built
+and nothing else. **Test by hand before trusting it**, and in particular: that the panes
+come up drawn on a session that is already running (the ordering trap above), that the
+broker's position and stops appear on *every* pane, and that the `→` badge says the right
+contract when routing is pointed at the micro.
 
 ---
 
@@ -262,13 +339,13 @@ move, not a build — except where noted.
 |---|---|---|
 | Legend: symbol + bucketing | ✓ | — |
 | Legend: OHLC readout | ✓ `.chart-ohlc` | — |
-| Legend: fold with `ƒ on/total` count | ~ folds, but shows no count | **5** |
+| Legend: fold with a count | ✓ — **the checklist was wrong**: `.chart-legend-count` has printed `shown/total` all along | — |
 | Legend: rows with swatch, name, value | ✓ (richer than the prototype) | — |
-| `→ MNQU6` routed-contract badge | ✗ | **7** |
-| `⇄` link badge | ✗ | **4** |
-| Focus ring | ✗ | **5** |
+| `→ MNQU6` routed-contract badge | ✓ Live, while routing really differs | 7 |
+| `⇄` link badge | ✓ per pane, toggles that pane's membership | 4 |
+| Focus ring | ✓ `.sim-pane.focused` | 5 |
 | ◎ back-to-price | ✓ `.chart-jump` | — |
-| Armed-tool hint | ~ in-canvas banners | **6** |
+| Armed-tool hint | ✓ in-canvas banners, plus the rail's own lit button | 6 |
 | Order pills + lines | ✓ every pane | 3 |
 | Fixed-range VP / measure overlays | ✓ | — |
 
@@ -330,6 +407,16 @@ move, not a build — except where noted.
 - **Saved layouts.** Layout + per-pane bucketing + indicators is a workspace, and
   workspaces want names. The shape would be the existing `chartPrefs` blob with a list
   around it.
+- **The dock's guard meters** (day loss, trailing DD, contracts) are the one parity row
+  left open. They were filed under phase 6 and they do not belong there: the numbers come
+  off `routing.Guards`, which only Live has, and `Discipline` already states the rules in
+  words. Three meters would be a *second* rendering of the same facts — worth building
+  only if reading them at a glance mid-session turns out to matter, which is a question
+  about the live page, not about the chrome.
+- **The armed-tool banner is still in the canvas.** It is per pane and it belongs there,
+  but with the rail also lit there are now two places saying "measuring". That reads fine
+  today; if it starts to feel like noise, the banner is the one to drop.
+- **`/charts/live` is unverified.** See phase 7 — three specific things to test by hand.
 - **A structural guarantee was traded away.** The context pane used to be un-tradable
   *by construction*. Now the discipline layer is the only thing between a gesture on
   pane 3 and a fill. That was a deliberate call; it is worth re-confirming after real use.
@@ -363,3 +450,13 @@ as well:
   open or shut).
 - To place an order at all on this instance, stub the guard levels **in the browser**
   (`page.route("**/live/routing", ...)`), never by writing settings.
+- **Aim at `fx ≈ 0.78` for anything that needs the crosshair to move**, not just for
+  clicks. Pane 0's legend is open by default and covers the middle of a narrow pane; a
+  pointer that lands on it still focuses the pane (the legend is inside it) but moves no
+  crosshair — which reads as a broken link rather than a wrong aim.
+- **Programmatic crosshairs fire no event.** `setCrosshairPosition` passes `skipEvent`,
+  so nothing hung off `subscribeCrosshairMove` will run for one. Assert on what the page
+  *paints*, not on the subscription firing.
+- **A hidden duplicate is still in the DOM.** The in-canvas rail is not rendered when a
+  page rail exists precisely because `display: none` left a second
+  `button[data-tip^="…"]` and broke a strict-mode locator in `smoke.mjs`.

@@ -443,6 +443,17 @@ export interface LiveChartKnobs {
   /** Whether the rail panel reserves layout width instead of opening over the
    *  tape. */
   railPinned: boolean;
+  /** The pane arrangement, its bucketings, its dividers and its link — the same
+   *  five fields `SimPrefs` carries, documented there. Live keeps its own copy
+   *  for the same reason it keeps its own timeframe: the grid you watch a
+   *  session on is not automatically the grid you study a replay on, and one store
+   *  would make changing either change both. */
+  layout: LayoutId;
+  paneTfs: string[];
+  splitPct: number;
+  splitPctY: number;
+  linkOn: boolean;
+  paneLinked: boolean[];
 }
 
 const LIVE_KNOBS_KEY = "live.chartKnobs";
@@ -466,6 +477,14 @@ export const DEFAULT_LIVE_CHART_KNOBS: LiveChartKnobs = {
   // Away by default, same as the replay's: the feed lays over the tape rather
   // than taking a column off it — see the page's own comment on `railView`.
   railPinned: false,
+  // One pane, so nothing about the page changes until it is asked for. The
+  // bucketings run slower as they go, from the tick bar Live watches on.
+  layout: "one",
+  paneTfs: ["500t", "1m", "5m", "15m"],
+  splitPct: 60,
+  splitPctY: 55,
+  linkOn: true,
+  paneLinked: [true, true, true, true],
 };
 
 export function loadLiveChartKnobs(): LiveChartKnobs {
@@ -488,6 +507,14 @@ export function loadLiveChartKnobs(): LiveChartKnobs {
       timeframe: TIMEFRAMES.some((t) => t.id === s.timeframe) ? (s.timeframe as string) : d.timeframe,
       indicators: typeof s.indicators === "boolean" ? s.indicators : d.indicators,
       railPinned: typeof s.railPinned === "boolean" ? s.railPinned : d.railPinned,
+      // Same validators as the replay's — an unknown layout id from a later
+      // version would otherwise render nothing at all.
+      layout: isLayoutId(s.layout) ? s.layout : d.layout,
+      paneTfs: paneTfs(s, d.paneTfs),
+      splitPct: clampRatio(s.splitPct, d.splitPct),
+      splitPctY: clampRatio(s.splitPctY, d.splitPctY),
+      linkOn: typeof s.linkOn === "boolean" ? s.linkOn : d.linkOn,
+      paneLinked: paneFlags(s.paneLinked, d.paneLinked),
     };
   } catch {
     return { ...d, eventTuning: { ...d.eventTuning }, modernVwap: { ...d.modernVwap } };

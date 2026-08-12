@@ -55,6 +55,19 @@ import { TimeframeControl } from "../components/charts/TimeframeControl";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import { SimIndicators } from "../components/charts/SimIndicators";
 import { QuickDock } from "../components/charts/QuickDock";
+import { LayoutPicker } from "../components/charts/LayoutPicker";
+import { ChartToolRail } from "../components/charts/ChartToolRail";
+import { TicketKnobs } from "../components/charts/TicketKnobs";
+import {
+  LAYOUTS,
+  MAX_PANES,
+  clampPaneIndex,
+  clampRatio,
+  gridArea,
+  gridTemplate,
+} from "../lib/paneLayout";
+import { setLinkOn as setLinkModuleOn } from "../lib/paneLink";
+import { EMPTY_TOOL_STATE, type ChartToolId, type ChartToolState } from "../lib/chartTools";
 import { TapeCoverage } from "../components/TapeCoverage";
 import { RoutingPanel } from "../components/RoutingPanel";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
@@ -159,6 +172,14 @@ const SPEEDS = [1, 5, 15, 60, 300, 900];
  *  fetched before the session's own tape starts (see `useLiveTape`). Cold, that
  *  is seconds per day; warm, nothing at all. */
 const HISTORY_DAY_OPTIONS = [0, 1, 2, 3, 5, 10];
+
+/** How often an extra pane may repaint, in ms. The Simulator's number and the
+ *  same argument: the engine step is ~0.006ms so every pane advances every
+ *  frame, but a *repaint* costs about 65% of a core, and four panes repainting
+ *  at 60fps would spend the frame budget on charts nobody is trading off. Bar
+ *  close or this, whichever comes first — so the forming bar visibly moves,
+ *  which is the whole reason to have the pane up on a live tape. */
+const PANE_DRAW_MS = 200;
 
 /** First index in a tape's (ascending) times at or after `ms`, or `n` if there
  *  is none. */
@@ -345,6 +366,85 @@ export function LiveChart() {
   // --- imperative refs (the frame loop reads these, never React state) ------
   const chartRef = useRef<ReplayChartHandle>(null);
   const engineRef = useRef<ReplayEngine | null>(null);
+  // The extra panes: one chart and one engine each, over the *same* growing
+  // tape at their own bucketing. Arrays indexed by pane, index 0 unused — the
+  // page's own chart is pane 0 and lives in the two refs above. Same shape as
+  // the Simulator's, deliberately: the two pages draw the same grid.
+  const extraCharts = useRef<(ReplayChartHandle | null)[]>([]);
+  const extraEngines = useRef<(ReplayEngine | null)[]>([]);
+  /** rAF timestamp of each extra pane's last repaint — see PANE_DRAW_MS. */
+  const extraDrawn = useRef<number[]>([]);
+  /** Any pane's chart handle by index. */
+  const paneChart = useCallback(
+    (i: number): ReplayChartHandle | null => (i === 0 ? chartRef.current : extraCharts.current[i]),
+    [],
+  );
+  /** Do something to every extra pane that currently exists. The guard is the
+   *  point: a pane's handle outlives by one render the layout change that
+   *  removed it. */
+  const eachExtra = useCallback((fn: (chart: ReplayChartHandle, i: number) => void) => {
+    for (let i = 1; i < paneCountRef.current; i++) {
+      const c = extraCharts.current[i];
+      if (c) fn(c, i);
+    }
+  }, []);
+  /** The grid, for the divider drag — the ratio is a fraction of this box. */
+  const splitRef = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState<"v" | "h" | null>(null);
+  const startSplitDrag = useCallback((e: React.PointerEvent<HTMLDivElement>, axis: "v" | "h") => {
+    const host = splitRef.current;
+    if (!host) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    setDragging(axis);
+    const onMove = (ev: PointerEvent) => {
+      const box = host.getBoundingClientRect();
+      const span = axis === "v" ? box.width : box.height;
+      if (span <= 0) return;
+      const at = axis === "v" ? ev.clientX - box.left : ev.clientY - box.top;
+      const pct = clampRatio((at / span) * 100, 50);
+      if (axis === "v") setSplitPct(pct);
+      else setSplitPctY(pct);
+    };
+    const onUp = () => {
+      setDragging(null);
+      el.releasePointerCapture?.(e.pointerId);
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onUp);
+    };
+    // On the captured element, not the window: capture routes every move here
+    // until it is released, and a pointercancel (the OS taking the pointer for a
+    // gesture of its own) is what stops a drag that would otherwise never end.
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onUp);
+  }, []);
+
+  // What each pane's hand-tools are doing, for the one rail that drives them.
+  const [toolStates, setToolStates] = useState<ChartToolState[]>(() =>
+    Array.from({ length: MAX_PANES }, () => EMPTY_TOOL_STATE),
+  );
+  const reportTools = useCallback((i: number, s: ChartToolState) => {
+    setToolStates((prev) => {
+      const cur = prev[i];
+      if (
+        cur &&
+        cur.armed === s.armed &&
+        cur.canOrder === s.canOrder &&
+        cur.hasAvwap === s.hasAvwap &&
+        cur.hasRangeSel === s.hasRangeSel &&
+        cur.hasHlineSel === s.hasHlineSel &&
+        cur.drawings === s.drawings
+      ) {
+        return prev;
+      }
+      const next = prev.slice();
+      next[i] = s;
+      return next;
+    });
+  }, []);
   const tapeRef = useRef<GrowableTape | null>(null);
   const clockRef = useRef(0);
   const rafRef = useRef<number | null>(null);
@@ -418,6 +518,27 @@ export function LiveChart() {
   const signalsOpen = railView === "signals";
   const [railPinned, setRailPinned] = useState(knobs.railPinned);
   const [indicators, setIndicators] = useState(knobs.indicators);
+  // The pane grid, exactly as the Simulator carries it — same layout model, same
+  // link, same per-pane bucketings, its own store. See lib/paneLayout.
+  const [layout, setLayout] = useState(knobs.layout);
+  const [paneTfIds, setPaneTfIds] = useState(knobs.paneTfs);
+  const [splitPct, setSplitPct] = useState(knobs.splitPct);
+  const [splitPctY, setSplitPctY] = useState(knobs.splitPctY);
+  const [linkOn, setLinkOn] = useState(knobs.linkOn);
+  const [paneLinked, setPaneLinked] = useState(knobs.paneLinked);
+  const paneCount = LAYOUTS[layout].panes;
+  const paneCountRef = useRef(paneCount);
+  paneCountRef.current = paneCount;
+  const paneTfKey = paneTfIds.join(",");
+  const paneTfsRef = useRef(paneTfIds.map(timeframeById));
+  paneTfsRef.current = paneTfIds.map(timeframeById);
+  const [focus, setFocus] = useState(0);
+  const focusedPane = clampPaneIndex(focus, layout);
+  const focusRef = useRef(focusedPane);
+  focusRef.current = focusedPane;
+  useEffect(() => {
+    setLinkModuleOn(linkOn);
+  }, [linkOn]);
   // Everything the store carries, written wholesale — same shape as the load.
   useEffect(() => {
     saveLiveChartKnobs({
@@ -433,8 +554,14 @@ export function LiveChart() {
       timeframe: tfId,
       indicators,
       railPinned,
+      layout,
+      paneTfs: paneTfIds,
+      splitPct,
+      splitPctY,
+      linkOn,
+      paneLinked,
     });
-  }, [bigLots, nodeProm, compositeRule, compositeSpan, evTuning, evLabelSt, evFill, evMarginal, mvParams, tfId, indicators, railPinned]);
+  }, [bigLots, nodeProm, compositeRule, compositeSpan, evTuning, evLabelSt, evFill, evMarginal, mvParams, tfId, indicators, railPinned, layout, paneTfIds, splitPct, splitPctY, linkOn, paneLinked]);
   // THE ticket — one object, and the page owns it. Size and the bracket that
   // every origination point on this page measures its order with: the setup
   // drawer below, the chart's own long-press ticket, and the routing panel's
@@ -547,11 +674,21 @@ export function LiveChart() {
       }
       paperCuesRef.current.observe(simMark(st));
       setWorking(views);
-      chartRef.current?.setPosition(st.open ? posLine(st.open, barAt) : null);
+      const pos = st.open ? posLine(st.open, barAt) : null;
+      const marks = st.trades.map((t) => tradeMark(t, barAt));
+      chartRef.current?.setPosition(pos);
       chartRef.current?.setOrders(views);
-      chartRef.current?.setTrades(st.trades.map((t) => tradeMark(t, barAt)));
+      chartRef.current?.setTrades(marks);
+      // Every pane, not just pane 0. A `WorkingOrderView` carries no
+      // x-coordinate — a resting order is a price and a horizontal line — so
+      // drawing it on four bucketings costs the same as drawing it on one.
+      eachExtra((c) => {
+        c.setPosition(pos);
+        c.setOrders(views);
+        c.setTrades(marks);
+      });
     },
-    [barAt],
+    [barAt, eachExtra],
   );
 
   /**
@@ -590,7 +727,7 @@ export function LiveChart() {
   // Runs for as long as the page is mounted. `atEnd` is never true on a live
   // source, so nothing stops it — when the feed is quiet the clock doesn't move
   // and `advance()` has nothing to apply, which costs one comparison a frame.
-  const frame = useCallback(() => {
+  const frame = useCallback((ts: number) => {
     const eng = engineRef.current;
     if (eng) {
       const { clock } = sourceRef.current.clockFor(clockRef.current, 0, 1);
@@ -599,6 +736,18 @@ export function LiveChart() {
         chartRef.current?.applyStep(r);
         geoRef.current = { ib: r.ib, range: r.range };
         clockRef.current = clock;
+        // Every extra pane advances every frame regardless — the engine step is
+        // ~0.006ms, and skipping it would leave its bars behind the clock. Only
+        // the *draw* is gated; see PANE_DRAW_MS.
+        for (let i = 1; i < paneCountRef.current; i++) {
+          const e = extraEngines.current[i];
+          if (!e) continue;
+          const step = e.advance(clock);
+          if (step.newBar || ts - (extraDrawn.current[i] ?? 0) >= PANE_DRAW_MS) {
+            extraDrawn.current[i] = ts;
+            extraCharts.current[i]?.applyStep(step);
+          }
+        }
         advanceSim(r.fromIdx, r.toIdx, clock);
         pushHud(r.lastPrice, clock);
       }
@@ -620,6 +769,10 @@ export function LiveChart() {
   const onReset = useCallback((tape: GrowableTape) => {
     tapeRef.current = tape;
     engineRef.current = null;
+    // The extra panes' engines described the old tape too. Dropped rather than
+    // re-primed here: the tape has no session in it yet, and `onAppend` is what
+    // knows when it does.
+    extraEngines.current = [];
     geoSigRef.current = "";
     clockRef.current = 0;
     logRef.current = newLog();
@@ -641,6 +794,9 @@ export function LiveChart() {
     setWorking([]);
     setReady(false);
   }, [ladder]);
+
+  const primePaneRef = useRef<(only?: number) => void>(() => {});
+  const resyncPanesRef = useRef<(reframe?: boolean | "follow") => void>(() => {});
 
   const onAppend = useCallback(
     (tape: GrowableTape) => {
@@ -669,6 +825,12 @@ export function LiveChart() {
       chartRef.current?.setSnapshot(snap);
       geoRef.current = { ib: snap.ib, range: snap.range };
       clockRef.current = clock;
+      // The extra panes, now that there is a session to build them over. Through
+      // a ref because this callback is made before `primePane` is — and it has
+      // to be here: a pane's chart mounted before the first print reports itself
+      // ready to a page with no tape, and nothing else would ever come back to
+      // it.
+      primePaneRef.current();
       setReady(true);
       pushHud(snap.lastPrice, clock, true);
       // Every later block is picked up by the frame loop, which reads the tape's
@@ -676,6 +838,76 @@ export function LiveChart() {
     },
     [header, pushHud],
   );
+
+  // --- the extra panes ------------------------------------------------------
+  const headerRef = useRef(header);
+  headerRef.current = header;
+
+  /**
+   * Stand an extra pane up: its own engine over the tape in hand, handed to its
+   * chart.
+   *
+   * Idempotent and called from both sides, for the reason the Simulator's copy
+   * spells out — the page learns about a tape in an effect, the pane's chart is
+   * built in an effect of its own, and React is free to throw that chart away
+   * and build another. Whoever is last wins, and neither can be relied on to be.
+   *
+   * The one thing that is different here: the tape is still growing. Priming
+   * mid-session is not a special case — the engine folds from row zero to the
+   * clock, and the frame loop carries it on from there.
+   */
+  const primePane = useCallback((only?: number) => {
+    const tape = tapeRef.current;
+    const hdr = headerRef.current;
+    if (!tape || !hdr || tape.n <= tape.ctx) return;
+    const payload = sessionPayloadFor(hdr, tape.t[tape.ctx]);
+    for (let i = 1; i < paneCountRef.current; i++) {
+      if (only != null && only !== i) continue;
+      const chart = extraCharts.current[i];
+      if (!chart) continue;
+      const e = new ReplayEngine(tape as Tape, payload, paneTfsRef.current[i]);
+      e.setBigLots(bigLotsRef.current);
+      e.setEventTuning(evTuningRef.current);
+      extraEngines.current[i] = e;
+      chart.setTape(tape as Tape, { contextRanges: ctxRangeRef.current });
+      chart.setSnapshot(e.snapshotTo(clockRef.current));
+      extraDrawn.current[i] = 0;
+    }
+  }, []);
+  primePaneRef.current = primePane;
+
+  /** Repaint every extra pane from its own engine, as of the page's clock. Every
+   *  path that re-derives the primary calls this too: the panes are one session,
+   *  and a pane showing a different session than the one under it is worse than
+   *  no pane. */
+  const resyncPanes = useCallback(
+    (reframe?: boolean | "follow") => {
+      eachExtra((c, i) => {
+        const e = extraEngines.current[i];
+        if (e) c.setSnapshot(e.snapshotTo(clockRef.current), { reframe });
+      });
+    },
+    [eachExtra],
+  );
+  resyncPanesRef.current = resyncPanes;
+
+  // Panes appearing, disappearing, or changing bucketing. Engines belonging to
+  // panes the layout no longer draws go now rather than being advanced forever
+  // by the frame loop over a chart that isn't on screen.
+  useEffect(() => {
+    for (let i = paneCount; i < extraEngines.current.length; i++) {
+      extraEngines.current[i] = null;
+      extraCharts.current[i] = null;
+    }
+    primePane();
+    // paneTfKey rather than the array: `.map` hands back a fresh one per render.
+  }, [paneCount, paneTfKey, primePane]);
+
+  // A context-span change re-cuts the same days without touching the tape; the
+  // chart no-ops when they are the ranges it already holds.
+  useEffect(() => {
+    eachExtra((c) => c.setContextRanges(contextRanges));
+  }, [contextRanges, eachExtra]);
 
   const tapeState = useLiveTape({
     enabled: !!gen && !!header && historyReady,
@@ -716,6 +948,15 @@ export function LiveChart() {
   // the routing poll and follow `broker.symbol` (see routingTypes).
   const routedTick = brokerState?.tick_size ?? tickSize;
   const routedPoint = brokerState?.point_value ?? pointValue;
+  /** The contract a click on any pane would actually reach, when that is not the
+   *  one the tape is drawing — the panes wear it as a badge. Undefined when the
+   *  two agree, which is the ordinary case and wants no chrome at all: a badge
+   *  that is always there stops being read. Only while orders really route
+   *  (paper fills off the tape in front of you, whatever routing says). */
+  const routedSymbol =
+    intent.real && brokerState && brokerState.symbol !== brokerState.feed_symbol
+      ? brokerState.symbol
+      : undefined;
   useEffect(() => {
     if (!intent.real || !brokerOrders) return;
     const sig = brokerSig(brokerOrders, brokerPos, brokerTrades ?? []);
@@ -742,18 +983,26 @@ export function LiveChart() {
       routedPoint,
     );
     setWorking(views);
-    chartRef.current?.setOrders(views);
-    chartRef.current?.setPosition(
-      positionLine(brokerPos, brokerOrders, barAt, sessionStartRef.current, {
-        tickSize: routedTick,
-        pointValue: routedPoint,
-      }),
-    );
+    const pos = positionLine(brokerPos, brokerOrders, barAt, sessionStartRef.current, {
+      tickSize: routedTick,
+      pointValue: routedPoint,
+    });
     // Round trips the server paired out of the fill stream, drawn with the same
     // marks the paper blotter uses — same primitive, same vocabulary for the
     // exit reason, so the two kinds of trade read identically on one chart.
-    chartRef.current?.setTrades(tradeViews(brokerTrades ?? [], barAt));
-  }, [barAt, brokerOrders, brokerPos, brokerRecent, brokerTrades, intent.real,
+    const marks = tradeViews(brokerTrades ?? [], barAt);
+    chartRef.current?.setOrders(views);
+    chartRef.current?.setPosition(pos);
+    chartRef.current?.setTrades(marks);
+    // …and on every other pane. What is live at the broker belongs on all of
+    // them: a stop you cannot see on the chart you happen to be reading is a
+    // stop you will forget is there.
+    eachExtra((c) => {
+      c.setOrders(views);
+      c.setPosition(pos);
+      c.setTrades(marks);
+    });
+  }, [barAt, brokerOrders, brokerPos, brokerRecent, brokerTrades, eachExtra, intent.real,
       routedPoint, routedTick]);
 
   // Switching account swaps whose orders are on the chart. Cleared first and
@@ -767,11 +1016,16 @@ export function LiveChart() {
     chartRef.current?.setOrders([]);
     chartRef.current?.setPosition(null);
     chartRef.current?.setTrades([]);
+    eachExtra((c) => {
+      c.setOrders([]);
+      c.setPosition(null);
+      c.setTrades([]);
+    });
     setWorking([]);
     // Back on paper: repaint the blotter, which has been running underneath all
     // along and is exactly where it was left.
     if (!drawBrokerRef.current) rebuild(clockRef.current);
-  }, [activeAccount, rebuild]);
+  }, [activeAccount, eachExtra, rebuild]);
 
   // --- paper trades reach the journal ---------------------------------------
   // The one surface in this app where you actually trade used to be the one
@@ -871,6 +1125,10 @@ export function LiveChart() {
     const snap = eng.snapshotTo(clockRef.current);
     chartRef.current?.setSnapshot(snap, { reframe: false });
     geoRef.current = { ib: snap.ib, range: snap.range };
+    // The extra panes' engines were built on the same header this just found to
+    // be wrong, so they are rebuilt too rather than left developing a session
+    // whose geometry has moved under them.
+    primePaneRef.current();
     rebuild(clockRef.current);
   }, [header, rebuild]);
 
@@ -909,6 +1167,16 @@ export function LiveChart() {
     geoRef.current = { ib: snap.ib, range: snap.range };
   }, []);
 
+  /** The same, for an extra pane. The ⚓ is the one gesture that is genuinely
+   *  per pane — it draws on the chart you dropped it on — so each pane's engine
+   *  keeps its own anchor. */
+  const setPaneAnchor = useCallback((i: number, barTime: number | null) => {
+    const eng = extraEngines.current[i];
+    if (!eng) return;
+    eng.setAnchor(barTime);
+    extraCharts.current[i]?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
+  }, []);
+
   /** Change what counts as a big trade — a re-derivation, exactly as on Replay:
    *  which sweeps clear the threshold is a question about the tape, so the
    *  engine re-runs it rather than the chart filtering marks it was given. */
@@ -918,6 +1186,8 @@ export function LiveChart() {
     if (!eng) return;
     eng.setBigLots(lots);
     chartRef.current?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
+    extraEngines.current.forEach((e) => e?.setBigLots(lots));
+    resyncPanesRef.current(false);
   }, []);
 
   /** Change what selects a tape event — the same path, for a stronger version
@@ -930,6 +1200,8 @@ export function LiveChart() {
     if (!eng) return;
     eng.setEventTuning(patch);
     chartRef.current?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
+    extraEngines.current.forEach((e) => e?.setEventTuning(patch));
+    resyncPanesRef.current(false);
   }, []);
 
   // The event layer as the chart takes it — its presence is what offers the
@@ -1398,14 +1670,41 @@ export function LiveChart() {
         }
       >
         <TimeframeControl
-          value={tfId}
-          onChange={setTfId}
+          // The focused pane's bucketing — the same arrangement as Replay's, so
+          // one control drives however many charts are up.
+          value={focusedPane === 0 ? tfId : paneTfIds[focusedPane]}
+          onChange={(id) =>
+            focusedPane === 0
+              ? setTfId(id)
+              : setPaneTfIds((prev) => prev.map((t, j) => (j === focusedPane ? id : t)))
+          }
           options={TIMEFRAMES.map((t) => ({ key: t.id, label: t.label }))}
           // The tick bar (unique to a tape-driven chart), the default, and the
           // two the research vocabulary is written in. 30s/2m/3m/1h go behind ⋯.
           primary={["500t", "1m", "5m", "15m"]}
           compact
         />
+        {paneCount > 1 && (
+          <span className="chart-focus-note" title="Point at a pane to act on it">
+            pane <b>{focusedPane + 1}</b>
+          </span>
+        )}
+        <LayoutPicker value={layout} onChange={setLayout} />
+        {paneCount > 1 && (
+          <button
+            type="button"
+            className={`chart-topbar-btn link${linkOn ? " on" : ""}`}
+            onClick={() => setLinkOn((v) => !v)}
+            aria-pressed={linkOn}
+            title={
+              linkOn
+                ? "Linked — the panes share one crosshair, and scrolling one moves the right edge of all of them. Each keeps its own span."
+                : "Unlinked — each pane scrolls on its own"
+            }
+          >
+            ⇄
+          </button>
+        )}
       </ChartTopBar>
 
       {setupOpen && (
@@ -1621,9 +1920,34 @@ export function LiveChart() {
 
       <div className="sim-body">
         <div className="sim-chart-card">
-          <div className="sim-chart">
+          {/* The rail and the pane grid, as on Replay: one tool rail outside every
+              canvas, acting on the focused pane. */}
+          <div className="sim-chart-wrap">
+          <ChartToolRail
+            state={toolStates[focusedPane] ?? EMPTY_TOOL_STATE}
+            paneLabel={paneCount > 1 ? String(focusedPane + 1) : undefined}
+            onArm={(id: ChartToolId | null) => paneChart(focusedPane)?.armTool(id)}
+            onClearAvwap={() => paneChart(focusedPane)?.clearAvwap()}
+            onDeleteSelected={() => paneChart(focusedPane)?.deleteSelected()}
+            onClearDrawings={() => paneChart(focusedPane)?.clearDrawings()}
+          />
+          <div className="sim-chart" ref={splitRef} style={gridTemplate(splitPct, splitPctY)}>
+            <div
+              className={`sim-pane${paneCount > 1 && focusedPane === 0 ? " focused" : ""}`}
+              data-pane="0"
+              style={{ gridArea: gridArea(LAYOUTS[layout].place[0]) }}
+            >
             <ReplayChart
               ref={chartRef}
+              linked={linkOn && paneLinked[0]}
+              onLinkedChange={
+                paneCount > 1
+                  ? (v) => setPaneLinked((p) => p.map((b, j) => (j === 0 ? v : b)))
+                  : undefined
+              }
+              onFocus={() => setFocus(0)}
+              onToolsChange={(s) => reportTools(0, s)}
+              routedTo={routedSymbol}
               onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
               onFlatten={closeAll}
@@ -1683,6 +2007,23 @@ export function LiveChart() {
                 dragged anywhere on the chart and remembered there — one saved
                 spot across both clocks. */}
             <QuickDock onFloorChange={setFloor}>
+              {/* Size and the bracket on the window that fires them, priced in
+                  the contract the order would actually reach — see TicketKnobs.
+                  On a real account that is the routed one, which is the whole
+                  reason the money is worth printing here: an MNQ stop read at
+                  NQ's $20 a point is ten times the risk that is on. */}
+              <TicketKnobs
+                ticket={{ size, stopTicks, targetTicks }}
+                onChange={(t) =>
+                  setTicket((p) => ({
+                    ...p,
+                    size: t.size,
+                    stopTicks: t.stopTicks,
+                    targetTicks: t.targetTicks,
+                  }))
+                }
+                tickUsd={intent.real ? routedTick * routedPoint : tickSize * pointValue}
+              />
               {openPos && (
                 <button type="button" className="sim-quick-btn flat" onClick={closeAll} title="Flatten (q)">
                   Close
@@ -1719,6 +2060,84 @@ export function LiveChart() {
                 </button>
               ))}
             </QuickDock>
+            </div>
+            {/* The dividers, read off the layout — see lib/paneLayout. */}
+            {LAYOUTS[layout].dividers.map((d) => (
+              <div
+                key={d.axis}
+                className="sim-pane-divider"
+                data-axis={d.axis}
+                data-dragging={dragging === d.axis ? "1" : undefined}
+                style={{ gridArea: gridArea(d) }}
+                onPointerDown={(e) => startSplitDrag(e, d.axis)}
+                role="separator"
+                aria-orientation={d.axis === "v" ? "vertical" : "horizontal"}
+                aria-label={d.axis === "v" ? "Resize the columns" : "Resize the rows"}
+                title="Drag to resize"
+              />
+            ))}
+            {/* The extra panes. Each is its own engine on its own bucketing over
+                the *same growing tape*, each draws the broker's position, its
+                working orders and its fills, and each takes the same order
+                gestures pane 0 does — the callbacks are handed over unchanged,
+                because every one of them names a price and nothing else. The ⚓
+                is the exception: it draws on the chart you dropped it on. */}
+            {LAYOUTS[layout].place.slice(1).map((place, k) => {
+              const i = k + 1;
+              return (
+                <div
+                  className={`sim-pane${focusedPane === i ? " focused" : ""}`}
+                  data-pane={i}
+                  key={i}
+                  style={{ gridArea: gridArea(place) }}
+                >
+                  <ReplayChart
+                    ref={(h) => {
+                      extraCharts.current[i] = h;
+                    }}
+                    linked={linkOn && paneLinked[i]}
+                    onLinkedChange={(v) =>
+                      setPaneLinked((p) => p.map((b, j) => (j === i ? v : b)))
+                    }
+                    onFocus={() => setFocus(i)}
+                    onToolsChange={(s) => reportTools(i, s)}
+                    routedTo={routedSymbol}
+                    onAnchorChange={(t) => setPaneAnchor(i, t)}
+                    onBracketChange={moveBracket}
+                    onFlatten={closeAll}
+                    onOrderMove={(o) =>
+                      editOrder(o.id, { price: o.price, stop: o.stop, target: o.target })
+                    }
+                    onOrderCancel={cancelOrder}
+                    onPlaceOrder={placeAt}
+                    onPlaceTyped={(o) => placeResting(o.price, o.side, o.type)}
+                    ticket={{ size, stopTicks, targetTicks }}
+                    onTicketChange={(t) =>
+                      setTicket((p) => ({
+                        ...p,
+                        size: t.size,
+                        stopTicks: t.stopTicks,
+                        targetTicks: t.targetTicks,
+                      }))
+                    }
+                    mark={hud.lastPrice}
+                    pointValue={intent.real ? routedPoint : pointValue}
+                    canPlaceOrders={ready}
+                    secondsAxis={showsSeconds(paneTfsRef.current[i])}
+                    bigLots={bigLots}
+                    composite={composite}
+                    nodeProm={nodeProm}
+                    modernVwap={mvParams}
+                    events={eventOverlay}
+                    indicatorSettings={indicatorSettings}
+                    drawingsKey={header ? `${header.symbol}|${header.date}` : undefined}
+                    prefsPane={`p${i}`}
+                    onReady={() => primePane(i)}
+                  />
+                </div>
+              );
+            })}
+          </div>
           </div>
         </div>
 
