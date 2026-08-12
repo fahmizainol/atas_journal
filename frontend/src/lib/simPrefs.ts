@@ -18,6 +18,7 @@ import { DEFAULT_NODE_PROM } from "./volumeProfile";
 import type { CompositeRule, CompositeSpan } from "./compositeProfile";
 import { DEFAULT_TIMEFRAME_ID, TIMEFRAMES } from "./timeframes";
 import { DEFAULT_MODERN_VWAP, modernVwapParams, type ModernVwapParams } from "./modernVwap";
+import { MAX_PANES, clampRatio, isLayoutId, type LayoutId } from "./paneLayout";
 
 /** Replay speeds, as multiples of real time. */
 export const SIM_SPEEDS = [1, 5, 30, 120, 300];
@@ -171,20 +172,25 @@ export interface SimPrefs {
    *  rail away, and that preference outlives the session. Like the other reading
    *  choices here it cannot touch a fill. */
   railPinned: boolean;
-  /** How many chart panes the replay draws. One is the page as it always was.
-   *  Two puts a context chart beside the trading one — its own engine on its own
-   *  bucketing over the same tape, read-only, repainting when a bar closes on it
-   *  rather than every frame (measured: a pane that repaints per frame costs a
-   *  quarter of the frame rate, one gated on bar close costs nothing). Stored as
-   *  a count rather than a boolean because the layout is built to grow. */
-  panes: number;
-  /** The context pane's bucketing. Its own preference — the point of the pane is
-   *  that it is *not* the timeframe you are trading. */
-  paneTf: string;
-  /** Where the divider sits, as the trading pane's percentage of the width.
-   *  Clamped well short of either edge: a pane dragged to nothing is a pane you
-   *  cannot get back by dragging. */
+  /** How the panes are arranged. `one` is the page as it always was; the rest
+   *  put two, three or four charts on the same tape, each with its own engine on
+   *  its own bucketing (measured: a pane that repaints per frame costs a quarter
+   *  of the frame rate, one gated on bar close costs nothing — so only the pane
+   *  you are working in repaints live). See lib/paneLayout. */
+  layout: LayoutId;
+  /** Each pane's bucketing, indexed by pane. Held for `MAX_PANES` however many
+   *  are on screen, so switching 1 -> 2x2 -> 1 gives every pane back the
+   *  bucketing it had rather than resetting it. Pane 0's entry is unused — the
+   *  page's own `timeframe` is pane 0's, because that is the one the top bar has
+   *  always driven and a second copy of it would be a second source of truth. */
+  paneTfs: string[];
+  /** Where the vertical divider sits, as the left column's percentage of the
+   *  width, and the horizontal one as the top row's percentage of the height.
+   *  Clamped well short of every edge: a pane dragged to nothing is a pane you
+   *  cannot get back by dragging. Kept across layout changes, so going
+   *  2-col -> 2x2 -> 2-col lands on the dividers you left. */
   splitPct: number;
+  splitPctY: number;
 }
 
 const KEY = "sim.prefs";
@@ -241,11 +247,13 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   // own answer (live.chartKnobs).
   railPinned: false,
   // One pane, so nothing about the page changes until it is asked for.
-  panes: 1,
-  // Five minutes against a one-minute default: far enough apart to be a second
+  layout: "one",
+  // Pane 0's slot is a placeholder (the page's own `timeframe` is pane 0's).
+  // The rest run slower as they go: far enough apart to be a second and third
   // read of the session rather than the same chart at a different zoom.
-  paneTf: "5m",
+  paneTfs: ["5m", "5m", "15m", "1h"],
   splitPct: 60,
+  splitPctY: 55,
 };
 
 const ORDER_TYPES: OrderType[] = ["market", "limit", "stop"];
@@ -329,11 +337,12 @@ export function loadSimPrefs(): SimPrefs {
       eventMarginal: typeof s.eventMarginal === "boolean" ? s.eventMarginal : d.eventMarginal,
       indicators: typeof s.indicators === "boolean" ? s.indicators : d.indicators,
       railPinned: typeof s.railPinned === "boolean" ? s.railPinned : d.railPinned,
-      // Only the layouts that exist. A stored 3 from a later version would
-      // otherwise render one pane and silently drop the rest of the setting.
-      panes: s.panes === 2 ? 2 : d.panes,
-      paneTf: TIMEFRAMES.some((t) => t.id === s.paneTf) ? (s.paneTf as string) : d.paneTf,
+      // Only the layouts that exist — an unknown id from a later version would
+      // otherwise render nothing at all.
+      layout: isLayoutId(s.layout) ? s.layout : legacyLayout(s, d.layout),
+      paneTfs: paneTfs(s, d.paneTfs),
       splitPct: clampSplit(s.splitPct, d.splitPct),
+      splitPctY: clampRatio(s.splitPctY, d.splitPctY),
     };
   } catch {
     return { ...d, modernVwap: { ...d.modernVwap } };
@@ -342,8 +351,31 @@ export function loadSimPrefs(): SimPrefs {
 
 /** Keep the divider away from both edges — see `SimPrefs.splitPct`. */
 export function clampSplit(v: unknown, fallback = DEFAULT_SIM_PREFS.splitPct): number {
-  if (typeof v !== "number" || !Number.isFinite(v)) return fallback;
-  return Math.min(80, Math.max(20, Math.round(v)));
+  return clampRatio(v, fallback);
+}
+
+/** What a pref written before there were layouts meant.
+ *
+ *  The old shape was `panes: 1 | 2` — one chart, or a trading chart beside a
+ *  context one, side by side. That is exactly `col2`, so a stored 2 comes back
+ *  as the same arrangement rather than as the default; anyone who had the split
+ *  on finds it still on. */
+function legacyLayout(s: Record<string, unknown>, fallback: LayoutId): LayoutId {
+  return s.panes === 2 ? "col2" : fallback;
+}
+
+/** Per-pane bucketings, padded and validated to `MAX_PANES`.
+ *
+ *  The old single `paneTf` was the context pane's, which is pane 1 — so a stored
+ *  one lands there and the rest keep their defaults. Anything unrecognised (a
+ *  timeframe that has since been removed) falls back per pane rather than
+ *  discarding the whole array. */
+function paneTfs(s: Record<string, unknown>, d: string[]): string[] {
+  const known = (v: unknown): v is string => TIMEFRAMES.some((t) => t.id === v);
+  const stored = Array.isArray(s.paneTfs) ? (s.paneTfs as unknown[]) : [];
+  const out = Array.from({ length: MAX_PANES }, (_, i) => (known(stored[i]) ? stored[i] : d[i]));
+  if (!stored.length && known(s.paneTf)) out[1] = s.paneTf;
+  return out;
 }
 
 export function saveSimPrefs(p: SimPrefs): void {

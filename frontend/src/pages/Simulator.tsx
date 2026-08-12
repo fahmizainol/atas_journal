@@ -30,6 +30,8 @@ import { SimIndicators } from "../components/charts/SimIndicators";
 import { QuickDock } from "../components/charts/QuickDock";
 import { TimeframeControl } from "../components/charts/TimeframeControl";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
+import { LayoutPicker } from "../components/charts/LayoutPicker";
+import { LAYOUTS, gridArea, gridTemplate } from "../lib/paneLayout";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
 import {
   useSimulatorDays,
@@ -510,20 +512,44 @@ export function Simulator() {
   // see it — see the rail section further down for what it does.
   const [railPinned, setRailPinned] = useState(prefs.railPinned);
 
-  // The context pane's own carried settings, up here for the same reason. What
-  // the pane *is* lives further down, with the engine that feeds it.
-  const [panes, setPanes] = useState(prefs.panes);
-  const [paneTfId, setPaneTfId] = useState(prefs.paneTf);
+  // The extra panes' own carried settings, up here for the same reason. What a
+  // pane *is* lives further down, with the engines that feed them.
+  const [layout, setLayout] = useState(prefs.layout);
+  const [paneTfIds, setPaneTfIds] = useState(prefs.paneTfs);
   const [splitPct, setSplitPct] = useState(prefs.splitPct);
-  const chart2Ref = useRef<ReplayChartHandle>(null);
-  const engine2Ref = useRef<ReplayEngine | null>(null);
-  const paneTf = timeframeById(paneTfId);
-  const paneTfRef = useRef(paneTf);
-  paneTfRef.current = paneTf;
-  const panesRef = useRef(panes);
-  panesRef.current = panes;
-  /** rAF timestamp of the context pane's last repaint — see PANE_DRAW_MS. */
-  const paneDrawnRef = useRef(0);
+  const [splitPctY, setSplitPctY] = useState(prefs.splitPctY);
+  const paneCount = LAYOUTS[layout].panes;
+
+  // Panes 1..n-1 — every chart on the page except the page's own. Arrays indexed
+  // by pane rather than a second named ref per pane: with six layouts the count
+  // is data, and `chart2Ref`/`chart3Ref`/`chart4Ref` would put that count into
+  // the source four times over. Index 0 is deliberately never used, so a pane
+  // index means the same thing here as it does everywhere else on the page.
+  const extraCharts = useRef<(ReplayChartHandle | null)[]>([]);
+  const extraEngines = useRef<(ReplayEngine | null)[]>([]);
+  /** rAF timestamp of each extra pane's last repaint — see PANE_DRAW_MS. */
+  const extraDrawn = useRef<number[]>([]);
+  // Identity-stable, so an effect can depend on "which bucketings" without
+  // re-running because `.map` handed back a fresh array this render.
+  const paneTfKey = paneTfIds.join(",");
+  const paneTfsRef = useRef(paneTfIds.map(timeframeById));
+  paneTfsRef.current = paneTfIds.map(timeframeById);
+  const paneCountRef = useRef(paneCount);
+  paneCountRef.current = paneCount;
+
+  /** Do something to every extra pane that currently exists. The guard is the
+   *  point: a pane's chart handle outlives the layout change that removed it by
+   *  one render, and driving a chart that is on its way out is how the old
+   *  two-pane code learned to check `panes > 1` in five places. */
+  const eachExtra = useCallback(
+    (fn: (chart: ReplayChartHandle, i: number) => void) => {
+      for (let i = 1; i < paneCountRef.current; i++) {
+        const c = extraCharts.current[i];
+        if (c) fn(c, i);
+      }
+    },
+    [],
+  );
 
   // The fill model follows you to the next visit too, and to the Live page —
   // hence its own store rather than a corner of this page's prefs.
@@ -560,9 +586,10 @@ export function Simulator() {
       eventMarginal: evMarginal,
       indicators,
       railPinned,
-      panes,
-      paneTf: paneTfId,
+      layout,
+      paneTfs: paneTfIds,
       splitPct,
+      splitPctY,
     });
   }, [
     root,
@@ -590,9 +617,10 @@ export function Simulator() {
     evMarginal,
     indicators,
     railPinned,
-    panes,
-    paneTfId,
+    layout,
+    paneTfIds,
     splitPct,
+    splitPctY,
   ]);
 
   // The app shell scrolls in normal document flow, so there is no ancestor
@@ -804,12 +832,16 @@ export function Simulator() {
     chartRef.current?.setOrders(views);
     const marks = st.trades.map((t) => tradeMark(t, barAt));
     chartRef.current?.setTrades(marks);
-    // The context pane gets the position and the fills but never the working
-    // orders: a resting order is a thing you drag, and the pane it is drawn on
-    // does not take gestures. Seeing where you are and where you traded is the
-    // reading; seeing a level you cannot move is an invitation to try.
-    chart2Ref.current?.setPosition(st.open ? posLine(st.open, barAt) : null);
-    chart2Ref.current?.setTrades(marks);
+    // Every other pane gets exactly the same three things. It costs nothing to
+    // draw them there: a position and a working order are horizontal lines, so
+    // they carry a price and nothing about where they sit in the tape, and the
+    // same view renders on a 1-minute pane and an hourly one unchanged.
+    const pos = st.open ? posLine(st.open, barAt) : null;
+    eachExtra((c) => {
+      c.setPosition(pos);
+      c.setOrders(views);
+      c.setTrades(marks);
+    });
     // Every path that changes the simulation ends here, which makes this the one
     // place the recorder has to be told. It writes nothing until a fill has
     // happened, and nothing again until something changes.
@@ -825,7 +857,7 @@ export function Simulator() {
     // Cheap enough to sit here: this runs when a fill resolves or you do
     // something, not per frame.
     writeResume();
-  }, [barAt, recordAttempt, writeResume]);
+  }, [barAt, eachExtra, recordAttempt, writeResume]);
 
   // Re-derive everything from the log. Every user action goes through here: an
   // action is rare enough that one pass over the tape costs nothing, and it
@@ -906,21 +938,28 @@ export function Simulator() {
   // exactly that inset. Pointer capture is what keeps the drag alive when the
   // pointer outruns a 7px target, which at speed it always does.
   const splitRef = useRef<HTMLDivElement>(null);
-  const [dragging, setDragging] = useState(false);
-  const startSplitDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+  /** Which divider is being dragged, or null. The axis rather than a boolean:
+   *  a layout can have one of each, and only the one under the pointer should
+   *  light up. */
+  const [dragging, setDragging] = useState<"v" | "h" | null>(null);
+  const startSplitDrag = useCallback((e: React.PointerEvent<HTMLDivElement>, axis: "v" | "h") => {
     const host = splitRef.current;
     if (!host) return;
     e.preventDefault();
     const el = e.currentTarget;
     el.setPointerCapture(e.pointerId);
-    setDragging(true);
+    setDragging(axis);
     const onMove = (ev: PointerEvent) => {
       const box = host.getBoundingClientRect();
-      if (box.width <= 0) return;
-      setSplitPct(clampSplit(((ev.clientX - box.left) / box.width) * 100));
+      const span = axis === "v" ? box.width : box.height;
+      if (span <= 0) return;
+      const at = axis === "v" ? ev.clientX - box.left : ev.clientY - box.top;
+      const pct = clampSplit((at / span) * 100);
+      if (axis === "v") setSplitPct(pct);
+      else setSplitPctY(pct);
     };
     const onUp = () => {
-      setDragging(false);
+      setDragging(null);
       el.releasePointerCapture?.(e.pointerId);
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerup", onUp);
@@ -934,15 +973,19 @@ export function Simulator() {
     el.addEventListener("pointercancel", onUp);
   }, []);
 
-  /** Repaint the context pane from its own engine, as of the clock the trading
-   *  pane is at. Every path that re-derives the primary calls this too — the two
+  /** Repaint every extra pane from its own engine, as of the clock the page's
+   *  chart is at. Every path that re-derives the primary calls this too — the
    *  panes are one session, and a context chart showing a different session than
    *  the one under it is worse than no context chart. */
-  const resyncPane = useCallback((reframe?: boolean | "follow") => {
-    const e2 = engine2Ref.current;
-    if (!e2) return;
-    chart2Ref.current?.setSnapshot(e2.snapshotTo(clockRef.current), { reframe });
-  }, []);
+  const resyncPane = useCallback(
+    (reframe?: boolean | "follow") => {
+      eachExtra((c, i) => {
+        const e = extraEngines.current[i];
+        if (e) c.setSnapshot(e.snapshotTo(clockRef.current), { reframe });
+      });
+    },
+    [eachExtra],
+  );
 
   // --- playback loop --------------------------------------------------------
   const stop = useCallback(() => {
@@ -968,14 +1011,18 @@ export function Simulator() {
       );
       const r = engineRef.current.advance(clock);
       chartRef.current?.applyStep(r);
-      // The context pane advances every frame regardless — the engine step is
+      // Every extra pane advances every frame regardless — the engine step is
       // 0.006ms, and skipping it would leave its bars behind the clock. Only the
-      // *draw* is gated, because the draw is the part that costs anything.
-      if (engine2Ref.current) {
-        const r2 = engine2Ref.current.advance(clock);
-        if (r2.newBar || ts - paneDrawnRef.current >= PANE_DRAW_MS) {
-          paneDrawnRef.current = ts;
-          chart2Ref.current?.applyStep(r2);
+      // *draw* is gated, because the draw is the part that costs anything: a
+      // pane repainting per frame costs about 65% of a core, and four of them
+      // would spend the frame budget on charts nobody is trading off.
+      for (let i = 1; i < paneCountRef.current; i++) {
+        const e = extraEngines.current[i];
+        if (!e) continue;
+        const step = e.advance(clock);
+        if (step.newBar || ts - (extraDrawn.current[i] ?? 0) >= PANE_DRAW_MS) {
+          extraDrawn.current[i] = ts;
+          extraCharts.current[i]?.applyStep(step);
         }
       }
       geoRef.current = { ib: r.ib, range: r.range };
@@ -1117,7 +1164,7 @@ export function Simulator() {
     if (!eng) return;
     eng.setBigLots(lots);
     chartRef.current?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
-    engine2Ref.current?.setBigLots(lots);
+    extraEngines.current.forEach((e) => e?.setBigLots(lots));
     resyncPane(false);
   }, [resyncPane]);
 
@@ -1136,7 +1183,7 @@ export function Simulator() {
     if (!eng) return;
     eng.setEventTuning(patch);
     chartRef.current?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
-    engine2Ref.current?.setEventTuning(patch);
+    extraEngines.current.forEach((e) => e?.setEventTuning(patch));
     resyncPane(false);
   }, [resyncPane]);
 
@@ -1270,27 +1317,34 @@ export function Simulator() {
    * it has just been (re)built, and re-running it costs one ~60ms re-derivation
    * over a tape that is already in memory.
    */
-  const primePane = useCallback(() => {
+  const primePane = useCallback((only?: number) => {
     const tape = tapeRef.current;
     const data = sessionRef.current;
-    const chart = chart2Ref.current;
-    if (panesRef.current < 2 || !tape || !data || !chart) return;
-    const e2 = new ReplayEngine(tape, data, paneTfRef.current);
-    e2.setBigLots(bigLotsRef.current);
-    e2.setEventTuning(evTuningRef.current);
-    engine2Ref.current = e2;
-    chart.setTape(tape, { contextRanges: contextRangesRef.current });
-    chart.setSnapshot(e2.snapshotTo(clockRef.current));
-    paneDrawnRef.current = 0;
+    if (!tape || !data) return;
+    for (let i = 1; i < paneCountRef.current; i++) {
+      if (only != null && only !== i) continue;
+      const chart = extraCharts.current[i];
+      if (!chart) continue;
+      const e = new ReplayEngine(tape, data, paneTfsRef.current[i]);
+      e.setBigLots(bigLotsRef.current);
+      e.setEventTuning(evTuningRef.current);
+      extraEngines.current[i] = e;
+      chart.setTape(tape, { contextRanges: contextRangesRef.current });
+      chart.setSnapshot(e.snapshotTo(clockRef.current));
+      extraDrawn.current[i] = 0;
+    }
   }, []);
 
   useEffect(() => {
-    if (panes < 2) {
-      engine2Ref.current = null;
-      return;
+    // Engines belonging to panes the layout no longer draws go now rather than
+    // when their chart unmounts: an engine is a whole tape's worth of derived
+    // bars, and one kept alive for a pane nobody can see is a leak that only
+    // shows up as memory.
+    for (let i = paneCount; i < extraEngines.current.length; i++) {
+      extraEngines.current[i] = null;
     }
     primePane();
-  }, [panes, paneTf, contextRanges, primePane]);
+  }, [paneCount, paneTfKey, contextRanges, primePane]);
 
   // Decode + build the engine whenever a new session lands — or whenever the
   // context days in front of it change, which is the same construction with the
@@ -1422,8 +1476,7 @@ export function Simulator() {
     // The context pane's own engine over the same tape — the same one path a
     // pane switched on mid-replay takes, so there is only one way it is ever
     // built. It reads the refs this effect has just written.
-    if (panesRef.current > 1) primePane();
-    else engine2Ref.current = null;
+    primePane();
     geoRef.current = { ib: snap.ib, range: snap.range };
     clockRef.current = clock;
     // A sitting resumed at the end of its tape has already had its ending — the
@@ -1498,8 +1551,8 @@ export function Simulator() {
   // rebuild's own `setTape` is not doubled up on.
   useEffect(() => {
     chartRef.current?.setContextRanges(contextRanges);
-    chart2Ref.current?.setContextRanges(contextRanges);
-  }, [contextRanges]);
+    eachExtra((c) => c.setContextRanges(contextRanges));
+  }, [contextRanges, eachExtra]);
 
   useEffect(() => () => stop(), [stop]);
 
@@ -2090,23 +2143,11 @@ export function Simulator() {
           primary={["500t", "1m", "5m", "15m"]}
           compact
         />
-        {/* The split, next to the bucketing it splits: both answer "what am I
+        {/* The layout, next to the bucketing it arranges: both answer "what am I
             looking at", and this is the other thing you change mid-read. Hidden
-            on a narrow viewport — two half-width charts on a phone is two charts
-            you cannot read, and the mobile pass deliberately stops at the Lab. */}
-        <button
-          type="button"
-          className="sim-pane-toggle"
-          aria-pressed={panes > 1}
-          onClick={() => setPanes((n) => (n > 1 ? 1 : 2))}
-          title={
-            panes > 1
-              ? "One chart"
-              : `Add a ${paneTf.label} context chart beside this one (read-only)`
-          }
-        >
-          {panes > 1 ? "◧◨" : "◫"}
-        </button>
+            on a narrow viewport — four half-width charts on a phone is four
+            charts you cannot read, and the mobile pass stops at the Lab. */}
+        <LayoutPicker value={layout} onChange={setLayout} />
       </ChartTopBar>
       {/* A press anywhere else puts the setup panel away — the touch screen's
           replacement for Escape, which a phone does not have. Under the bar, so
@@ -2333,13 +2374,17 @@ export function Simulator() {
 
       <div className="sim-body">
         <div className="sim-chart-card">
-          <div className="sim-chart" ref={splitRef}>
-            {/* The trading pane. Everything the page floats over a chart — the
-                indicator strip, the order dock — is inside it rather than beside
-                it, so a split moves them with the chart they belong to. */}
+          <div className="sim-chart" ref={splitRef} style={gridTemplate(splitPct, splitPctY)}>
+            {/* Pane 0 — the page's own chart. Everything the page floats over a
+                chart (the indicator strip, the order dock) is inside it rather
+                than beside it, so a layout change moves them with the chart they
+                belong to. Placed like every other pane; with one pane on screen
+                the placement spans the divider tracks too, so nothing about the
+                single-chart page moved. */}
             <div
               className="sim-pane"
-              style={panes > 1 ? { flex: `0 0 ${splitPct}%` } : undefined}
+              data-pane="0"
+              style={{ gridArea: gridArea(LAYOUTS[layout].place[0]) }}
             >
             <ReplayChart
               ref={chartRef}
@@ -2452,28 +2497,49 @@ export function Simulator() {
               </button>
             </QuickDock>
             </div>
-            {panes > 1 && (
-              <>
+            {/* The dividers. Read off the layout rather than counted here:
+                which axes a layout splits on is a property of the layout, and
+                the drag handler is told which ratio it moves. */}
+            {LAYOUTS[layout].dividers.map((d) => (
+              <div
+                key={d.axis}
+                className="sim-pane-divider"
+                data-axis={d.axis}
+                data-dragging={dragging === d.axis ? "1" : undefined}
+                style={{ gridArea: gridArea(d) }}
+                onPointerDown={(e) => startSplitDrag(e, d.axis)}
+                role="separator"
+                aria-orientation={d.axis === "v" ? "vertical" : "horizontal"}
+                aria-label={d.axis === "v" ? "Resize the columns" : "Resize the rows"}
+                title="Drag to resize — double-click to even them up"
+                onDoubleClick={() =>
+                  d.axis === "v"
+                    ? setSplitPct(DEFAULT_SIM_PREFS.splitPct)
+                    : setSplitPctY(DEFAULT_SIM_PREFS.splitPctY)
+                }
+              />
+            ))}
+            {/* The extra panes. Each one is its own engine on its own bucketing
+                over the same tape, and each draws the position, the working
+                orders and the fills — see the publish path. They take no order
+                gestures yet, which is the next slice of this build, not a
+                property of the layout. */}
+            {LAYOUTS[layout].place.slice(1).map((place, k) => {
+              const i = k + 1;
+              return (
                 <div
-                  className="sim-pane-divider"
-                  data-dragging={dragging ? "1" : undefined}
-                  onPointerDown={startSplitDrag}
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-label="Resize the context pane"
-                  title="Drag to resize — double-click to even them up"
-                  onDoubleClick={() => setSplitPct(DEFAULT_SIM_PREFS.splitPct)}
-                />
-                {/* The context pane. Read-only by construction: it is handed no
-                    order callbacks and no ticket, so there is no gesture on it
-                    that could reach the blotter. What it draws is the session
-                    you are trading, on a bucketing you are not. */}
-                <div className="sim-pane">
+                  className="sim-pane"
+                  data-pane={i}
+                  key={i}
+                  style={{ gridArea: gridArea(place) }}
+                >
                   <ReplayChart
-                    ref={chart2Ref}
+                    ref={(h) => {
+                      extraCharts.current[i] = h;
+                    }}
                     canPlaceOrders={false}
                     hideDates={hidden}
-                    secondsAxis={showsSeconds(paneTf)}
+                    secondsAxis={showsSeconds(paneTfsRef.current[i])}
                     bigLots={bigLots}
                     composite={historyDays > 0 ? composite : "off"}
                     nodeProm={nodeProm}
@@ -2481,18 +2547,23 @@ export function Simulator() {
                     events={eventOverlay}
                     indicatorSettings={indicatorSettings}
                     drawingsKey={sel ? `${sel.symbol}|${sel.date}` : undefined}
-                    prefsPane="b"
-                    onReady={primePane}
+                    // Each pane keeps its own indicator visibility and legend
+                    // state. Keyed by index, so pane 2's answers are pane 2's
+                    // whichever layout put it there.
+                    prefsPane={`p${i}`}
+                    onReady={() => primePane(i)}
                   />
                   {/* The pane's own bucketing, on the pane — the same control
-                      the trading pane drives from the top bar, so every
-                      timeframe is reachable here too and the ⋯ holds the rest.
-                      It sits *on* the chart rather than in the bar because it
-                      belongs to this pane and the bar belongs to the page. */}
+                      pane 0 drives from the top bar, so every timeframe is
+                      reachable here too and the ⋯ holds the rest. It sits *on*
+                      the chart rather than in the bar because it belongs to this
+                      pane and the bar belongs to the page. */}
                   <div className="sim-pane-tf">
                     <TimeframeControl
-                      value={paneTfId}
-                      onChange={setPaneTfId}
+                      value={paneTfIds[i]}
+                      onChange={(v) =>
+                        setPaneTfIds((prev) => prev.map((t, j) => (j === i ? v : t)))
+                      }
                       options={TIMEFRAMES.map((t) => ({ key: t.id, label: t.label }))}
                       // The slow end: a context pane on 500-tick bars is a
                       // second copy of the chart you are already reading.
@@ -2501,8 +2572,8 @@ export function Simulator() {
                     />
                   </div>
                 </div>
-              </>
-            )}
+              );
+            })}
           </div>
           {/* The transport keeps a permanent row — the one deliberate exception
               to this page summoning its chrome. It is not something you

@@ -58,17 +58,24 @@ try {
   await openChart(page, "/charts/replay");
   await page.evaluate(() => {
     localStorage.removeItem("sim.prefs");
-    localStorage.removeItem("chart.indicatorVisibility.b");
-    localStorage.removeItem("chart.legendOpen.b");
+    for (const i of [1, 2, 3]) {
+      localStorage.removeItem(`chart.indicatorVisibility.p${i}`);
+      localStorage.removeItem(`chart.legendOpen.p${i}`);
+    }
   });
   await openChart(page, "/charts/replay");
 
   check("starts as one pane", (await paneCount()) === 1, `${await paneCount()} pane(s)`);
 
-  const toggle = page.locator(".sim-pane-toggle");
-  await toggle.click();
-  await page.waitForTimeout(2500);
-  check("the toggle adds a pane", (await paneCount()) === 2, `${await paneCount()} pane(s)`);
+  /** Pick a layout by the title its button carries (see lib/paneLayout). */
+  const pickLayout = async (title) => {
+    await page.locator(".chart-layout-btn").click();
+    await page.locator(`.chart-layout-menu button[title="${title}"]`).click();
+    await page.waitForTimeout(2500);
+  };
+
+  await pickLayout("Two side by side");
+  check("the picker adds a pane", (await paneCount()) === 2, `${await paneCount()} pane(s)`);
 
   const a = await axisOf(0);
   const b = await axisOf(1);
@@ -128,14 +135,18 @@ try {
     stores.pane === null ? "no pane blob written yet" : "separate blobs",
   );
 
-  // Read-only: the context pane draws no order dock.
+  // One order dock on the page, and it belongs to pane 0.
   const docks = await page.evaluate(
     () => document.querySelectorAll(".sim-pane .sim-quick-btn").length,
   );
-  const inSecond = await page.evaluate(
-    () => document.querySelectorAll(".sim-pane:nth-of-type(3) .sim-quick-btn").length,
+  const elsewhere = await page.evaluate(
+    () => document.querySelectorAll('.sim-pane:not([data-pane="0"]) .sim-quick-btn').length,
   );
-  check("the order dock is on the trading pane only", docks > 0 && inSecond === 0, `${docks} buttons, ${inSecond} in the context pane`);
+  check(
+    "the order dock is on pane 0 only",
+    docks > 0 && elsewhere === 0,
+    `${docks} buttons, ${elsewhere} outside pane 0`,
+  );
 
   // The gate, at 1× — the case that matters and the one the first version of
   // this check missed by playing at 30×. A 15m pane closes a bar every fifteen
@@ -157,9 +168,27 @@ try {
 
   await shot(page, "panecheck");
 
-  await toggle.click();
-  await page.waitForTimeout(600);
-  check("the toggle takes it away again", (await paneCount()) === 1, `${await paneCount()} pane(s)`);
+  // Every layout draws the panes it claims and the dividers that go with them —
+  // the geometry itself is checked without a browser by tools/layoutcheck.mjs;
+  // what this adds is that a real chart mounts in each one.
+  for (const [title, panes, dividers] of [
+    ["Two stacked", 2, 1],
+    ["One left, two stacked right", 3, 2],
+    ["One on top, two below", 3, 2],
+    ["Two by two", 4, 2],
+  ]) {
+    await pickLayout(title);
+    const n = await paneCount();
+    const d = await page.locator(".sim-pane-divider").count();
+    const drawn = await page.evaluate(
+      () => [...document.querySelectorAll(".sim-pane")].every((p) => p.querySelector("canvas")),
+    );
+    check(`${title.toLowerCase()} draws ${panes} panes`, n === panes && d === dividers && drawn,
+      `${n} panes, ${d} dividers, ${drawn ? "all drew" : "a pane is blank"}`);
+  }
+
+  await pickLayout("One chart");
+  check("the picker takes them away again", (await paneCount()) === 1, `${await paneCount()} pane(s)`);
   check("no console errors", errors.length === 0, errors.slice(0, 2).join(" | "));
 } finally {
   await browser.close();

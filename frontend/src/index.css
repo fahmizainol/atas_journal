@@ -2281,70 +2281,144 @@ button:disabled {
   flex: 1;
   min-height: 0;
   position: relative;
-  display: flex;
-  flex-direction: row;
+  /* A 3x3 line grid — two content tracks per axis with a divider track between
+     them. The template comes from lib/paneLayout so the placements and the
+     tracks they are read against can never disagree; with one pane the pane
+     spans the divider tracks too and this is a plain box again. */
+  display: grid;
 }
-/* The split toggle, sitting in the top bar beside the timeframe picker and
-   styled to match it. */
-.sim-pane-toggle {
+/* The layout picker, sitting in the top bar beside the timeframe control and
+   styled to match it. The button wears the layout it is on, so the bar says
+   which arrangement you are in without a word of text. */
+.chart-layout {
+  position: relative;
+  flex: none;
+  display: flex;
+}
+.chart-layout-btn {
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1;
-  padding: 5px 8px;
+  line-height: 0;
+  padding: 4px 7px;
   border-radius: 6px;
   cursor: pointer;
 }
-.sim-pane-toggle:hover {
-  color: var(--text);
-  background: var(--bg-2);
+.chart-layout-btn svg rect {
+  fill: currentColor;
 }
-.sim-pane-toggle[aria-pressed="true"] {
+.chart-layout-btn:hover,
+.chart-layout-btn.open {
   color: var(--text);
   background: var(--bg-2);
   border-color: var(--card-border);
+}
+.chart-layout-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  padding: 6px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 9px;
+  box-shadow: 0 10px 34px #000a;
+}
+.chart-layout-menu button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--card-border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+.chart-layout-menu button svg rect {
+  fill: var(--grid);
+}
+.chart-layout-menu button:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+.chart-layout-menu button.on {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.chart-layout-menu button.on svg rect {
+  fill: var(--accent);
 }
 /* Two half-width charts on a phone is two charts you cannot read. The split is
    hidden rather than unset: the choice belongs to the desktop it was made on and
    is still there when you go back to it, whereas clearing the preference would
    mean visiting on a phone quietly rearranged the machine you work on. The
    trading pane gives up its width fraction and takes the whole box. */
+/* Four half-width charts on a phone is four charts you cannot read. The layout
+   is *hidden* rather than unset: the arrangement you chose on a desktop is still
+   there when you go back to it, whereas clearing the preference would mean
+   visiting on a phone quietly rearranged the machine you work on. Pane 0 takes
+   the whole box, spanning the divider tracks as it does in the one-pane
+   layout. */
 @media (max-width: 900px) {
-  .sim-pane-toggle,
-  .sim-pane-divider,
-  .sim-pane ~ .sim-pane {
+  .chart-layout,
+  .sim-pane-divider {
     display: none;
   }
-  .sim-chart > .sim-pane:first-child {
-    flex: 1 !important;
+  .sim-pane[data-pane]:not([data-pane="0"]) {
+    display: none;
+  }
+  .sim-chart > .sim-pane[data-pane="0"] {
+    grid-area: 1 / 1 / 4 / 4 !important;
   }
 }
 
-/* One pane of the split. `position: relative` is what the chart's own overlays
-   (the legend, the tools, the indicator strip, the order dock) anchor to — with
-   a single pane this box fills .sim-chart exactly, so they land where they
-   always did and nothing about the one-pane page moved. */
+/* One pane. `position: relative` is what the chart's own overlays (the legend,
+   the tools, the indicator strip, the order dock) anchor to — with a single pane
+   this box fills .sim-chart exactly, so they land where they always did and
+   nothing about the one-pane page moved. `overflow: hidden` keeps a pane's
+   overlays inside the pane they belong to rather than over its neighbour. */
 .sim-pane {
   position: relative;
-  flex: 1;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 /* The divider is the only chrome the split adds. Kept to a hairline with a
    generous grab area either side of it: a 3px target is a target you miss, and
    this is a control you reach for mid-replay. */
 .sim-pane-divider {
-  flex: 0 0 7px;
-  cursor: col-resize;
   position: relative;
   background: var(--card-border);
   touch-action: none;
+  /* Over the panes either side, so the grab area that overhangs the track is
+     not swallowed by a chart canvas. */
+  z-index: 4;
 }
-.sim-pane-divider::after {
+.sim-pane-divider[data-axis="v"] {
+  cursor: col-resize;
+}
+.sim-pane-divider[data-axis="h"] {
+  cursor: row-resize;
+}
+/* The grab area overhangs the paint on the axis it resizes: a 7px target is a
+   target you miss, and this is a control you reach for mid-replay. */
+.sim-pane-divider[data-axis="v"]::after {
   content: "";
   position: absolute;
   inset: 0 -4px;
+}
+.sim-pane-divider[data-axis="h"]::after {
+  content: "";
+  position: absolute;
+  inset: -4px 0;
 }
 .sim-pane-divider:hover,
 .sim-pane-divider[data-dragging="1"] {
