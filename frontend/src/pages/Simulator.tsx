@@ -31,8 +31,10 @@ import { QuickDock } from "../components/charts/QuickDock";
 import { TimeframeControl } from "../components/charts/TimeframeControl";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import { LayoutPicker } from "../components/charts/LayoutPicker";
-import { LAYOUTS, clampPaneIndex, gridArea, gridTemplate } from "../lib/paneLayout";
+import { LAYOUTS, MAX_PANES, clampPaneIndex, gridArea, gridTemplate } from "../lib/paneLayout";
 import { setLinkOn as setLinkModuleOn } from "../lib/paneLink";
+import { ChartToolRail } from "../components/charts/ChartToolRail";
+import { EMPTY_TOOL_STATE, type ChartToolId, type ChartToolState } from "../lib/chartTools";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
 import {
   useSimulatorDays,
@@ -533,6 +535,36 @@ export function Simulator() {
   const focusRef = useRef(focusedPane);
   focusRef.current = focusedPane;
 
+  // What each pane's hand-tools are doing, for the one rail that drives them
+  // (see lib/chartTools). Page state because the rail is drawn by the page; one
+  // entry per pane rather than one for the focused pane, so switching focus
+  // shows what that pane already had armed rather than a stale reading of the
+  // pane you left.
+  const [toolStates, setToolStates] = useState<ChartToolState[]>(() =>
+    Array.from({ length: MAX_PANES }, () => EMPTY_TOOL_STATE),
+  );
+  const reportTools = useCallback((i: number, s: ChartToolState) => {
+    setToolStates((prev) => {
+      const cur = prev[i];
+      // The chart reports on a render; most of those say the same thing, and a
+      // fresh array per report would re-render the whole page for nothing.
+      if (
+        cur &&
+        cur.armed === s.armed &&
+        cur.canOrder === s.canOrder &&
+        cur.hasAvwap === s.hasAvwap &&
+        cur.hasRangeSel === s.hasRangeSel &&
+        cur.hasHlineSel === s.hasHlineSel &&
+        cur.drawings === s.drawings
+      ) {
+        return prev;
+      }
+      const next = prev.slice();
+      next[i] = s;
+      return next;
+    });
+  }, []);
+
   // Panes 1..n-1 — every chart on the page except the page's own. Arrays indexed
   // by pane rather than a second named ref per pane: with six layouts the count
   // is data, and `chart2Ref`/`chart3Ref`/`chart4Ref` would put that count into
@@ -549,6 +581,14 @@ export function Simulator() {
   paneTfsRef.current = paneTfIds.map(timeframeById);
   const paneCountRef = useRef(paneCount);
   paneCountRef.current = paneCount;
+
+  /** Any pane's chart handle by index — pane 0's lives in its own ref, since it
+   *  is the page's own chart and everything else on the page reaches it that
+   *  way. The tool rail is the one caller that genuinely doesn't care which. */
+  const paneChart = useCallback(
+    (i: number): ReplayChartHandle | null => (i === 0 ? chartRef.current : extraCharts.current[i]),
+    [],
+  );
 
   /** Do something to every extra pane that currently exists. The guard is the
    *  point: a pane's chart handle outlives the layout change that removed it by
@@ -2494,6 +2534,19 @@ export function Simulator() {
 
       <div className="sim-body">
         <div className="sim-chart-card">
+          {/* The rail and the grid, side by side. One rail for however many
+              charts: a tool is a mode of the terminal, not a property of one
+              canvas — see ChartToolRail. It arms the focused pane, which is why
+              phase 5 (the focus model) had to come first. */}
+          <div className="sim-chart-wrap">
+          <ChartToolRail
+            state={toolStates[focusedPane] ?? EMPTY_TOOL_STATE}
+            paneLabel={paneCount > 1 ? String(focusedPane + 1) : undefined}
+            onArm={(id: ChartToolId | null) => paneChart(focusedPane)?.armTool(id)}
+            onClearAvwap={() => paneChart(focusedPane)?.clearAvwap()}
+            onDeleteSelected={() => paneChart(focusedPane)?.deleteSelected()}
+            onClearDrawings={() => paneChart(focusedPane)?.clearDrawings()}
+          />
           <div className="sim-chart" ref={splitRef} style={gridTemplate(splitPct, splitPctY)}>
             {/* Pane 0 — the page's own chart. Everything the page floats over a
                 chart (the indicator strip, the order dock) is inside it rather
@@ -2515,6 +2568,7 @@ export function Simulator() {
                   : undefined
               }
               onFocus={() => setFocus(0)}
+              onToolsChange={(s) => reportTools(0, s)}
               onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
               onFlatten={closeManual}
@@ -2671,6 +2725,7 @@ export function Simulator() {
                       setPaneLinked((p) => p.map((b, j) => (j === i ? v : b)))
                     }
                     onFocus={() => setFocus(i)}
+                    onToolsChange={(s) => reportTools(i, s)}
                     onAnchorChange={(t) => setPaneAnchor(i, t)}
                     onBracketChange={moveBracket}
                     onFlatten={closeManual}
@@ -2704,6 +2759,7 @@ export function Simulator() {
                 </div>
               );
             })}
+          </div>
           </div>
           {/* The transport keeps a permanent row — the one deliberate exception
               to this page summoning its chrome. It is not something you

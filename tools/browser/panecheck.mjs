@@ -357,6 +357,50 @@ try {
   await page.locator(".chart-topbar-btn.link").click();
   await page.waitForTimeout(300);
 
+  // --- the tool rail (components/charts/ChartToolRail) ---------------------
+  // One rail for four charts, outside every canvas, acting on the focused pane.
+  const railBtns = () =>
+    page.locator(".chart-rail .chart-tool").evaluateAll((els) =>
+      els.map((e) => e.getAttribute("aria-label")),
+    );
+  const railArmed = () =>
+    page.locator(".chart-rail .chart-tool.on").evaluateAll((els) =>
+      els.map((e) => e.getAttribute("aria-label")),
+    );
+  check(
+    "one rail on the page, none left inside a canvas",
+    (await page.locator(".chart-rail").count()) === 1 &&
+      (await page.evaluate(
+        () =>
+          [...document.querySelectorAll(".chart-tools")].filter(
+            (e) => getComputedStyle(e).display !== "none",
+          ).length,
+      )) === 0,
+    `${(await railBtns()).length} buttons: ${(await railBtns()).join(", ")}`,
+  );
+  // ＋Order is on the rail on a desktop. In the canvas it was touch-only, on the
+  // grounds that Space+click is strictly the better mouse gesture — which is
+  // true, and is also why nobody with a mouse ever found the tool.
+  check("the rail offers ＋Order with a mouse", (await railBtns()).includes("＋ Order"));
+
+  await focusPane(2);
+  await page.locator('.chart-rail .chart-tool[aria-label="Measure"]').click();
+  await page.waitForTimeout(400);
+  check("arming from the rail lights it", (await railArmed()).join() === "Measuring…", `lit: ${(await railArmed()).join()}`);
+  // The rail reads the focused pane, so pointing at a pane that has nothing
+  // armed must show nothing armed — not the last pane's state.
+  await focusPane(0);
+  check(
+    "the rail follows focus rather than remembering",
+    (await railArmed()).join() === "Cursor",
+    `lit on pane 1: ${(await railArmed()).join()}`,
+  );
+  await focusPane(2);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+  check("Esc on the pane disarms the rail", (await railArmed()).join() === "Cursor",
+    `lit: ${(await railArmed()).join()}`);
+
   const placed = [];
   for (const pane of [0, 1, 2, 3]) placed.push(await spaceClick(pane));
   check(

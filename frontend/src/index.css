@@ -897,7 +897,10 @@ button:disabled {
 .chart-badges {
   position: absolute;
   top: 8px;
-  right: calc(8px + var(--axis-w, 0px));
+  /* Left of the ◎, which owns this corner (.chart-jump: same top, 28px wide plus
+     its own 8px gutter). Both sit just inside the price axis, so both track
+     --axis-w. */
+  right: calc(var(--axis-w, 60px) + 44px);
   z-index: 4;
   display: flex;
   gap: 4px;
@@ -2320,8 +2323,19 @@ button:disabled {
    context is for the indicator strip below, which floats over the chart's foot:
    the chart's own canvas fills this box, so an absolutely-positioned sibling is
    how anything gets to sit on top of it. */
+/* The tool rail and the pane grid, side by side. The rail is outside every
+   canvas now (see components/charts/ChartToolRail) so it takes real width off
+   the charts rather than floating over them — 38px of 1920, and it pays for
+   itself the moment there is more than one pane, because the alternative is one
+   floating rail per canvas each covering its own candles. */
+.sim-chart-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
 .sim-chart {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   position: relative;
   /* A 3x3 line grid — two content tracks per axis with a divider track between
@@ -2329,6 +2343,29 @@ button:disabled {
      tracks they are read against can never disagree; with one pane the pane
      spans the divider tracks too and this is a plain box again. */
   display: grid;
+}
+/* The rail itself: the same buttons the in-canvas rail draws (.chart-tool), in a
+   column with a real edge rather than a floating panel — it is chrome now, not
+   an overlay, so it gets the card's border instead of a backdrop blur. */
+.chart-rail {
+  flex: none;
+  width: 38px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 0;
+  border-right: 1px solid var(--card-border);
+  background: var(--bg-2);
+  /* Deliberately not `overflow: hidden` — every button's tooltip spills to the
+     right, over the chart, which is the only side a left-edge rail has to spill
+     onto. The stacking context is what puts those over the canvas. */
+  position: relative;
+  z-index: 5;
+}
+.chart-rail .chart-tool-sep {
+  width: 22px;
+  margin: 3px 0;
 }
 /* The layout picker, sitting in the top bar beside the timeframe control and
    styled to match it. The button wears the layout it is on, so the bar says

@@ -92,6 +92,7 @@ import {
 import { playCue } from "../../lib/orderSound";
 import { focusChart, hasChartFocus, mountChart, nextChartId, unmountChart } from "../../lib/chartFocus";
 import { joinLink, publishCrosshair, publishRightEdge, setPaneLinked } from "../../lib/paneLink";
+import type { ChartToolId, ChartToolState } from "../../lib/chartTools";
 import { VwapBandPrimitive } from "./VwapBandPrimitive";
 import { VolumeProfilePrimitive } from "./VolumeProfilePrimitive";
 import { RangeProfilePrimitive } from "./RangeProfilePrimitive";
@@ -204,6 +205,17 @@ export interface ReplayChartHandle {
   /** Drop any measurement on the chart. The page calls this when the bar grid
    *  changes under it: a ruler reads "n bars", and those bars are gone. */
   clearRuler(): void;
+  /** Arm a hand-tool, or `null` to disarm whatever is armed.
+   *
+   *  This is the whole of the page-level tool rail's power over a pane — see
+   *  lib/chartTools. Arming stays in here (so does the pointer, the mutual
+   *  exclusion and every drawing); the rail is a remote control over it. */
+  armTool(id: ChartToolId | null): void;
+  /** The rail's "take it away" group, in the order the rail draws them: the
+   *  anchored VWAP, whichever drawing is selected, and everything at once. */
+  clearAvwap(): void;
+  deleteSelected(): void;
+  clearDrawings(): void;
 }
 
 interface Props {
@@ -335,6 +347,11 @@ interface Props {
    *  is not the contract the tape is on (NQ tape, MNQ orders). Drawn as a badge,
    *  because "where would a click on this chart send" must never be a guess. */
   routedTo?: string;
+  /** What this pane's hand-tools are doing, whenever it changes — what a
+   *  page-level rail lights up from. Offered, the chart takes its own in-canvas
+   *  rail down: the two would be the same buttons twice, and only one of them
+   *  can be the one that says what is armed. */
+  onToolsChange?: (s: ChartToolState) => void;
   /** The pointer arrived on this pane, or pressed it. The keyboard election in
    *  lib/chartFocus already happens on exactly these events; this is the page's
    *  copy of the same fact, for the chrome that has to name which pane it acts
@@ -667,6 +684,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     linked = true,
     onLinkedChange,
     routedTo,
+    onToolsChange,
     onFocus,
     onReady,
   },
@@ -1677,6 +1695,58 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   const syncRef = useRef<() => void>(() => {});
   disarmRef.current = () => arm(false);
   syncRef.current = syncRanges;
+
+  /** Arm one tool by name, or disarm everything (`null`). The five `arm*`
+   *  functions above already make themselves mutually exclusive, so this is a
+   *  dispatch and not a state machine — and disarming is "turn each of them
+   *  off", which is exactly what Escape does. */
+  const armTool = (id: ChartToolId | null) => {
+    if (id !== "order") armOrder(false);
+    if (id !== "vp") arm(false);
+    if (id !== "ruler") armRuler(false);
+    if (id !== "avwap") armAvwap(false);
+    if (id !== "hline") armHline(false);
+    if (id === "order") armOrder(true);
+    else if (id === "vp") arm(true);
+    else if (id === "ruler") armRuler(true);
+    else if (id === "avwap") armAvwap(true);
+    else if (id === "hline") armHline(true);
+  };
+  /** Whichever drawing is selected — one Del, whatever it is pointing at. */
+  const deleteSelectedAny = () => {
+    if (selected != null) deleteSelected();
+    if (selectedHline != null) deleteSelectedHline();
+  };
+
+  // What this pane's tools are doing, published to whoever draws the rail. An
+  // effect rather than a call inside each `arm*` so it cannot go out of step:
+  // it is derived from the rendered state, so every path that changes a tool —
+  // a rail click, a key, Escape, a drawing being deleted, a session landing —
+  // reports the same way.
+  const onToolsRef = useRef(onToolsChange);
+  onToolsRef.current = onToolsChange;
+  const toolsArmed: ChartToolId | null = orderArmed
+    ? "order"
+    : armed
+      ? "vp"
+      : rulerArmed
+        ? "ruler"
+        : avwapArmed
+          ? "avwap"
+          : hlineArmed
+            ? "hline"
+            : null;
+  const drawingCount = ranges.length + hlines.length;
+  useEffect(() => {
+    onToolsRef.current?.({
+      armed: toolsArmed,
+      canOrder: canPlaceOrders,
+      hasAvwap: avwapAnchor != null,
+      hasRangeSel: selected != null,
+      hasHlineSel: selectedHline != null,
+      drawings: drawingCount,
+    });
+  }, [toolsArmed, canPlaceOrders, avwapAnchor, selected, selectedHline, drawingCount]);
 
   useEffect(() => {
     mountChart(paneId);
@@ -3799,6 +3869,15 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       setTradeCount((n) => (n === trades.length ? n : trades.length));
       pushTrades();
     },
+    // The page-level rail's four. No deps array on this handle, so these close
+    // over the current render's arm functions rather than the first one's.
+    armTool,
+    clearAvwap,
+    deleteSelected: deleteSelectedAny,
+    clearDrawings() {
+      clearRanges();
+      clearHlines();
+    },
   }));
 
   // Only layers that have actually printed get a row.
@@ -4018,7 +4097,19 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     );
 
   return (
-    <div ref={rootRef} style={{ position: "relative", width: "100%", height: "100%", minHeight: 0 }}>
+    <div
+      ref={rootRef}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        minHeight: 0,
+        // With the tools out on a page rail, the legend and the placement
+        // banners get the left edge back — they were only ever clearing a rail
+        // that is no longer inside the canvas.
+        ...(onToolsChange ? ({ "--chart-rail": "0px" } as React.CSSProperties) : null),
+      }}
+    >
       {/* What the two buttons mean while Space is down. The mapping flips across
           the market, so this is worth saying on screen rather than in a tooltip
           you can't read with a modifier held. */}
@@ -4084,7 +4175,12 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           🔔 {alertFlash.price.toFixed(2)} crossed
         </div>
       )}
-      <div className="chart-tools">
+      {/* The in-canvas rail. Absent the moment the page draws one of its own
+          (`onToolsChange`): the same buttons twice would be two places claiming
+          to say what is armed, and only one of them can be right. The banners
+          that clear it read `--chart-rail`, which the root sets to 0 when this
+          is gone. */}
+      <div className="chart-tools" style={onToolsChange ? { display: "none" } : undefined}>
         {/* Only where the modifier isn't available. On a mouse Space+click is
             strictly the better gesture — nothing to arm, nothing left armed —
             and a button that duplicates it would just be a slower way in. */}
