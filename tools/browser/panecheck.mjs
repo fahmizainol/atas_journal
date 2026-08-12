@@ -145,21 +145,52 @@ try {
     `${a?.w}px vs ${b?.w}px`,
   );
 
-  // The context pane's own bucketing picker.
-  // The shared TimeframeControl: the resident buttons plus the ⋯ holding the
-  // rest, so every bucketing is reachable on the pane itself.
-  const tfBtns = page.locator(".sim-pane-tf button");
+  // The top bar's timeframe picker, acting on whichever pane the pointer last
+  // touched. There is no per-pane picker any more: the bar reaches every pane
+  // now, and a second copy of the control on every canvas was chart pixels spent
+  // on a second place for the same answer to live.
+  const topTf = page.locator(".chart-topbar .radio-group");
+  /** Put the pointer on a pane and leave it there — this is the whole focus
+   *  gesture, and it is what the bar's "pane N" note reads.
+   *
+   *  Right of centre for the same reason spaceClick is: the indicator legend is
+   *  a DOM overlay at the top-LEFT and starts open on pane 0, so on a narrow
+   *  pane a point at 0.5 lands on the legend. Focus still works from there (the
+   *  legend is inside the pane), but the *crosshair* does not move — which made
+   *  the link look broken when it was the aim that was wrong. Two moves, again
+   *  because a move to where the pointer already is fires nothing. */
+  const focusPane = async (i, fx = 0.78, fy = 0.35) => {
+    const box = await page.locator(`.sim-pane[data-pane="${i}"]`).boundingBox();
+    await page.mouse.move(box.x + box.width * fx, box.y + box.height * fy - 30);
+    await page.mouse.move(box.x + box.width * fx, box.y + box.height * fy);
+    await page.waitForTimeout(250);
+  };
+  const focusNote = () => page.locator(".chart-focus-note").textContent();
+
+  await focusPane(1);
+  check("pointing at a pane focuses it", (await focusNote())?.includes("2"), `bar says "${(await focusNote())?.trim()}"`);
   check(
-    "the context pane has its own timeframe picker",
-    (await tfBtns.count()) >= 3,
-    `${await tfBtns.count()} buttons`,
+    "the focus ring is on that pane and no other",
+    (await page.locator(".sim-pane.focused").count()) === 1 &&
+      (await page.locator('.sim-pane[data-pane="1"].focused').count()) === 1,
+    `${await page.locator(".sim-pane.focused").count()} ring(s)`,
   );
-  const pressed = await page.locator('.sim-pane-tf button.active').textContent();
-  check("it defaults to 5m", pressed?.trim() === "5m", `showing ${pressed?.trim()}`);
-  await page.locator('.sim-pane-tf button:text-is("15m")').click();
+  const pressed = await topTf.locator("button.active").textContent();
+  check("the bar shows that pane's bucketing", pressed?.trim() === "5m", `showing ${pressed?.trim()}`);
+  await topTf.locator('button:text-is("15m")').click();
   await page.waitForTimeout(1500);
-  const after = await page.locator('.sim-pane-tf button.active').textContent();
-  check("it re-buckets on click", after?.trim() === "15m", `showing ${after?.trim()}`);
+  const after = await topTf.locator("button.active").textContent();
+  check("it re-buckets that pane", after?.trim() === "15m", `showing ${after?.trim()}`);
+
+  // …and pane 0 kept its own. The bar acting on the focused pane is only useful
+  // if it did not quietly re-bucket the page's own chart on the way.
+  await focusPane(0);
+  const back = await topTf.locator("button.active").textContent();
+  check(
+    "pane 0 kept its own bucketing",
+    back?.trim() === "1m" && (await focusNote())?.includes("1"),
+    `showing ${back?.trim()}, bar says "${(await focusNote())?.trim()}"`,
+  );
 
   // The divider.
   const div = await page.locator(".sim-pane-divider").boundingBox();
@@ -175,7 +206,8 @@ try {
   // Both choices are settings, so they survive a reload.
   await openChart(page, "/charts/replay");
   const a3 = await axisOf(0);
-  const kept = await page.locator('.sim-pane-tf button.active').textContent();
+  await focusPane(1);
+  const kept = await topTf.locator("button.active").textContent();
   check(
     "pane, size and bucketing all survive a reload",
     (await paneCount()) === 2 && Math.abs(a3.w - a2.w) < 30 && kept?.trim() === "15m",
@@ -269,6 +301,62 @@ try {
   }
   check("the replay is paused before the order checks", !(await transport())?.includes("Pause"),
     `transport says "${(await transport())?.trim()}"`);
+
+  // --- the link (lib/paneLink) --------------------------------------------
+  // Checked with the tape stopped, which is the only way any of it means
+  // anything: a running replay repaints every pane on its own, so "pane 1
+  // changed" would be true whatever pane 0 did.
+  //
+  // The crosshair first. Pane 1's OHLC readout is a DOM overlay, so a pane that
+  // followed the crosshair prints a bar's numbers without a pointer on it.
+  const readout = (i) =>
+    page.evaluate((idx) => {
+      const el = document.querySelector(`.sim-pane[data-pane="${idx}"] .chart-ohlc`);
+      if (!el) return null;
+      return getComputedStyle(el).display === "none" ? "" : el.textContent.trim();
+    }, i);
+  await focusPane(0);
+  check(
+    "the crosshair reaches the other panes",
+    (await readout(1))?.startsWith("O") && (await readout(3))?.startsWith("O"),
+    `pane 1: "${(await readout(1))?.slice(0, 22)}…"`,
+  );
+
+  /** Pan a pane by dragging its tape sideways. */
+  const dragPane = async (pane, dx) => {
+    const box = await page.locator(`.sim-pane[data-pane="${pane}"]`).boundingBox();
+    const x = box.x + box.width * 0.6;
+    const y = box.y + box.height * 0.35;
+    await page.mouse.move(x - 6, y);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + dx, y, { steps: 12 });
+    await page.mouse.up();
+    await page.waitForTimeout(700);
+  };
+  const before1 = await axisOf(1);
+  await dragPane(0, 160);
+  const after1 = await axisOf(1);
+  check(
+    "scrolling one pane moves the others",
+    before1.hash !== after1.hash,
+    `pane 1 hash ${before1.hash} → ${after1.hash}`,
+  );
+
+  // And the switch really is a switch. Off, a pan is one pane's business.
+  await page.locator(".chart-topbar-btn.link").click();
+  await page.waitForTimeout(300);
+  const before2 = await axisOf(1);
+  await dragPane(0, -160);
+  const after2b = await axisOf(1);
+  check(
+    "unlinked, it does not",
+    before2.hash === after2b.hash,
+    `pane 1 hash ${before2.hash} → ${after2b.hash}`,
+  );
+  await page.locator(".chart-topbar-btn.link").click();
+  await page.waitForTimeout(300);
+
   const placed = [];
   for (const pane of [0, 1, 2, 3]) placed.push(await spaceClick(pane));
   check(

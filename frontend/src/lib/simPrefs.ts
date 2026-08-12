@@ -191,6 +191,14 @@ export interface SimPrefs {
    *  2-col -> 2x2 -> 2-col lands on the dividers you left. */
   splitPct: number;
   splitPctY: number;
+  /** Whether the panes share one crosshair and one right edge (lib/paneLink).
+   *  A reading choice like the layout itself — it moves viewports, never a
+   *  fill. */
+  linkOn: boolean;
+  /** Which panes take part, indexed like `paneTfs`. The global switch above is
+   *  the one you reach for; this is the per-pane `⇄` badge, for the pane you
+   *  want to hold still while you scroll the others. */
+  paneLinked: boolean[];
 }
 
 const KEY = "sim.prefs";
@@ -254,6 +262,12 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   paneTfs: ["5m", "5m", "15m", "1h"],
   splitPct: 60,
   splitPctY: 55,
+  // On: reading one moment at four bucketings is what the grid is *for*, and a
+  // link nobody switched on is a feature nobody finds. It is one click away and
+  // the answer sticks — which is the shape "a toggle, not a default" asks for.
+  // With one pane it does nothing at all, so the single-chart page is unmoved.
+  linkOn: true,
+  paneLinked: [true, true, true, true],
 };
 
 const ORDER_TYPES: OrderType[] = ["market", "limit", "stop"];
@@ -343,6 +357,8 @@ export function loadSimPrefs(): SimPrefs {
       paneTfs: paneTfs(s, d.paneTfs),
       splitPct: clampSplit(s.splitPct, d.splitPct),
       splitPctY: clampRatio(s.splitPctY, d.splitPctY),
+      linkOn: typeof s.linkOn === "boolean" ? s.linkOn : d.linkOn,
+      paneLinked: paneFlags(s.paneLinked, d.paneLinked),
     };
   } catch {
     return { ...d, modernVwap: { ...d.modernVwap } };
@@ -376,6 +392,16 @@ function paneTfs(s: Record<string, unknown>, d: string[]): string[] {
   const out = Array.from({ length: MAX_PANES }, (_, i) => (known(stored[i]) ? stored[i] : d[i]));
   if (!stored.length && known(s.paneTf)) out[1] = s.paneTf;
   return out;
+}
+
+/** A per-pane boolean array, padded and validated to `MAX_PANES` — same rule as
+ *  `paneTfs`: a short or hand-edited array fills from the default per slot
+ *  rather than being thrown away whole. */
+function paneFlags(raw: unknown, d: boolean[]): boolean[] {
+  const stored = Array.isArray(raw) ? (raw as unknown[]) : [];
+  return Array.from({ length: MAX_PANES }, (_, i) =>
+    typeof stored[i] === "boolean" ? (stored[i] as boolean) : (d[i] ?? true),
+  );
 }
 
 export function saveSimPrefs(p: SimPrefs): void {

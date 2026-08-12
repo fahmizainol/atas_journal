@@ -91,6 +91,7 @@ import {
 } from "../../lib/chartPrefs";
 import { playCue } from "../../lib/orderSound";
 import { focusChart, hasChartFocus, mountChart, nextChartId, unmountChart } from "../../lib/chartFocus";
+import { joinLink, publishCrosshair, publishRightEdge, setPaneLinked } from "../../lib/paneLink";
 import { VwapBandPrimitive } from "./VwapBandPrimitive";
 import { VolumeProfilePrimitive } from "./VolumeProfilePrimitive";
 import { RangeProfilePrimitive } from "./RangeProfilePrimitive";
@@ -321,6 +322,24 @@ interface Props {
    *  a secondary pane passes something short and stable like `"b"`, since the
    *  key has to survive a reload and so cannot be a runtime instance id. */
   prefsPane?: string;
+  /** Whether this pane shares the crosshair and the right edge with the others
+   *  (see lib/paneLink). Undefined means linked — a lone chart has nobody to
+   *  link with, so the default costs nothing and the pages that never split
+   *  don't have to say anything. */
+  linked?: boolean;
+  /** Offered, the pane wears a `⇄` badge that takes it in and out of the link.
+   *  Omitted, no badge — which is the one-pane page, where there is nothing to
+   *  link to and a control saying so would be noise. */
+  onLinkedChange?: (v: boolean) => void;
+  /** The contract this pane's orders would actually be *routed* to, when that
+   *  is not the contract the tape is on (NQ tape, MNQ orders). Drawn as a badge,
+   *  because "where would a click on this chart send" must never be a guess. */
+  routedTo?: string;
+  /** The pointer arrived on this pane, or pressed it. The keyboard election in
+   *  lib/chartFocus already happens on exactly these events; this is the page's
+   *  copy of the same fact, for the chrome that has to name which pane it acts
+   *  on. */
+  onFocus?: () => void;
 }
 
 /** Everything the chart needs to draw the tape events, as the page holds it: the
@@ -645,6 +664,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     indicatorSettings,
     drawingsKey,
     prefsPane,
+    linked = true,
+    onLinkedChange,
+    routedTo,
+    onFocus,
     onReady,
   },
   ref,
@@ -658,6 +681,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // every render, since the argument is evaluated whether or not it is used.
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+  // Read from the pointer handlers inside the build effect, which is installed
+  // once — so the page's latest callback has to be reachable through a ref.
+  const onFocusRef = useRef(onFocus);
+  onFocusRef.current = onFocus;
 
   const paneIdRef = useRef<number | null>(null);
   if (paneIdRef.current == null) paneIdRef.current = nextChartId();
@@ -1656,6 +1683,12 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     return () => unmountChart(paneId);
   }, [paneId]);
 
+  // Membership of the link, kept in the module the chart handlers read. Not part
+  // of `joinLink` because it changes with a click and the registration doesn't.
+  useEffect(() => {
+    setPaneLinked(paneId, linked);
+  }, [paneId, linked]);
+
   useEffect(() => {
     // Whether a key belongs to whatever the user is typing into rather than to
     // the chart.
@@ -2080,6 +2113,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       syncOffTape();
     });
 
+
     // The price axis' width, republished for anything positioned against the
     // tape's right edge (the ◎ button). It changes with the digits in the scale,
     // not just with layout — and the time scale's own width is what moves when
@@ -2096,15 +2130,21 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // come off `barsRef` by logical index rather than off `param.seriesData`,
     // because the volume isn't in the candle series and the forming bar's
     // numbers should be the engine's own.
-    chart.subscribeCrosshairMove((param) => {
+    /** Print one bar's numbers, or take the readout down (`i < 0`).
+     *
+     *  A function rather than the body of the subscription because the *link*
+     *  needs it too: `setCrosshairPosition` deliberately skips the crosshair-move
+     *  event (it passes `skipEvent` all the way down), so a pane told to follow
+     *  would otherwise move a crosshair with no numbers beside it — which is
+     *  precisely the readout you turned the link on for. */
+    const paintOhlc = (i: number) => {
       const el = ohlcRef.current;
       if (!el) return;
       const bars = barsRef.current;
-      const i = param.logical == null ? -1 : Math.round(param.logical);
       // Hidden while a placement banner owns the same corner — two rows of
       // chips in one spot would cover each other exactly when the price under
       // the pointer matters most.
-      if (!param.point || i < 0 || i >= bars.length || spaceRef.current || orderArmedRef.current) {
+      if (i < 0 || i >= bars.length || spaceRef.current || orderArmedRef.current) {
         el.style.display = "none";
         return;
       }
@@ -2120,6 +2160,54 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         `<span class="${cls}">${chg >= 0 ? "+" : "−"}${f(Math.abs(chg))}</span>` +
         `<span>V <b>${b.volume.toLocaleString()}</b></span>`;
       el.style.display = "flex";
+    };
+    chart.subscribeCrosshairMove((param) => {
+      const i = param.logical == null ? -1 : Math.round(param.logical);
+      // Every crosshair that reaches here has a pointer behind it, so every one
+      // of them is this pane's to publish (the synthetic ones never fire this).
+      if (param.point) {
+        const px = candle.coordinateToPrice(param.point.y);
+        if (px != null) publishCrosshair(paneId, (param.time as number) ?? null, px);
+      } else {
+        // The pointer left the tape without leaving the pane — off the end of
+        // the data, or onto the axis. Take the followers' crosshairs down with
+        // this one rather than leaving three panes reading a price nobody is
+        // pointing at.
+        publishCrosshair(paneId, null, 0);
+      }
+      paintOhlc(i);
+    });
+
+    // --- the link: one crosshair and one right edge across the grid ----------
+    // See lib/paneLink for why it is the right *edge* and not the whole window.
+    // Registered here rather than in an effect of its own because both closures
+    // hold this chart, and this is the scope that knows when it is destroyed.
+    const leaveLink = joinLink(paneId, {
+      crosshair(time, price) {
+        if (time == null) {
+          chart.clearCrosshairPosition();
+          paintOhlc(-1);
+          return;
+        }
+        // Throws when the time isn't on this pane's bucketing at all; paneLink
+        // swallows it, and a pane that can't follow simply doesn't.
+        chart.setCrosshairPosition(price, time as Time, candle);
+        // The source pane's time, snapped onto whichever of this pane's bars
+        // holds that moment — which is the whole reading the link is for.
+        paintOhlc(idxOfTime(barsRef.current, time));
+      },
+      rightEdge(to) {
+        const cur = chart.timeScale().getVisibleRange();
+        if (!cur) return;
+        const span = (cur.to as number) - (cur.from as number);
+        // Each pane keeps its own span — that is the whole design. A pane with
+        // no span yet (one bar, or none) has nothing to keep, so leave it be.
+        if (!(span > 0)) return;
+        chart.timeScale().setVisibleRange({ from: (to - span) as Time, to: to as Time });
+      },
+    });
+    chart.timeScale().subscribeVisibleTimeRangeChange((r) => {
+      if (r) publishRightEdge(paneId, r.to as number);
     });
 
     // --- The composite over the context days, and the events on the tape -----
@@ -2548,6 +2636,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // usually made it already, but not on a touchscreen — a finger arrives at
       // pointerdown with no enter before it.
       focusChart(paneId);
+      onFocusRef.current?.();
       const x = xOf(e);
       const idx = idxAtX(x);
       if (idx == null) return;
@@ -3035,9 +3124,14 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // Reaching a pane with the pointer is enough to make its keyboard yours —
       // the same standard the Space modifier already held itself to.
       focusChart(paneId);
+      onFocusRef.current?.();
     };
     const onLeave = () => {
       overRef.current = false;
+      // Take the linked crosshair down with the pointer. A crosshair left behind
+      // on three other panes reads as a live reading of a price nobody is
+      // pointing at any more.
+      publishCrosshair(paneId, null, 0);
     };
 
     // Pointer events rather than mouse events: one set of handlers that a finger,
@@ -3154,6 +3248,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      // Before chart.remove(): the two link callbacks close over this chart, and
+      // a pane still in the map after its chart is destroyed is a throw on the
+      // next crosshair move anywhere on the page.
+      leaveLink();
       chart.remove();
       chartRef.current = null;
       candleRef.current = null;
@@ -4093,6 +4191,37 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           />
         )}
       </div>
+      {/* The pane's badges, top-right: what it is doing that isn't visible in
+          the candles. Both of them answer a question you would otherwise have to
+          hold in your head across four charts — is this one scrolling with the
+          others, and where would an order placed here go. */}
+      {(onLinkedChange || routedTo) && (
+        <div className="chart-badges">
+          {routedTo && (
+            <span
+              className="chart-badge routed"
+              title={`Orders from this chart are routed to ${routedTo}, not to the contract the tape is on`}
+            >
+              → {routedTo}
+            </span>
+          )}
+          {onLinkedChange && (
+            <button
+              type="button"
+              className={`chart-badge link${linked ? " on" : ""}`}
+              onClick={() => onLinkedChange(!linked)}
+              aria-pressed={linked}
+              title={
+                linked
+                  ? "Linked — this pane shares the crosshair and the right edge with the others. Click to read it on its own."
+                  : "Unlinked — this pane scrolls on its own. Click to rejoin the others."
+              }
+            >
+              ⇄
+            </button>
+          )}
+        </div>
+      )}
       {/* Back to the price. The opposite corner from the tool rail and just
           inside the price axis, because that is the corner the newest bar is in
           — the button is where you are already looking when you notice the tape

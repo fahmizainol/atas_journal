@@ -12,6 +12,9 @@
   --text: #e6e8ee;
   --muted: #8a8f9c;
   --grid: #2a2e38;
+  /* theme.ts' `palette.orange`. Two rules already referenced it and were
+     silently inheriting their colour instead. */
+  --orange: #f97316;
 }
 
 * {
@@ -886,6 +889,46 @@ button:disabled {
   height: 1px;
   margin: 2px 3px;
   background: var(--card-border);
+}
+/* ---- pane badges (see ReplayChart's .chart-badges block) ----
+   Top-right of the pane: the corner the tools left when they moved to the left
+   edge, and the only one none of the readouts want. What a pane is doing that
+   the candles don't say — whether it is linked, and where its orders route. */
+.chart-badges {
+  position: absolute;
+  top: 8px;
+  right: calc(8px + var(--axis-w, 0px));
+  z-index: 4;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.chart-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid var(--card-border);
+  background: rgba(14, 17, 23, 0.72);
+  backdrop-filter: blur(6px);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  font-family: inherit;
+  cursor: pointer;
+}
+.chart-badge.routed {
+  color: var(--orange);
+  cursor: default;
+}
+.chart-badge.link.on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.chart-badge.link:hover {
+  color: var(--text);
 }
 /* The words the icons replaced, on hover. Out to the right — the rail is on the
    left edge, so that is the only side with chart to spill onto — and delayed,
@@ -2424,20 +2467,30 @@ button:disabled {
 .sim-pane-divider[data-dragging="1"] {
   background: var(--muted);
 }
-/* The context pane's bucketing picker, bottom-left of its own pane — the one
-   corner that pane leaves empty (its legend is top-left but starts collapsed,
-   the tools are top-right, and it has no order dock because it places nothing). */
-.sim-pane-tf {
-  position: absolute;
-  left: 8px;
-  bottom: 8px;
-  z-index: 3;
-  padding: 2px 3px;
-  border-radius: 7px;
-  /* Backed, because it sits over the tape rather than over chrome — an
-     unbacked row of buttons on candles is unreadable half the session. */
-  background: color-mix(in srgb, var(--card) 82%, transparent);
-  border: 1px solid var(--card-border);
+/* Which pane the chrome acts on. Drawn loudly on purpose: with two 15m panes
+   side by side this ring is the *only* thing that says which of them the
+   timeframe button is about to re-bucket. An inset shadow rather than a border,
+   so claiming focus never changes a pane's size and nudges the chart inside it.
+   Only ever on with more than one pane — see the `paneCount > 1` guard on the
+   class, since a lone pane is always the focused one and a ring around the whole
+   chart would be permanent noise. */
+.sim-pane.focused {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent);
+  border-radius: 3px;
+}
+/* The top bar's copy of the same fact, beside the control it qualifies. */
+.chart-focus-note {
+  flex: none;
+  align-self: center;
+  padding: 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.chart-focus-note b {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 /* ---- day-scale indicator strip (see components/charts/SimIndicators) ----

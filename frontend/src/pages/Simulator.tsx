@@ -31,7 +31,8 @@ import { QuickDock } from "../components/charts/QuickDock";
 import { TimeframeControl } from "../components/charts/TimeframeControl";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import { LayoutPicker } from "../components/charts/LayoutPicker";
-import { LAYOUTS, gridArea, gridTemplate } from "../lib/paneLayout";
+import { LAYOUTS, clampPaneIndex, gridArea, gridTemplate } from "../lib/paneLayout";
+import { setLinkOn as setLinkModuleOn } from "../lib/paneLink";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
 import {
   useSimulatorDays,
@@ -518,7 +519,19 @@ export function Simulator() {
   const [paneTfIds, setPaneTfIds] = useState(prefs.paneTfs);
   const [splitPct, setSplitPct] = useState(prefs.splitPct);
   const [splitPctY, setSplitPctY] = useState(prefs.splitPctY);
+  const [linkOn, setLinkOn] = useState(prefs.linkOn);
+  const [paneLinked, setPaneLinked] = useState(prefs.paneLinked);
   const paneCount = LAYOUTS[layout].panes;
+  /** Which pane the chrome acts on. Claimed by the pointer arriving (the same
+   *  event lib/chartFocus already elects the keyboard owner on), so it is
+   *  usually the pane you are looking at without anyone having clicked. A pane
+   *  that stops existing hands it back to pane 0 rather than to nothing. */
+  const [focus, setFocus] = useState(0);
+  const focusedPane = clampPaneIndex(focus, layout);
+  // For the key handler, which is installed once and must read the current pane
+  // at event time rather than whichever one it closed over.
+  const focusRef = useRef(focusedPane);
+  focusRef.current = focusedPane;
 
   // Panes 1..n-1 — every chart on the page except the page's own. Arrays indexed
   // by pane rather than a second named ref per pane: with six layouts the count
@@ -590,6 +603,8 @@ export function Simulator() {
       paneTfs: paneTfIds,
       splitPct,
       splitPctY,
+      linkOn,
+      paneLinked,
     });
   }, [
     root,
@@ -621,7 +636,16 @@ export function Simulator() {
     paneTfIds,
     splitPct,
     splitPctY,
+    linkOn,
+    paneLinked,
   ]);
+
+  // The global switch, into the module the chart handlers read at event time.
+  // The per-pane half rides the `linked` prop, since that one is already a
+  // per-chart fact.
+  useEffect(() => {
+    setLinkModuleOn(linkOn);
+  }, [linkOn]);
 
   // The app shell scrolls in normal document flow, so there is no ancestor
   // height for the chart to be a percentage of. Measure where the page starts
@@ -1174,6 +1198,25 @@ export function Simulator() {
       if (wasPlaying) play();
     },
     [play, rebuild, stop],
+  );
+
+  /** The bucketing of whichever pane the chrome is acting on.
+   *
+   *  This is what makes one timeframe control enough for four charts, and it is
+   *  why the per-pane pickers that phase 2 left sitting on each canvas are gone:
+   *  the bar could not reach past pane 0, so every extra pane had to carry a
+   *  second copy of the same control. Pane 0's bucketing is the page's own
+   *  `timeframe` — it drives the engine the fills come out of — so the two
+   *  halves are genuinely different operations, not one with an index. */
+  const changePaneTimeframe = useCallback(
+    (i: number, id: string) => {
+      if (i === 0) {
+        changeTimeframe(id);
+        return;
+      }
+      setPaneTfIds((prev) => prev.map((t, j) => (j === i ? id : t)));
+    },
+    [changeTimeframe],
   );
 
   /**
@@ -1987,17 +2030,33 @@ export function Simulator() {
         nudgeSpeed(k === "]" ? 1 : -1);
         return;
       }
+      // Shift+1..4 picks the pane the chrome acts on. Not the bare digits: those
+      // have picked the bar size since before there were panes, and taking a
+      // binding away from a page you drive by keyboard is worse than spending a
+      // modifier. By `code` rather than by `key`, because shifted digits are
+      // punctuation and which punctuation depends on the keyboard layout.
+      if (e.shiftKey && /^Digit[1-4]$/.test(e.code)) {
+        const i = Number(e.code.slice(5)) - 1;
+        if (i < paneCountRef.current) {
+          e.preventDefault();
+          setFocus(i);
+        }
+        return;
+      }
+      if (e.shiftKey) return;
       if (/^[1-8]$/.test(k)) {
         const tf = TIMEFRAMES[Number(k) - 1];
         if (tf) {
           e.preventDefault();
-          changeTimeframe(tf.id);
+          // The focused pane's, not the page's — the same rule the top bar's
+          // picker follows, so the key and the button cannot disagree.
+          changePaneTimeframe(focusRef.current, tf.id);
         }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [changeTimeframe, closeAll, nudgeSpeed, placeMarket, play, stepBack, stepBar, stop]);
+  }, [changePaneTimeframe, closeAll, nudgeSpeed, placeMarket, play, stepBack, stepBar, stop]);
 
   const onSpeed = (v: number) => {
     speedRef.current = v;
@@ -2162,19 +2221,53 @@ export function Simulator() {
         }
       >
         <TimeframeControl
-          value={tfId}
-          onChange={changeTimeframe}
+          // The focused pane's bucketing. With one pane that is the page's own
+          // and nothing has changed; with four it is the one control that used
+          // to need a copy on every canvas.
+          value={focusedPane === 0 ? tfId : paneTfIds[focusedPane]}
+          onChange={(id) => changePaneTimeframe(focusedPane, id)}
           options={TIMEFRAMES.map((t) => ({ key: t.id, label: t.label }))}
           // The tick bar (unique to a tape-driven chart), the default, and the
           // two the research vocabulary is written in. 30s/2m/3m/1h go behind ⋯.
           primary={["500t", "1m", "5m", "15m"]}
           compact
         />
+        {/* Which pane the control to the left just changed. Spelled out rather
+            than left to the focus ring alone: with two 15m panes side by side
+            the ring is the only difference between them, and a bar that silently
+            re-buckets whichever chart you last brushed past is a bar you stop
+            trusting. Only with more than one pane — on a single chart it would
+            be a label for a choice that doesn't exist. */}
+        {paneCount > 1 && (
+          <span className="chart-focus-note" title="Shift+1…4 to change it, or point at a pane">
+            pane <b>{focusedPane + 1}</b>
+          </span>
+        )}
         {/* The layout, next to the bucketing it arranges: both answer "what am I
             looking at", and this is the other thing you change mid-read. Hidden
             on a narrow viewport — four half-width charts on a phone is four
             charts you cannot read, and the mobile pass stops at the Lab. */}
         <LayoutPicker value={layout} onChange={setLayout} />
+        {/* The link. Next to the layout because it is a property of the
+            arrangement: two views of one tape at different bucketings should
+            scroll together, four charts used as four different questions should
+            not. Same reason as the note above — with one pane there is nothing
+            to link to. */}
+        {paneCount > 1 && (
+          <button
+            type="button"
+            className={`chart-topbar-btn link${linkOn ? " on" : ""}`}
+            onClick={() => setLinkOn((v) => !v)}
+            aria-pressed={linkOn}
+            title={
+              linkOn
+                ? "Linked — the panes share one crosshair, and scrolling one moves the right edge of all of them. Each keeps its own span, so an hourly pane stays hourly."
+                : "Unlinked — each pane scrolls on its own"
+            }
+          >
+            ⇄
+          </button>
+        )}
       </ChartTopBar>
       {/* A press anywhere else puts the setup panel away — the touch screen's
           replacement for Escape, which a phone does not have. Under the bar, so
@@ -2409,12 +2502,19 @@ export function Simulator() {
                 the placement spans the divider tracks too, so nothing about the
                 single-chart page moved. */}
             <div
-              className="sim-pane"
+              className={`sim-pane${paneCount > 1 && focusedPane === 0 ? " focused" : ""}`}
               data-pane="0"
               style={{ gridArea: gridArea(LAYOUTS[layout].place[0]) }}
             >
             <ReplayChart
               ref={chartRef}
+              linked={linkOn && paneLinked[0]}
+              onLinkedChange={
+                paneCount > 1
+                  ? (v) => setPaneLinked((p) => p.map((b, j) => (j === 0 ? v : b)))
+                  : undefined
+              }
+              onFocus={() => setFocus(0)}
               onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
               onFlatten={closeManual}
@@ -2557,7 +2657,7 @@ export function Simulator() {
               const i = k + 1;
               return (
                 <div
-                  className="sim-pane"
+                  className={`sim-pane${focusedPane === i ? " focused" : ""}`}
                   data-pane={i}
                   key={i}
                   style={{ gridArea: gridArea(place) }}
@@ -2566,6 +2666,11 @@ export function Simulator() {
                     ref={(h) => {
                       extraCharts.current[i] = h;
                     }}
+                    linked={linkOn && paneLinked[i]}
+                    onLinkedChange={(v) =>
+                      setPaneLinked((p) => p.map((b, j) => (j === i ? v : b)))
+                    }
+                    onFocus={() => setFocus(i)}
                     onAnchorChange={(t) => setPaneAnchor(i, t)}
                     onBracketChange={moveBracket}
                     onFlatten={closeManual}
@@ -2592,24 +2697,10 @@ export function Simulator() {
                     prefsPane={`p${i}`}
                     onReady={() => primePane(i)}
                   />
-                  {/* The pane's own bucketing, on the pane — the same control
-                      pane 0 drives from the top bar, so every timeframe is
-                      reachable here too and the ⋯ holds the rest. It sits *on*
-                      the chart rather than in the bar because it belongs to this
-                      pane and the bar belongs to the page. */}
-                  <div className="sim-pane-tf">
-                    <TimeframeControl
-                      value={paneTfIds[i]}
-                      onChange={(v) =>
-                        setPaneTfIds((prev) => prev.map((t, j) => (j === i ? v : t)))
-                      }
-                      options={TIMEFRAMES.map((t) => ({ key: t.id, label: t.label }))}
-                      // The slow end: a context pane on 500-tick bars is a
-                      // second copy of the chart you are already reading.
-                      primary={["5m", "15m", "1h"]}
-                      compact
-                    />
-                  </div>
+                  {/* No per-pane timeframe picker any more: the top bar's
+                      reaches this pane the moment it is focused, and a second
+                      copy of the same control on every canvas was both chart
+                      pixels and a second place for the answer to live. */}
                 </div>
               );
             })}
