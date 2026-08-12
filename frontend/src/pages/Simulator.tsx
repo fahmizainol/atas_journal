@@ -1112,6 +1112,33 @@ export function Simulator() {
     chartRef.current?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
   }, []);
 
+  /** The same, for a pane that is not pane 0. The anchored VWAP is a property
+   *  of the engine that draws it, so a ⚓ dropped on the 15-minute pane anchors
+   *  the 15-minute VWAP and leaves every other pane alone — which is the only
+   *  reading of the gesture that makes sense once there are four charts. */
+  const ticket = useMemo(
+    () => ({ size, stopTicks, targetTicks }),
+    [size, stopTicks, targetTicks],
+  );
+  /** The ticket, changed from a chart. One handler for every pane: size and the
+   *  bracket belong to the page, so the number in a long-press ticket and the
+   *  number a dock button sends are the same number whichever chart you are on. */
+  const changeTicket = useCallback(
+    (t: { size: number; stopTicks: number; targetTicks: number }) => {
+      setSize(t.size);
+      applyStop(t.stopTicks);
+      applyTarget(t.targetTicks);
+    },
+    [applyStop, applyTarget],
+  );
+
+  const setPaneAnchor = useCallback((i: number, barTime: number | null) => {
+    const eng = extraEngines.current[i];
+    if (!eng) return;
+    eng.setAnchor(barTime);
+    extraCharts.current[i]?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
+  }, []);
+
   /**
    * Draw the same tape as different bars.
    *
@@ -2395,12 +2422,8 @@ export function Simulator() {
               onOrderCancel={cancelOrder}
               onPlaceOrder={placeAt}
               onPlaceTyped={placeTyped}
-              ticket={{ size, stopTicks, targetTicks }}
-              onTicketChange={(t) => {
-                setSize(t.size);
-                applyStop(t.stopTicks);
-                applyTarget(t.targetTicks);
-              }}
+              ticket={ticket}
+              onTicketChange={changeTicket}
               mark={hud.lastPrice}
               canPlaceOrders={ready}
               hideDates={hidden}
@@ -2520,10 +2543,16 @@ export function Simulator() {
               />
             ))}
             {/* The extra panes. Each one is its own engine on its own bucketing
-                over the same tape, and each draws the position, the working
-                orders and the fills — see the publish path. They take no order
-                gestures yet, which is the next slice of this build, not a
-                property of the layout. */}
+                over the same tape, each draws the position, the working orders
+                and the fills, and each takes the same order gestures pane 0
+                does — space+click, the ＋Order tool, the long-press ticket, and
+                a drag on any level already drawn.
+
+                They are handed the *same* callbacks rather than pane-aware
+                copies, and that is the point: every one of them names a price
+                and nothing else, so there is exactly one order path however many
+                charts are pointing at it. The one thing that is per pane is the
+                ⚓ anchor, because that draws on the chart you dropped it on. */}
             {LAYOUTS[layout].place.slice(1).map((place, k) => {
               const i = k + 1;
               return (
@@ -2537,7 +2566,17 @@ export function Simulator() {
                     ref={(h) => {
                       extraCharts.current[i] = h;
                     }}
-                    canPlaceOrders={false}
+                    onAnchorChange={(t) => setPaneAnchor(i, t)}
+                    onBracketChange={moveBracket}
+                    onFlatten={closeManual}
+                    onOrderMove={moveOrder}
+                    onOrderCancel={cancelOrder}
+                    onPlaceOrder={placeAt}
+                    onPlaceTyped={placeTyped}
+                    ticket={ticket}
+                    onTicketChange={changeTicket}
+                    mark={hud.lastPrice}
+                    canPlaceOrders={ready}
                     hideDates={hidden}
                     secondsAxis={showsSeconds(paneTfsRef.current[i])}
                     bigLots={bigLots}
