@@ -1,7 +1,12 @@
 # Terminal redesign — build plan
 
 *Written 2026-08-12. Phases 1–3 are built on `feat/terminal-redesign` and verified;
-phases 4–7 are not started. The design this implements is the clickable prototype at
+phases 4–7 are not started. [Parity with the prototype](#parity-with-the-prototype--the-checklist)
+is the element-by-element checklist — every control the prototype draws, where it is in
+the app today, and which phase closes the gap. Work that list, not a memory of the
+screenshots.*
+
+* The design this implements is the clickable prototype at
 `docs/research/terminal-redesign.html` (built by `demo/terminal_redesign_demo.py`) —
 read that first if the "why" of any phase below is unclear, because the arguments live
 there and are not repeated here.*
@@ -194,6 +199,122 @@ change phase 3 was).
 **Verification is manual.** `/charts/live` is manual-test-only by standing rule — gestures
 there reach Rithmic. Do not script that page. Build it, then hand it over to be tested by
 hand, and say plainly in the handover that it is unverified.
+
+---
+
+## Parity with the prototype — the checklist
+
+The target is **1:1 on chrome anatomy and affordances**: every control the prototype
+draws, in the same place, meaning the same thing. It is deliberately *not* 1:1 on the
+internals, because the prototype is a sketch in three places and copying it literally
+would delete working features:
+
+1. **The legend.** The prototype shows 7 indicator rows and a fold. The app's
+   `IndicatorLegend` has ~14 rows, a per-row `…` settings panel, dim states for layers
+   switched off by their own setting, and an appearance panel on the header. Keep the
+   app's; take only the fold's *summary* (`ƒ 2/7`), which the app's header lacks.
+2. **The dock.** The prototype's is a mock with three meters and a pad. `RoutingPanel`
+   is 1,409 lines of account tagging, single-use tokens, broker reconciliation,
+   one-click and the untagged state. Keep the app's; take the *layout* — persistent
+   right column instead of a summoned rail.
+3. **The `read-only` / `TRADE` pane badge is obsolete, not missing.** Every pane places
+   orders now (phase 3), so there is nothing for it to say. Do not build it.
+
+Legend: **✓** in the app · **~** partly there · **✗** missing · **n/a** deliberately not.
+
+### Top bar (36px)
+
+| Prototype | App | Phase |
+|---|---|---|
+| ▤ nav menu | ✓ `NavMenu` | — |
+| Title + symbol + caret → setup | ✓ `ChartTopBar` title slot | — |
+| Timeframe segmented + `⋯` | ✓ `TimeframeControl` | — |
+| Layout picker (icon = current layout) | ✓ `LayoutPicker` | 2 |
+| "acting on **pane N**" focus note | ✗ | **5** |
+| `⇄ link` toggle | ✗ | **4** |
+| Replay \| Live tabs | ✓ | — |
+| 🔊 sound cue cycle | ✓ | — |
+| ⛶ fullscreen | ✓ | — |
+| Dock toggle (`▤▎`) | ~ lives on `.sim-rail` as `sim-rail-btn`, not the top bar | **6** |
+
+### Left tool rail (38px, outside every canvas)
+
+Every one of these exists today **inside** each canvas as `.chart-tools`, so phase 6 is a
+move, not a build — except where noted.
+
+| Prototype | App | Phase |
+|---|---|---|
+| ⌖ cursor (disarm) | ~ Esc disarms; no cursor button | **6** |
+| 🧾 ＋Order | ~ in-canvas, **touch only** (`COARSE_POINTER`) | **6** |
+| 📊 fixed-range VP | ~ in-canvas | **6** |
+| 📏 measure | ~ in-canvas | **6** |
+| ⚓ anchored VWAP | ~ in-canvas | **6** |
+| ━ price line | ~ in-canvas | **6** |
+| 🔔 alert | ~ price lines already chime on cross; no separate tool | **6** |
+| ✎ drawings flyout | ✗ (prototype marks it unbuilt too) | later |
+| ƒ indicators picker | ~ the legend is the picker; no rail entry | **6** |
+| 🧹 clear / 🗑 delete | ~ in-canvas, appears with what it removes | **6** |
+| ⚙ appearance | ~ on the legend header | **6** |
+
+### Per pane
+
+| Prototype | App | Phase |
+|---|---|---|
+| Legend: symbol + bucketing | ✓ | — |
+| Legend: OHLC readout | ✓ `.chart-ohlc` | — |
+| Legend: fold with `ƒ on/total` count | ~ folds, but shows no count | **5** |
+| Legend: rows with swatch, name, value | ✓ (richer than the prototype) | — |
+| `→ MNQU6` routed-contract badge | ✗ | **7** |
+| `⇄` link badge | ✗ | **4** |
+| Focus ring | ✗ | **5** |
+| ◎ back-to-price | ✓ `.chart-jump` | — |
+| Armed-tool hint | ~ in-canvas banners | **6** |
+| Order pills + lines | ✓ every pane | 3 |
+| Fixed-range VP / measure overlays | ✓ | — |
+
+### Right dock
+
+| Prototype | App | Phase |
+|---|---|---|
+| Persistent right column | ~ summoned `.sim-panel`, pinnable via `railPinned` | **6** |
+| Account dot + select + kind badge | ✓ `RoutingPanel` (Live) | — |
+| Routed instrument + `$/tick` + `⚠ chart is NQ` | ✓ `InstrumentSwitch` | — |
+| Guard meters (day loss, trailing DD, contracts) | ~ `Discipline` shows the rules, not three meters | **6** |
+| Order pad MKT/LIM/STP + size + stop + target | ✓ | — |
+| Risk/reward hint line (`−$200 · +$400 · R:R`) | ~ shown, verify shape | **6** |
+| Review sentence + Send + countdown | ✓ | — |
+| One-click switch | ✓ | — |
+| Position row + FLATTEN | ✓ | — |
+| Working list + cancel | ✓ | — |
+| Footer: reconciled / last price | ✓ | — |
+| Untagged-account warning | ✓ | — |
+
+### Floating ticket (over one pane)
+
+| Prototype | App | Phase |
+|---|---|---|
+| Drag grip, draggable, remembers position | ✓ `QuickDock` | — |
+| BUY / SELL with prices | ✓ | — |
+| Position chip + flatten | ✓ | — |
+| Size stepper on the ticket | ✗ (size lives in the rail) | **6** |
+| `⊥ 40t −$200` / `⊤ 80t +$400` knobs | ✗ (bracket lives in the rail) | **6** |
+| Routed symbol + account kind | ✗ | **7** |
+| Never moves pane on its own | ✓ by construction (pane 0 only) | — |
+
+### Overlays
+
+| Prototype | App | Phase |
+|---|---|---|
+| Layout modal | ✓ popover instead of modal — better, keep | — |
+| Indicator picker modal | ~ the legend does it inline | **6** |
+| Session setup behind the title | ✓ `.sim-setup` | — |
+
+### Responsive
+
+| Prototype | App | Phase |
+|---|---|---|
+| < 900px → focused pane only, layout kept not cleared | ✓ CSS media query | 2 |
+| < 1100px → dock folds, ticket carries order entry | ✗ | **6** |
 
 ---
 
