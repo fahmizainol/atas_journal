@@ -56,7 +56,9 @@ const checks = {
     await hlineBtn.click();
     await page.mouse.click(chart.x + chart.width * 0.5, chart.y + chart.height * 0.4);
     await page.waitForTimeout(200);
-    const delBtn = await page.locator("button[data-tip^='Remove this price line']").count();
+    // The rail's delete is one button for whatever is selected now, not one per
+    // kind of drawing — see components/charts/ChartToolRail.
+    const delBtn = await page.locator("button[data-tip^='Remove what is selected']").count();
     const stored = await page.evaluate(() => {
       try {
         const store = JSON.parse(localStorage.getItem("chart.drawings") ?? "{}");

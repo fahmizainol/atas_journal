@@ -4175,12 +4175,14 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           🔔 {alertFlash.price.toFixed(2)} crossed
         </div>
       )}
-      {/* The in-canvas rail. Absent the moment the page draws one of its own
-          (`onToolsChange`): the same buttons twice would be two places claiming
-          to say what is armed, and only one of them can be right. The banners
-          that clear it read `--chart-rail`, which the root sets to 0 when this
-          is gone. */}
-      <div className="chart-tools" style={onToolsChange ? { display: "none" } : undefined}>
+      {/* The in-canvas rail. Not rendered at all once the page draws one of its
+          own (`onToolsChange`): the same buttons twice would be two places
+          claiming to say what is armed, and only one can be right — and a hidden
+          copy is still a second `[data-tip^="Horizontal line"]` for anything
+          looking the tools up by what they say. The banners that used to clear
+          this rail read `--chart-rail`, which the root sets to 0 when it goes. */}
+      {!onToolsChange && (
+      <div className="chart-tools">
         {/* Only where the modifier isn't available. On a mouse Space+click is
             strictly the better gesture — nothing to arm, nothing left armed —
             and a button that duplicates it would just be a slower way in. */}
@@ -4287,6 +4289,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           />
         )}
       </div>
+      )}
       {/* The pane's badges, top-right: what it is doing that isn't visible in
           the candles. Both of them answer a question you would otherwise have to
           hold in your head across four charts — is this one scrolling with the

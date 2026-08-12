@@ -3446,6 +3446,87 @@ button:disabled {
   gap: 8px;
   padding: 6px;
 }
+/* Size and the bracket, on the window that fires them (components/charts/
+   TicketKnobs). Its own row above the market buttons: a knob and a BUY on the
+   same line is a mis-aim away from an order nobody described. */
+.sim-quick-knobs {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  order: -1;
+}
+/* Two lines rather than one. In a row the three knobs plus the ratio measure
+   ~600px, and a 600px window floating over the tape is not a window, it is a
+   banner — the box was ~230px before this row existed.
+   The cap goes on the *body*, not on the row: this box is absolutely positioned
+   and therefore shrink-to-fit, so `flex-basis: 100%` on the row resolves against
+   a width that is still being computed from the content — and the box simply
+   grows to put the knobs and the buttons on one line. A width the container
+   actually has is what makes the wrap happen. Scoped with :has so a dock without
+   knobs (Live's) keeps sizing itself. */
+.sim-quick-body:has(.sim-quick-knobs) {
+  max-width: 300px;
+}
+.sim-knob {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.25);
+}
+.sim-knob button {
+  width: 20px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+.sim-knob button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+}
+.sim-knob button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.sim-knob-v {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text);
+  white-space: nowrap;
+  /* The money is what the decision is actually about, so it is the part that
+     carries colour; the tick count beside it is the setting. */
+  border-inline: 1px solid var(--card-border);
+}
+.sim-knob-v b {
+  font-weight: 600;
+}
+.sim-knob.stop .sim-knob-v b {
+  color: var(--red);
+}
+.sim-knob.target .sim-knob-v b {
+  color: var(--green);
+}
+.sim-knob-rr {
+  padding: 4px 6px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+}
 .sim-quick-btn {
   display: flex;
   flex-direction: column;
@@ -3550,6 +3631,24 @@ button:disabled {
 }
 .sim-page.pinned .sim-panel:not(.open) {
   display: none;
+}
+/* Narrow enough that a 300px column is a quarter of the window: the dock folds
+   back into an overlay whatever the pin says, and the tape keeps its width. The
+   floating ticket is what carries order entry there — it has the size and both
+   bracket legs on it (TicketKnobs), which is the whole reason those moved onto
+   it. The preference itself is untouched: widen the window and the column comes
+   back, the same way the pane layout survives a phone. */
+@media (max-width: 1100px) {
+  .sim-page.pinned .sim-panel {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: min(340px, 100%);
+    max-height: 100%;
+    border-top: 1px solid var(--card-border);
+    border-top-left-radius: 10px;
+    box-shadow: -8px -8px 30px rgba(0, 0, 0, 0.45);
+  }
 }
 /* While a finger is on the grab bar the sheet tracks it exactly; the snap-back
    after letting go is what the transition is for. */

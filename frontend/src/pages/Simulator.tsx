@@ -34,6 +34,7 @@ import { LayoutPicker } from "../components/charts/LayoutPicker";
 import { LAYOUTS, MAX_PANES, clampPaneIndex, gridArea, gridTemplate } from "../lib/paneLayout";
 import { setLinkOn as setLinkModuleOn } from "../lib/paneLink";
 import { ChartToolRail } from "../components/charts/ChartToolRail";
+import { TicketKnobs } from "../components/charts/TicketKnobs";
 import { EMPTY_TOOL_STATE, type ChartToolId, type ChartToolState } from "../lib/chartTools";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
 import {
@@ -2255,9 +2256,26 @@ export function Simulator() {
         onTitle={() => setSetupOpen((o) => !o)}
         titleOpen={setupOpen}
         right={
-          <Link to="/charts/replay/history" className="sim-topbar-link" title="Every attempt you've recorded">
-            History →
-          </Link>
+          <>
+            <Link to="/charts/replay/history" className="sim-topbar-link" title="Every attempt you've recorded">
+              History →
+            </Link>
+            {/* The dock's opener, on the bar. It used to be the ▤ on the side
+                rail, which meant the control that summons the panel lived on a
+                strip you had to know was there — and the bar is the one piece of
+                chrome that is always on screen. The rail keeps the pin, the
+                working count and the day-type dot: those *report*, this
+                summons. */}
+            <button
+              type="button"
+              className={`chart-topbar-btn${sheetOpen ? " on" : ""}`}
+              onClick={() => setSheetOpen((o) => !o)}
+              aria-pressed={sheetOpen}
+              title={sheetOpen ? "Hide the ticket and blotter" : "Show the ticket and blotter"}
+            >
+              ▤▎
+            </button>
+          </>
         }
       >
         <TimeframeControl
@@ -2623,6 +2641,12 @@ export function Simulator() {
               starts at the foot of the tape and can be dragged anywhere on the
               chart, remembering where it was left (see QuickDock). */}
             <QuickDock onFloorChange={setFloor}>
+              {/* Size and the bracket, on the window that actually fires. The
+                  numbers were only editable in a panel you had to summon, which
+                  is a ticket split across two surfaces — and under 1100px the
+                  panel gets no column at all, so this is the only order entry
+                  there is. See TicketKnobs. */}
+              <TicketKnobs ticket={ticket} onChange={changeTicket} tickUsd={tickUsd} />
               {openPos && (
                 <>
                   <span className="sim-quick-pos">
@@ -2840,15 +2864,8 @@ export function Simulator() {
             default here, because a replay is mostly reading and the ticket is
             two keystrokes away (w/s) or a click on the chart itself. */}
         <div className="sim-rail">
-          <button
-            type="button"
-            className={`sim-rail-btn${sheetOpen ? " on" : ""}`}
-            onClick={() => setSheetOpen((o) => !o)}
-            aria-pressed={sheetOpen}
-            title={sheetOpen ? "Hide the ticket and blotter" : "Show the ticket and blotter"}
-          >
-            ▤
-          </button>
+          {/* The ▤ opener moved to the top bar — see ChartTopBar's `right` slot.
+              What is left here reports rather than summons. */}
           {/* Only offered once the panel is out: pinning something you cannot
               see is a setting with no visible effect. */}
           {sheetOpen && (
