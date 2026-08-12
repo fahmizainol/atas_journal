@@ -85,31 +85,57 @@ export function useTapeHistory(
     // them, and yesterday's yesterday is not context for today.
     setState({ days: [], loading: true, failed: [], settled: false });
     void (async () => {
+      const dates = key.split(",");
       const days: HistDay[] = [];
       const failed: string[] = [];
-      // One at a time: each day is a multi-megabyte parse, and three of them
-      // racing each other only makes the first one land later.
-      for (const date of key.split(",")) {
-        const ck = `${endpoint}|${symbol}|${date}|${tz}`;
+      const ckOf = (date: string) => `${endpoint}|${symbol}|${date}|${tz}`;
+      type Payload = SessionPayload & { source?: string };
+      // A day is asked for while the one before it is being decoded, and never
+      // more than that. Not the whole week at once: the payload is the expensive
+      // thing — three arrays of half a million numbers, ~25MB of JSON that
+      // exists only to be prefix-summed into typed arrays and dropped — so
+      // five in flight would hold five of those alive to save time on a parse
+      // that is single-threaded anyway. One ahead overlaps the server and the
+      // wire with the decode, which is where the wait actually is, and doubles
+      // the peak instead of quintupling it.
+      //
+      // Resolves to null rather than rejecting: the next day's request is
+      // started before this one is awaited, so a rejection could otherwise
+      // surface with nobody attached to it.
+      const fetchDay = (date: string): Promise<Payload | null> | null =>
+        TAPES.has(ckOf(date))
+          ? null
+          : apiGet<Payload>(endpoint, { symbol, date, tz }).catch(() => null);
+      let ahead = dates.length ? fetchDay(dates[0]) : null;
+      for (let i = 0; i < dates.length; i++) {
+        const date = dates[i];
+        const pending = ahead;
+        // Started before this one is awaited — that is the whole overlap.
+        ahead = i + 1 < dates.length ? fetchDay(dates[i + 1]) : null;
+        const ck = ckOf(date);
         let day = TAPES.get(ck);
         if (!day) {
+          // `pending` is null when the day was cached at prefetch time; the
+          // fallback covers the one case where it was evicted since (the cache
+          // holds fewer days than the longest span offered).
+          const p = await (pending ?? fetchDay(date) ?? Promise.resolve(null));
+          if (cancelled) return;
+          if (!p) {
+            failed.push(date);
+            continue;
+          }
           try {
-            const p = await apiGet<SessionPayload & { source?: string }>(endpoint, {
-              symbol,
-              date,
-              tz,
-            });
             day = {
               tape: decodeTape(p),
               rthOpenMs: p.rth_open_ms,
               rthCloseMs: p.rth_close_ms,
               source: p.source,
             };
-            remember(ck, day);
           } catch {
             failed.push(date);
             continue;
           }
+          remember(ck, day);
         }
         if (cancelled) return;
         days.push(day);

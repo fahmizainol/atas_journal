@@ -2,11 +2,19 @@ import { useEffect, useState } from "react";
 import { loadLegendOpen, saveLegendOpen } from "../../lib/chartPrefs";
 import { IndicatorSettings, type IndicatorSettingsSpec } from "./IndicatorSettings";
 
+// One union across both chart components, because the persisted visibility map
+// is one map: a band hidden on a strategy chart comes up hidden on the replay,
+// and vice versa. The cost of that sharing is that each component draws only a
+// subset — the rows below marked "journal charts only" never appear on
+// ReplayChart, and the "Simulator only" ones never on CandlestickChart — so an
+// unfamiliar key here is not dead, it belongs to the other chart.
 export type IndicatorKey =
   | "vwapGlobex"
   | "vwapNy"
   | "vwapWeekly"
   | "vwapAnchored"
+  /** Journal charts only (CandlestickChart): ATR pane, key levels, the four
+   *  1-minute EMAs, RSI pane, level touches and VA-snap marks. */
   | "atr"
   | "cvd"
   | "levels"
@@ -44,7 +52,19 @@ export type IndicatorKey =
    *  Separate keys because they stand for opposite halves of the same idea —
    *  size arriving, and size defending. */
   | "sweepBursts"
-  | "absorption";
+  | "absorption"
+  /** Charts workspace only (ReplayChart): the bar-range vol pane — ATR line,
+   *  developing median bar range, yesterday's median, all in ticks against the
+   *  50-tick stop. See lib/volRuler. */
+  | "volRuler"
+  /** Charts workspace only: Modern VWAP [GBB] — the swing-anchored VWAP and its
+   *  σ envelope, and the MR/TC triggers it names. Two keys because the line is a
+   *  reference you may want without a layer of arrows over the tape, and every
+   *  knob for both hangs off either row's "…". An unfalsified indicator: see
+   *  lib/modernVwap and docs/research/modern-vwap.html before reading anything
+   *  off it. */
+  | "modernVwap"
+  | "modernVwapSignals";
 
 export interface LegendItem {
   key: IndicatorKey;
@@ -129,6 +149,11 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
+/** The header's panel is keyed like a row's so one piece of open/close logic
+ *  covers both — it just isn't a layer. */
+const APPEARANCE = "__appearance";
+type PanelKey = IndicatorKey | typeof APPEARANCE;
+
 // TV-style on-chart indicator list: one row per indicator, click to hide/show,
 // and a "…" on the rows that have something to tune. The whole list collapses
 // behind its header so it can get out of the chart's way — handy on a phone,
@@ -137,15 +162,25 @@ export function IndicatorLegend({
   items,
   visibility,
   onToggle,
+  appearance,
+  prefsPane,
 }: {
   items: LegendItem[];
   visibility: Record<IndicatorKey, boolean>;
   onToggle: (key: IndicatorKey) => void;
+  /** The chart's own colours, hung off the list's header rather than off a row —
+   *  it is the one setting here that belongs to the whole chart instead of to a
+   *  layer. Optional: a chart that doesn't own its surface omits it and the
+   *  header keeps its old shape, no "…" at all. */
+  appearance?: IndicatorSettingsSpec;
+  /** Which pane's copy of the open/closed state to keep. See chartPrefs.paneKey. */
+  prefsPane?: string;
 }) {
-  const [open, setOpen] = useState(loadLegendOpen);
-  /** Which row has its settings panel out. One at a time: they overlay the rows
-   *  below them, so two open panels would mostly be one panel hiding another. */
-  const [settingsFor, setSettingsFor] = useState<IndicatorKey | null>(null);
+  const [open, setOpen] = useState(() => loadLegendOpen(prefsPane));
+  /** Which row has its settings panel out — `APPEARANCE` for the header's. One at
+   *  a time: they overlay the rows below them, so two open panels would mostly be
+   *  one panel hiding another. */
+  const [settingsFor, setSettingsFor] = useState<PanelKey | null>(null);
 
   // Esc closes the panel, and does so *before* anything else on the page sees
   // the key. The convention elsewhere is a bubble-phase listener that marks the
@@ -179,32 +214,49 @@ export function IndicatorLegend({
     };
   }, [settingsFor]);
 
-  if (items.length === 0) return null;
+  if (items.length === 0 && !appearance) return null;
   // A row switched off by its own setting doesn't count as shown, whatever its
   // eye says: the count is "how much of this is on the chart".
   const shown = items.filter((it) => visibility[it.key] && !it.dim).length;
   const setOpenPersist = (v: boolean) => {
     setOpen(v);
-    saveLegendOpen(v);
-    // Collapsing the list takes any open panel with it — it is anchored to a row
-    // that is about to stop existing.
-    if (!v) setSettingsFor(null);
+    saveLegendOpen(v, prefsPane);
+    // Collapsing the list takes any open row panel with it — it is anchored to a
+    // row that is about to stop existing. The header's own panel stays: its
+    // anchor is the one thing collapsing leaves behind.
+    if (!v && settingsFor !== APPEARANCE) setSettingsFor(null);
   };
+  const appearanceOpen = settingsFor === APPEARANCE;
   return (
     <div className={`chart-legend${settingsFor ? " settings-open" : ""}`}>
-      <button
-        className="chart-legend-row chart-legend-head"
-        onClick={() => setOpenPersist(!open)}
-        aria-expanded={open}
-        title={open ? "Hide the indicator list" : "Show the indicator list"}
-      >
-        <LayersIcon />
-        <span>Indicators</span>
-        <span className="chart-legend-count">
-          {shown}/{items.length}
-        </span>
-        <Chevron open={open} />
-      </button>
+      <div className="chart-legend-item" data-ind-item={APPEARANCE}>
+        <button
+          className={`chart-legend-row chart-legend-head${appearance ? " has-dots" : ""}`}
+          onClick={() => setOpenPersist(!open)}
+          aria-expanded={open}
+          title={open ? "Hide the indicator list" : "Show the indicator list"}
+        >
+          <LayersIcon />
+          <span>Indicators</span>
+          <span className="chart-legend-count">
+            {shown}/{items.length}
+          </span>
+          <Chevron open={open} />
+        </button>
+        {appearance && (
+          <button
+            className="chart-legend-dots"
+            onClick={() => setSettingsFor(appearanceOpen ? null : APPEARANCE)}
+            aria-expanded={appearanceOpen}
+            title="Chart appearance — background and candle colours"
+          >
+            <DotsIcon />
+          </button>
+        )}
+        {appearance && appearanceOpen && (
+          <IndicatorSettings spec={appearance} onClose={() => setSettingsFor(null)} />
+        )}
+      </div>
       {open &&
         items.map((it) => {
           const on = visibility[it.key];

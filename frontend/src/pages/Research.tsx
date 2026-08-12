@@ -42,8 +42,12 @@ export function Research() {
     );
   }
 
+  // Markdown keeps a reading measure; an artifact page brings its own layout —
+  // usually charts and wide tables — so it gets the full column instead.
+  const wide = doc.data?.kind === "html";
+
   return (
-    <div className="research-doc">
+    <div className={wide ? "research-doc wide" : "research-doc"}>
       <div className="research-doc-nav">
         <Link to="/research" className="muted">
           ← All studies

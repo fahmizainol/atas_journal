@@ -99,6 +99,33 @@ where this indicator earns its place.
 > "quality-of-life, no research risk" class as the sim-runtime item in the queue
 > below.
 
+## 9. YouTube video — "VWAP Is Outdated" 2026 overhaul — TODO (filed 2026-08-07)
+https://www.youtube.com/watch?v=bPVOB96JWuw — *"VWAP Is Outdated — Here's The
+2026 Overhaul You Asked For"*, The Good, The Bad And The Bitcoin, 11:54,
+published 2026-08-04. Short lesson video (not a livestream), so the payoff — if
+any — is a **mechanism**, not a trade log.
+
+- [ ] Transcribe (`uvx yt-dlp --write-auto-sub`, same as item 7) and write the
+      claim-by-claim table into `docs/research/`.
+- [ ] For each claim, name which of the two buckets it lands in **before**
+      costing any work: *already built here* (session/weekly/monthly VWAP
+      anchors, σ-band regime coloring, IB + extensions, session VP) or *already
+      resolved null* (event-anchored VWAP reclaim, stacked-ref confluence,
+      LVN/VP geometry ×5, EMA-vs-band collinearity, oscillator-at-fill bleed).
+      The two prior VWAP-toolkit teardowns both landed 100% inside those two
+      buckets — assume this one does too until a claim escapes them.
+- [ ] Apply the standing artifact screens: any "retest"/"reclaim" definition
+      that scores the touch bar's own close is the touch-bar artifact by
+      construction; any indicator whose value at fill correlates >0.7 with
+      stretch-from-anchor is that anchor renamed.
+- [ ] Only if a genuinely unbuilt construct survives both screens: cost it as a
+      Lab study, not a build.
+
+> The `/trading-video-teardown` skill covers the transcription + timestamp
+> mechanics; it is aimed at trade extraction, so for a lesson video use only its
+> transcript half. Prior art: item 7 (`vwap-wave-toolkit-video.md`) and the
+> livestream teardown (`vwap-wave-livestream-teardown.md`).
+
 ---
 
 ## Simulator: vol-regime chip + ATR clock (queued 2026-08-03)

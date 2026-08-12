@@ -161,8 +161,10 @@ def test_session_chart_draws_the_night_without_moving_the_engines_candles():
     with _cache(n_on=1100, n_rth=2000) as cfg:
         t = tickmod.get_day_ticks(cfg.contract, DAY)   # the engine's own ticks
         eng = barmod.tick_bars(t, PER_BAR)             # the engine's own bars
-        (full, bars, gx, ny, wk, prof_gx, prof_ny, _, ib, fp,
-         _cvd_rows, divs, _ema9, _ema20, _rsi) = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+        f = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+    bars, gx, ny, wk = f.bars, f.vwap_globex, f.vwap_ny, f.vwap_weekly
+    prof_gx, prof_ny, ib, fp = f.profile_globex, f.profile_ny, f.ib, f.footprint
+    divs = f.cvd_divergences
 
     lead = len(bars) - len(eng)
     assert lead == 2 and len(eng) == 4, (lead, len(eng))
@@ -190,7 +192,7 @@ def test_session_chart_draws_the_night_without_moving_the_engines_candles():
     # CVD divergences ride the same frame as marks to fold into: always a list,
     # never draws a mark on a session the CVD series couldn't be built for.
     assert isinstance(divs, list)
-    assert _cvd_rows or not divs, "divergences without a CVD series to diverge from"
+    assert f.cvd or not divs, "divergences without a CVD series to diverge from"
 
 
 def test_profile_is_drawn_even_when_no_rule_read_it():
@@ -198,8 +200,9 @@ def test_profile_is_drawn_even_when_no_rule_read_it():
     looking at it is the run's config, not the picture."""
     with _cache(n_on=1000, n_rth=2000) as cfg:
         assert not confmod.needs_profile(cfg), "the fixture must be a run that ignores the profile"
-        _, _, _, _, _, prof_gx, prof_ny, _, _, _, _, _, _, _, _ = _session_frame(cfg, DAY, ET_TZ, overnight=False)
-    assert prof_gx and prof_ny, "a value area was withheld from a run that did not read it"
+        f = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+    assert f.profile_globex and f.profile_ny, \
+        "a value area was withheld from a run that did not read it"
 
 
 def test_session_chart_survives_a_missing_night():
@@ -210,8 +213,9 @@ def test_session_chart_survives_a_missing_night():
         tickmod._read_day_parquet.cache_clear()
         t = tickmod.get_day_ticks(cfg.contract, DAY)
         eng = barmod.tick_bars(t, PER_BAR)
-        (_, bars, gx, ny, wk, prof_gx, prof_ny, _, _ib, _,
-         _cvd_rows, _divs, _ema9, _ema20, _rsi) = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+        f = _session_frame(cfg, DAY, ET_TZ, overnight=False)
+    bars, gx, ny, wk = f.bars, f.vwap_globex, f.vwap_ny, f.vwap_weekly
+    prof_gx, prof_ny = f.profile_globex, f.profile_ny
 
     assert len(bars) == len(eng)
     assert gx == [], "no night on disk, so there is no Globex anchor to draw"

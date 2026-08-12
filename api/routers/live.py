@@ -39,17 +39,30 @@ against the session they were read from, so every request carries the token and
 every response answers with one. A mismatch is answered with ``reset: true`` and
 the whole tape, never with a block that would splice two days into one chart.
 
-NO ORDER ROUTING. Nothing in this router can send an order, and nothing in Phases
-0-6 should be shaped as though it might. See docs/live-shadow-plan.md § Phase 7.
+NO ORDER ROUTING **IN THIS ROUTER**, and that is now a load-bearing distinction
+rather than a blanket claim. Nothing here can send an order; everything that can
+is in ``live_orders.py``, behind its own env flag, its own arm and a two-step
+confirm. The one seam between them is the ``routing`` flag on
+``/live/feed/rithmic``, which decides whether the connection opens Rithmic's
+ORDER plant at all — it has to be decided here because one login means one
+socket, and the order path rides the tick feed's.
+
+Nothing in Phases 0-6 is shaped for it: the shadow shelf cannot reach the broker
+(``shadow.py`` imports nothing from it), routing is manual-only, and the two
+recording modes are unchanged. See docs/live-shadow-plan.md § Phase 7.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import time as timemod
 from datetime import date, datetime, time, timedelta
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 
 from journal import live as livemod
 from journal.config import DEFAULT_DISPLAY_TZ, ET_TZ, contract_spec, root_symbol
@@ -115,6 +128,11 @@ def live_status() -> dict:
         "journalling": live.shadow.journal is not None,
         "unrecorded_rows": live.unrecorded,
         "can_record": live.source != "fake",
+        # Whether this session's connection opened the ORDER plant. Here so the
+        # page can decide whether to offer the routing panel at all without a
+        # second request, and false for every session that is not a routing one
+        # — which is all of them by default.
+        "routing": live.broker is not None,
         "feed_status": feed.status() if hasattr(feed, "status") else None,
     }
 
@@ -190,6 +208,7 @@ def live_feed_rithmic(
     backfill: bool = Query(True, description="replay the session so far on connect"),
     record: bool = Query(True, description="write the tape to data/live/"),
     signals: bool = Query(True, description="run the shelf over the day"),
+    routing: bool = Query(False, description="also open the ORDER plant"),
 ) -> dict:
     """Connect the real ticker plant and start recording the session.
 
@@ -197,10 +216,19 @@ def live_feed_rithmic(
     probe Databento — which a live path must never do — and the on-disk roll map
     ends 2026-06-30 regardless, so there is nothing there to resolve against.
 
-    Market data only. Nothing in this router can reach the order plant. The feed
-    opens ``TICKER_PLANT`` — plus ``HISTORY_PLANT`` when backfilling — rather
-    than taking the client's all-four default (docs/live-shadow-plan.md
-    decision 2).
+    Market data by default: the feed opens ``TICKER_PLANT`` — plus
+    ``HISTORY_PLANT`` when backfilling — rather than taking the client's
+    all-four default (docs/live-shadow-plan.md decision 2).
+
+    ``routing=true`` is the one thing that opens ``ORDER_PLANT`` (and
+    ``PNL_PLANT``, for the position), and it is settled **here**, at connect,
+    because Rithmic allows one session per login and the order path therefore
+    has to ride this same socket. It is deliberately not a runtime switch like
+    the two below: a shadow session cannot grow the ability to trade under a
+    page somebody is already watching. Refused with 422 unless the environment
+    allows routing — see ``journal.live.routing`` and the ``/live/routing``
+    endpoints, which are in a different router precisely so that the sentence
+    at the top of this file stays true.
 
     ``backfill`` replays the session from its 18:00 ET open before the live
     stream starts, so connecting at nine in the morning gives a whole session
@@ -218,7 +246,8 @@ def live_feed_rithmic(
             422, f"{symbol!r} looks like a root — pin the raw contract (e.g. NQU6)")
     try:
         live = livemod.start_rithmic(symbol.upper(), exchange, backfill=backfill,
-                                     record=record, signals=signals)
+                                     record=record, signals=signals,
+                                     routing=routing)
     except LookupError as e:
         raise HTTPException(503, str(e)) from e
     except ValueError as e:
@@ -226,6 +255,10 @@ def live_feed_rithmic(
     return {"gen": live.session.gen, "symbol": live.session.symbol,
             "date": live.session.day.isoformat(), "source": live.source,
             "recording": live.recording, "signals": live.signals,
+            # Whether the ORDER plant was opened. Read off the session rather
+            # than echoed back from the request: the two agree here, and the one
+            # worth reporting is the one that is true.
+            "routing": live.broker is not None,
             "backfill": backfill, "skipped": live.shadow.skipped}
 
 
@@ -267,9 +300,12 @@ def _kind_of(man: dict, slugs: list[str]) -> str:
 def live_recordings(symbol: str | None = Query(None)) -> dict:
     """Every recorded session in the live store, newest first.
 
-    Deliberately its own endpoint rather than a source flag on
-    ``/simulator/days``: a recorded day is not replayable (decision 4), and the
-    two stores stay visible in exactly the places that own them.
+    Still its own endpoint now that ``/simulator/days`` carries a source flag,
+    because it answers a different question. That list is "what can I replay",
+    and holds a recorded day to a covered RTH window; this one is "what is on
+    disk", and a half-recorded session, a harvest that truncated and a day with
+    nothing in it are all things it exists to show. A session can appear here
+    and not there, and that gap is the reporting, not a bug.
 
     ``contracts`` carries the one deadline in the live stack per symbol in the
     store: Rithmic replays a *listed* contract back ~120 days and an expired one
@@ -527,6 +563,12 @@ def live_session(tz: str | None = Query(None)) -> dict:
         "session_start_ms": start_ms,
         "rth_open_ms": _wall_ms(s.day, RTH_OPEN, zone),
         "rth_close_ms": _wall_ms(s.day, RTH_CLOSE, zone),
+        # Where the night's VWAP *should* be anchored, beside where it is. The
+        # feed backfills this session whole from its 18:00 open however late you
+        # connect — but Rithmic's replay has been seen to come back short
+        # without erroring, and a band anchored mid-night draws exactly like a
+        # correct one. Shipping both numbers is what makes that visible at all.
+        "globex_open_ms": _wall_ms(s.day - timedelta(days=1), tickmod.GLOBEX_OPEN, zone),
         "globex_anchor_ms": globex_anchor_ms,
         "weekly_seed": list(seed) if seed is not None else None,
         "has_overnight": on is not None,
@@ -568,8 +610,17 @@ def live_tape(
     s = live.session
     zone = zone_for(tz)
     reset = gen is not None and gen != s.gen
-    start = 0 if reset else since
-    frame = s.slice(start)
+    return _tape_payload(s, 0 if reset else since, None, zone, reset)
+
+
+def _tape_payload(s, start: int, end: int | None, zone, reset: bool) -> dict:
+    """One block of the tape, sliced, encoded and enveloped.
+
+    Shared verbatim between the poll endpoint and the SSE stream so the two can
+    never drift: an event's ``data:`` is byte-for-byte a poll response, which is
+    what lets the client decode both with the same ``TapeBlock`` type.
+    """
+    frame = s.slice(start, end)
     tape = encode_ticks(frame, zone, float(contract_spec(s.symbol)["tick_size"]))
     return {
         "gen": s.gen,
@@ -580,6 +631,149 @@ def live_tape(
         "closed": s.closed,
         **tape,
     }
+
+
+# Catch-up slices are cut into blocks of this many rows. The blocks are
+# self-contained (that is the codec's whole contract), so the client consumes a
+# chunked catch-up exactly as it consumes anything else; the cap only bounds how
+# long one executor stint and one client-side JSON.parse can be. Steady-state
+# blocks are a few dozen rows and never come near it.
+_SSE_CHUNK = 200_000
+# One comment frame per idle stretch, to keep proxies from calling a silent
+# (but healthy) connection dead. Vite's dev proxy and same-origin prod both
+# tolerate far longer; 15s is for whatever sits in front some day.
+_SSE_HEARTBEAT_S = 15.0
+# The control-plane bound: how long a quiet stream goes between looks at
+# `livemod.current()`. Data never waits on this — appends wake the stream
+# directly — it exists for the one transition with no notifier, `stop()`
+# nulling the module global after the close notification already fired.
+_SSE_WAIT_S = 1.0
+
+
+def _sse_frame(payload: dict) -> str:
+    """One SSE event. ``id`` is ``{gen}|{next}`` — the browser echoes it back as
+    ``Last-Event-ID`` on auto-reconnect, which is what makes reconnection resume
+    at the right row of the right accumulation. ``|`` because gen contains ``:``.
+    """
+    body = json.dumps(payload, separators=(",", ":"))
+    return f"id: {payload['gen']}|{payload['next']}\ndata: {body}\n\n"
+
+
+def _resume_point(request: Request, since: int, gen: str | None) -> tuple[int, str | None]:
+    """Where this connection starts reading, header beating query.
+
+    EventSource's auto-reconnect replays the *original* URL — a ``since`` that
+    is stale the moment the first block lands — but sends the last event's
+    ``id`` as the ``Last-Event-ID`` header. So the header, when present and
+    well-formed, is the truth; the query params are only the cold-start seed.
+    """
+    last_id = request.headers.get("last-event-id")
+    if last_id and "|" in last_id:
+        g, _, c = last_id.rpartition("|")
+        if c.isdigit():
+            return int(c), g
+    return since, gen
+
+
+@router.get("/live/tape/stream")
+async def live_tape_stream(
+    request: Request,
+    since: int = Query(0, ge=0),
+    gen: str | None = Query(None),
+    tz: str | None = Query(None),
+) -> StreamingResponse:
+    """The live tape as a server-sent event stream: ``/live/tape``, pushed.
+
+    Every ``data:`` payload is byte-for-byte a ``/live/tape`` response (built by
+    the same ``_tape_payload``), so the client decodes both with one type and
+    the cursor contract — advance on ``next``, reset on ``reset`` — is the same
+    contract, driven from the server side.
+
+    Delivery is event-time, not cadence: a per-connection event is nudged by
+    ``LiveSession`` the moment an append lands (see ``session.subscribe``), so a
+    block goes out when the market printed, not when a timer fired. The chart
+    downstream inherits the market's own rhythm, which is the entire point.
+
+    The stream outlives any one session. A roll or restart closes the old
+    session (which notifies), the next look at ``livemod.current()`` finds the
+    new one, and the client gets a ``reset`` block from row 0 — the same answer
+    the poll gives a stale ``gen``. Only two things end the stream: the client
+    hanging up, or the live state being gone entirely, which is said out loud as
+    an ``event: gone`` rather than an error status — a non-200 would put
+    EventSource into retry-forever against a 404.
+    """
+    zone = zone_for(tz)
+    start_cursor, start_gen = _resume_point(request, since, gen)
+
+    async def events():
+        loop = asyncio.get_running_loop()
+        wake = asyncio.Event()
+
+        def nudge() -> None:
+            # Runs on the producer's thread. call_soon_threadsafe is the one
+            # loop method that is safe from outside; a dead loop raises and
+            # session._notify swallows it, which is the correct fate for a
+            # nudge aimed at a connection that no longer exists.
+            loop.call_soon_threadsafe(wake.set)
+
+        cursor, client_gen = start_cursor, start_gen
+        subscribed = None
+        first = True
+        sent_closed = False
+        last_write = timemod.monotonic()
+        try:
+            while True:
+                live = livemod.current()
+                if live is None:
+                    yield "event: gone\ndata: {}\n\n"
+                    return
+                s = live.session
+                if s is not subscribed:
+                    # First pass, or the session rolled underneath us. Subscribe
+                    # BEFORE slicing: an append that lands between the slice and
+                    # the wait re-sets the event, so nothing can be missed.
+                    if subscribed is not None:
+                        subscribed.unsubscribe(nudge)
+                    s.subscribe(nudge)
+                    subscribed = s
+                # Clear BEFORE reading n, same no-missed-append ordering.
+                wake.clear()
+                reset = client_gen is not None and client_gen != s.gen
+                start = 0 if reset else cursor
+                n, closed = s.n, s.closed
+                if reset or n > start or first or (closed and not sent_closed):
+                    end = min(start + _SSE_CHUNK, n)
+
+                    def build(s=s, start=start, end=end, reset=reset):
+                        payload = _tape_payload(s, start, end, zone, reset)
+                        return payload["next"], _sse_frame(payload)
+
+                    # Encode and serialise off the loop: steady-state blocks are
+                    # tiny, but a first connect behind a preloaded session is
+                    # the whole day so far, and the loop must keep serving.
+                    cursor, frame_str = await loop.run_in_executor(None, build)
+                    yield frame_str
+                    client_gen = s.gen
+                    first = False
+                    sent_closed = closed
+                    last_write = timemod.monotonic()
+                    if cursor < n:
+                        continue  # still catching up — no wait between chunks
+                try:
+                    await asyncio.wait_for(wake.wait(), _SSE_WAIT_S)
+                except asyncio.TimeoutError:
+                    if timemod.monotonic() - last_write >= _SSE_HEARTBEAT_S:
+                        yield ": ping\n\n"
+                        last_write = timemod.monotonic()
+        finally:
+            if subscribed is not None:
+                subscribed.unsubscribe(nudge)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/live/signals")

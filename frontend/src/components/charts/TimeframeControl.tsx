@@ -1,10 +1,12 @@
 // The one timeframe selector shared by every chart section. Callers pass the
 // option list: the minute set is uniform (MINUTE_TFS), and the leading bar
-// option differs by context — the engine's native n-tick bar on Strategies, a
-// fixed 500t on the Interactions/Drafts research benches, and none on the
-// Journal's databento minute charts. Mapping a chosen key back to backend params
-// (resolution vs bar_minutes/ticks_per_bar) stays with each caller; this is only
-// the button row.
+// option differs by context — the engine's native n-tick bar on Strategies, and
+// a fixed 500t on the Interactions/Drafts research benches and now the Journal
+// (JOURNAL_TFS). The Journal used to be the one section with no tick option at
+// all, because its charts were built from bought 1-minute bars; they read the
+// tick cache now, so it can offer what everything else does. Mapping a chosen
+// key back to backend params (resolution vs bar_minutes/ticks_per_bar) stays
+// with each caller; this is only the button row.
 
 import { useEffect, useState } from "react";
 
@@ -17,6 +19,11 @@ export const MINUTE_TFS: TfOption[] = [
   { key: "5m", label: "5m" },
   { key: "15m", label: "15m" },
 ];
+
+// What the Journal's charts offer. 500 ticks is the same bar the research
+// benches use — there is no engine behind a journal trade to inherit a native
+// bar size from, so the shared default is the honest choice.
+export const JOURNAL_TFS: TfOption[] = [{ key: "500t", label: "500t" }, ...MINUTE_TFS];
 
 export function TimeframeControl({
   value,

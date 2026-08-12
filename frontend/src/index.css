@@ -652,7 +652,9 @@ button:disabled {
 .chart-legend {
   position: absolute;
   top: 8px;
-  left: 8px;
+  /* Beside the tool rail, not under it: both live on this edge and the rail is
+     the one anchored to it. 8px gutter, rail, 6px gutter. */
+  left: calc(14px + var(--chart-rail, 36px));
   z-index: 3;
   display: flex;
   flex-direction: column;
@@ -805,40 +807,72 @@ button:disabled {
   opacity: 0.75;
 }
 
-/* ---- on-chart tool buttons (fixed-range profile), mirroring the legend ---- */
+/* ---- on-chart tool rail (fixed-range profile, ruler, anchored VWAP) ----
+   A floating vertical rail on the chart's left edge, the way every charting
+   platform puts its drawing tools. Vertical because the row was horizontal and
+   growing: every tool added cost width along the top, and the conditional ones
+   (delete, clear all) shoved the rest sideways as they appeared. A column takes
+   the axis the chart has to spare, and the tools that come and go now come and
+   go at the bottom of it instead of reflowing the ones above.
+   It owns the left edge, so the legend starts to its right (--chart-rail). */
+:root {
+  /* Rail width: button + the panel's padding and border on both sides. */
+  --chart-rail: 36px;
+}
 .chart-tools {
   position: absolute;
   top: 8px;
-  right: 12px;
-  /* Above the legend, which shares this edge and is drawn after it. Where a wide
-     legend row and a tool button genuinely land on the same pixels, the button
-     is the one that has to win — it is the smaller target and the rarer one. */
+  left: 8px;
+  /* Above the legend, which is drawn after it. Where an open settings panel and
+     the rail genuinely land on the same pixels, .chart-legend.settings-open
+     lifts the legend over this. */
   z-index: 4;
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 4px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 8px;
+  /* One panel rather than a stack of separate chips: floating over candles, the
+     group needs a single edge, or the gaps between buttons read as tape. */
+  background: rgba(14, 17, 23, 0.72);
+  border: 1px solid var(--card-border);
+  backdrop-filter: blur(6px);
 }
 .chart-tool {
-  border: none;
-  border-radius: 6px;
-  background: rgba(14, 17, 23, 0.72);
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
-  padding: 5px 9px;
-  cursor: pointer;
+  position: relative;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
 }
 .chart-tool-i {
   line-height: 1;
 }
-.chart-tool:hover {
+/* Two glyphs in a 28px square. Emoji advance widths vary by platform and a pair
+   at full size can overhang the button, so a compound icon comes down a size and
+   closes the gap between its halves rather than trusting the metrics. */
+.chart-tool-pair {
+  font-size: 10px;
+  letter-spacing: -1px;
+}
+/* The name lives in the tooltip now. Kept in the markup, not deleted: it is
+   what aria-label is built from, and it is one rule away from coming back. */
+.chart-tool-t {
+  display: none;
+}
+.chart-tool:hover:not(:disabled) {
   border: none;
-  background: rgba(26, 29, 39, 0.95);
+  background: rgba(255, 255, 255, 0.1);
 }
 .chart-tool.on {
   background: var(--accent);
@@ -848,6 +882,202 @@ button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
+.chart-tool-sep {
+  height: 1px;
+  margin: 2px 3px;
+  background: var(--card-border);
+}
+/* The words the icons replaced, on hover. Out to the right — the rail is on the
+   left edge, so that is the only side with chart to spill onto — and delayed,
+   because a column of buttons is also something a cursor crosses on its way to
+   the tape. CSS rather than the platform's `title`: this one can hold a
+   sentence, wrap it, and show up in under a second. */
+.chart-tool[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 6;
+  width: max-content;
+  max-width: 240px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(14, 17, 23, 0.96);
+  border: 1px solid var(--card-border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.12s ease,
+    visibility 0.12s;
+}
+.chart-tool[data-tip]:hover::after,
+.chart-tool[data-tip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0.35s;
+}
+/* ---- back to the price (see ReplayChart's ◎) ----
+   The chart's other corner. The tool rail owns the top left, so the one button
+   that is not a tool — it draws nothing and arms nothing, it just puts the view
+   back on the tape — takes the top right, where the newest bar is. Inside the
+   price axis rather than over it: the axis is a drag target of its own, and its
+   width is whatever the scale is printing (--axis-w, republished by the chart on
+   every size change; the fallback is the same 60px the ＋ assumes). */
+.chart-jump {
+  position: absolute;
+  top: 8px;
+  right: calc(var(--axis-w, 60px) + 8px);
+  z-index: 4;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 8px;
+  /* The rail's panel, one button wide — the two float over the same candles and
+     have to read as the same kind of thing. */
+  background: rgba(14, 17, 23, 0.72);
+  border: 1px solid var(--card-border);
+  backdrop-filter: blur(6px);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.chart-jump:hover:not(:disabled) {
+  border: 1px solid var(--card-border);
+  background: rgba(26, 29, 39, 0.95);
+}
+/* The live edge is off screen. Lit rather than only-then-visible: a button that
+   appears when you pan is a button you have to find in the moment you already
+   lost the price. */
+.chart-jump.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.chart-jump:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* Same tooltip the rail's buttons get, hung below-left instead of right: this
+   corner has the axis on one side and the top of the chart on the other. */
+.chart-jump[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 6;
+  width: max-content;
+  max-width: 240px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(14, 17, 23, 0.96);
+  border: 1px solid var(--card-border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.12s ease,
+    visibility 0.12s;
+}
+.chart-jump[data-tip]:hover::after,
+.chart-jump[data-tip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0.35s;
+}
+
+/* The crosshair OHLC readout — top-centre, because the top-left corner already
+   belongs to the legend and the top-right to the price axis and the ◎. Hidden
+   until the
+   crosshair is over a bar (display is driven imperatively), and
+   pointer-events: none throughout: it is a reading, never a target. */
+.chart-ohlc {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: none;
+  gap: 8px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: rgba(14, 17, 23, 0.86);
+  border: 1px solid var(--card-border);
+  font-size: 11px;
+  line-height: 1;
+  font-family: monospace;
+  color: var(--muted);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.chart-ohlc b {
+  font-weight: 600;
+}
+.chart-ohlc .up {
+  color: #21c07a;
+}
+.chart-ohlc .down {
+  color: #f5455f;
+}
+
+/* A price line was crossed: the alert's visual half, over the top edge of the
+   chart where it reads whatever you were watching. A step below the OHLC
+   readout's row, so the two can coexist. Fades itself; the component removes it
+   a beat later. */
+.chart-alert-flash {
+  position: absolute;
+  top: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: rgba(14, 17, 23, 0.9);
+  border: 1px solid #c4b5fd;
+  color: #c4b5fd;
+  font-size: 12px;
+  line-height: 1;
+  pointer-events: none;
+  animation: chart-alert-fade 4s ease-out forwards;
+}
+@keyframes chart-alert-fade {
+  0% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* The bar-close countdown riding the transport clock (and Live's top-bar
+   clock): the same monospace, dimmed — it is the clock's satellite, not a
+   second clock. */
+.sim-countdown {
+  margin-left: 6px;
+  opacity: 0.55;
+  font-size: 11px;
+}
+
 /* The order tool's channel picker. Deliberately NOT in the top-left corner where
    the Space+click banner sits: that corner already holds the indicator legend and
    is within reach of the tool buttons opposite, and these are things you have to
@@ -1005,6 +1235,22 @@ button:disabled {
   padding: 4px 5px;
   font-size: 11px;
 }
+/* The caption over a box: its name on the left, and — on the two bracket boxes —
+   what that many ticks is worth on the right. One line, clipped rather than
+   wrapped: a four-figure stop must not make the SL column taller than the two
+   beside it. */
+.replay-omenu-l {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.replay-omenu-l b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 .replay-omenu-px {
   display: flex;
   align-items: center;
@@ -1104,9 +1350,25 @@ button:disabled {
 /* Fingertip sizing. Keyed off the pointer, never the viewport — a landscape
    phone is 844px wide and still a fingertip. */
 @media (pointer: coarse) {
+  :root {
+    --chart-rail: 44px;
+  }
   .chart-tool {
-    font-size: 12px;
-    padding: 10px 12px;
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+  /* No hover on a touchscreen, so the tooltip would only ever fire on the tap
+     that already ran the tool — a caption for something you just did, sitting
+     over the tape. aria-label still carries the name. */
+  .chart-tool[data-tip]::after,
+  .chart-jump[data-tip]::after {
+    content: none;
+  }
+  .chart-jump {
+    width: 36px;
+    height: 36px;
+    font-size: 18px;
   }
   /* The "…" is the narrowest thing on the legend and the one you reach for with
      a thumb over a chart that is also listening for a long press. Widened, and
@@ -1151,37 +1413,10 @@ button:disabled {
     width: 34px;
     height: 34px;
   }
-  /* Finger-sized buttons wrap onto more rows, and the lower rows would reach back
-     across the top edge into the legend. Fenced off at the width of a collapsed
-     legend (128px) plus its margins, so the two can't land on each other however
-     many rows the tools take. An expanded legend is wider than that and will
-     overlap — the z-index above decides it in the tools' favour, and collapsing
-     the legend is one tap. */
-  .chart-tools {
-    max-width: calc(100% - 148px);
-  }
 }
-/* Icons only, once the words cost more than they explain. Worded and finger-sized,
-   the row wraps into three lines that sit on top of the candles — on a phone the
-   tools end up hiding the chart they act on. Keyed off width rather than the
-   pointer for once, because this is a space problem and not a fingertip one: a
-   coarse-pointer tablet has room for the words and keeps them. The icons stay
-   the same ones the wide row shows, so nothing has to be re-learned, and title /
-   aria-label still carry the full name. */
-@media (max-width: 640px) {
-  .chart-tool-t {
-    display: none;
-  }
-  .chart-tool {
-    font-size: 14px;
-    padding: 8px 10px;
-  }
-  /* Nothing left to wrap into a second row, so the fence against the legend can
-     go — the icons need the width less than the legend needs to be reachable. */
-  .chart-tools {
-    max-width: calc(100% - 24px);
-  }
-}
+/* The narrow-screen rule that used to strip the words is gone: the rail is icons
+   at every width now, and a column can't wrap back across the legend the way the
+   old row did, so there is nothing left for a width query to fix. */
 
 /* ---- data table ---- */
 .data-table {
@@ -1281,14 +1516,19 @@ button:disabled {
 .notice.warn {
   border-left-color: var(--gold, #e0a52a);
 }
+/* minmax(0, …) rather than a bare 1fr: a grid item's automatic minimum size is
+   its min-content width, and these columns hold nowrap data tables — so a table
+   too wide for its half pushes the track (and the document) out sideways instead
+   of scrolling inside the wrapper it was given. Measured on Edges at 390px: a
+   338px column held a 419px item. */
 .grid-2 {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px;
 }
 @media (max-width: 1100px) {
   .grid-2 {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -1411,8 +1651,13 @@ button:disabled {
   font-weight: 600;
   margin-bottom: 2px;
 }
+/* Markdown memos keep a readable measure; artifact pages are charts and wide
+   tables that were laid out for a screen, so they get the whole column. */
 .research-doc {
   max-width: 860px;
+}
+.research-doc.wide {
+  max-width: none;
 }
 .research-doc-nav {
   display: flex;
@@ -1518,7 +1763,7 @@ button:disabled {
 }
 .research-frame {
   width: 100%;
-  height: calc(100vh - 170px);
+  height: calc(100vh - 140px);
   border: 1px solid var(--card-border);
   border-radius: 14px;
   background: #fff; /* artifact pages paint their own bg; white avoids a dark flash on light pages */
@@ -2036,6 +2281,89 @@ button:disabled {
   flex: 1;
   min-height: 0;
   position: relative;
+  display: flex;
+  flex-direction: row;
+}
+/* The split toggle, sitting in the top bar beside the timeframe picker and
+   styled to match it. */
+.sim-pane-toggle {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.sim-pane-toggle:hover {
+  color: var(--text);
+  background: var(--bg-2);
+}
+.sim-pane-toggle[aria-pressed="true"] {
+  color: var(--text);
+  background: var(--bg-2);
+  border-color: var(--card-border);
+}
+/* Two half-width charts on a phone is two charts you cannot read. The split is
+   hidden rather than unset: the choice belongs to the desktop it was made on and
+   is still there when you go back to it, whereas clearing the preference would
+   mean visiting on a phone quietly rearranged the machine you work on. The
+   trading pane gives up its width fraction and takes the whole box. */
+@media (max-width: 900px) {
+  .sim-pane-toggle,
+  .sim-pane-divider,
+  .sim-pane ~ .sim-pane {
+    display: none;
+  }
+  .sim-chart > .sim-pane:first-child {
+    flex: 1 !important;
+  }
+}
+
+/* One pane of the split. `position: relative` is what the chart's own overlays
+   (the legend, the tools, the indicator strip, the order dock) anchor to — with
+   a single pane this box fills .sim-chart exactly, so they land where they
+   always did and nothing about the one-pane page moved. */
+.sim-pane {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+/* The divider is the only chrome the split adds. Kept to a hairline with a
+   generous grab area either side of it: a 3px target is a target you miss, and
+   this is a control you reach for mid-replay. */
+.sim-pane-divider {
+  flex: 0 0 7px;
+  cursor: col-resize;
+  position: relative;
+  background: var(--card-border);
+  touch-action: none;
+}
+.sim-pane-divider::after {
+  content: "";
+  position: absolute;
+  inset: 0 -4px;
+}
+.sim-pane-divider:hover,
+.sim-pane-divider[data-dragging="1"] {
+  background: var(--muted);
+}
+/* The context pane's bucketing picker, bottom-left of its own pane — the one
+   corner that pane leaves empty (its legend is top-left but starts collapsed,
+   the tools are top-right, and it has no order dock because it places nothing). */
+.sim-pane-tf {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 3;
+  padding: 2px 3px;
+  border-radius: 7px;
+  /* Backed, because it sits over the tape rather than over chrome — an
+     unbacked row of buttons on candles is unreadable half the session. */
+  background: color-mix(in srgb, var(--card) 82%, transparent);
+  border: 1px solid var(--card-border);
 }
 
 /* ---- day-scale indicator strip (see components/charts/SimIndicators) ----
@@ -2153,45 +2481,50 @@ button:disabled {
 }
 
 
-/* ---- mobile: Lab + Charts workspaces ----
-   The Lab was the first workspace tuned for phones; the Journal keeps its desktop
-   shell until it gets the same pass, so every rule here is scoped. Charts joined
-   when the Simulator moved into it and needs the identical treatment — hence
-   :is(.ws-lab, .ws-charts) where both still match. (The .sim-* rules that used to
-   be here have moved into the base layout at the end of the file: that IS the
-   chart layout now, at every width, and a second statement of it here only meant
-   the two could disagree. Rules for chrome the Charts shell no longer draws —
-   the tab strip, the data sidebar — are plain .ws-lab.) :is() takes the
-   specificity of its most specific argument, and both are a single class, so this
-   is specificity-neutral: the deliberate source-order tie with .sim-page.full at
-   the end of this file still resolves exactly as its comment describes.
+/* ---- mobile: the shell, and the Lab + Charts workspaces ----
+   The Lab was the first workspace tuned for phones; Charts joined when the
+   Simulator moved into it, and the Journal followed (its own page-level rules are
+   in the block after this one). What lives here is the part all three share — the
+   shell — plus the Lab/Charts page rules that have nowhere better to be. Every
+   selector is still workspace-scoped rather than bare, because the three want
+   different things from the same chrome: Charts draws none of it and wants zero
+   page padding, the other two want a phone-sized version of it.
+
+   (The .sim-* rules that used to be here have moved into the base layout at the
+   end of the file: that IS the chart layout now, at every width, and a second
+   statement of it here only meant the two could disagree. Rules for chrome the
+   Charts shell no longer draws — the tab strip, the data sidebar — name only the
+   workspaces that draw it.) :is() takes the specificity of its most specific
+   argument, and every argument is a single class, so this is specificity-neutral:
+   the deliberate source-order tie with .sim-page.full at the end of this file
+   still resolves exactly as its comment describes.
+
    Charts already size to their container (ResizeObserver / Recharts width:100%),
    so the work is reclaiming width from chrome, scrolling the tab strip and wide
    tables sideways instead of down, and overlaying the data drawer. */
 @media (max-width: 640px) {
-  /* Lab only: Charts wants zero page padding at every width, and says so once in
-     the layout section above. Same specificity as this rule would have had, so
-     keeping :is() here would leave the winner decided by source order — naming
-     the one workspace that still wants padding is what makes it unambiguous. */
-  .ws-lab .app-main {
+  /* Everything but Charts, which wants zero page padding at every width and says
+     so once in the layout section above. Same specificity as that rule, and the
+     two selectors are disjoint, so nothing is left for source order to decide. */
+  :is(.ws-lab, .ws-journal) .app-main {
     padding: 0.85rem 0.8rem 2rem;
   }
   /* Tab strip scrolls as one row rather than wrapping under the content. */
-  .ws-lab .tabs {
+  :is(.ws-lab, .ws-journal) .tabs {
     flex-wrap: nowrap;
     overflow-x: auto;
     scrollbar-width: none;
   }
-  .ws-lab .tabs::-webkit-scrollbar {
+  :is(.ws-lab, .ws-journal) .tabs::-webkit-scrollbar {
     display: none;
   }
-  .ws-lab .tabs a {
+  :is(.ws-lab, .ws-journal) .tabs a {
     flex: 0 0 auto;
     padding: 0 13px;
     white-space: nowrap;
   }
   /* Hand the panel / doc side padding back to content. */
-  :is(.ws-lab, .ws-charts) .panel {
+  :is(.ws-lab, .ws-charts, .ws-journal) .panel {
     padding: 13px;
   }
   /* A pinned 560px chart would cover the whole phone viewport, hiding the
@@ -2225,7 +2558,7 @@ button:disabled {
   }
   /* The data/timezone drawer overlays the content instead of squeezing the flex
      row down to a sliver; the scrim behind it closes it on an outside tap. */
-  .ws-lab .sidebar {
+  :is(.ws-lab, .ws-journal) .sidebar {
     position: fixed;
     top: 0;
     left: 0;
@@ -2236,7 +2569,7 @@ button:disabled {
     overflow-y: auto;
     box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
   }
-  .ws-lab .sidebar-backdrop {
+  :is(.ws-lab, .ws-journal) .sidebar-backdrop {
     display: block;
     position: fixed;
     inset: 0;
@@ -2246,6 +2579,326 @@ button:disabled {
     border: none;
     border-radius: 0;
     background: rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* ---- the Journal's own layouts ----
+   These are not mobile rules; they are the desktop layouts, moved out of inline
+   styles so that the mobile block below can reach them at all. An inline style
+   beats every stylesheet rule, so anything a media query has to change cannot
+   live on the element — the same conversion the Simulator needed. Each one is
+   stated once here, at its desktop values, and re-stated only where a phone
+   genuinely wants something different. */
+
+/* Day header: title on the left, the two destructive buttons on the right. */
+.day-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.day-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Day review: the recording beside the day's trades. The 3fr track holds a
+   nine-column table, so once it drops under ~270px the table is scrolling
+   sideways inside a column that is itself a third of the screen — stack them
+   instead and let each have the full width. */
+.day-video-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 3fr);
+  gap: 12px;
+  align-items: stretch;
+}
+@media (max-width: 900px) {
+  .day-video-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Models → Manage models: name, description, submit on one row. */
+.model-add-form {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.model-add-name {
+  flex: 0 0 26%;
+  min-width: 140px;
+}
+
+/* Trading-days list: a fixed-height scroller with a pinned header. */
+.calendar-table-scroll {
+  height: 480px;
+  overflow: auto;
+}
+
+/* ---- month heatmap ----
+   Seven columns at every width — that is what a month is — so the phone case is
+   about what fits in a ~45px cell, not about rearranging the grid. */
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+.cal-weekday {
+  text-align: center;
+  font-size: 11px;
+  padding: 4px;
+}
+.cal-cell {
+  min-height: 64px;
+  min-width: 0;
+  border-radius: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--card-border);
+  cursor: pointer;
+}
+/* A day with no trades is a placeholder, not a link. */
+.cal-cell.empty {
+  cursor: default;
+}
+.cal-cell-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+.cal-day {
+  font-weight: 700;
+  font-size: 12px;
+}
+.cal-flags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1;
+}
+.cal-attempts {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 6px;
+  border: 1px solid var(--card-border);
+}
+.cal-pnl {
+  font-size: 12px;
+}
+.cal-trades {
+  font-size: 11px;
+}
+/* The abbreviated spelling of the same number; the phone block swaps which of
+   the two is displayed. Both are always in the DOM — picking between them in JS
+   would mean watching the viewport from React for something CSS already knows. */
+.cal-pnl-narrow {
+  display: none;
+}
+
+/* The filter bar's collapse control exists only on a phone (see below), but it
+   is always rendered — hiding it here is what keeps the desktop bar identical
+   and spares FilterBar a width listener. */
+.filter-bar-toggle {
+  display: none;
+}
+
+/* A KPI value is a single unbreakable token — "$150,439.45", "$1,234 / $-567" —
+   so it sets the grid track's minimum, and a six-up row of them can push the
+   document sideways at any width, not just a phone's (measured: the day review's
+   six flow cards overflowing an 820px tablet). Letting the value break is what
+   makes the track shrinkable, so it belongs here rather than in a media query:
+   it costs nothing until the text genuinely does not fit. */
+.ws-journal .kpi-value {
+  overflow-wrap: anywhere;
+}
+
+/* Six or five compact KPIs across stop being legible well before they stop
+   fitting. Three-up is the last honest step before the phone's two. The hero
+   spans from here down rather than being restated in the phone block: a ≤640px
+   viewport matches this query too, so one statement covers both bands — and a
+   1.5fr hero sharing a row of equal thirds is exactly the emphasis this is
+   meant to preserve. */
+@media (max-width: 1100px) {
+  .ws-journal .kpi-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+  .ws-journal .kpi-hero {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ---- mobile: the Journal workspace ----
+   The Journal is nine filter fields, KPI grids templated per-page, and tables up
+   to twelve columns wide — three things that are fine on a desktop and each of
+   which, alone, fills a phone screen. The shell it shares with the Lab is handled
+   in the block above; what follows is the Journal's own furniture.
+
+   Scoped `.ws-journal` for the same reason the Lab's rules are scoped: `.panel`,
+   `.data-table` and `.kpi-grid` are shared with the Lab and Charts, and those two
+   have already been tuned. Rules for markup only the Journal renders (the filter
+   bar, the heatmap) are left unscoped — the class name is the scope. */
+@media (max-width: 640px) {
+  /* --- the filter bar collapses to one line ---
+     Nine fields is the whole first screen, and on most visits the scope is
+     already right and only needs reading, not editing. Collapsed it states the
+     scope; open, the fields sit two-up. */
+  .filter-bar {
+    gap: 10px;
+    padding: 10px 12px;
+    /* The 78px floor exists to reserve the desktop bar's two rows against CLS;
+       one summary line has nothing to reserve. */
+    min-height: 0;
+  }
+  .filter-bar-toggle {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex: 1 1 100%;
+    min-width: 0;
+    padding: 3px 0;
+    background: transparent;
+    border: none;
+    text-align: left;
+  }
+  .filter-bar-summary {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--muted);
+  }
+  .filter-bar.collapsed .field {
+    display: none;
+  }
+  /* Two-up, except the two button groups — four session buttons on half a phone
+     wrap to two ragged rows and read as two separate controls. */
+  .filter-bar .field {
+    flex: 1 1 calc(50% - 5px);
+    min-width: 0;
+  }
+  .filter-bar .field-wide {
+    flex-basis: 100%;
+  }
+  .filter-bar .field > select,
+  .filter-bar .field > input {
+    min-width: 0;
+    width: 100%;
+  }
+  .filter-bar .radio-group {
+    flex-wrap: wrap;
+  }
+
+  /* --- KPI grids ---
+     Every Journal grid gets its column template as an inline prop (KpiGrid takes
+     the string; Models writes its own), so `!important` is the only way in — the
+     same bind the Lab's .lab-kpi is in. Unconditional here because every Journal
+     grid wants the identical answer: two-up, hero across the top. */
+  .ws-journal .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px;
+  }
+  .ws-journal .kpi-hero .kpi-value {
+    font-size: 30px;
+  }
+
+  /* --- tables ---
+     Journal tables are nowrap by design (a price that wraps is unreadable), so
+     they set their own minimum width and the wrapper scrolls them sideways
+     rather than letting them push the document out. Trimming the cell padding
+     first buys ~4 columns before any scrolling is needed at all. */
+  .ws-journal .data-table th,
+  .ws-journal .data-table td {
+    padding: 7px 8px;
+  }
+  /* Most of the height of a 480px scroller is off-screen on a phone anyway, and
+     a nested scroll region taller than the viewport is a trap: the page cannot
+     be scrolled past it. */
+  .calendar-table-scroll {
+    height: 58dvh;
+  }
+
+  /* --- month heatmap ---
+     ~45px per cell at 390px. The tint already carries the magnitude, so the
+     number only has to say roughly how much and which way — hence the short
+     spelling, and the cents that were never load-bearing here. */
+  .cal-grid {
+    gap: 3px;
+  }
+  .cal-cell {
+    min-height: 52px;
+    padding: 4px;
+    border-radius: 6px;
+  }
+  .cal-weekday {
+    font-size: 10px;
+    padding: 2px 0;
+  }
+  .cal-day {
+    font-size: 11px;
+  }
+  .cal-pnl {
+    font-size: 10.5px;
+  }
+  .cal-trades {
+    font-size: 9.5px;
+  }
+  .cal-pnl-wide {
+    display: none;
+  }
+  .cal-pnl-narrow {
+    display: inline;
+  }
+}
+
+/* A wide table whose rows expand into forms. Plain .table-scroll-x would be the
+   obvious wrapper, but a scroll container clips what overflows it on BOTH axes —
+   including the tag autocomplete that opens out of the journal form inside an
+   expanded row. So it becomes a scroller only below the width where the table
+   stops fitting, which for the twelve-column trades table is measured at ~1030px
+   of content: above that the wrapper would buy nothing and still cost the
+   popover. 1100 is where the rest of this file already draws that line. */
+@media (max-width: 1100px) {
+  .table-scroll-x-narrow {
+    overflow-x: auto;
+  }
+}
+
+/* Coarse pointer, Journal edition. Hit sizes only, and keyed off the pointer
+   rather than the width for the reason stated at the Simulator's block: a phone
+   in landscape is 844px wide and still a fingertip. */
+@media (pointer: coarse) {
+  /* Direct children only — the rule checklist's checkboxes are nested inside a
+     .field and have no business being 40px tall. */
+  .ws-journal .field > select,
+  .ws-journal .field > input,
+  .ws-journal .radio-group button,
+  .ws-journal .filter-bar button {
+    min-height: 40px;
+  }
+  .ws-journal .badge-input {
+    min-height: 42px;
+  }
+  /* Rows are the primary target on four of the seven tabs — a day, a trade, an
+     edge bucket. padding-block only, so the compact variant keeps its tight
+     columns; the extra specificity is what gets past .compact-table. */
+  .ws-journal .data-table tbody td {
+    padding-block: 11px;
+  }
+  /* Revealed on hover at rest, which on a touchscreen means never revealed —
+     the tag would be undeletable. Applies wherever badges are edited, Lab
+     included. */
+  .badge-x {
+    opacity: 1;
   }
 }
 
@@ -2298,25 +2951,26 @@ button:disabled {
    left is the transport, which is the one thing on the page that still costs
    height unconditionally — so on a short viewport it gets tighter, not hidden. */
 @media (max-height: 620px) {
-  /* Lab only: Charts draws no shell chrome to compress. */
-  .ws-lab .app-main {
+  /* Everything but Charts, which draws no shell chrome to compress. */
+  :is(.ws-lab, .ws-journal) .app-main {
     padding-top: 0.7rem;
   }
-  .ws-lab .app-topbar {
+  :is(.ws-lab, .ws-journal) .app-topbar {
     margin-bottom: 4px;
   }
-  .ws-lab .tabs {
+  :is(.ws-lab, .ws-journal) .tabs {
     margin-bottom: 6px;
     /* A landscape phone is 641-844px wide, so it clears the narrow query above
-       and its tab row (~710px) would otherwise overflow the document sideways. */
+       and its tab row (~710px in the Lab, more in the Journal's seven) would
+       otherwise overflow the document sideways. */
     flex-wrap: nowrap;
     overflow-x: auto;
     scrollbar-width: none;
   }
-  .ws-lab .tabs::-webkit-scrollbar {
+  :is(.ws-lab, .ws-journal) .tabs::-webkit-scrollbar {
     display: none;
   }
-  .ws-lab .tabs a {
+  :is(.ws-lab, .ws-journal) .tabs a {
     flex: 0 0 auto;
     height: 34px;
     padding: 0 13px;
@@ -2537,31 +3191,96 @@ button:disabled {
   background: var(--accent);
   border-radius: 9px;
 }
+/* The day-type readout as a dot — green paying, amber grudging, red dry, muted
+   while it is still reading. The color comes inline from the verdict; the
+   numbers behind it live on the panel strip (and in this dot's hover). */
+.sim-rail-read {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
 
-/* Market orders, floating at the foot of the tape — the lowest thing on the
-   screen and so the easiest to reach, which is the point: everything else here
-   is something you call up, and these two are not.
+/* Market orders in a small window, parked at the foot of the tape — the lowest
+   thing on the screen and so the easiest to reach, which is the point:
+   everything else here is something you call up, and these two are not.
 
-   Sized to their contents so the band they sit in doesn't swallow chart drags
-   along the bottom of the tape, and pointer-events only on the buttons for the
-   same reason. */
+   It floats over the chart rather than sitting in it, and it moves: grabbed
+   anywhere on its own chrome it goes wherever on the tape you want it, and stays
+   there across reloads and across both charts (components/charts/QuickDock).
+   Sized to its contents so it covers as little of the price action as a pair of
+   thumb-sized buttons can, and centred on the foot until it is moved. */
 .sim-quick {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
   z-index: 5;
+  display: flex;
+  flex-direction: column;
+  max-width: calc(100% - 16px);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: rgba(14, 17, 23, 0.86);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  /* The box is the drag surface, so the browser must not claim the gesture for
+     scrolling first — and a drag over it must not select the button labels. */
+  touch-action: none;
+  user-select: none;
+}
+/* Dragged off the foot: the page pins it by left/top instead, so the centring
+   transform and the bottom anchor both have to go. */
+.sim-quick.moved {
+  bottom: auto;
+  transform: none;
+}
+.sim-quick.dragging {
+  cursor: grabbing;
+}
+/* The title bar. It carries no title — there is nothing to say about two buttons
+   labelled BUY and SELL — but it is what makes the box read as a window rather
+   than as a pair of buttons on a backing, and it is the thing you reach for to
+   move it. Full width and its own strip, because the handle has to be findable
+   without being pointed at: a hairline down the side was not, and the buttons
+   can't do the job — a drag that starts on BUY must never become an order.
+
+   The pill inside is the one the order ticket is grabbed by, so the two things
+   on this page you can drag say so the same way. */
+.sim-quick-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--card-border);
+  cursor: grab;
+}
+.sim-quick-grip:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.sim-quick-grip span {
+  width: 32px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--grid);
+}
+.sim-quick.dragging .sim-quick-grip {
+  cursor: grabbing;
+}
+/* The buttons, and the position chip when a trade is on. Wraps inside the window
+   rather than widening it past the chart on a phone. */
+.sim-quick-body {
   display: flex;
   align-items: center;
   justify-content: center;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 0;
-  padding: 8px 0 10px;
-  pointer-events: none;
-}
-.sim-quick > * {
-  pointer-events: auto;
+  padding: 6px;
 }
 .sim-quick-btn {
   display: flex;
@@ -2604,19 +3323,19 @@ button:disabled {
 /* Joins the pair while a trade is on rather than replacing it — the position is
    netted, so those two buttons are how you scale in and out of what this chip is
    reporting. Takes the whole first line when the four of them won't fit across a
-   phone, which puts it directly above the buttons it belongs to. */
+   phone, which puts it directly above the buttons it belongs to.
+
+   No panel of its own: it used to float on the tape by itself and needed one,
+   and now it sits inside the window's, which already supplies the backing and
+   the border. Two would read as two boxes. */
 .sim-quick-pos {
   display: flex;
   align-items: center;
   flex: 1 1 auto;
   min-width: 0;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 4px 6px;
   font-size: 12px;
-  background: rgba(14, 17, 23, 0.86);
-  backdrop-filter: blur(6px);
-  border: 1px solid var(--card-border);
-  border-radius: 8px;
 }
 .sim-quick-pos b {
   font-family: monospace;

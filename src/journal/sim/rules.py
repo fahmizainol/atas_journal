@@ -96,6 +96,28 @@ class SimConfig(_JsonMixin):
     # Ignored when trail_stop_ticks is 0. The stop only ever moves toward the
     # trade — a pullback never loosens it.
     trail_step_ticks: int = 0
+    # 0 = off. Sets the trail's DISTANCE from the day's volatility instead of the
+    # fixed tick count: the distance becomes this multiple of the daily ATR(14)
+    # the session was walked into with (Wilder, over globex-day true ranges
+    # through the PRIOR session — the vol clock's own number, see
+    # journal.sim.vol_regime), rounded to the tick grid. The Chandelier exit's
+    # shape, with the ATR read ONCE, at the session's open: the trail is wider on
+    # a hot day and tighter on a quiet one, but it never breathes intraday, so it
+    # cannot tighten on a trade just because the afternoon went quiet.
+    #
+    # The multiplier is a fraction because a daily range dwarfs an intraday
+    # trail: over 2024-03..2026-06 NQ's daily ATR ran 210-890 points (median
+    # 390), so 0.05 lands a median 78-tick trail — the fixed 75 the baseline
+    # carries — while stretching to ~178 ticks on the hottest days and ~42 on the
+    # quietest. That is the knob's whole point, and 0.05 is the vol-neutral
+    # setting to A/B a fixed distance against.
+    #
+    # trail_stop_ticks remains the master switch (0 there is no trail at all) and
+    # the FALLBACK: a session whose ATR can't be read (no cached warm-up window)
+    # trails at the fixed distance rather than losing the rule silently. The step
+    # rides along when trail_step_ticks is 0 — the grid then scales with the
+    # distance instead of pinning to a tick count the distance no longer matches.
+    trail_atr_mult: float = 0.0
     # Where the trail's first click lands, in ticks beyond the entry — and so the
     # origin of the whole step grid. 0 puts it on the entry itself, which is only
     # breakeven *gross*: the round trip still owes commission, so a stop there

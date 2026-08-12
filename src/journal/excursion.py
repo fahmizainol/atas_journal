@@ -3,6 +3,19 @@
 MFE = most favorable excursion (best unrealized gain during the hold).
 MAE = most adverse excursion (worst unrealized loss during the hold).
 Exit efficiency = realized PnL / MFE PnL (how much of the best move captured).
+
+The bars now come off the tick cache (``journal.tick_bars``) rather than a
+Databento ohlcv-1m purchase. Nothing here changed shape: still minute bars,
+still Wilder's ATR over them, so the numbers this reports are the numbers it
+always reported — with two corrections that only ever made it wrong. The bars
+are now the *traded* contract for that day rather than a continuous symbol, and
+they exist at all: the bar cache was empty, so every call here had been
+returning None.
+
+Tick-exact extremes were the tempting alternative and are deliberately not taken
+— ``api.sim_charts`` does that for engine trades, and it is a different
+measurement. Keeping this at minute granularity means a number on the Trades
+page still means what it meant last month.
 """
 
 from __future__ import annotations
@@ -11,7 +24,7 @@ from datetime import timedelta
 
 import pandas as pd
 
-from . import databento_client as dbn
+from . import tick_bars
 from .atr import atr_series
 from .config import point_value
 
@@ -23,7 +36,8 @@ _ATR_WARMUP_BARS = 30
 
 def trade_excursion(trade: pd.Series) -> dict | None:
     """Compute MAE/MFE for one logical trade. None if bars unavailable."""
-    bars = dbn.get_bars(trade["instrument"], trade["entry_ts_utc"], trade["exit_ts_utc"])
+    bars = tick_bars.get_bars(trade["instrument"], trade["entry_ts_utc"],
+                              trade["exit_ts_utc"])
     if bars is None or bars.empty:
         return None
 
@@ -79,7 +93,8 @@ def _avg_atr_during_hold(
     entry_utc = pd.Timestamp(trade["entry_ts_utc"]).tz_convert("UTC")
     exit_utc = pd.Timestamp(trade["exit_ts_utc"]).tz_convert("UTC")
     warmup_start = entry_utc - timedelta(minutes=_ATR_WARMUP_BARS)
-    buffered = dbn.get_bars(trade["instrument"], warmup_start, exit_utc, slice_to_window=True)
+    buffered = tick_bars.get_bars(trade["instrument"], warmup_start, exit_utc,
+                                  slice_to_window=True)
     if buffered is None or buffered.empty:
         return None, None
     atr = atr_series(buffered, _ATR_PERIOD)
@@ -93,7 +108,7 @@ def _avg_atr_during_hold(
 
 def aggregate_excursion(trades: pd.DataFrame, limit: int | None = None) -> pd.DataFrame:
     """Per-trade MAE/MFE table across trades (only those with bar data)."""
-    if trades is None or trades.empty or not dbn.is_available():
+    if trades is None or trades.empty or not tick_bars.is_available():
         return pd.DataFrame()
     rows = []
     sub = trades if limit is None else trades.head(limit)

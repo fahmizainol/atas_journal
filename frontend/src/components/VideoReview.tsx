@@ -16,6 +16,7 @@ import {
   useUpdateBookmark,
   useVideo,
 } from "../hooks/useVideo";
+import { COARSE_POINTER } from "../lib/pointer";
 import type { FilterScope } from "../lib/queryKeys";
 import type { TradeRow, VideoBookmark, VideoData } from "../lib/types";
 
@@ -605,7 +606,10 @@ function BookmarkRow({
         </span>
       )}
       {/* Borderless glyph; only visible on hover so it doesn't clutter the
-          resting row. stopPropagation keeps the row's seek-on-click out. */}
+          resting row. stopPropagation keeps the row's seek-on-click out.
+          A fingertip cannot hover, so on a touch device the reveal would make
+          the control unreachable rather than tidy — it stands there instead,
+          with a finger-sized hit box the 12px glyph doesn't have on its own. */}
       <span
         role="button"
         title="Delete bookmark"
@@ -615,9 +619,10 @@ function BookmarkRow({
         }}
         style={{
           color: "var(--red)",
-          opacity: hover ? 1 : 0,
+          opacity: COARSE_POINTER || hover ? 1 : 0,
           cursor: "pointer",
-          padding: "0 2px",
+          padding: COARSE_POINTER ? "6px 10px" : "0 2px",
+          margin: COARSE_POINTER ? "-6px 0" : undefined,
           userSelect: "none",
         }}
       >

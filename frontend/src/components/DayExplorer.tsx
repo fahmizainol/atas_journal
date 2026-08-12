@@ -165,14 +165,7 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
 
   return (
     <div>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 12,
-        }}
-      >
+      <div className="day-head">
         <div>
           <div className="section-title">{pretty}</div>
           <div className="section-cap">
@@ -181,7 +174,7 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
               ` · ${data.attempts.find((a) => a.source_file === data.source_file)?.label} of ${data.attempts.length}`}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="day-head-actions">
           {data.attempts.length > 1 && (
             <button
               type="button"
@@ -226,20 +219,15 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
         <KpiGrid cards={flowCards} template="repeat(6, 1fr)" />
         {/* Experimental layout: the player sits in the same container as the
             trades table, side-by-side. The video column is sticky, so the
-            table scrolls beside a pinned player. */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 7fr) minmax(0, 3fr)",
-            gap: 12,
-            alignItems: "stretch",
-          }}
-        >
+            table scrolls beside a pinned player. Below ~900px the 3fr track is
+            narrower than one row of the trades table, so the two stack (see
+            .day-video-grid). */}
+        <div className="day-video-grid">
           <VideoPanel sourceFile={data.source_file} scope={scope} />
           <div>
             <div className="section-title">Trades this day</div>
             <div className="section-cap">Click a row to expand its full detail.</div>
-            <div className="panel compact-table" style={{ overflowX: "auto" }}>
+            <div className="panel compact-table table-scroll-x">
               <DataTable
                 data={data.trades}
                 columns={dayColumns}

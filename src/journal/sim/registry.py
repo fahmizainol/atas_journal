@@ -63,7 +63,11 @@ STRATEGIES: dict[str, Strategy] = {
                 "re-accepted back inside value. trail_stop_ticks turns the fixed "
                 "stop into a ratchet that follows that far behind the best price "
                 "the trade has seen — its first move is to breakeven — resting on "
-                "a grid of trail_step_ticks measured from the entry. The "
+                "a grid of trail_step_ticks measured from the entry; "
+                "trail_atr_mult sets that distance from the daily ATR the "
+                "session opened with instead of a fixed tick count, read once "
+                "at the open so it is wider on a hot day without breathing "
+                "intraday. The "
                 "regime confluence stands the strategy down from its checkpoint "
                 "(09:45 or 10:30 ET) on days whose morning lived below both "
                 "anchored VWAPs; vwap_slope does the same on days whose NY VWAP "
@@ -152,7 +156,12 @@ STRATEGIES: dict[str, Strategy] = {
             # evaluates and simulates identically to v13, but it is the first per-tick
             # exit trigger on the base rule path, so v13 runs are quarantined rather
             # than trusted.
-            version="14",
+            # v15: added trail_atr_mult — the trail's distance may be set from the
+            # daily ATR the session opened with (read once, at the open) instead of
+            # a fixed tick count. 0 (the default) keeps the fixed distance and
+            # simulates identically to v14, but it moves the stop on the base rule
+            # path, so v14 runs are quarantined rather than trusted.
+            version="15",
             confluences=("volume_profile", "regime", "vwap_slope", "vwap_cross",
                          "upper_occupancy", "gx_rescue", "gx_floor", "on_high",
                          "gx_value", "gx_poc_shape", "ny_poc_floor",
@@ -224,7 +233,9 @@ STRATEGIES: dict[str, Strategy] = {
             # v14: added underwater_exit_after_s — see vwap-upper-band-bounce
             # v14. Rides the shared run_session; 0 (the default) simulates
             # identically to v13.
-            version="14",
+            # v15: added trail_atr_mult — see vwap-upper-band-bounce v15. Rides
+            # the shared run_session; 0 (the default) simulates identically to v14.
+            version="15",
             config_cls=GlobexBounceConfig,
             # vwap_slope joined for the 2026-07 regime study: the invert-on
             # long's split-half-stable bleed is confined to trend-down days,
@@ -288,7 +299,10 @@ STRATEGIES: dict[str, Strategy] = {
             # v14. Rides the shared run_session (via run_session_short); on a
             # short "underwater" is the rip against the position, the signed
             # mirror. 0 (the default) simulates identically to v10.
-            version="11",
+            # v12: added trail_atr_mult — see vwap-upper-band-bounce v15. Rides
+            # the shared run_session (via run_session_short); 0 (the default)
+            # simulates identically to v11.
+            version="12",
             confluences=("volume_profile", "on_high", "gx_value",
                          "regime_mirror"),
             run_session=engine.run_session_short,

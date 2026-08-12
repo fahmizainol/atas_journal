@@ -178,7 +178,7 @@ class TickRecorder:
         """Which window a tick falls in. Asked of a batch's *first* row only.
 
         A batch that straddles 09:30 therefore lands whole in the night's chunk,
-        and the seal happens one batch (~100ms) late. That is deliberate and
+        and the seal happens one batch (~`PUBLISH_S`) late. That is deliberate and
         costs nothing: ``live_segment`` cuts by timestamp, not by which chunk a
         tick was written into, so the boundary the readers see is exact either
         way. What the rule buys is that the night is sealed and readable within
@@ -249,9 +249,10 @@ def read_manifest(symbol: str, day: date) -> dict | None:
 def recorded_days(symbol: str | None = None) -> list[tuple[str, date]]:
     """Every (symbol, session date) with at least one sealed chunk, oldest first.
 
-    Globs the live store alone. ``/simulator/days`` deliberately does not call
-    this — a recorded day is not replayable (decision 4), and the two stores stay
-    visible in exactly the places that own them.
+    Globs the live store alone — "what was recorded", with no view of what was
+    bought. ``/simulator/days`` calls this for its second pass and then applies
+    its own bar (RTH covered end to end); the two questions are different, and
+    keeping this one store-shaped is what lets both be asked.
     """
     root = tickmod.LIVE_TICK_DIR
     if not root.is_dir():

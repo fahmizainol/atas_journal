@@ -81,13 +81,19 @@ def time_bars(ticks: pd.DataFrame, freq: str = "1min") -> pd.DataFrame:
     ts = ticks["ts_utc"]
     if ts.dt.tz is None:
         ts = ts.dt.tz_localize("UTC")
-    bucket = ts.dt.floor(freq).to_numpy()
+    # ``.values``, not ``.to_numpy()`` — the same trap ``tick_bars`` documents
+    # above, and this function had been falling into it on *every* row. On a
+    # tz-aware column ``.to_numpy()`` boxes each entry into a Python Timestamp,
+    # so a 300k-tick session cost ~18M object conversions and a groupby over an
+    # object column: 20 seconds to draw one chart. The naive ns values ARE the
+    # UTC instants, and ``utc=True`` below re-localizes the sampled ends.
+    bucket = ts.dt.floor(freq).values
     df = pd.DataFrame({
         "bucket": bucket,
         "price": ticks["price"].to_numpy(),
         "size": ticks["size"].to_numpy(),
         "pos": np.arange(len(ticks)),
-        "ts": ts.to_numpy(),
+        "ts": ts.values,
     })
     g = df.groupby("bucket", sort=True)
     return pd.DataFrame({

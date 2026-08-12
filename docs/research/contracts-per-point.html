@@ -1,0 +1,484 @@
+<title>Contracts per point — the two kinds of day</title>
+
+<style>
+  /* Dark is the default here: this renders in an iframe inside the Lab, which
+     never passes its theme down, and every other research page is dark. Light
+     is opt-in via the OS preference. */
+  :root {
+    --ground: #0F1314;
+    --panel: #171C1D;
+    --ink: #E7EDED;
+    --muted: #98A4A8;
+    --faint: #6C787C;
+    --rule: #2A3234;
+    --carpet: #D2894C;
+    --carpet-soft: #33261C;
+    --ice: #5FB2D2;
+    --ice-soft: #14262F;
+    --accent: #58A9A3;
+
+    --serif: ui-serif, Georgia, "Times New Roman", serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ground: #F1F4F4;
+      --panel: #FBFCFC;
+      --ink: #14181A;
+      --muted: #5A666B;
+      --faint: #8A9498;
+      --rule: #D5DCDC;
+      --carpet: #A85D2B;
+      --carpet-soft: #EBDDD0;
+      --ice: #2B7E9E;
+      --ice-soft: #D6E7EF;
+      --accent: #1F5F5B;
+    }
+  }
+
+  :root[data-theme="light"] {
+    --ground: #F1F4F4;
+    --panel: #FBFCFC;
+    --ink: #14181A;
+    --muted: #5A666B;
+    --faint: #8A9498;
+    --rule: #D5DCDC;
+    --carpet: #A85D2B;
+    --carpet-soft: #EBDDD0;
+    --ice: #2B7E9E;
+    --ice-soft: #D6E7EF;
+    --accent: #1F5F5B;
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0F1314;
+    --panel: #171C1D;
+    --ink: #E7EDED;
+    --muted: #98A4A8;
+    --faint: #6C787C;
+    --rule: #2A3234;
+    --carpet: #D2894C;
+    --carpet-soft: #33261C;
+    --ice: #5FB2D2;
+    --ice-soft: #14262F;
+    --accent: #58A9A3;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    margin: 0;
+    padding: 2.5rem 1.25rem 4rem;
+  }
+
+  .wrap {
+    max-width: 60rem;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3rem;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin: 0 0 0.75rem;
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-size: clamp(1.9rem, 4.5vw, 2.7rem);
+    font-weight: 600;
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0 0 0.9rem;
+  }
+
+  h2 {
+    font-family: var(--serif);
+    font-size: 1.35rem;
+    font-weight: 600;
+    line-height: 1.25;
+    text-wrap: balance;
+    margin: 0 0 0.6rem;
+  }
+
+  .lede {
+    font-size: 1.08rem;
+    color: var(--muted);
+    max-width: 46ch;
+    margin: 0;
+  }
+
+  p { margin: 0 0 0.9rem; max-width: 66ch; }
+  p:last-child { margin-bottom: 0; }
+
+  section { display: flex; flex-direction: column; gap: 1rem; }
+
+  /* ---- the two floors ---- */
+
+  .floors {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+    gap: 1.25rem;
+  }
+
+  .day {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 1.4rem 1.4rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .day-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+
+  .chip {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0.22rem 0.5rem;
+    border-radius: 2px;
+  }
+  .chip.carpet { background: var(--carpet-soft); color: var(--carpet); }
+  .chip.ice    { background: var(--ice-soft);    color: var(--ice); }
+
+  .day-name { font-family: var(--serif); font-size: 1.2rem; font-weight: 600; }
+
+  .day-sub { color: var(--muted); font-size: 0.93rem; margin: 0; max-width: none; }
+
+  /* push meter — identical in both cards, which is the whole point */
+  .push {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--faint);
+    letter-spacing: 0.06em;
+  }
+  .push-bar {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--accent);
+    opacity: 0.55;
+  }
+
+  /* the floor + box */
+  .track {
+    position: relative;
+    height: 76px;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    overflow: hidden;
+    background-color: var(--carpet-soft);
+  }
+  .track.carpet {
+    background-color: var(--carpet-soft);
+    background-image: repeating-linear-gradient(
+      45deg, transparent 0 3px, rgba(210, 137, 76, 0.22) 3px 4px
+    );
+  }
+  .track.ice {
+    background-color: var(--ice-soft);
+    background-image: linear-gradient(100deg,
+      rgba(95, 178, 210, 0.18) 0%, rgba(95, 178, 210, 0) 52%,
+      rgba(95, 178, 210, 0.10) 74%, rgba(95, 178, 210, 0) 100%);
+  }
+  @media (prefers-color-scheme: light) {
+    .track.carpet {
+      background-image: repeating-linear-gradient(
+        45deg, transparent 0 3px, rgba(168, 93, 43, 0.28) 3px 4px);
+    }
+    .track.ice {
+      background-image: linear-gradient(100deg,
+        rgba(255,255,255,0.55) 0%, rgba(255,255,255,0) 38%,
+        rgba(255,255,255,0.35) 62%, rgba(255,255,255,0) 100%);
+    }
+  }
+
+  .startline {
+    position: absolute;
+    left: 8px; top: 0; bottom: 0;
+    width: 1px;
+    background: var(--faint);
+    opacity: 0.5;
+  }
+
+  .box {
+    position: absolute;
+    top: 50%;
+    width: 34px; height: 34px;
+    margin-top: -17px;
+    left: 8px;
+    border-radius: 2px;
+    display: grid;
+    place-items: center;
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    color: var(--ground);
+    transform: translateX(var(--end));
+    animation: slide 900ms cubic-bezier(.22,.72,.24,1) both;
+  }
+  .box.carpet { background: var(--carpet); --end: 22%; }
+  .box.ice    { background: var(--ice);    --end: 76%; }
+
+  @keyframes slide { from { transform: translateX(0); } to { transform: translateX(var(--end)); } }
+  @media (prefers-reduced-motion: reduce) {
+    .box { animation: none; }
+  }
+
+  .travel {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--faint);
+    letter-spacing: 0.06em;
+  }
+
+  /* numbers */
+  .figs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.1rem 1rem;
+    border-top: 1px solid var(--rule);
+    padding-top: 0.9rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .figs dt {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--faint);
+    align-self: end;
+  }
+  .figs dd { margin: 0 0 0.55rem; font-size: 1.02rem; }
+
+  .ratio {
+    border-top: 1px solid var(--rule);
+    padding-top: 0.9rem;
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+  .ratio-num {
+    font-family: var(--serif);
+    font-size: 2rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .ratio.carpet .ratio-num { color: var(--carpet); }
+  .ratio.ice .ratio-num { color: var(--ice); }
+  .ratio-unit { font-family: var(--mono); font-size: 0.72rem; color: var(--faint); letter-spacing: 0.06em; }
+
+  /* ---- verdict strip ---- */
+  .verdict {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 1.2rem 1.4rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.6rem 1rem;
+  }
+  .verdict strong {
+    font-family: var(--serif);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .verdict span { color: var(--muted); max-width: 52ch; }
+
+  /* ---- histograms ---- */
+  .hists {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+    gap: 1.25rem;
+  }
+  .hist {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 1.3rem 1.4rem 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+  .bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 108px;
+  }
+  .bars i {
+    flex: 1;
+    background: var(--faint);
+    opacity: 0.45;
+    border-radius: 1px 1px 0 0;
+  }
+  .hist.split .bars i.a { background: var(--carpet); opacity: 0.75; }
+  .hist.split .bars i.b { background: var(--ice); opacity: 0.75; }
+  .axis {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.07em;
+    color: var(--faint);
+    border-top: 1px solid var(--rule);
+    padding-top: 0.5rem;
+  }
+  .read { font-size: 0.93rem; color: var(--muted); margin: 0; max-width: none; }
+  .read b { color: var(--ink); font-weight: 600; }
+
+  .note {
+    border-left: 2px solid var(--rule);
+    padding-left: 1rem;
+    color: var(--muted);
+    font-size: 0.93rem;
+  }
+  .note p { max-width: 62ch; }
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--ground);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 0.08em 0.34em;
+  }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 0; }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Order flow · one measure</p>
+    <h1>How many contracts did it take to move one point?</h1>
+    <p class="lede">Same shove, different floor. The number tells you what kind of floor you were on — without ever looking at the floor.</p>
+  </header>
+
+  <section>
+    <div class="floors">
+
+      <article class="day">
+        <div class="day-head">
+          <span class="day-name">Carpet day</span>
+          <span class="chip carpet">absorption</span>
+        </div>
+        <p class="day-sub">Heavy trading, price barely travels. Something is soaking up every order.</p>
+
+        <div class="push"><span>PUSH</span><div class="push-bar"></div><span>SAME</span></div>
+
+        <div class="track carpet">
+          <div class="startline"></div>
+          <div class="box carpet">box</div>
+        </div>
+        <div class="travel"><span>START</span><span>TRAVELLED 180 PTS</span></div>
+
+        <dl class="figs">
+          <dt>Range</dt><dt>Volume</dt>
+          <dd>180 pts</dd><dd>620,000</dd>
+        </dl>
+
+        <div class="ratio carpet">
+          <span class="ratio-num">3,444</span>
+          <span class="ratio-unit">CONTRACTS PER POINT</span>
+        </div>
+      </article>
+
+      <article class="day">
+        <div class="day-head">
+          <span class="day-name">Ice day</span>
+          <span class="chip ice">impact</span>
+        </div>
+        <p class="day-sub">Half the trading, triple the travel. Nothing standing in the way.</p>
+
+        <div class="push"><span>PUSH</span><div class="push-bar"></div><span>SAME</span></div>
+
+        <div class="track ice">
+          <div class="startline"></div>
+          <div class="box ice">box</div>
+        </div>
+        <div class="travel"><span>START</span><span>TRAVELLED 520 PTS</span></div>
+
+        <dl class="figs">
+          <dt>Range</dt><dt>Volume</dt>
+          <dd>520 pts</dd><dd>310,000</dd>
+        </dl>
+
+        <div class="ratio ice">
+          <span class="ratio-num">596</span>
+          <span class="ratio-unit">CONTRACTS PER POINT</span>
+        </div>
+      </article>
+
+    </div>
+
+    <div class="verdict">
+      <strong>5.8&times;</strong>
+      <span>It took nearly six times as much trading to move NQ a single point on the carpet day. That gap is the whole measurement — one number per session.</span>
+    </div>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>Now do it for every day and look at the shape</h2>
+    <p>One session tells you nothing. Compute the ratio for the whole sample, plot the histogram, and read the silhouette. This is the entire test — and it decides whether the idea is worth spending money on.</p>
+
+    <div class="hists">
+
+      <article class="hist">
+        <div class="bars">
+          <i style="height:6%"></i><i style="height:14%"></i><i style="height:31%"></i>
+          <i style="height:58%"></i><i style="height:84%"></i><i style="height:100%"></i>
+          <i style="height:81%"></i><i style="height:54%"></i><i style="height:28%"></i>
+          <i style="height:12%"></i><i style="height:5%"></i>
+        </div>
+        <div class="axis"><span>STICKY</span><span>SLIPPERY</span></div>
+        <p class="read"><b>One hump — dead end.</b> Every session is basically the same floor. There are no regimes here, so no dealer-gamma label can explain a difference that does not exist. Stop, and keep the money.</p>
+      </article>
+
+      <article class="hist split">
+        <div class="bars">
+          <i class="a" style="height:16%"></i><i class="a" style="height:48%"></i><i class="a" style="height:88%"></i>
+          <i class="a" style="height:62%"></i><i class="a" style="height:22%"></i>
+          <i style="height:11%"></i>
+          <i class="b" style="height:26%"></i><i class="b" style="height:70%"></i><i class="b" style="height:100%"></i>
+          <i class="b" style="height:55%"></i><i class="b" style="height:18%"></i>
+        </div>
+        <div class="axis"><span>STICKY</span><span>SLIPPERY</span></div>
+        <p class="read"><b>Two humps — keep going.</b> There really are two kinds of day. Now it is worth paying for options data to find out whether the split lines up with dealer gamma sign.</p>
+      </article>
+
+    </div>
+  </section>
+
+  <hr>
+
+  <section class="note">
+    <h2>Two things that will bite</h2>
+    <p><strong>Drift.</strong> Volume and volatility both wander over the years, so a raw ratio partly just tracks &ldquo;was this a busy month.&rdquo; Compare each day against its own trailing 20-session median instead of against the whole sample — otherwise the two humps found are 2024 and 2026.</p>
+    <p><strong>The sharper version.</strong> Range over total volume is the readable form. The precise form uses <em>signed</em> flow: net buy-initiated minus sell-initiated volume against signed price change. That is Kyle&rsquo;s lambda, and it needs the aggressor tags — where <code>B</code> is a buy aggressor and <code>A</code> a sell. Check <code>interactions.py:266</code> before trusting the output; the sign flip there would invert this study silently.</p>
+    <p><strong>Context.</strong> Written as the free precursor to a dealer-gamma (GEX) study — the question being whether NQ sessions separate into absorption and impact regimes at all, before any options data gets bought. See <code>docs/research/iv-rank.md</code> for the neighbouring vol-indicator reference.</p>
+  </section>
+
+</div>

@@ -565,13 +565,49 @@ def insert_executions(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
     return _insert_ignore(conn, "executions", cols, rows)
 
 
+JOURNAL_COLS = [
+    "dedupe_key", "account", "instrument", "open_ts_local", "close_ts_local",
+    "open_ts_utc", "close_ts_utc", "open_price", "open_volume", "close_price",
+    "close_volume", "price_pnl", "profit_ticks", "pnl", "comment", "source_file",
+]
+
+
 def insert_journal(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
-    cols = [
-        "dedupe_key", "account", "instrument", "open_ts_local", "close_ts_local",
-        "open_ts_utc", "close_ts_utc", "open_price", "open_volume", "close_price",
-        "close_volume", "price_pnl", "profit_ticks", "pnl", "comment", "source_file",
-    ]
-    return _insert_ignore(conn, "atas_journal", cols, rows)
+    return _insert_ignore(conn, "atas_journal", JOURNAL_COLS, rows)
+
+
+def replace_journal(
+    conn: sqlite3.Connection, source_file: str, rows: Iterable[dict]
+) -> int:
+    """Make one source file's journal rows *exactly* ``rows``. Returns how many.
+
+    ``insert_journal`` can only ever add: it is INSERT OR IGNORE on a content
+    hash, which is the right shape for an import (re-importing the same export
+    is free) and the wrong shape for a source whose trades can be **withdrawn**.
+    A Simulator attempt is such a source — rewinding past a fill un-happens it —
+    and appending would leave the erased trade in the journal for good, with the
+    attempt on disk no longer saying it ever existed.
+
+    Delete-then-insert rather than a diff, because a `dedupe_key` is derived from
+    the trade's own content: a trade whose exit price changed is a different key,
+    so there is nothing to update in place. Both statements land in one commit,
+    so a reader never sees the gap where the file has no trades.
+
+    Notes survive this. ``trade_notes`` is keyed by ``trade_key``, which is the
+    lot's ``dedupe_key`` truncated (``trades._trade_key``) — so a trade that
+    comes back unchanged comes back under the same key, with its note attached.
+    """
+    data = [tuple(r[c] for c in JOURNAL_COLS) for r in rows]
+    placeholders = ",".join("?" for _ in JOURNAL_COLS)
+    conn.execute("DELETE FROM atas_journal WHERE source_file = ?", (source_file,))
+    if data:
+        conn.executemany(
+            f"INSERT OR IGNORE INTO atas_journal ({','.join(JOURNAL_COLS)}) "
+            f"VALUES ({placeholders})",
+            data,
+        )
+    conn.commit()
+    return len(data)
 
 
 def insert_statistics(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
@@ -612,6 +648,19 @@ def mark_imported(
         "VALUES (?, datetime('now'), ?)",
         (source_file, file_mtime),
     )
+    conn.commit()
+
+
+def clear_imported(conn: sqlite3.Connection, source_file: str) -> None:
+    """Drop one source file's import stamp, leaving its rows alone.
+
+    ``delete_attempt`` does this as part of clearing a whole ATAS take. A
+    Simulator sitting is withdrawn through ``replace_journal`` instead (its
+    trades are a mirror, not an import), so it needs the stamp removed on its
+    own — otherwise a deleted attempt keeps a Modified time on the calendar day
+    it no longer has any trades in.
+    """
+    conn.execute("DELETE FROM imported_files WHERE source_file = ?", (source_file,))
     conn.commit()
 
 
@@ -1067,6 +1116,20 @@ def update_session(
     sets.append("updated_at = datetime('now')")
     params.append(source_file)
     conn.execute(f"UPDATE sessions SET {', '.join(sets)} WHERE source_file = ?", params)
+    conn.commit()
+
+
+def delete_session(conn: sqlite3.Connection, source_file: str) -> None:
+    """Drop the sitting record itself.
+
+    Not part of ``delete_attempt``, which exists to clear a junk *import* so the
+    same file can be re-uploaded — there the session row is the thing that must
+    survive, because it carries the mode and archive choice made in the UI. A
+    source whose sitting is gone for good (a deleted Simulator attempt) has no
+    such file to come back, and a session row pointing at nothing would sit in
+    the sessions list forever.
+    """
+    conn.execute("DELETE FROM sessions WHERE source_file = ?", (source_file,))
     conn.commit()
 
 

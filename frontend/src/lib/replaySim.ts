@@ -27,10 +27,17 @@
 //
 // House rules, all of them the conservative reading:
 //
-//   - a resting order fills when a print reaches its price, at that price — no
-//     queue model, no slippage. Practising the read, not the microstructure.
-//     Flattering to a stop, which in life slips through its trigger; the ticks
-//     lost there are not something a replay can teach you to avoid;
+//   - what a fill *costs* is a model, and it is one place: lib/fillModel. A
+//     market order and a triggered stop cross the spread and pay for it; a
+//     resting limit does not fill until the tape has traded past it, because a
+//     print at your price belonged to the queue in front of you; every round
+//     turn pays commission per contract per side. Set the model to zero
+//     (`PERFECT_FILLS`) and all three charges go away;
+//   - a stop books what it was jumped through at, not what it was set at. The
+//     trigger is the level; the fill is the print that crossed it, plus the
+//     spread. In a fast market those are not the same number, and the difference
+//     is the one cost a tape can measure honestly rather than assume — so it is
+//     the one that survives even a zeroed model, being data and not a charge;
 //   - an order can only be placed (or dragged) on the side of the market its
 //     type belongs on. A buy limit above the market would fill at the limit and
 //     mint free ticks; a buy stop below it would do the same in reverse;
@@ -66,6 +73,7 @@
 //     loss books past 1R, tighten it and it books under.
 
 import type { Tape } from "./replayEngine";
+import { cross, queueGap, roundTurn, type FillCfg } from "./fillModel";
 
 export type Side = "long" | "short";
 /** How a portion of a position came off: by hand, on its bracket, or because an
@@ -236,8 +244,19 @@ export interface Trade {
   exitMs: number;
   exitPrice: number;
   reason: ExitReason;
+  /** Gross points, entry to exit — no commission in it, because points don't
+   *  have any. The two prices it is measured between are the ones actually
+   *  filled, so the spread is already inside it. */
   pts: number;
+  /** What the account did: the points in money, less `fees`. Net rather than
+   *  gross so that every number downstream — the blotter, the win rate, the
+   *  profit factor, R — is the number the account would have printed. A trade
+   *  that made two ticks and paid a round turn is a loss, and a practice log
+   *  that says otherwise is teaching the wrong lesson. */
   pnl: number;
+  /** Commission on this portion: `size` contracts, both sides. Kept apart from
+   *  `pnl` so a summary can say how much of a flat month was the broker. */
+  fees: number;
   /** Excursion R: points moved ÷ points risked at open. Size-blind — it asks
    *  whether the *read* was good, i.e. whether price travelled further than the
    *  distance you'd allowed against you. Null when the position carried no risk
@@ -315,8 +334,11 @@ function openPosition(
   idx: number,
   price: number,
   size: number,
-  pointValue: number,
+  cfg: FillCfg,
 ): Position {
+  // Measured from the price that filled, not from the price the ticket was
+  // written at: the spread you paid getting in is money already at risk, and a
+  // stop 40 ticks under the level you clicked is 41 ticks under the fill.
   const riskPts = legs.stop != null ? Math.abs(price - legs.stop) : null;
   return {
     side: o.side,
@@ -333,7 +355,7 @@ function openPosition(
     ladder: null,
     trailArmed: false,
     riskPts,
-    riskCash: riskPts != null ? riskPts * pointValue * size : null,
+    riskCash: riskPts != null ? riskPts * cfg.pointValue * size : null,
   };
 }
 
@@ -385,12 +407,17 @@ function reduce(
   ms: number,
   price: number,
   reason: ExitReason,
-  pointValue: number,
+  cfg: FillCfg,
 ): void {
   const p = st.open!;
   const dir = p.side === "long" ? 1 : -1;
   const pts = (price - p.entryPrice) * dir;
-  const pnl = pts * pointValue * size;
+  // The whole round turn is charged here rather than half at the entry, because
+  // a portion is where the two sides finally belong to the same number of
+  // contracts: scale in twice and out three times and the fees still total two
+  // sides per contract, without the position having to carry a running tab.
+  const fees = roundTurn(cfg, size);
+  const pnl = pts * cfg.pointValue * size - fees;
   // Both R's measure against the risk frozen at open, never the stop as it
   // stands now. Reading the live stop makes every stop exit book exactly ±1.00R
   // by construction — the exit price *is* the stop, so the numerator and the
@@ -411,6 +438,11 @@ function reduce(
     reason,
     pts,
     pnl,
+    fees,
+    // Excursion R stays gross — it asks how far price travelled against what you
+    // allowed, and commission is not a distance. Stake R divides the *net*
+    // dollars by the dollars staked, so it is the one that says a 1R winner that
+    // paid two round turns was not quite a 1R winner.
     r: p.riskPts && p.riskPts > 0 ? pts / p.riskPts : null,
     rCash: p.riskCash && p.riskCash > 0 ? pnl / p.riskCash : null,
   });
@@ -429,11 +461,11 @@ function applyFill(
   ms: number,
   idx: number,
   price: number,
-  pointValue: number,
+  cfg: FillCfg,
 ): void {
   const p = st.open;
   if (!p) {
-    st.open = openPosition(o, legs, ms, idx, price, o.size, pointValue);
+    st.open = openPosition(o, legs, ms, idx, price, o.size, cfg);
     return;
   }
   if (p.side === o.side) {
@@ -451,11 +483,11 @@ function applyFill(
   // Against the position: net it down, and if the order is bigger than what was
   // on, the remainder opens a new one the other way.
   const closed = Math.min(o.size, p.size);
-  reduce(st, closed, ms, price, "reduce", pointValue);
+  reduce(st, closed, ms, price, "reduce", cfg);
   const rest = o.size - closed;
   // The flip carries this order's own legs and its own ladder, never the ones it
   // just closed out from under — a fresh position, armed from scratch.
-  if (rest > 0) st.open = openPosition(o, legs, ms, idx, price, rest, pointValue);
+  if (rest > 0) st.open = openPosition(o, legs, ms, idx, price, rest, cfg);
 }
 
 /** Take a filled order out of the working set, along with the rest of its OCO
@@ -466,16 +498,40 @@ function retire(st: SimState, w: Working | null, oco: boolean): void {
   st.working = st.working.filter((x) => x !== w && !(oco && x.oco));
 }
 
-/** Would this print resolve the bracket, and as which leg? */
-function bracketHit(p: Position, px: number): ExitReason | null {
+/** Would this print resolve the bracket, and as which leg?
+ *
+ *  The two legs are not the same kind of order and are not tested the same way.
+ *  The stop is a trigger: a print *at* it is enough, and that is exactly what
+ *  makes a stop a stop. The target is a limit resting in a queue, so it takes a
+ *  print past it (`gap`) before the fill is yours rather than the fill of
+ *  whoever was already there. */
+function bracketHit(p: Position, px: number, gap: number): ExitReason | null {
   if (p.side === "long") {
     if (p.stop != null && px <= p.stop) return "stop";
-    if (p.target != null && px >= p.target) return "target";
+    if (p.target != null && px >= p.target + gap) return "target";
   } else {
     if (p.stop != null && px >= p.stop) return "stop";
-    if (p.target != null && px <= p.target) return "target";
+    if (p.target != null && px <= p.target - gap) return "target";
   }
   return null;
+}
+
+/**
+ * What a stop actually books.
+ *
+ * Two things happen between the level and the fill, and both of them cost. The
+ * print that crossed the trigger may already be through it — a fast market
+ * doesn't stop at your number — so the fill starts from the print, not from the
+ * level. Then the resting order becomes a market order and crosses the spread,
+ * which is `cross`. A long's stop is a sell, a short's is a buy.
+ *
+ * `Math.min`/`Math.max` rather than the print outright: the print can only ever
+ * be *worse* than the level for the side being closed, so taking the worse of
+ * the two is the same number with the invariant written down.
+ */
+function stopFill(p: Position, px: number, cfg: FillCfg): number {
+  const at = p.side === "long" ? Math.min(px, p.stop!) : Math.max(px, p.stop!);
+  return cross(at, p.side === "short", cfg);
 }
 
 /**
@@ -492,9 +548,10 @@ export function stepSim(
   from: number,
   to: number,
   clock: number,
-  pointValue: number,
+  cfg: FillCfg,
 ): void {
   const { orders, closes, brackets } = log;
+  const gap = queueGap(cfg);
 
   // Everything that happens *between* prints: orders coming on, cancels taking
   // effect, a bracket drag landing, a manual close. Run before each tick against
@@ -508,9 +565,11 @@ export function stepSim(
       // deterministic, so the state it is admitted into is the state it was
       // placed into.
       if (o.type === "market") {
-        // A market order is its own fill, at the last print before it.
+        // A market order is its own fill, at the last print before it — plus the
+        // spread, because the last print is where someone else traded and the
+        // offer is where you will.
         const oco = st.open == null;
-        applyFill(st, o, o, o.ms, o.idx, priceAtMs(tape, o.ms), pointValue);
+        applyFill(st, o, o, o.ms, o.idx, cross(priceAtMs(tape, o.ms), o.side === "long", cfg), cfg);
         retire(st, null, oco);
       } else st.working.push({ o, oco: st.open == null });
     }
@@ -531,7 +590,7 @@ export function stepSim(
         // by hand: see `riskPts`.
         if (p.riskPts == null && s != null) {
           p.riskPts = Math.abs(p.entryPrice - s);
-          p.riskCash = p.riskPts * pointValue * p.size;
+          p.riskCash = p.riskPts * cfg.pointValue * p.size;
         }
         p.stop = s;
         p.target = b.target;
@@ -561,7 +620,17 @@ export function stepSim(
     }
     while (st.ci < closes.length && closes[st.ci].ms <= ms) {
       const c = closes[st.ci++];
-      if (st.open) reduce(st, st.open.size, c.ms, priceAtMs(tape, c.ms), "manual", pointValue);
+      // Flattening by hand is a market order like any other, and pays for the
+      // spread like any other — a long comes off on the bid.
+      if (st.open)
+        reduce(
+          st,
+          st.open.size,
+          c.ms,
+          cross(priceAtMs(tape, c.ms), st.open.side === "short", cfg),
+          "manual",
+          cfg,
+        );
     }
   };
 
@@ -579,13 +648,16 @@ export function stepSim(
     // fills anything you were waiting on.
     if (st.open && i >= st.open.fillIdx) {
       const p = st.open;
-      const hit = bracketHit(p, px);
+      const hit = bracketHit(p, px, gap);
       if (hit) {
         // A stop the ladder had moved is not the stop you placed. Kept apart so
         // the blotter can say which one got you out — they are different events,
         // and only one of them is a loss you planned for.
         const why = hit === "stop" && p.trailArmed ? "trail" : hit;
-        reduce(st, p.size, ms, hit === "stop" ? p.stop! : p.target!, why, pointValue);
+        // The target fills at its own price and no better — a limit that is
+        // traded through still only ever gets the limit. The stop takes what
+        // the market gave it.
+        reduce(st, p.size, ms, hit === "stop" ? stopFill(p, px, cfg) : p.target!, why, cfg);
       } else if (p.trail) {
         // The high-water mark moves *after* the bracket has been read, so a
         // print can never both set a new best and ratchet a stop into its own
@@ -605,10 +677,20 @@ export function stepSim(
         if (s.price == null) continue;
         // A limit is reached from the passive side, a stop from the active one —
         // the same comparison, mirrored.
-        const wantsUp = w.o.type === "stop" ? w.o.side === "long" : w.o.side === "short";
-        const filled = wantsUp ? px >= s.price : px <= s.price;
+        const stop = w.o.type === "stop";
+        const wantsUp = stop ? w.o.side === "long" : w.o.side === "short";
+        // The stop triggers on a touch; the limit needs the tape to come through
+        // it, because a print at the level was the queue's and not yours.
+        const at = stop ? s.price : wantsUp ? s.price + gap : s.price - gap;
+        const filled = wantsUp ? px >= at : px <= at;
         if (filled) {
-          applyFill(st, w.o, s, ms, i + 1, s.price, pointValue);
+          // A triggered stop takes the print it triggered on — which may already
+          // be through the level — and then crosses the spread. A limit fills at
+          // its own price, however far past it the tape went.
+          const fill = stop
+            ? cross(wantsUp ? Math.max(px, s.price) : Math.min(px, s.price), wantsUp, cfg)
+            : s.price;
+          applyFill(st, w.o, s, ms, i + 1, fill, cfg);
           retire(st, w, w.oco);
         }
       }
@@ -618,12 +700,12 @@ export function stepSim(
 }
 
 /** Rebuild the whole picture from the log, as of `clock`. */
-export function runSim(tape: Tape, log: Log, clock: number, pointValue: number): SimState {
+export function runSim(tape: Tape, log: Log, clock: number, cfg: FillCfg): SimState {
   const st = newSim();
   // Nothing can happen before the first order was placed, so start the walk
   // there rather than at the session's first tick.
   const from = log.orders.length ? log.orders[0].idx : tape.n;
-  stepSim(tape, log, st, from, tape.n, clock, pointValue);
+  stepSim(tape, log, st, from, tape.n, clock, cfg);
   return st;
 }
 
@@ -722,6 +804,12 @@ function samePrefix<T>(cur: readonly T[], was: readonly T[]): boolean {
 export class SimLadder {
   private tape: Tape | null = null;
   private cps: Checkpoint[] = [];
+  /** The fill model the snapshots were folded under. A checkpoint is a fold of
+   *  (tape, log, *rules*), and the rules are a setting that can be changed while
+   *  a session is open — so it is checked like the other two rather than assumed
+   *  constant. Cheap: one string compare per run against ~20 snapshots' worth of
+   *  saved work. */
+  private cfgKey = "";
 
   /** `every` is the tick spacing between snapshots. The default trades ~20
    *  snapshots over a busy NQ session against a worst-case walk of 50k ticks on
@@ -745,9 +833,11 @@ export class SimLadder {
     return this.cps.length;
   }
 
-  run(tape: Tape, log: Log, clock: number, pointValue: number): SimState {
-    if (tape !== this.tape) {
+  run(tape: Tape, log: Log, clock: number, cfg: FillCfg): SimState {
+    const key = `${cfg.tickSize}|${cfg.pointValue}|${cfg.commission}|${cfg.slipTicks}|${cfg.queueTicks}`;
+    if (tape !== this.tape || key !== this.cfgKey) {
       this.tape = tape;
+      this.cfgKey = key;
       this.cps = [];
     }
     const base = this.pick(tape, log, clock);
@@ -766,7 +856,7 @@ export class SimLadder {
       // The chunk's own clock, not the caller's. `stepSim` finishes with
       // `admin(clock)`, and handing it the caller's would apply orders placed
       // long after this chunk's last print at this chunk's position.
-      stepSim(tape, log, st, i, to, tape.t[to - 1], pointValue);
+      stepSim(tape, log, st, i, to, tape.t[to - 1], cfg);
       i = to;
       this.push(tape, log, st, i);
     }
@@ -774,7 +864,7 @@ export class SimLadder {
     // tape that has not printed since, is working. Deliberately after the last
     // snapshot — this admin runs at a clock ahead of the ticks, and folding it
     // into a checkpoint would consume log entries at the wrong tick.
-    stepSim(tape, log, st, i, i, clock, pointValue);
+    stepSim(tape, log, st, i, i, clock, cfg);
     return st;
   }
 

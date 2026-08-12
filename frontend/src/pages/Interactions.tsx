@@ -339,10 +339,14 @@ function SessionChart({
     );
   return (
     <div style={{ position: "relative" }}>
+      {/* Not .chart-tool any more: that class is a 28px icon square in the left
+          rail now, and this is a sentence. A legend row is the same chip and
+          still the right shape for it — parked on the right, the edge the rail
+          left free. */}
       {!settled && (
         <div
-          className="chart-tool"
-          style={{ position: "absolute", top: 8, left: 12, zIndex: 3, cursor: "default" }}
+          className="chart-legend-row"
+          style={{ position: "absolute", top: 8, right: 12, zIndex: 3, cursor: "default" }}
         >
           Loading sessions…
         </div>

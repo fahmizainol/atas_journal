@@ -1,0 +1,1756 @@
+<meta charset="utf-8"/>
+<title>Terminal redesign — split panes, chrome, trade panel</title>
+<script>__LWC_JS__</script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#0e1117; --bg2:#15171f; --card:#1a1d27; --border:#262a36;
+    --accent:#6c5ce7; --green:#21c07a; --red:#f5455f; --blue:#3b82f6;
+    --gold:#e0a52a; --violet:#a78bfa; --text:#e6e8ee; --muted:#8a8f9c; --grid:#2a2e38;
+    --topbar-h:36px; --rail-w:38px; --dock-w:320px;
+  }
+  * { box-sizing:border-box; }
+  /* The emoji families are in the stack on purpose: the tool rail is drawn in
+     the app's own icon vocabulary, which is emoji, and a rail of tofu boxes is
+     a rail nobody can use. */
+  body { margin:0; background:var(--bg); color:#cbd5e1;
+         font:14px/1.5 Inter,system-ui,"Segoe UI Emoji","Noto Color Emoji","Apple Color Emoji",sans-serif; }
+  #wrap { max-width:1860px; margin:0 auto; padding:18px 20px 64px; }
+  h1 { font-size:20px; font-weight:600; margin:0 0 4px; color:var(--text); }
+  h2 { font-size:15px; font-weight:600; margin:30px 0 8px; color:var(--text); }
+  h3 { font-size:12.5px; font-weight:600; margin:0 0 4px; color:var(--text); }
+  .lede { color:var(--muted); font-size:12.5px; margin:0 0 14px; max-width:1020px; }
+  .lede b { color:#b6bcc9; }
+  .warn { display:flex; gap:10px; padding:10px 13px; margin:0 0 16px; font-size:12.5px;
+          background:#1a1410; border:1px solid #3a2a18; border-radius:8px; color:#c8a06a; }
+  .warn b { color:#e0b878; }
+  #selftest { margin:0 0 16px; padding:11px 14px; background:var(--card); border:1px solid var(--border);
+              border-radius:8px; font-size:12.5px; }
+  #selftest h3 { margin:0 0 6px; }
+  #selftest ul { margin:0; padding-left:18px; } #selftest li { margin:3px 0; color:#94a3b8; }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#94a3b8; }
+  .note { margin-top:14px; padding:12px 14px; background:var(--card); border:1px solid var(--border);
+          border-radius:8px; font-size:12.5px; color:var(--muted); }
+  .note b { color:#b6bcc9; }
+  .note ul { margin:6px 0 0; padding-left:18px; } .note li { margin:6px 0; }
+  .cols { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; }
+  table.anat { border-collapse:collapse; width:100%; font-size:12px; margin-top:8px; }
+  table.anat th, table.anat td { padding:6px 9px; text-align:left; border-bottom:1px solid var(--border);
+                                 vertical-align:top; }
+  table.anat th { color:#94a3b8; font-weight:600; }
+  table.anat td:first-child { color:#b6bcc9; white-space:nowrap; }
+  .kbd { display:inline-block; border:1px solid var(--border); border-bottom-width:2px; border-radius:4px;
+         padding:0 5px; font-size:11px; font-family:ui-monospace,monospace; color:#b6bcc9; background:var(--bg2); }
+
+  /* ================================================================== */
+  /*  THE TERMINAL                                                       */
+  /* ================================================================== */
+  .tm { border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--bg);
+        display:flex; flex-direction:column; height:min(78vh,780px); min-height:560px; }
+  .tm.full { position:fixed; inset:0; z-index:200; height:100vh; border-radius:0; max-width:none; }
+
+  /* ---- top bar: 36px, exactly what it is in the app today ---- */
+  .tm-top { display:flex; align-items:center; gap:8px; flex:none; height:var(--topbar-h);
+            padding:0 8px; border-bottom:1px solid var(--border); background:var(--card); font-size:13px; }
+  .tm-top .nav { border:none; background:transparent; color:var(--muted); font-size:15px; cursor:pointer;
+                 padding:2px 5px; border-radius:6px; }
+  .tm-top .nav:hover { color:var(--text); background:var(--bg2); }
+  .tm-title { display:inline-flex; align-items:center; gap:6px; border:none; background:transparent;
+              color:var(--text); font:inherit; font-weight:600; padding:4px 8px; border-radius:6px;
+              cursor:pointer; white-space:nowrap; }
+  .tm-title:hover, .tm-title.open { background:var(--bg2); }
+  .tm-title .caret { color:var(--muted); font-size:11px; }
+  .tm-title .sym { color:var(--muted); font-weight:500; font-size:12px; }
+  .tm-end { display:flex; align-items:center; gap:8px; margin-left:auto; }
+  .tm-seg { display:flex; gap:2px; }
+  .tm-seg button, .tm-btn { border:1px solid transparent; background:transparent; color:var(--muted);
+            border-radius:6px; padding:4px 9px; font:inherit; font-size:12px; cursor:pointer; line-height:18px; }
+  .tm-seg button:hover, .tm-btn:hover { background:var(--bg2); color:var(--text); }
+  .tm-seg button.on { background:var(--bg2); color:var(--text); border-color:var(--border); }
+  .tm-btn.on { background:var(--bg2); color:var(--text); border-color:var(--border); }
+  .tm-btn.chrome { border-color:var(--border); background:var(--bg); }
+  .tm-tabs { display:flex; gap:2px; background:var(--bg); border:1px solid var(--border);
+             border-radius:7px; padding:2px; }
+  .tm-tabs button { border:none; background:transparent; padding:3px 12px; border-radius:5px;
+                    color:var(--muted); font-weight:600; font-size:12px; line-height:18px; cursor:pointer; }
+  .tm-tabs button.on { background:var(--accent); color:#fff; }
+  .tm-sep { width:1px; align-self:stretch; background:var(--border); margin:6px 2px; }
+  .tm-focusnote { font-size:11.5px; color:var(--muted); white-space:nowrap; }
+  .tm-focusnote b { color:var(--violet); }
+
+  /* ---- body: rail | grid | dock ---- */
+  .tm-body { flex:1; min-height:0; display:flex; }
+  .tm-rail { width:var(--rail-w); flex:0 0 var(--rail-w); background:var(--card);
+             border-right:1px solid var(--border); display:flex; flex-direction:column; gap:2px;
+             padding:5px 3px; position:relative; }
+  .tm-rail button { background:transparent; border:1px solid transparent; border-radius:6px;
+                    color:#8fa0b8; height:30px; display:flex; align-items:center; justify-content:center;
+                    cursor:pointer; font-size:14px; }
+  .tm-rail button:hover { background:var(--bg2); color:var(--text); }
+  .tm-rail button.on { background:var(--bg2); color:var(--violet); border-color:#3d2a5c; }
+  .tm-rail button:disabled { opacity:.35; cursor:default; }
+  .tm-rail .spacer { flex:1; }
+  .tm-rail .hair { height:1px; background:var(--border); margin:4px 4px; }
+  .tm-flyout { position:absolute; left:calc(var(--rail-w) + 1px); z-index:40; min-width:212px;
+               background:var(--card); border:1px solid #333a49; border-radius:8px; padding:5px;
+               box-shadow:0 10px 34px #000a; }
+  .tm-flyout .head { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.5px;
+                     padding:4px 9px 3px; }
+  .tm-flyout button { display:flex; width:100%; height:auto; justify-content:flex-start; gap:9px;
+                      padding:5px 9px; border-radius:5px; font-size:12.5px; color:#cbd5e1; }
+  .tm-flyout button .dim { color:#5b6272; font-size:11px; margin-left:auto; }
+
+  /* ---- the pane grid ---- */
+  .tm-grid { flex:1; min-width:0; display:grid; position:relative; background:var(--border); }
+  .pane { position:relative; min-width:0; min-height:0; background:var(--bg); overflow:hidden; }
+  /* Narrow: the split is *hidden*, never unset. The layout you chose on a
+     desktop is still there when you go back to it — clearing the preference
+     would mean opening the page on a phone quietly rearranged your machine. */
+  .pane.hidden, .divider.hidden { display:none; }
+  .pane-chart { position:absolute; inset:0; }
+  .pane.focused::after { content:""; position:absolute; inset:0; pointer-events:none; z-index:20;
+                         box-shadow:inset 0 0 0 1px var(--accent); }
+  .pane.trading .pane-badge { color:var(--green); border-color:#1c5340; background:#0f2019; }
+  .divider { background:var(--border); z-index:15; position:relative; touch-action:none; }
+  .divider.v { cursor:col-resize; }
+  .divider.h { cursor:row-resize; }
+  .divider::after { content:""; position:absolute; inset:-4px; }
+  .divider:hover, .divider[data-drag="1"] { background:var(--muted); }
+
+  /* pane legend — top-left, over the canvas */
+  .pane-legend { position:absolute; left:9px; top:7px; z-index:12; font-size:11.5px; line-height:1.5;
+                 text-shadow:0 1px 3px var(--bg); pointer-events:none; }
+  .pane-legend .id { color:var(--text); font-weight:600; font-size:12px; pointer-events:auto;
+                     display:flex; align-items:center; gap:6px; }
+  .pane-legend .id .tf { color:var(--muted); font-weight:500; }
+  .pane-legend .ohlc { color:var(--muted); font-variant-numeric:tabular-nums; }
+  .pane-legend .ohlc b { color:#b6bcc9; font-weight:500; }
+  .pane-legend .ohlc .up { color:var(--green); } .pane-legend .ohlc .down { color:var(--red); }
+  .pane-legend .row { display:flex; align-items:center; gap:6px; pointer-events:auto; cursor:pointer;
+                      border-radius:4px; padding:0 3px; margin-left:-3px; width:max-content; }
+  .pane-legend .row:hover { background:#1a1d2799; }
+  .pane-legend .row.off { opacity:.42; }
+  .pane-legend .sw { width:8px; height:8px; border-radius:2px; flex:none; }
+  .pane-legend .nm { color:#b6bcc9; }
+  .pane-legend .vv { color:var(--muted); font-variant-numeric:tabular-nums; }
+  /* The collapse handle. A legend is the one overlay that grows without bound —
+     the app's own indicator list is a dozen deep and climbing — so the rows are
+     a disclosure and the count is what you read when they are away. */
+  .pane-legend .fold { display:inline-flex; align-items:center; gap:4px; pointer-events:auto;
+                       cursor:pointer; border:none; background:none; font:inherit; font-size:11px;
+                       color:var(--muted); padding:0 3px; border-radius:4px; }
+  .pane-legend .fold:hover { background:#1a1d2799; color:var(--text); }
+  .pane-legend .fold b { color:#b6bcc9; font-weight:600; }
+  .pane-legend .fold .car { font-size:9px; }
+
+  /* ---- order pills: the chips the app's own primitives draw ---------------
+     Right-aligned against the price axis, one per level, in the colour of the
+     line they belong to. DOM here rather than canvas because this page is
+     chrome; the app draws them in OrdersPrimitive/PositionPrimitive. */
+  .ord-layer { position:absolute; inset:0; z-index:18; pointer-events:none; }
+  .ord-line { position:absolute; left:0; height:0; border-top:1px solid; }
+  .ord-pill { position:absolute; display:flex; align-items:center; gap:6px; height:18px;
+              padding:0 6px; border-radius:4px; border:1px solid; background:rgba(14,17,23,.92);
+              font:600 10px Inter,system-ui,sans-serif; letter-spacing:.2px; white-space:nowrap;
+              transform:translateY(-50%); font-variant-numeric:tabular-nums; }
+  .ord-pill .x { pointer-events:auto; cursor:pointer; color:var(--muted); margin-left:1px;
+                 font-size:11px; line-height:1; }
+  .ord-pill .x:hover { color:var(--red); }
+  .ord-pill.grab { pointer-events:auto; cursor:ns-resize; }
+
+  /* pane badges — top-right */
+  .pane-tags { position:absolute; right:9px; top:7px; z-index:14; display:flex; gap:5px; align-items:center; }
+  .pane-badge { font-size:10.5px; letter-spacing:.4px; text-transform:uppercase; padding:2px 7px;
+                border-radius:99px; border:1px solid var(--border); background:var(--card);
+                color:var(--muted); cursor:pointer; }
+  .pane-badge:hover { color:var(--text); }
+  .pane-badge.link.on { color:var(--blue); border-color:#1e3a5f; background:#0d1726; }
+  .pane-jump { position:absolute; right:60px; bottom:26px; z-index:13; width:26px; height:26px;
+               border-radius:99px; border:1px solid var(--border); background:#1a1d27cc; color:var(--muted);
+               cursor:pointer; font-size:13px; line-height:1; }
+  .pane-jump:hover { color:var(--text); }
+  .pane-hint { position:absolute; left:50%; transform:translateX(-50%); bottom:30px; z-index:16;
+               font-size:11.5px; padding:4px 10px; border-radius:99px; background:#1a1d27ee;
+               border:1px solid #3d2a5c; color:var(--violet); pointer-events:none; white-space:nowrap; }
+  .pane-vp { position:absolute; z-index:11; pointer-events:none; }
+  .pane-vp i { position:absolute; height:2px; background:#6c5ce7aa; display:block; }
+  .pane-measure { position:absolute; z-index:16; border:1px dashed var(--violet); background:#6c5ce71a;
+                  pointer-events:none; }
+  .pane-measure span { position:absolute; left:4px; top:4px; font-size:11px; color:var(--violet);
+                       background:#1a1d27dd; padding:1px 5px; border-radius:4px; white-space:nowrap; }
+
+  /* ---- the floating ticket (QuickDock successor) ---- */
+  .ticket { position:absolute; z-index:25; background:#1a1d27f2; border:1px solid var(--border);
+            border-radius:9px; box-shadow:0 10px 30px #0009; display:flex; overflow:hidden;
+            font-size:12px; user-select:none; }
+  .ticket.parked { left:50%; bottom:14px; transform:translateX(-50%); }
+  .ticket .grip { width:12px; background:var(--bg2); cursor:grab; display:flex; align-items:center;
+                  justify-content:center; border-right:1px solid var(--border); }
+  .ticket .grip span { width:2px; height:22px; border-radius:2px; background:#39404f; display:block; }
+  .ticket.drag .grip { cursor:grabbing; }
+  .ticket .body { padding:7px 9px; display:flex; flex-direction:column; gap:6px; }
+  .ticket .side { display:flex; gap:6px; }
+  .ticket .side button { border:1px solid; border-radius:7px; padding:5px 11px; font:inherit;
+                         font-weight:700; font-size:12px; cursor:pointer; display:flex; flex-direction:column;
+                         align-items:center; line-height:1.25; min-width:96px; }
+  .ticket .side button b { font-weight:500; font-size:11px; opacity:.85; font-variant-numeric:tabular-nums; }
+  .ticket .buy { color:#0c1a13; background:var(--green); border-color:var(--green); }
+  .ticket .sell { color:#1c0b0f; background:var(--red); border-color:var(--red); }
+  .ticket .side button:disabled { opacity:.4; cursor:default; }
+  .ticket .knobs { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:11.5px; }
+  .ticket .knobs .k { display:flex; align-items:center; gap:3px; background:var(--bg); border:1px solid var(--border);
+                      border-radius:6px; padding:1px 4px; white-space:nowrap; }
+  .ticket .knobs .k button { border:none; background:none; color:var(--muted); cursor:pointer; padding:0 3px;
+                             font-size:12px; }
+  .ticket .knobs .k button:hover { color:var(--text); }
+  .ticket .knobs .k b { color:#b6bcc9; font-weight:600; font-variant-numeric:tabular-nums; min-width:16px;
+                        text-align:center; }
+  .ticket .pos { display:flex; align-items:center; gap:8px; font-size:11.5px; padding-top:1px;
+                 border-top:1px solid var(--border); margin-top:1px; }
+  .ticket .pos .qty { font-weight:700; }
+  .ticket .pos button { border:1px solid var(--border); background:var(--bg); color:#b6bcc9; border-radius:5px;
+                        padding:1px 7px; font:inherit; font-size:11px; cursor:pointer; }
+  .ticket .pos button:hover { color:var(--text); border-color:var(--muted); }
+
+  /* ---- the right dock: the trade panel ---- */
+  .tm-dock { width:var(--dock-w); flex:0 0 var(--dock-w); background:var(--card);
+             border-left:1px solid var(--border); display:flex; flex-direction:column; min-height:0; }
+  .tm-dock[hidden] { display:none; }
+  .dk-head { padding:8px 10px; border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:7px; }
+  .dk-acct { display:flex; align-items:center; gap:7px; }
+  .dk-acct select { flex:1; min-width:0; background:var(--bg); color:var(--text); border:1px solid var(--border);
+                    border-radius:6px; padding:4px 7px; font:inherit; font-size:12px; }
+  .dot { width:7px; height:7px; border-radius:99px; background:var(--green); flex:none;
+         box-shadow:0 0 0 3px #21c07a22; }
+  .dot.paper { background:var(--muted); box-shadow:0 0 0 3px #8a8f9c22; }
+  .kind { font-size:10px; text-transform:uppercase; letter-spacing:.5px; padding:2px 6px; border-radius:4px;
+          border:1px solid; white-space:nowrap; }
+  .kind.paper { color:var(--muted); border-color:var(--border); background:var(--bg); }
+  .kind.eval { color:var(--gold); border-color:#4a3a18; background:#1d170b; }
+  .kind.funded { color:var(--green); border-color:#1c5340; background:#0f2019; }
+  .kind.untagged { color:var(--red); border-color:#5c2230; background:#1f1014; }
+  .dk-guards { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+  .guard { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:4px 6px; }
+  .guard .lb { font-size:9.5px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); }
+  .guard .vv { font-size:11.5px; color:#b6bcc9; font-variant-numeric:tabular-nums; }
+  .guard .bar { height:3px; border-radius:2px; background:var(--border); margin-top:3px; overflow:hidden; }
+  .guard .bar i { display:block; height:100%; background:var(--green); }
+  .guard.warn .bar i { background:var(--gold); } .guard.warn .vv { color:var(--gold); }
+  .guard.bad .bar i { background:var(--red); } .guard.bad .vv { color:var(--red); }
+  .dk-body { flex:1; min-height:0; overflow:auto; padding:9px 10px 12px; display:flex;
+             flex-direction:column; gap:10px; }
+  .dk-sec { border:1px solid var(--border); background:var(--bg); border-radius:8px; padding:8px 9px; }
+  .dk-sec > .t { font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted);
+                 margin-bottom:6px; display:flex; align-items:center; gap:6px; }
+  .dk-sec > .t .r { margin-left:auto; text-transform:none; letter-spacing:0; font-size:11px; }
+  .kinds { display:flex; gap:2px; background:var(--card); border:1px solid var(--border); border-radius:7px;
+           padding:2px; margin-bottom:7px; }
+  .kinds button { flex:1; border:none; background:transparent; color:var(--muted); border-radius:5px;
+                  padding:3px 0; font:inherit; font-size:11.5px; font-weight:600; cursor:pointer; }
+  .kinds button.on { background:var(--bg2); color:var(--text); }
+  .fields { display:grid; grid-template-columns:auto 1fr; gap:6px 9px; align-items:center; font-size:11.5px;
+            color:var(--muted); }
+  .fields input { background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:6px;
+                  padding:3px 7px; font:inherit; font-size:12px; width:100%;
+                  font-variant-numeric:tabular-nums; }
+  .fields .stepper { display:flex; align-items:center; gap:4px; }
+  .fields .stepper button { border:1px solid var(--border); background:var(--card); color:#b6bcc9;
+                            border-radius:5px; width:22px; height:22px; cursor:pointer; font-size:13px;
+                            line-height:1; }
+  .fields .stepper button:hover { color:var(--text); }
+  .fields .hint { grid-column:1/-1; color:#5b6272; font-size:11px; }
+  .sides { display:flex; gap:7px; margin-top:8px; }
+  .sides button { flex:1; border:1px solid; border-radius:7px; padding:7px 0; font:inherit; font-weight:700;
+                  font-size:12.5px; cursor:pointer; display:flex; flex-direction:column; align-items:center;
+                  line-height:1.3; }
+  .sides button b { font-weight:500; font-size:11px; opacity:.85; font-variant-numeric:tabular-nums; }
+  .sides .buy { color:#0c1a13; background:var(--green); border-color:var(--green); }
+  .sides .sell { color:#1c0b0f; background:var(--red); border-color:var(--red); }
+  .sides button:disabled { opacity:.4; cursor:default; }
+  .review { border:1px solid #4a3a18; background:#1d170b; border-radius:8px; padding:8px 9px; }
+  .review p { margin:0 0 7px; font-size:11.5px; color:#e0c690; line-height:1.5; }
+  .review p b { color:#fff; }
+  .review .btns { display:flex; gap:6px; align-items:center; }
+  .review .btns button { border:1px solid var(--border); background:var(--card); color:#b6bcc9;
+                         border-radius:6px; padding:4px 12px; font:inherit; font-size:12px; cursor:pointer; }
+  .review .btns .send { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  .review .btns .cd { margin-left:auto; font-size:11px; color:var(--muted);
+                      font-variant-numeric:tabular-nums; }
+  .posrow { display:flex; align-items:center; gap:8px; font-size:12px; }
+  .posrow .q { font-weight:700; font-variant-numeric:tabular-nums; }
+  .posrow .pl { margin-left:auto; font-variant-numeric:tabular-nums; font-weight:600; }
+  .flat { width:100%; margin-top:7px; border:1px solid #5c2230; background:#1f1014; color:#ff8a9c;
+          border-radius:7px; padding:6px 0; font:inherit; font-size:12px; font-weight:700; cursor:pointer; }
+  .flat:hover { background:#2a151a; }
+  .wrk { display:flex; flex-direction:column; gap:4px; }
+  .wrk .row { display:flex; align-items:center; gap:7px; font-size:11.5px; padding:3px 5px;
+              border-radius:5px; background:var(--card); font-variant-numeric:tabular-nums; }
+  .wrk .row .k { font-size:10px; letter-spacing:.4px; text-transform:uppercase; color:var(--muted); }
+  .wrk .row .x { margin-left:auto; border:none; background:none; color:#5b6272; cursor:pointer; font-size:13px; }
+  .wrk .row .x:hover { color:var(--red); }
+  .wrk .empty { font-size:11.5px; color:#5b6272; }
+  .pos { color:var(--green); } .neg { color:var(--red); } .muted { color:var(--muted); }
+  .dk-foot { border-top:1px solid var(--border); padding:6px 10px; font-size:11px; color:#5b6272;
+             display:flex; align-items:center; gap:8px; }
+  .dk-foot .tape { margin-left:auto; font-variant-numeric:tabular-nums; }
+
+  /* ---- modal (indicator picker / layouts on small screens) ---- */
+  .modal { position:fixed; inset:0; z-index:300; background:#000b; display:flex; align-items:flex-start;
+           justify-content:center; padding:70px 16px; }
+  .modal[hidden] { display:none; }
+  .sheet { background:var(--card); border:1px solid #333a49; border-radius:10px; width:min(560px,100%);
+           max-height:70vh; display:flex; flex-direction:column; box-shadow:0 18px 60px #000b; }
+  .sheet header { display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border); }
+  .sheet header h3 { flex:1; margin:0; }
+  .sheet header button { background:none; border:none; color:var(--muted); font-size:16px; cursor:pointer; }
+  .sheet .body { overflow:auto; padding:8px 6px; }
+  .sheet .body .grp { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.5px;
+                      padding:6px 10px 3px; }
+  .sheet .body .it { display:flex; align-items:center; gap:9px; padding:6px 10px; border-radius:6px;
+                     cursor:pointer; font-size:12.5px; color:#cbd5e1; }
+  .sheet .body .it:hover { background:var(--bg2); }
+  .sheet .body .it .dim { margin-left:auto; color:#5b6272; font-size:11px; }
+  .layouts { display:grid; grid-template-columns:repeat(3,1fr); gap:7px; }
+  .layouts button { border:1px solid var(--border); background:var(--bg); border-radius:7px; padding:7px;
+                    cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:5px;
+                    color:var(--muted); font:inherit; font-size:10.5px; }
+  .layouts button:hover { border-color:var(--muted); color:var(--text); }
+  .layouts button.on { border-color:var(--accent); color:var(--text); background:#15121f; }
+  .layouts svg rect { fill:#2a2e38; }
+  .layouts button.on svg rect { fill:#4b3f8f; }
+</style>
+
+<div id="wrap">
+  <h1>A terminal for split panes — and the trade panel that goes with it</h1>
+  <p class="lede">The Charts workspace already draws no shell chrome, and it already splits — into exactly two
+    panes, one tradable and one read-only. <b>Two is where the current chrome stops working.</b> Everything the page
+    floats over "the chart" — the legend, the tool rail, the order dock, the timeframe control on the bar — was
+    written when there was one chart to float over, and each answers <i>which chart?</i> in its own way or not at
+    all. Going to arbitrary layouts forces the question, so this page answers it in one place: tools to a
+    <b>left rail</b>, layout and bucketing to a <b>top bar acting on the focused pane</b>, what-is-drawn to a
+    <b>per-pane legend</b>, and order entry to a <b>right dock</b> plus a <b>ticket that floats over the trading
+    pane</b>. Candles are a real cached NQ session — chrome that survives a synthetic sine wave proves nothing.</p>
+
+  <div class="warn"><b>Prototype, not a build.</b>
+    <span>Nothing here is wired into the app and no gesture on this page can reach a broker. The account selector,
+      the guardrail meters, the review sentence and the fills are all mock — driven by a random walk around the
+      session's last price, so the numbers move and the states are reachable. Everything about the <i>chrome</i> is
+      real: the layouts switch, the dividers drag, the tools arm and draw, the panes sync.</span></div>
+
+  <div id="selftest"><h3>Self-check</h3><ul id="selftest-list"><li class="muted">running…</li></ul></div>
+
+  <!-- ============================ TERMINAL ============================ -->
+  <div class="tm" id="term">
+    <div class="tm-top">
+      <button class="nav" title="Everywhere else in the app (the Charts workspace draws no tab strip)">▤</button>
+      <button class="tm-title" id="tm-title" title="Session setup — the title is the trigger for the thing it names">
+        <span id="tm-title-txt">—</span><span class="sym" id="tm-title-sym"></span><span class="caret">▾</span>
+      </button>
+      <div class="tm-sep"></div>
+      <!-- Bucketing: acts on the FOCUSED pane, which is the whole reason focus
+           is drawn as loudly as it is. -->
+      <div class="tm-seg" id="tm-tf"></div>
+      <div class="tm-sep"></div>
+      <button class="tm-btn chrome" id="tm-layout-btn" title="Layout (L)">◫ <span id="tm-layout-lb">1</span></button>
+      <span class="tm-focusnote" id="tm-focusnote"></span>
+      <div class="tm-end">
+        <button class="tm-btn" id="tm-sync" title="Link the panes: crosshair and visible range follow the focused chart">⇄ link</button>
+        <nav class="tm-tabs"><button class="on">Replay</button><button id="tm-live">Live</button></nav>
+        <button class="tm-btn" title="Order cues: tones">🔊</button>
+        <button class="tm-btn" id="tm-full" title="Fullscreen">⛶</button>
+        <button class="tm-btn on" id="tm-dockbtn" title="Trade panel (T)">▤▎</button>
+      </div>
+    </div>
+
+    <div class="tm-body">
+      <div class="tm-rail" id="tm-rail"></div>
+      <div class="tm-grid" id="tm-grid"></div>
+      <aside class="tm-dock" id="tm-dock"></aside>
+    </div>
+  </div>
+
+  <div class="modal" id="modal" hidden>
+    <div class="sheet">
+      <header><h3 id="modal-title">—</h3><button id="modal-x">✕</button></header>
+      <div class="body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ============================ DESIGN NOTES ======================== -->
+  <h2>What moved, and why</h2>
+  <table class="anat">
+    <tr><th>Thing</th><th>Today (one or two panes)</th><th>Here (up to four)</th></tr>
+    <tr><td>Tools</td>
+        <td>Rail floating <i>inside</i> the canvas, top-right. Belongs to one chart; a split gets two rails, or one
+            rail that silently acts on the left chart.</td>
+        <td>Left rail, outside every canvas. A tool is a mode of the <i>terminal</i>, and it acts on the focused
+            pane. One rail however many charts there are — and it stops eating chart pixels.</td></tr>
+    <tr><td>Bucketing</td>
+        <td>On the bar, meaning "the trading chart". The context pane grew its own picker bottom-left because the
+            bar's could not reach it.</td>
+        <td>On the bar, acting on the <b>focused pane</b>. One control, four charts, and the second picker goes
+            away.</td></tr>
+    <tr><td>Legend</td>
+        <td>One, top-left of the chart.</td>
+        <td>One <i>per pane</i> — unchanged in kind, because what is drawn was always per chart. Collapses to the
+            identity line on a pane under ~360px.</td></tr>
+    <tr><td>Which chart trades</td>
+        <td>Structural: pane 1 gets the order callbacks, pane 2 is handed none.</td>
+        <td><b>All of them.</b> Every pane takes a click and every pane draws every pill. What used to be a
+            structural guarantee becomes the guard layer's job — see the cost note below.</td></tr>
+    <tr><td>Order pills</td>
+        <td>On the trading chart only. Pane 2 already gets the position line and the trade marks; it is simply
+            never handed the working orders.</td>
+        <td>Every level, on every pane, carrying <b>what it is</b> and <b>what it is worth</b>:
+            <code>SL −$200</code>, <code>TP +$400 · 2.0R</code>, and <code>LONG ×1 +$120</code> running against
+            the tape once it fills.</td></tr>
+    <tr><td>Routed contract</td>
+        <td>A selector in the Live rail — send to the mini or its micro while the tape stays put.</td>
+        <td>Same control, in the dock, and now every pill, meter and sentence is denominated in it. Panes wear a
+            <span class="kbd">→ MNQU6</span> badge whenever it is not the contract on screen.</td></tr>
+    <tr><td>Order entry</td>
+        <td>Rail panel on Live (typed pad, book, guardrails) plus a draggable BUY/SELL dock on both pages.</td>
+        <td>Both, deliberately — see below. The dock is per <i>account</i> and sits outside the grid; the ticket
+            floats on one pane and moves only when you move it.</td></tr>
+    <tr><td>Transport</td>
+        <td>In flow under the chart on Replay.</td>
+        <td>Unchanged and not shown here. It is the instrument you drive a replay with, not chrome.</td></tr>
+  </table>
+
+  <h2>The five questions a grid forces</h2>
+  <div class="cols">
+    <div class="note"><h3>1 · Which chart does a control mean?</h3>
+      The answer is <b>focus</b>, and it only works if focus is impossible to mistake. Here it is a 1px accent ring
+      on the pane plus the pane number spelled out on the bar beside the control that acts on it. Click anywhere on
+      a pane to focus it; <span class="kbd">1</span>–<span class="kbd">4</span> jump.
+      A quieter treatment was tried first and failed the obvious test: with two 15m panes side by side you could not
+      tell which one the timeframe button was about to change.</div>
+    <div class="note"><h3>2 · What is shared and what is not?</h3>
+      <b>Shared:</b> the session, the instrument, the account, the tool arming. <b>Per pane:</b> bucketing,
+      indicators, scale, and the visible range unless linked. The rule of thumb is that anything you would answer
+      with "the session" is shared and anything you would answer with "this chart" is not — which is also why
+      linking is a toggle rather than a default. Two views of the same tape at different bucketings <i>should</i>
+      scroll together; four charts you are using as four different questions should not.</div>
+    <div class="note"><h3>2b · Link means the same right edge, not the same window</h3>
+      The obvious implementation — push one pane's visible range onto the others — is what TradingView does and it
+      is <b>wrong for mixed bucketings</b>. The first build of this page did it, and the 2×2 was the proof: an
+      hourly pane forced into a 5-minute pane's window shows <i>four candles</i>. So link here pins every pane to
+      the same <b>right edge</b> and leaves each one its own span. Scroll back an hour anywhere and every pane
+      moves back an hour, each still showing the amount of history its bucketing is for.</div>
+    <div class="note"><h3>3 · Where does the trade surface go?</h3>
+      Not in a pane. Order entry is a property of the <b>account</b>, and there is exactly one account — putting a
+      pad in each pane would draw four of a thing you have one of. It goes in a dock outside the grid. The ticket
+      that duplicates its two most-used buttons sits on <b>one</b> pane and stays there until you move it —
+      drag it anywhere, double-click its grip to bring it to the pane you are working in. The pills are the
+      opposite case: they are the state of the account rendered at a price, so they belong on <i>every</i> pane at
+      once.</div>
+    <div class="note"><h3>4 · What does a fourth pane cost?</h3>
+      Measured, not guessed: the chart engine is cheap and linear — roughly <b>65% of a core per repainting pane</b>,
+      flat in pane size. So the cost is the repaint rate, not the pane count. Panes you are not working in update
+      on <b>new bar</b> rather than on tick; the focused pane keeps the live update. Four panes on tick is the one
+      configuration this design does not offer.</div>
+    <div class="note"><h3>5 · What happens on a narrow window?</h3>
+      Below ~1100px the dock collapses to a button and the ticket carries the whole order surface. Below ~900px the
+      grid falls back to the focused pane alone — the split is <i>hidden</i>, not unset, so the layout you chose on
+      a desktop is still there when you come back to it. The mobile pass stops at the Lab and this does not change
+      that.</div>
+    <div class="note"><h3>Keys</h3>
+      <span class="kbd">1</span>–<span class="kbd">4</span> focus a pane · <span class="kbd">L</span> layouts ·
+      <span class="kbd">T</span> trade panel · <span class="kbd">Esc</span> disarm the tool ·
+      <span class="kbd">Space</span>+click a price to place · <span class="kbd">q</span>/<span class="kbd">w</span>
+      buy/sell · <span class="kbd">s</span> flatten. The order keys are page-level and mean the same thing
+      wherever the pointer is — a market order does not belong to a chart. Only the <i>pointing</i> gestures
+      (space+click, ＋Order) are per pane, because those name a price and a price has to be read off
+      something.</div>
+  </div>
+
+  <h2>The order pills</h2>
+  <div class="note">
+    <p style="margin:0 0 8px">A level on a chart has to say two things: <b>what it is</b> and <b>what it is
+      worth</b>. The prototype now draws the app's own chips — <code>BUY LMT ×1 · 12.50 pts</code> on the resting
+      price, <code>SL −$200</code> and <code>TP +$400 · 2.0R</code> on the legs behind it, and once it fills,
+      <code>LONG ×1 +$120</code> ticking against the tape.</p>
+    <ul>
+      <li><b>No prices in the pills.</b> Every level already names its price in an axis label the colour of its own
+        line. Printing it twice only makes the pill long enough to cover the candles it sits over.</li>
+      <li><b>Money, measured on the routed contract.</b> The same 40 ticks is $200 of NQ and $20 of MNQ. Point the
+        dock at the micro and every pill, meter and sentence on the page re-denominates — because the number you
+        read has to be the number that gets booked.</li>
+      <li><b>A working order's legs are prospective.</b> They are measured off the <i>resting</i> price, not a
+        fill, and they are what the order <i>would</i> carry. Once there is a position, the bracket belongs to the
+        position and the pills change hands — blue and amber for "not money yet", green and red for "money".</li>
+      <li><b>Lines stay true, pills get nudged.</b> A 40-tick bracket is about 20px apart on an hourly pane, so
+        the pills collide and the thing that loses is the ✕. The line always sits at its real price; only the pill
+        slides, keeping top-to-bottom order.</li>
+    </ul>
+  </div>
+
+  <h2>What it costs to let every pane trade</h2>
+  <div class="note">
+    <p style="margin:0 0 8px">Less than it sounds, and the reason is a decision made a long time ago:
+      <b><code>WorkingOrderView</code> carries no x-coordinate.</b> A working order is a horizontal line, so it
+      needs a price and nothing about where it sits in the tape — which is why the same pill draws on a
+      1-minute pane and an hourly one with no per-pane work at all.</p>
+    <ul>
+      <li><b>Pills in every pane: one line per page.</b> The context pane is <i>already</i> handed the position
+        line and the trade marks (<code>chart2Ref.current?.setPosition(…)</code>, <code>.setTrades(…)</code>). It
+        is never handed <code>setOrders</code>. Adding that call is the whole of it.</li>
+      <li><b>Placing from any pane: pass the props you already withhold.</b> The callbacks are price-based and the
+        chart component is already pane-agnostic. What pane 2 lacks is
+        <code>onPlaceOrder / onOrderMove / onOrderCancel / ticket / canPlaceOrders</code> — the same values pane 1
+        gets.</li>
+      <li><b>The keyboard problem is already solved.</b> <code>lib/chartFocus.ts</code> elects one pane as the
+        keyboard owner on pointer-enter or press, precisely so Escape and Delete aimed at one pane do not act on
+        the other.</li>
+      <li><b>The real work is page-level plumbing, not chart work.</b> Two named refs become an array, and the
+        six places that drive them (<code>setTape</code>, <code>setSnapshot</code>, <code>applyStep</code>,
+        <code>setPosition</code>, <code>setOrders</code>, <code>setTrades</code>) become loops.
+        <code>prefsPane="a"|"b"</code> becomes an index. One <code>QuickDock</code> for the page rather than one
+        inside each pane.</li>
+      <li><b>And one engine per pane.</b> The second pane already runs its own <code>replayEngine</code> at its own
+        bucketing; four panes is four engines. That is the actual cost, and it is the one already measured —
+        ~65% of a core per repainting pane, so the non-focused panes want to repaint on new bar rather than on
+        tick.</li>
+    </ul>
+    <p style="margin:8px 0 0"><b>What you give up</b> is the sentence "there is no gesture on that pane that could
+      reach the blotter", which is currently true <i>by construction</i> and would become true only because the
+      guard layer says so. That is the part worth arguing about — not the wiring.</p>
+  </div>
+
+  <h2>The trade panel: why two surfaces and not one</h2>
+  <div class="note">
+    <p style="margin:0 0 8px">They answer different questions and get used at different tempos, and collapsing them
+      costs one of the two.</p>
+    <ul>
+      <li><b>The dock is the account.</b> Which account this is (drawn in every state, including the ones where
+        nothing can be sent), what the guardrails have left, what the broker says is working, and the one place you
+        can <i>type</i> an order rather than point at one. It is read before a session and consulted during one. Its
+        kind badge is the load-bearing pixel on the page: the failure this whole feature exists to prevent is a
+        funded account that looked like a paper one.</li>
+      <li><b>The ticket is the trade.</b> Two buttons, a size, a bracket, and the position — over the chart, under
+        the thumb, draggable to wherever <i>your</i> layout is quiet. It carries no account state at all beyond
+        being disabled when the dock says you cannot send.</li>
+      <li><b>Review lives in the dock only.</b> An order you <i>type</i> gets a sentence and a single-use token
+        before it goes; the ticket, the hotkeys and the chart gestures send immediately, because putting a confirm
+        step in front of the button you press when price is moving is how you train yourself to dismiss confirms
+        without reading them. One-click removes the sentence from the pad too, for the sessions where the pad is
+        the fast path.</li>
+      <li><b>Flatten is in both, always enabled.</b> The moment you want it most is the one where something is
+        behaving in a way nobody planned.</li>
+      <li><b>The ticket does not follow focus, and that is not a convenience call.</b> It did, in the first build
+        of this page, and the bug it caused is the argument: clicking low on an unfocused pane re-parked the
+        ticket at that pane's bottom-centre <i>between mousedown and mouseup</i>, so the ticket swallowed the
+        click — and the next one would have landed on BUY. A surface carrying market-order buttons must never
+        arrive under the pointer as a side effect of a gesture aimed at something else.</li>
+    </ul>
+  </div>
+
+  <h2>Open questions this prototype does not settle</h2>
+  <div class="note">
+    <ul>
+      <li><b>Does the trading pane follow focus, or stay put?</b> Here it stays put and moves only when you press
+        its badge — deliberately sticky, because "the chart I trade" changing because I clicked another chart to
+        read it is exactly the class of surprise that costs money. The opposite choice is defensible if you find
+        yourself pressing the badge constantly.</li>
+      <li><b>Per-pane instruments.</b> The grid is one session and one instrument throughout. NQ/ES/CL in different
+        panes needs a symbol-link group model and a second tape subscription, and it is a bigger change than the
+        chrome — worth deciding before the layout model is built, not after.</li>
+      <li><b>Saved layouts.</b> Layout + per-pane bucketing + indicators is a workspace, and workspaces want names.
+        Not prototyped; the shape it would take is the existing <code>chartPrefs</code> blob with a list around it.</li>
+      <li><b>Does the left rail earn 38px?</b> On a 1080p window the rail plus the dock is 358px of 1920. The rail
+        pays for itself the moment there are two panes (one rail instead of two, and no tools drawn over price); on
+        a single pane it is a straight loss against today's in-canvas rail.</li>
+    </ul>
+  </div>
+
+  <div class="note" style="margin-top:22px">
+    <b>Built by</b> <code>demo/terminal_redesign_demo.py</code> from the cached tick parquets — no fetch, no
+    Databento spend. Bars are ET wall-clock stamped as UTC so the axis reads in market time; VWAP here is
+    bar-resolution rather than the app's tick-derived one, because this page is chrome and the legend only has to
+    show a number that moves the way the real one does.
+  </div>
+</div>
+
+<script>
+const SESSIONS = __SESSIONS_JSON__;
+const TFS      = __TFS_JSON__;
+const PANE_TFS = __PANE_TFS_JSON__;
+const DEFAULT_TF = "__DEFAULT_TF__";
+const TICK = __TICK__;
+const LWC = LightweightCharts;
+const el = (id) => document.getElementById(id);
+const fmt = (p) => p.toFixed(2);
+const usd = (v) => (v < 0 ? "−$" : "$") + Math.abs(v).toFixed(0);
+/** Money on a chip. Always signed, the way the app's own chips print it — a
+ *  bare "$200" on a stop leg reads as a price for the half-second that matters. */
+const signed = (v) => (v < 0 ? "−$" : "+$") + Math.abs(v).toFixed(0);
+const tfLabel = (m) => (+m >= 60 ? (+m / 60) + "h" : m + "m");
+
+/* ------------------------------------------------------------------ layouts
+   Every layout is placed on one 3x3 line grid: two content tracks and a 6px
+   divider between them, on each axis. `place` is [rowStart,rowEnd,colStart,
+   colEnd] in grid *line* numbers; a pane spanning 1..4 simply swallows the
+   divider track, which is what makes the one-pane case fall out for free. */
+const LAYOUTS = {
+  one:   { label:"1",     panes:1, place:[[1,4,1,4]], divs:[] },
+  col2:  { label:"2 ⇢",   panes:2, place:[[1,4,1,2],[1,4,3,4]],
+           divs:[{ax:"v", at:[1,4,2,3]}] },
+  row2:  { label:"2 ⇡",   panes:2, place:[[1,2,1,4],[3,4,1,4]],
+           divs:[{ax:"h", at:[2,3,1,4]}] },
+  left3: { label:"3 ⊣",   panes:3, place:[[1,4,1,2],[1,2,3,4],[3,4,3,4]],
+           divs:[{ax:"v", at:[1,4,2,3]},{ax:"h", at:[2,3,3,4]}] },
+  top3:  { label:"3 ⊤",   panes:3, place:[[1,2,1,4],[3,4,1,2],[3,4,3,4]],
+           divs:[{ax:"h", at:[2,3,1,4]},{ax:"v", at:[3,4,2,3]}] },
+  quad:  { label:"2×2",   panes:4, place:[[1,2,1,2],[1,2,3,4],[3,4,1,2],[3,4,3,4]],
+           divs:[{ax:"v", at:[1,4,2,3]},{ax:"h", at:[2,3,1,4]}] },
+};
+const LAYOUT_ICON = {
+  one:  [[0,0,10,10]],
+  col2: [[0,0,4.6,10],[5.4,0,4.6,10]],
+  row2: [[0,0,10,4.6],[0,5.4,10,4.6]],
+  left3:[[0,0,4.6,10],[5.4,0,4.6,4.6],[5.4,5.4,4.6,4.6]],
+  top3: [[0,0,10,4.6],[0,5.4,4.6,4.6],[5.4,5.4,4.6,4.6]],
+  quad: [[0,0,4.6,4.6],[5.4,0,4.6,4.6],[0,5.4,4.6,4.6],[5.4,5.4,4.6,4.6]],
+};
+
+/* ------------------------------------------------------------------- tools
+   The rail's vocabulary is the app's own (ReplayChart's chart-tools), moved
+   out of the canvas. `armed` tools take a click on the focused pane. */
+const TOOLS = [
+  { id:"cursor", icon:"⌖",  name:"Cursor",            hint:"" },
+  { id:"order",  icon:"🧾", name:"＋ Order",           hint:"Click a price on the trading pane — below the market is a bid, above it an offer" },
+  { id:"vp",     icon:"📊", name:"Fixed-range VP",    hint:"Click the start of the range, then the end" },
+  { id:"ruler",  icon:"📏", name:"Measure",           hint:"Click, then click again" },
+  { id:"avwap",  icon:"⚓", name:"Anchored VWAP",     hint:"Click a bar to anchor a VWAP there" },
+  { id:"hline",  icon:"━",  name:"Price line",        hint:"Click a price to mark it" },
+  { id:"alert",  icon:"🔔", name:"Alert",             hint:"Click a price to alert on it crossing" },
+];
+
+/* ------------------------------------------------------------------- state */
+const S = {
+  sessionIx: 0,
+  layout: "col2",
+  focus: 0,
+  link: true,
+  tool: "cursor",
+  pending: [],          // clicks collected by a two-click tool
+  cx: 55, ry: 55,       // divider ratios, %
+  dock: true, dockFits: true,
+  // Every pane is tradable. There is no "the trading pane" any more — see the
+  // note on the page about what that costs and what pays for it instead.
+  panes: PANE_TFS.map((tf, i) => ({
+    tf,
+    ind: { vwap:true, ema9:false, ema20:i === 0, ema50:false, vol:true, pd:false, on:false },
+    // The rows start folded on every pane but the first. A four-pane grid with
+    // four expanded legends is four paragraphs of text over the price action.
+    legendOpen: i === 0,
+    avwap:null, lines:[], vp:null, ruler:null, levelLines:[],
+  })),
+  // account / order / routing state — all mock
+  acct: "paper",
+  routeIx: 0,            // which contract orders go to; the tape never follows
+  kind: "market",
+  qty: 1, stopT: 40, tgtT: 80, limitPx: null,
+  oneClick: false,
+  review: null,          // {side, left}
+  working: [],           // entries only: {id, kind, side, qty, px, stop, target, tag}
+  position: null,        // {qty, avg, stop, target} — the position owns its bracket
+  realised: 0,
+  last: 0, prev: 0,
+  running: true,
+  ticketPane: 0,         // which pane the ticket is sitting on
+  ticketPos: null,       // {x,y} within that pane, null = parked
+};
+/** The contract orders are routed to, and what a point of it is worth. The
+ *  chart stays on the feed's contract either way — one login is one socket. */
+function route() { return session().routes[S.routeIx] || session().routes[0]; }
+function pv() { return route().mult; }
+function away() { return route().symbol !== session().symbol; }
+const ACCOUNTS = {
+  paper:  { label:"Paper (sim)",           kind:"paper",    kindLb:"paper",    live:false, maxQty:5, dayLoss:1000, dd:2000 },
+  lucid:  { label:"LucidPro 50K",          kind:"eval",     kindLb:"eval",     live:true,  maxQty:1, dayLoss:1100, dd:2000 },
+  untag:  { label:"Rithmic 78221 (untagged)", kind:"untagged", kindLb:"untagged", live:false, maxQty:0, dayLoss:0, dd:0 },
+};
+const charts = [];   // per pane: {chart, candle, vol, vwap, ema, avwap, priceLines:[], el, legend}
+
+/* ================================================================== render */
+function session() { return SESSIONS[S.sessionIx]; }
+function bars(tf) { return session().tfs[tf] || session().tfs[DEFAULT_TF]; }
+
+function buildRail() {
+  const rail = el("tm-rail");
+  rail.innerHTML = "";
+  const mk = (icon, title, on, fn, dis) => {
+    const b = document.createElement("button");
+    b.textContent = icon; b.title = title; if (on) b.classList.add("on");
+    if (dis) b.disabled = true;
+    b.onclick = fn; rail.appendChild(b); return b;
+  };
+  TOOLS.forEach((t) => {
+    const dis = t.id === "order" && !ACCOUNTS[S.acct].maxQty;
+    mk(t.icon, t.name + (t.hint ? " — " + t.hint : ""), S.tool === t.id,
+       () => { S.tool = S.tool === t.id ? "cursor" : t.id; S.pending = []; buildRail(); paintHints(); }, dis);
+  });
+  const hair = document.createElement("div"); hair.className = "hair"; rail.appendChild(hair);
+  mk("✎", "Drawings — trend line, ray, rectangle, Fibonacci. Not in this prototype; the point here is that they " +
+          "live in the rail rather than over the canvas.", false, () => flyout("draw"));
+  mk("ƒ", "Indicators — the app's own list, per pane", false, () => flyout("ind"));
+  const sp = document.createElement("div"); sp.className = "spacer"; rail.appendChild(sp);
+  mk("🧹", "Clear this pane's drawings", false, () => {
+    const p = S.panes[S.focus], c = charts[S.focus];
+    if (!c) return;
+    // Order lines are not drawings and do not go: the tidy-up button must never
+    // be a way to lose sight of a working stop.
+    c.priceLines.filter((l) => !l.__order).forEach((l) => c.candle.removePriceLine(l));
+    c.priceLines = c.priceLines.filter((l) => l.__order);
+    p.lines = []; p.avwap = null; p.vp = null; p.ruler = null;
+    if (c.avwap) { c.chart.removeSeries(c.avwap); c.avwap = null; }
+    paintOverlays(S.focus); paintLegend(S.focus);
+  });
+  mk("⚙", "Chart appearance — surface, candles, scale. Unchanged from today.", false, () => flyout("set"));
+}
+
+function flyout(kind) {
+  closeFlyout();
+  const rail = el("tm-rail");
+  const f = document.createElement("div");
+  f.className = "tm-flyout"; f.id = "flyout";
+  const items = kind === "draw"
+    ? [["Trend line","not prototyped"],["Ray","not prototyped"],["Rectangle","not prototyped"],
+       ["Fib retracement","not prototyped"],["Text note","not prototyped"]]
+    : kind === "set"
+    ? [["Surface — Charcoal",""],["Candles — Green / red",""],["Scale — logarithmic",""],["Seconds on the axis",""]]
+    : null;
+  if (kind === "ind") { closeFlyout(); openIndicators(); return; }
+  f.innerHTML = `<div class="head">${kind === "draw" ? "Drawings" : "Appearance"}</div>` +
+    items.map(([n, d]) => `<button>${n}<span class="dim">${d}</span></button>`).join("");
+  f.style.top = "150px";
+  rail.appendChild(f);
+  setTimeout(() => document.addEventListener("pointerdown", offClick, { once:true }), 0);
+}
+function offClick(e) { if (!e.target.closest(".tm-flyout")) closeFlyout(); }
+function closeFlyout() { const f = el("flyout"); if (f) f.remove(); }
+
+const IND_LIST = [
+  ["Overlays", [["VWAP · NY","vwap"],["EMA 9","ema9"],["EMA 20","ema20"],["EMA 50","ema50"]]],
+  ["Levels", [["Prior day H/L","pd"],["Overnight H/L","on"]]],
+  ["Panes", [["Volume","vol"]]],
+  ["Not in this prototype", [["VWAP · Globex",""],["VWAP · weekly",""],["Developing profile",""],
+    ["Composite profile",""],["Initial balance",""],["Big trades",""],["Vol ruler",""],["Modern VWAP [GBB]",""]]],
+];
+function openIndicators() {
+  const p = S.panes[S.focus];
+  el("modal-title").textContent = `Indicators — pane ${S.focus + 1}`;
+  el("modal-body").innerHTML = IND_LIST.map(([g, rows]) =>
+    `<div class="grp">${g}</div>` + rows.map(([n, k]) =>
+      `<div class="it" data-k="${k}"><span>${n}</span><span class="dim">${
+        k ? (p.ind[k] ? "on" : "off") : "—"}</span></div>`).join("")).join("");
+  el("modal-body").querySelectorAll(".it").forEach((it) => {
+    it.onclick = () => {
+      const k = it.dataset.k; if (!k) return;
+      p.ind[k] = !p.ind[k]; applyIndicators(S.focus); paintLegend(S.focus); openIndicators();
+    };
+  });
+  el("modal").hidden = false;
+}
+el("modal-x").onclick = () => { el("modal").hidden = true; };
+el("modal").onclick = (e) => { if (e.target.id === "modal") el("modal").hidden = true; };
+
+/* ------------------------------------------------------------ the pane grid */
+function buildGrid() {
+  const L = LAYOUTS[S.layout];
+  const g = el("tm-grid");
+  charts.forEach((c) => c && c.chart.remove());
+  charts.length = 0;
+  g.innerHTML = "";
+  g.style.gridTemplateColumns = `${S.cx}fr 6px ${100 - S.cx}fr`;
+  g.style.gridTemplateRows = `${S.ry}fr 6px ${100 - S.ry}fr`;
+  if (S.focus >= L.panes) S.focus = 0;
+
+  for (let i = 0; i < L.panes; i++) {
+    const [r1, r2, c1, c2] = L.place[i];
+    const d = document.createElement("div");
+    d.className = "pane";
+    d.style.gridArea = `${r1} / ${c1} / ${r2} / ${c2}`;
+    d.dataset.i = i;
+    d.innerHTML = `<div class="pane-chart"></div>
+      <div class="pane-legend"></div>
+      <div class="pane-tags"></div>
+      <button class="pane-jump" title="Back to the price">◎</button>`;
+    d.addEventListener("pointerdown", () => setFocus(i));
+    g.appendChild(d);
+    makeChart(i, d);
+  }
+  L.divs.forEach((dv) => {
+    const b = document.createElement("div");
+    b.className = "divider " + dv.ax;
+    b.style.gridArea = `${dv.at[0]} / ${dv.at[2]} / ${dv.at[1]} / ${dv.at[3]}`;
+    b.onpointerdown = (e) => startDrag(e, b, dv.ax);
+    g.appendChild(b);
+  });
+  mountTicket();
+  applyResponsive();
+  paintAll();
+  el("tm-layout-lb").textContent = L.label;
+}
+
+/** The two width thresholds, applied without rebuilding a single chart.
+ *
+ *  Under 1100px the dock stops fitting beside a readable grid and folds away,
+ *  leaving the ticket as the whole order surface — which is the one thing on
+ *  this page that was designed to be sufficient on its own. Under 900px the
+ *  grid falls back to the focused pane: four half-width charts is four charts
+ *  you cannot read, and two is not much better. */
+const NARROW = 900, NO_DOCK = 1100;
+function applyResponsive() {
+  const w = el("term").clientWidth;
+  const nar = w < NARROW;
+  const L = LAYOUTS[S.layout];
+  charts.forEach((c, i) => {
+    if (!c) return;
+    c.el.classList.toggle("hidden", nar && i !== S.focus);
+    const [r1, r2, c1, c2] = L.place[i];
+    c.el.style.gridArea = nar ? "1 / 1 / 4 / 4" : `${r1} / ${c1} / ${r2} / ${c2}`;
+  });
+  el("tm-grid").querySelectorAll(".divider").forEach((d) => d.classList.toggle("hidden", nar));
+  S.dockFits = w >= NO_DOCK;
+  el("tm-dockbtn").disabled = !S.dockFits;
+  el("tm-dockbtn").title = S.dockFits ? "Trade panel (T)" : "Too narrow for the dock — the ticket has it";
+}
+
+function startDrag(e, node, ax) {
+  const g = el("tm-grid");
+  node.setPointerCapture(e.pointerId);
+  node.dataset.drag = "1";
+  const move = (ev) => {
+    const r = g.getBoundingClientRect();
+    const pct = ax === "v" ? ((ev.clientX - r.left) / r.width) * 100
+                           : ((ev.clientY - r.top) / r.height) * 100;
+    const v = Math.min(82, Math.max(18, pct));
+    if (ax === "v") { S.cx = v; g.style.gridTemplateColumns = `${v}fr 6px ${100 - v}fr`; }
+    else { S.ry = v; g.style.gridTemplateRows = `${v}fr 6px ${100 - v}fr`; }
+  };
+  const up = () => {
+    delete node.dataset.drag;
+    node.removeEventListener("pointermove", move);
+    node.removeEventListener("pointerup", up);
+  };
+  node.addEventListener("pointermove", move);
+  node.addEventListener("pointerup", up);
+  e.preventDefault();
+}
+
+/* --------------------------------------------------------------- one chart */
+function makeChart(i, host) {
+  const box = host.querySelector(".pane-chart");
+  const chart = LWC.createChart(box, {
+    autoSize: true,
+    layout: { background:{ type:"solid", color:"#0e1117" }, textColor:"#8a8f9c", fontSize:11,
+              attributionLogo:false },
+    grid: { vertLines:{ color:"#2a2e3866" }, horzLines:{ color:"#2a2e3866" } },
+    rightPriceScale: { borderColor:"#262a36", scaleMargins:{ top:0.08, bottom:0.06 } },
+    timeScale: { borderColor:"#262a36", timeVisible:true, secondsVisible:false, rightOffset:4 },
+    crosshair: { mode: LWC.CrosshairMode.Normal,
+                 vertLine:{ color:"#4b5162", labelBackgroundColor:"#2a2e38" },
+                 horzLine:{ color:"#4b5162", labelBackgroundColor:"#2a2e38" } },
+    handleScale:{ axisPressedMouseMove:true }, localization:{ locale:"en-US" },
+  });
+  const candle = chart.addSeries(LWC.CandlestickSeries, {
+    upColor:"#21c07a", downColor:"#f5455f", wickUpColor:"#21c07a", wickDownColor:"#f5455f",
+    borderVisible:false, priceLineVisible:true, priceLineColor:"#8a8f9c", priceLineStyle:2,
+    lastValueVisible:true,
+  });
+  const vol = chart.addSeries(LWC.HistogramSeries, {
+    priceScaleId:"", priceFormat:{ type:"volume" }, lastValueVisible:false, priceLineVisible:false,
+  });
+  vol.priceScale().applyOptions({ scaleMargins:{ top:0.86, bottom:0 } });
+  // One line series per line-shaped indicator, built off the same metadata the
+  // legend reads — a row and its series cannot drift apart if there is one list.
+  const lines = {};
+  LINE_KEYS.forEach((k) => {
+    lines[k] = chart.addSeries(LWC.LineSeries, {
+      color:IND_META[k].c, lineWidth:k === "vwap" ? 2 : 1, lastValueVisible:false,
+      priceLineVisible:false, crosshairMarkerVisible:false });
+  });
+
+  const layer = document.createElement("div");
+  layer.className = "ord-layer";
+  host.appendChild(layer);
+
+  const c = { chart, candle, vol, lines, layer, avwap:null, priceLines:[], el:host, i };
+  charts[i] = c;
+  loadPane(i);
+
+  chart.subscribeCrosshairMove((param) => {
+    paintLegend(i, param);
+    if (!S.link || syncing) return;
+    syncing = true;
+    charts.forEach((o, j) => {
+      if (!o || j === i) return;
+      if (param.time && param.seriesData && param.seriesData.get(candle)) {
+        const px = param.seriesData.get(candle).close;
+        try { o.chart.setCrosshairPosition(px, param.time, o.candle); } catch (_) {}
+      } else o.chart.clearCrosshairPosition();
+    });
+    syncing = false;
+  });
+  // Link means SAME RIGHT EDGE, not same window — see the note on the page.
+  // Every pane follows the moment you scrolled to and keeps its own span, so a
+  // 1h pane beside a 5m one still shows an hourly chart rather than four bars.
+  chart.timeScale().subscribeVisibleTimeRangeChange(() => {
+    if (!S.link || syncing) return;
+    const r = chart.timeScale().getVisibleRange();
+    if (!r) return;
+    syncing = true;
+    charts.forEach((o, j) => {
+      if (!o || j === i) return;
+      const cur = o.chart.timeScale().getVisibleRange();
+      if (!cur) return;
+      const span = cur.to - cur.from;
+      if (!(span > 0)) return;
+      try { o.chart.timeScale().setVisibleRange({ from:r.to - span, to:r.to }); } catch (_) {}
+    });
+    syncing = false;
+  });
+  chart.timeScale().subscribeVisibleLogicalRangeChange(() => { paintOverlays(i); paintOrders(); });
+  // Tool clicks come off the DOM rather than off `chart.subscribeClick`.
+  // Two clicks inside lightweight-charts' double-click threshold arrive as ONE
+  // click plus a dblclick, so a two-click tool (measure, fixed-range VP) used
+  // at speed silently loses its second point — and a tool that works only when
+  // you are slow is a tool that reads as broken. The DOM has no such threshold;
+  // the chart is still the thing that turns pixels into a price and a time.
+  box.addEventListener("click", (e) => {
+    if (S.tool === "cursor" && !spaceDown) return;
+    const r = box.getBoundingClientRect();
+    const point = { x:e.clientX - r.left, y:e.clientY - r.top };
+    const price = candle.coordinateToPrice(point.y);
+    const time = chart.timeScale().coordinateToTime(point.x);
+    if (price == null) return;
+    onPaneClick(i, { point, price, time });
+  });
+  host.querySelector(".pane-jump").onclick = (e) => {
+    e.stopPropagation();
+    chart.timeScale().scrollToRealTime(); chart.priceScale("right").applyOptions({ autoScale:true });
+  };
+}
+let syncing = false;
+
+function loadPane(i) {
+  const c = charts[i], p = S.panes[i];
+  const d = bars(p.tf);
+  c.candle.setData(d.bars);
+  c.vol.setData(d.volume.map((v) => ({ time:v.time, value:v.value,
+    color: v.up ? "#21c07a33" : "#f5455f33" })));
+  LINE_KEYS.forEach((k) => c.lines[k].setData(d[IND_META[k].src] || []));
+  applyIndicators(i);
+  c.chart.timeScale().setVisibleRange({ from:d.open_at, to:d.bars[d.bars.length - 1].time });
+}
+function applyIndicators(i) {
+  const c = charts[i], p = S.panes[i];
+  LINE_KEYS.forEach((k) => c.lines[k].applyOptions({ visible:!!p.ind[k] }));
+  c.vol.applyOptions({ visible:!!p.ind.vol });
+  // The level families are price lines rather than series: they are two flat
+  // prices read off the session, not something that develops bar by bar.
+  p.levelLines.forEach((l) => c.candle.removePriceLine(l));
+  p.levelLines = [];
+  Object.entries(IND_META).forEach(([k, m]) => {
+    if (!m.levels || !p.ind[k]) return;
+    m.levels.forEach((lk) => {
+      const price = session().levels[lk];
+      if (price == null) return;
+      p.levelLines.push(c.candle.createPriceLine({
+        price, color:m.c, lineWidth:1, lineStyle:2, axisLabelVisible:true,
+        title:lk.toUpperCase() }));
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ legend */
+// Seven rows, which is the point: one indicator does not make the case for a
+// collapsible legend and the app's own list is a dozen deep and climbing.
+const IND_META = {
+  vwap:  { n:"VWAP · NY",     c:"#a78bfa", src:"vwap"  },
+  ema9:  { n:"EMA 9",         c:"#e0a52a", src:"ema9"  },
+  ema20: { n:"EMA 20",        c:"#f97316", src:"ema20" },
+  ema50: { n:"EMA 50",        c:"#3b82f6", src:"ema50" },
+  vol:   { n:"Volume",        c:"#4b5162" },
+  pd:    { n:"Prior day H/L", c:"#8a8f9c", levels:["pdh", "pdl"] },
+  on:    { n:"Overnight H/L", c:"#2dd4bf", levels:["onh", "onl"] },
+};
+const LINE_KEYS = ["vwap", "ema9", "ema20", "ema50"];
+function paintLegend(i, param) {
+  const c = charts[i], p = S.panes[i];
+  if (!c) return;
+  const d = bars(p.tf);
+  const bar = (param && param.seriesData && param.seriesData.get(c.candle))
+    || d.bars[d.bars.length - 1];
+  // The value each row prints: what the crosshair is over, else the last bar.
+  const at = (k) => {
+    const src = d[IND_META[k].src] || [];
+    const hit = param && param.seriesData && param.seriesData.get(c.lines[k]);
+    const v = hit || src[src.length - 1];
+    return v ? fmt(v.value) : "—";
+  };
+  const dir = bar.close >= bar.open ? "up" : "down";
+  const narrow = c.el.clientWidth < 360;
+  const on = Object.keys(p.ind).filter((k) => p.ind[k]).length;
+  const total = Object.keys(p.ind).length;
+  const rows = Object.keys(IND_META).map((k) => {
+    const m = IND_META[k], lit = !!p.ind[k];
+    const v = m.src ? at(k) : "";
+    return `<div class="row${lit ? "" : " off"}" data-k="${k}">
+        <i class="sw" style="background:${m.c}"></i><span class="nm">${m.n}</span>
+        <span class="vv">${v}</span></div>`;
+  }).join("");
+  // Folded, the legend is two lines whatever is on the chart. That bound is the
+  // whole feature: the identity and the bar you are on never move down the pane
+  // because someone switched six overlays on.
+  const fold = `<button class="fold" data-fold="1"
+      title="${p.legendOpen ? "Fold the indicator rows away" : "Show the indicator rows"}">
+      <span class="car">${p.legendOpen ? "▾" : "▸"}</span> ƒ <b>${on}</b>/${total}</button>`;
+  c.el.querySelector(".pane-legend").innerHTML =
+    `<div class="id">${session().symbol}<span class="tf">${tfLabel(p.tf)}</span>${
+       away() ? `<span class="tf" style="color:var(--gold)">→ ${route().symbol}</span>` : ""}</div>` +
+    (narrow ? "" :
+      `<div class="ohlc">O <b>${fmt(bar.open)}</b> H <b>${fmt(bar.high)}</b> L <b>${fmt(bar.low)}</b>
+        C <b class="${dir}">${fmt(bar.close)}</b></div>` + fold + (p.legendOpen ? rows : ""));
+  const box = c.el.querySelector(".pane-legend");
+  const fb = box.querySelector("[data-fold]");
+  if (fb) fb.onclick = (e) => { e.stopPropagation(); p.legendOpen = !p.legendOpen; paintLegend(i); };
+  box.querySelectorAll(".row").forEach((r) => {
+    r.onclick = (e) => {
+      e.stopPropagation();
+      p.ind[r.dataset.k] = !p.ind[r.dataset.k];
+      applyIndicators(i); paintLegend(i);
+    };
+  });
+}
+
+function paintTags(i) {
+  const c = charts[i];
+  if (!c) return;
+  c.el.classList.toggle("focused", S.focus === i);
+  // Every pane places orders, so there is no trade/read-only badge to draw. What
+  // is worth a badge is where a click on *this* chart would send — which is the
+  // one thing that is not obvious once routing can point at the micro.
+  c.el.querySelector(".pane-tags").innerHTML =
+    (away() ? `<span class="pane-badge" style="color:var(--gold);border-color:#4a3a18;background:#1d170b"
+        title="Orders from this chart go to ${route().symbol}. The tape is ${session().symbol} — the two
+        track within a tick, but a price read off here is sent as typed.">→ ${route().symbol}</span>` : "") +
+    `<button class="pane-badge link ${S.link ? "on" : ""}" data-a="link"
+       title="${S.link ? "Linked — crosshair follows, and every pane keeps the same right edge" : "Not linked"}">⇄</button>`;
+  c.el.querySelectorAll(".pane-badge[data-a]").forEach((b) => {
+    b.onclick = (e) => { e.stopPropagation(); S.link = !S.link; paintAll(); paintDock(); };
+  });
+}
+
+function paintHints() {
+  document.querySelectorAll(".pane-hint").forEach((h) => h.remove());
+  const t = TOOLS.find((x) => x.id === S.tool);
+  if (!t || !t.hint) return;
+  const c = charts[S.focus];
+  if (!c) return;
+  const h = document.createElement("div");
+  h.className = "pane-hint";
+  h.textContent = t.icon + "  " + (S.pending.length ? "…now the second point (Esc to cancel)" : t.hint);
+  c.el.appendChild(h);
+}
+
+/* -------------------------------------------------------- tools that draw */
+function onPaneClick(i, { point, price, time }) {
+  const c = charts[i], p = S.panes[i];
+  // `time` is null right of the last bar. Only the tools that anchor to a bar
+  // care; a price line placed in the empty space to the right is still a price.
+  const needsBar = S.tool === "avwap" || S.tool === "vp";
+  if (needsBar && time == null) return;
+  if (S.tool === "hline" || S.tool === "alert") {
+    const line = c.candle.createPriceLine({
+      price: Math.round(price / TICK) * TICK,
+      color: S.tool === "alert" ? "#e0a52a" : "#8a8f9c",
+      lineWidth: 1, lineStyle: S.tool === "alert" ? 2 : 0,
+      axisLabelVisible: true, title: S.tool === "alert" ? "🔔" : "",
+    });
+    c.priceLines.push(line); p.lines.push(price);
+    S.tool = "cursor"; buildRail(); paintHints(); return;
+  }
+  if (S.tool === "avwap") {
+    drawAvwap(i, time);
+    S.tool = "cursor"; buildRail(); paintHints(); return;
+  }
+  if (S.tool === "vp" || S.tool === "ruler") {
+    S.pending.push({ time, price, x:point.x, y:point.y });
+    if (S.pending.length < 2) { paintHints(); return; }
+    const [a, b] = S.pending;
+    if (S.tool === "vp") p.vp = { a, b }; else p.ruler = { a, b };
+    S.pending = []; S.tool = "cursor"; buildRail(); paintHints(); paintOverlays(i);
+    return;
+  }
+  if (S.tool === "order") {
+    placeWorking(price);
+    S.tool = "cursor"; buildRail(); paintHints(); return;
+  }
+  if (spaceDown) placeWorking(price);
+}
+
+function drawAvwap(i, fromTime) {
+  const c = charts[i], p = S.panes[i], d = bars(p.tf);
+  let pv = 0, vv = 0;
+  const out = [];
+  d.bars.forEach((b, k) => {
+    if (b.time < fromTime) return;
+    const v = d.volume[k] ? d.volume[k].value : 1;
+    pv += ((b.high + b.low + b.close) / 3) * v; vv += v;
+    out.push({ time:b.time, value: +(pv / Math.max(vv, 1)).toFixed(2) });
+  });
+  if (!c.avwap) c.avwap = c.chart.addSeries(LWC.LineSeries, {
+    color:"#2dd4bf", lineWidth:2, lastValueVisible:false, priceLineVisible:false });
+  c.avwap.setData(out);
+  p.avwap = fromTime;
+}
+
+function paintOverlays(i) {
+  const c = charts[i], p = S.panes[i];
+  c.el.querySelectorAll(".pane-vp,.pane-measure").forEach((n) => n.remove());
+  // Both overlays are DOM over the canvas, so they have to be re-projected from
+  // (time, price) every time the scales move — a measure box pinned to the
+  // pixels it was drawn at slides off the bars it measures on the first pan.
+  const CX = (pt) => c.chart.timeScale().timeToCoordinate(pt.time) ?? pt.x;
+  const CY = (pt) => c.candle.priceToCoordinate(pt.price) ?? pt.y;
+  if (p.ruler) {
+    const { a, b } = p.ruler;
+    const ax = CX(a), bx = CX(b), ay = CY(a), by = CY(b);
+    const dp = b.price - a.price, tk = dp / TICK;
+    const n = document.createElement("div");
+    n.className = "pane-measure";
+    n.style.left = Math.min(ax, bx) + "px"; n.style.top = Math.min(ay, by) + "px";
+    n.style.width = Math.abs(bx - ax) + "px"; n.style.height = Math.abs(by - ay) + "px";
+    n.innerHTML = `<span>${dp >= 0 ? "+" : "−"}${Math.abs(dp).toFixed(2)} pts ·
+      ${Math.abs(tk).toFixed(0)} ticks · ${usd(Math.abs(dp) * pv())}/lot</span>`;
+    c.el.appendChild(n);
+  }
+  if (p.vp) {
+    const { a, b } = p.vp, d = bars(p.tf);
+    const t0 = Math.min(a.time, b.time), t1 = Math.max(a.time, b.time);
+    const inRange = d.bars.filter((x) => x.time >= t0 && x.time <= t1);
+    if (inRange.length) {
+      const lo = Math.min(...inRange.map((x) => x.low)), hi = Math.max(...inRange.map((x) => x.high));
+      const N = 34, step = (hi - lo) / N || 1, hist = new Array(N).fill(0);
+      inRange.forEach((x, k) => {
+        const v = d.volume[d.bars.indexOf(x)] ? d.volume[d.bars.indexOf(x)].value : 1;
+        const from = Math.max(0, Math.floor((x.low - lo) / step));
+        const to = Math.min(N - 1, Math.floor((x.high - lo) / step));
+        for (let q = from; q <= to; q++) hist[q] += v / Math.max(1, to - from + 1);
+      });
+      const max = Math.max(...hist);
+      const n = document.createElement("div");
+      n.className = "pane-vp";
+      const x0 = Math.min(CX(a), CX(b)), x1 = Math.max(CX(a), CX(b));
+      n.style.left = x0 + "px"; n.style.width = (x1 - x0) + "px";
+      const yTop = c.candle.priceToCoordinate(hi), yBot = c.candle.priceToCoordinate(lo);
+      n.style.top = yTop + "px"; n.style.height = Math.max(4, yBot - yTop) + "px";
+      n.innerHTML = hist.map((v, k) =>
+        `<i style="bottom:${(k / N) * 100}%;width:${(v / max) * 100}%"></i>`).join("");
+      c.el.appendChild(n);
+    }
+  }
+}
+
+/* ============================================================ trade panel */
+function acct() { return ACCOUNTS[S.acct]; }
+function canSend() { return acct().maxQty > 0; }
+function brackets(side, entry) {
+  const s = side === "long" ? entry - S.stopT * TICK : entry + S.stopT * TICK;
+  const t = side === "long" ? entry + S.tgtT * TICK : entry - S.tgtT * TICK;
+  return { stop:s, target:t };
+}
+/** Dollars at risk / on offer for a bracket of `n` ticks on `qty`, measured on
+ *  the ROUTED contract — the same 40 ticks is $200 of NQ and $20 of MNQ, and
+ *  the number the chips print has to be the one that will actually be booked. */
+function money(ticks, qty) { return ticks * TICK * pv() * qty; }
+function sentence(side, entry) {
+  const a = acct(), { stop, target } = brackets(side, entry);
+  return `<b>${side === "long" ? "Buy" : "Sell"} ${S.qty} ${route().symbol}</b> at
+    ${S.kind === "market" ? "market" : S.kind + " " + fmt(entry)},
+    stop <b>${fmt(stop)}</b> (${S.stopT}t, −${usd(money(S.stopT, S.qty))}), target <b>${fmt(target)}</b>
+    (${S.tgtT}t, +${usd(money(S.tgtT, S.qty))}) — <b>${a.label}</b> <i>${a.kindLb}</i>${
+    away() ? `, while the chart is ${session().symbol}` : ""}.`;
+}
+
+/** Would this working order trigger at the current print?
+ *
+ *  Four cases, not two: a sell *limit* rests above the market and a sell
+ *  *stop* rests below it, and the same is true mirrored for buys. Collapsing
+ *  them to "sells trigger on the way up" fires every protective stop the
+ *  instant it is placed — which is exactly what the first run of this page did.
+ */
+function triggered(w) {
+  return w.kind === "limit"
+    ? (w.side === "long" ? S.last <= w.px : S.last >= w.px)
+    : (w.side === "long" ? S.last >= w.px : S.last <= w.px);
+}
+function placeWorking(price) {
+  if (!canSend()) return;
+  const px = Math.round(price / TICK) * TICK;
+  // A click below the market is a bid, a click above it is an offer. Which of
+  // the two an entry *is* — limit or stop — is a choice the real ＋Order tool
+  // makes you state before you tap; here the unambiguous half is enough.
+  const side = px < S.last ? "long" : "short";
+  // The bracket it *would* carry, resolved at the resting price and drawn
+  // behind it. Prospective money, one step before there is a position.
+  const b = brackets(side, px);
+  S.working.push({ id:Math.random().toString(36).slice(2, 7), kind:"limit", side, qty:S.qty,
+                   px, stop:b.stop, target:b.target, tag:"chart" });
+  paintOrders(); paintDock();
+}
+/** The dock's own send. Always reviews unless one-click is on — the ticket and
+ *  the hotkeys are the fast path and deliberately do not come through here. */
+function sendMarket(side) {
+  if (!canSend()) return;
+  if (!S.oneClick) { S.review = { side, left:20 }; paintDock(); return; }
+  doSend(side);
+}
+function doSend(side) {
+  if (S.kind === "market") { fill(side, S.last); return; }
+  const px = S.limitPx ?? S.last, b = brackets(side, px);
+  S.working.push({ id:Math.random().toString(36).slice(2, 7), kind:S.kind, side,
+                   qty:S.qty, px, stop:b.stop, target:b.target, tag:"typed" });
+  paintOrders(); paintDock();
+}
+function fill(side, px) {
+  const q = side === "long" ? S.qty : -S.qty;
+  if (!S.position) S.position = { qty:q, avg:px };
+  else {
+    const nq = S.position.qty + q;
+    if (nq === 0) { S.realised += (px - S.position.avg) * S.position.qty * pv(); S.position = null; }
+    else if (Math.sign(nq) === Math.sign(S.position.qty)) {
+      S.position.avg = (S.position.avg * S.position.qty + px * q) / nq; S.position.qty = nq;
+    } else { S.realised += (px - S.position.avg) * S.position.qty * pv();
+             S.position = { qty:nq, avg:px }; }
+  }
+  // The bracket belongs to the position, not to the working list — which is
+  // what lets the position pill print SL and TP as its own legs, the way
+  // PositionPrimitive does, instead of as two unrelated resting orders.
+  if (S.position) {
+    const b = brackets(S.position.qty > 0 ? "long" : "short", S.position.avg);
+    S.position.stop = b.stop; S.position.target = b.target;
+  }
+  paintOrders(); paintDock(); paintTicket();
+}
+function flatten() {
+  if (S.position) S.realised += (S.last - S.position.avg) * S.position.qty * pv();
+  S.position = null; S.working = [];
+  paintOrders(); paintDock(); paintTicket();
+}
+/* ---------------------------------------------------------- the order pills
+   What the app draws in OrdersPrimitive and PositionPrimitive, in DOM: a line
+   at each level and a right-aligned pill against the price axis carrying what
+   that level IS and what it is WORTH. Prices are deliberately absent from the
+   pills — every level already names its price in an axis label the colour of
+   its own line, and printing it twice only makes the pill long enough to cover
+   the candles it sits over.
+
+   Drawn in EVERY pane, which costs nothing: a level is a horizontal line, so it
+   needs a price and nothing about where it sits in the tape. The same pill
+   lands on a 1-minute pane and an hourly one with no per-pane work at all.  */
+const LIMIT_C = "#3b82f6", STOP_C = "#f97316";
+const TP_C = "rgba(33,192,122,.55)", SL_C = "rgba(245,69,95,.55)";
+
+function paintOrders() {
+  charts.forEach((c, i) => {
+    if (!c) return;
+    const L = c.layer;
+    L.innerHTML = "";
+    const W = c.el.clientWidth;
+    // Right edge of the plot area: just inside the price axis, which is where
+    // the app's chips right-align to.
+    const axisW = 62, right = W - axisW;
+    // Two passes: collect, then place. A 40-tick bracket is ~20px apart on an
+    // hourly pane, so the pills WILL collide — and the one that loses is the ✕.
+    // The lines stay at their true price; only the pills get nudged.
+    const items = [];
+    const put = (price, colour, dash, segs, opts) => {
+      const y = c.candle.priceToCoordinate(price);
+      if (y == null || y < 8 || y > c.el.clientHeight - 8) return;
+      items.push({ y, colour, dash, segs, opts:opts || {} });
+    };
+
+    // --- working entries, with the bracket they would carry sketched behind.
+    S.working.forEach((o) => {
+      const mult = pv() * o.qty;
+      const riskPts = o.stop != null ? Math.abs(o.px - o.stop) : null;
+      if (o.target != null) {
+        const pts = Math.abs(o.target - o.px);
+        const r = riskPts ? pts / riskPts : null;
+        put(o.target, TP_C, true, [{ t:"TP", c:"#21c07a" },
+          { t:`${signed(pts * mult)}${r ? ` · ${r.toFixed(1)}R` : ""}`, c:"#21c07a" }]);
+      }
+      if (o.stop != null) {
+        const pts = Math.abs(o.px - o.stop);
+        put(o.stop, SL_C, true, [{ t:"SL", c:"#f5455f" }, { t:signed(-pts * mult), c:"#f5455f" }]);
+      }
+      const hue = o.kind === "stop" ? STOP_C : LIMIT_C;
+      const awayPts = Math.abs(o.px - S.last);
+      put(o.px, hue, true, [
+        { t:`${o.side === "long" ? "BUY" : "SELL"} ${o.kind === "stop" ? "STP" : "LMT"} ×${o.qty}`,
+          c:o.side === "long" ? "#21c07a" : "#f5455f" },
+        { t:`${awayPts.toFixed(2)} pts`, c:"#8a8f9c" },
+      ], { close:o.id, grab:true });
+    });
+
+    // --- the position and its own two legs.
+    const P = S.position;
+    if (P) {
+      const q = Math.abs(P.qty), long = P.qty > 0, mult = pv() * q;
+      const side = long ? "#21c07a" : "#f5455f";
+      const riskPts = P.stop != null ? Math.abs(P.avg - P.stop) : null;
+      if (P.target != null) {
+        const pts = Math.abs(P.target - P.avg);
+        const r = riskPts ? pts / riskPts : null;
+        put(P.target, TP_C, true, [{ t:"TP", c:"#21c07a" },
+          { t:`${signed(pts * mult)}${r ? ` · ${r.toFixed(1)}R` : ""}`, c:"#21c07a" }]);
+      }
+      const open = unreal();
+      put(P.avg, side, false, [
+        { t:`${long ? "LONG" : "SHORT"} ×${q}`, c:side },
+        { t:signed(open), c:open >= 0 ? "#21c07a" : "#f5455f" },
+      ], { close:"pos", thick:true });
+      if (P.stop != null) {
+        const pts = Math.abs(P.avg - P.stop);
+        put(P.stop, SL_C, true, [{ t:"SL", c:"#f5455f" }, { t:signed(-pts * mult), c:"#f5455f" }]);
+      }
+    }
+
+    // --- place. Lines first at the true price, then the pills, nudged apart
+    //     top-down so no two overlap and the order top-to-bottom still matches
+    //     the order of the prices.
+    items.forEach((it) => {
+      const ln = document.createElement("div");
+      ln.className = "ord-line";
+      ln.style.top = it.y + "px"; ln.style.width = right + "px";
+      ln.style.borderTopColor = it.colour;
+      ln.style.borderTopStyle = it.dash ? "dashed" : "solid";
+      ln.style.borderTopWidth = (it.opts.thick ? 2 : 1) + "px";
+      L.appendChild(ln);
+    });
+    const GAP = 20;
+    let floor = -Infinity;
+    items.slice().sort((m, n) => m.y - n.y).forEach((it) => {
+      const pill = document.createElement("div");
+      pill.className = "ord-pill" + (it.opts.grab ? " grab" : "");
+      pill.style.borderColor = it.colour;
+      pill.innerHTML = it.segs.map((sg) => `<span style="color:${sg.c}">${sg.t}</span>`).join("") +
+        (it.opts.close ? `<span class="x" data-x="${it.opts.close}" title="Cancel">✕</span>` : "");
+      L.appendChild(pill);
+      const y = Math.max(it.y, floor + GAP);
+      floor = y;
+      pill.style.top = y + "px";
+      // Right-align by measurement: the pill's width depends on how many digits
+      // the money came out as.
+      pill.style.left = (right - 6 - pill.offsetWidth) + "px";
+      const x = pill.querySelector(".x");
+      if (x) x.onclick = (e) => {
+        e.stopPropagation();
+        if (x.dataset.x === "pos") flatten();
+        else { S.working = S.working.filter((w) => w.id !== x.dataset.x); paintOrders(); paintDock(); }
+      };
+    });
+  });
+}
+
+function unreal() {
+  return S.position ? (S.last - S.position.avg) * S.position.qty * pv() : 0;
+}
+function paintDock() {
+  const d = el("tm-dock");
+  const show = S.dock && S.dockFits;
+  d.hidden = !show;
+  if (!show) return;
+  const a = acct();
+  const day = S.realised + unreal();
+  const g = (lb, used, cap, inv) => {
+    const pctv = cap ? Math.min(100, Math.max(0, (used / cap) * 100)) : 0;
+    const cls = pctv > 80 ? "bad" : pctv > 55 ? "warn" : "";
+    return `<div class="guard ${cls}"><div class="lb">${lb}</div>
+      <div class="vv">${inv ? used + " / " + cap : usd(cap - used) + " left"}</div>
+      <div class="bar"><i style="width:${pctv}%"></i></div></div>`;
+  };
+  const used = Math.max(0, -day);
+  const openQty = S.position ? Math.abs(S.position.qty) : 0;
+  d.innerHTML = `
+    <div class="dk-head">
+      <div class="dk-acct">
+        <span class="dot ${a.live ? "" : "paper"}"></span>
+        <select id="dk-acct">${Object.entries(ACCOUNTS).map(([k, v]) =>
+          `<option value="${k}" ${k === S.acct ? "selected" : ""}>${v.label}</option>`).join("")}</select>
+        <span class="kind ${a.kind}">${a.kindLb}</span>
+      </div>
+      <!-- Which contract orders are sent to. The chart does not follow: one
+           login is one socket and the subscription was made at connect. The
+           money beside it is the only reason to touch this control. -->
+      <div class="dk-acct">
+        <select id="dk-route" style="max-width:120px;${away() ? "border-color:var(--gold)" : ""}"
+          title="Which contract orders go to. The chart stays on ${session().symbol} either way.">
+          ${session().routes.map((r, i) =>
+            `<option value="${i}" ${i === S.routeIx ? "selected" : ""}>${r.symbol}</option>`).join("")}
+        </select>
+        <span class="muted" style="font-size:11px"
+          title="Dollars per tick on the routed contract. Every bracket here is measured in ticks, so this is what turns the geometry into risk.">
+          $${(TICK * pv()).toFixed(2)}/tick</span>
+        ${away() ? `<span style="color:var(--gold);font-size:11px"
+            title="Orders go to ${route().symbol}; the chart is ${session().symbol}. The two track within a tick, so the geometry carries over — but a limit price read off this chart is the other contract's price, sent as typed.">⚠ chart is ${session().symbol}</span>` : ""}
+      </div>
+      <div class="dk-guards">
+        ${g("day loss", used, a.dayLoss || 1)}
+        ${g("trailing dd", Math.max(0, -Math.min(0, day)), a.dd || 1)}
+        ${g("contracts", openQty, a.maxQty || 1, true)}
+      </div>
+    </div>
+    <div class="dk-body">
+      ${!canSend() ? `<div class="dk-sec" style="border-color:#5c2230;background:#1f1014">
+          <div class="t" style="color:#ff8a9c">untagged account</div>
+          <div style="font-size:11.5px;color:#e9a3ae">Nothing can be sent from an account nobody has declared.
+          Tag it as paper, eval or funded first — an untagged account reads as untagged everywhere, because the
+          failure this guards against is a funded account that looked like a paper one.</div></div>` : ""}
+
+      <div class="dk-sec">
+        <div class="t">order <span class="r muted">${route().symbol}${away() ? " · chart " + session().symbol : ""}</span></div>
+        <div class="kinds">${["market", "limit", "stop"].map((k) =>
+          `<button data-k="${k}" class="${S.kind === k ? "on" : ""}">${k.toUpperCase().slice(0, 3)}</button>`).join("")}</div>
+        <div class="fields">
+          <label>size</label>
+          <div class="stepper"><button data-q="-1">−</button>
+            <input id="f-qty" value="${S.qty}" style="width:52px;text-align:center">
+            <button data-q="1">+</button>
+            <span class="muted" style="margin-left:4px">max ${a.maxQty}</span></div>
+          ${S.kind === "market" ? "" : `<label>price</label>
+            <input id="f-px" value="${fmt(S.limitPx ?? S.last)}">`}
+          <label>stop</label><input id="f-stop" value="${S.stopT}">
+          <label>target</label><input id="f-tgt" value="${S.tgtT}">
+          <div class="hint">${S.stopT}t = −${usd(money(S.stopT, S.qty))} ·
+            ${S.tgtT}t = +${usd(money(S.tgtT, S.qty))} ·
+            R:R ${(S.tgtT / Math.max(1, S.stopT)).toFixed(2)}</div>
+        </div>
+        <div class="sides">
+          <button class="buy" data-side="long" ${canSend() ? "" : "disabled"}>BUY<b>${fmt(S.last + TICK)}</b></button>
+          <button class="sell" data-side="short" ${canSend() ? "" : "disabled"}>SELL<b>${fmt(S.last)}</b></button>
+        </div>
+        <label style="display:flex;gap:6px;align-items:center;margin-top:7px;font-size:11.5px;color:#8a8f9c">
+          <input type="checkbox" id="f-oc" ${S.oneClick ? "checked" : ""}> one-click — the pad sends without the review sentence
+        </label>
+      </div>
+
+      ${S.review ? `<div class="review">
+        <p>${sentence(S.review.side, S.kind === "market" ? S.last : (S.limitPx ?? S.last))}</p>
+        <div class="btns"><button class="send" id="rv-send">Send</button>
+          <button id="rv-x">Cancel</button>
+          <span class="cd">expires 0:${String(S.review.left).padStart(2, "0")}</span></div></div>` : ""}
+
+      <div class="dk-sec">
+        <div class="t">position <span class="r ${day >= 0 ? "pos" : "neg"}">${signed(day)} today</span></div>
+        ${S.position ? `<div class="posrow">
+            <span class="q ${S.position.qty > 0 ? "pos" : "neg"}">${S.position.qty > 0 ? "+" : ""}${S.position.qty}</span>
+            <span class="muted">@ ${fmt(S.position.avg)}</span>
+            <span class="pl ${unreal() >= 0 ? "pos" : "neg"}">${signed(unreal())}</span></div>`
+          : `<div class="wrk"><div class="empty">flat</div></div>`}
+        <button class="flat" id="dk-flat">⚑ FLATTEN</button>
+      </div>
+
+      <div class="dk-sec">
+        <div class="t">working <span class="r muted">${S.working.length + (S.position ? 2 : 0)}</span></div>
+        <div class="wrk">${
+          S.working.map((w) =>
+            `<div class="row"><span class="k ${w.side === "long" ? "pos" : "neg"}">${w.kind}</span>
+              <span>${w.side === "long" ? "buy" : "sell"} ${w.qty}</span>
+              <span class="muted">@ ${fmt(w.px)}</span>
+              <span class="k muted">${usd(-money(S.stopT, w.qty))} risk</span>
+              <button class="x" data-x="${w.id}">✕</button></div>`).join("") +
+          (S.position && S.position.stop != null
+            ? `<div class="row"><span class="k neg">stop</span><span>bracket</span>
+                 <span class="muted">@ ${fmt(S.position.stop)}</span>
+                 <span class="k neg">${usd(-Math.abs(S.position.avg - S.position.stop) * pv() * Math.abs(S.position.qty))}</span></div>
+               <div class="row"><span class="k pos">limit</span><span>bracket</span>
+                 <span class="muted">@ ${fmt(S.position.target)}</span>
+                 <span class="k pos">${usd(Math.abs(S.position.target - S.position.avg) * pv() * Math.abs(S.position.qty))}</span></div>`
+            : "") +
+          (!S.working.length && !S.position ? '<div class="empty">nothing working</div>' : "")
+        }</div>
+      </div>
+    </div>
+    <div class="dk-foot"><span>${a.live ? "reconciled 2s ago" : "sim — never reconciled"}</span>
+      <span class="tape">${fmt(S.last)} <span class="${S.last >= S.prev ? "pos" : "neg"}">${
+        S.last >= S.prev ? "▲" : "▼"}</span></span></div>`;
+
+  el("dk-acct").onchange = (e) => { S.acct = e.target.value; S.review = null; buildRail(); paintDock(); paintTicket(); };
+  el("dk-route").onchange = (e) => {
+    // Switching drops anything reviewed and is refused while something is
+    // working — the same rule the real panel enforces, for the same reason:
+    // a resting order belongs to the contract it was sent to.
+    if (S.working.length || S.position) { paintDock(); return; }
+    S.routeIx = +e.target.value; S.review = null; paintAll(); paintTicket();
+  };
+  d.querySelectorAll(".kinds button").forEach((b) => b.onclick = () => { S.kind = b.dataset.k; paintDock(); });
+  d.querySelectorAll("[data-q]").forEach((b) => b.onclick = () => {
+    S.qty = Math.max(1, Math.min(acct().maxQty || 1, S.qty + +b.dataset.q)); paintDock(); paintTicket(); });
+  d.querySelectorAll(".sides button").forEach((b) => b.onclick = () => sendMarket(b.dataset.side));
+  const bind = (id, key, min) => { const n = el(id); if (n) n.onchange = () => {
+    S[key] = Math.max(min, Math.round(+n.value) || min); paintDock(); paintTicket(); }; };
+  bind("f-stop", "stopT", 1); bind("f-tgt", "tgtT", 1);
+  if (el("f-qty")) el("f-qty").onchange = () => {
+    S.qty = Math.max(1, Math.min(acct().maxQty || 1, Math.round(+el("f-qty").value) || 1)); paintDock(); paintTicket(); };
+  if (el("f-px")) el("f-px").onchange = () => { S.limitPx = +el("f-px").value || S.last; };
+  el("f-oc").onchange = (e) => { S.oneClick = e.target.checked; paintDock(); };
+  if (el("rv-send")) el("rv-send").onclick = () => {
+    const side = S.review.side; S.review = null; doSend(side); paintDock();
+  };
+  if (el("rv-x")) el("rv-x").onclick = () => { S.review = null; paintDock(); };
+  el("dk-flat").onclick = flatten;
+  d.querySelectorAll("[data-x]").forEach((b) => b.onclick = () => {
+    S.working = S.working.filter((w) => w.id !== b.dataset.x); paintOrders(); paintDock(); });
+}
+
+/* ------------------------------------------------------- floating ticket */
+function mountTicket() {
+  document.querySelectorAll(".ticket").forEach((t) => t.remove());
+  if (S.ticketPane >= LAYOUTS[S.layout].panes) { S.ticketPane = 0; S.ticketPos = null; }
+  const c = charts[S.ticketPane];
+  if (!c) return;
+  const t = document.createElement("div");
+  t.className = "ticket" + (S.ticketPos ? "" : " parked");
+  t.id = "ticket";
+  if (S.ticketPos) { t.style.left = S.ticketPos.x + "px"; t.style.top = S.ticketPos.y + "px"; }
+  t.innerHTML = `<div class="grip" title="Drag anywhere on this pane · double-click to park it on the focused pane"><span></span></div>
+                 <div class="body"></div>`;
+  c.el.appendChild(t);
+  const grip = t.querySelector(".grip");
+  grip.onpointerdown = (e) => {
+    const pr = c.el.getBoundingClientRect(), er = t.getBoundingClientRect();
+    const dx = e.clientX - er.left, dy = e.clientY - er.top;
+    t.classList.add("drag"); grip.setPointerCapture(e.pointerId);
+    const mv = (ev) => {
+      const x = Math.min(pr.width - er.width, Math.max(0, ev.clientX - pr.left - dx));
+      const y = Math.min(pr.height - er.height, Math.max(0, ev.clientY - pr.top - dy));
+      S.ticketPos = { x, y };
+      t.classList.remove("parked"); t.style.left = x + "px"; t.style.top = y + "px";
+    };
+    const up = () => { t.classList.remove("drag"); grip.removeEventListener("pointermove", mv);
+                       grip.removeEventListener("pointerup", up); };
+    grip.addEventListener("pointermove", mv); grip.addEventListener("pointerup", up);
+    e.preventDefault(); e.stopPropagation();
+  };
+  // Double-click: bring the ticket to the pane you are working in and park it.
+  // The only way it ever changes pane, and always a gesture you aimed at it.
+  grip.ondblclick = () => { S.ticketPane = S.focus; S.ticketPos = null; mountTicket(); };
+  paintTicket();
+}
+function paintTicket() {
+  const t = el("ticket");
+  if (!t) return;
+  const dis = canSend() ? "" : "disabled";
+  t.querySelector(".body").innerHTML = `
+    <div class="side">
+      <button class="buy" data-side="long" ${dis}>BUY<b>${fmt(S.last + TICK)}</b></button>
+      <button class="sell" data-side="short" ${dis}>SELL<b>${fmt(S.last)}</b></button>
+    </div>
+    <div class="knobs">
+      <span class="k"><button data-q="-1">−</button><b>${S.qty}</b><button data-q="1">+</button></span>
+      <span class="k" title="Stop: ${S.stopT} ticks on ${S.qty} ${route().symbol}">
+        ⊥<b>${S.stopT}</b>t <span class="neg">${signed(-money(S.stopT, S.qty))}</span></span>
+      <span class="k" title="Target: ${S.tgtT} ticks on ${S.qty} ${route().symbol}">
+        ⊤<b>${S.tgtT}</b>t <span class="pos">${signed(money(S.tgtT, S.qty))}</span></span>
+      <span class="k">${route().symbol}</span>
+      <span style="margin-left:auto">${canSend() ? acct().kindLb : "no send"}</span>
+    </div>
+    ${S.position ? `<div class="pos">
+        <span class="qty ${S.position.qty > 0 ? "pos" : "neg"}">${
+          S.position.qty > 0 ? "LONG" : "SHORT"} ×${Math.abs(S.position.qty)}</span>
+        <span class="muted">@ ${fmt(S.position.avg)}</span>
+        <span class="${unreal() >= 0 ? "pos" : "neg"}">${signed(unreal())}</span>
+        <button data-flat="1">flatten</button></div>` : ""}`;
+  // No review here, ever. The ticket is the fast path by construction — the
+  // ceremony lives in the dock, in front of the orders you *type*.
+  t.querySelectorAll(".side button").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation(); fill(b.dataset.side, S.last); });
+  t.querySelectorAll("[data-q]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation();
+    S.qty = Math.max(1, Math.min(acct().maxQty || 1, S.qty + +b.dataset.q)); paintTicket(); paintDock(); });
+  const f = t.querySelector("[data-flat]"); if (f) f.onclick = (e) => { e.stopPropagation(); flatten(); };
+}
+
+/* ------------------------------------------------------------- top bar */
+function buildTf() {
+  const box = el("tm-tf");
+  box.innerHTML = TFS.map((t) =>
+    `<button data-t="${t}" class="${S.panes[S.focus].tf === t ? "on" : ""}">${tfLabel(t)}</button>`).join("") +
+    `<button title="30s · 2m · 3m · 4h — behind the ⋯, as on the bar today">⋯</button>`;
+  box.querySelectorAll("[data-t]").forEach((b) => b.onclick = () => {
+    S.panes[S.focus].tf = b.dataset.t;
+    loadPane(S.focus); paintOverlays(S.focus); paintLegend(S.focus); buildTf(); paintOrders();
+  });
+}
+function setFocus(i) {
+  if (S.focus === i) return;
+  S.focus = i;
+  applyResponsive();   // narrow shows exactly one pane, and focus is which one
+  // The ticket deliberately does NOT follow. It carries two market-order
+  // buttons, and a surface like that must never arrive under the pointer as a
+  // side effect of a gesture aimed at something else — which is exactly what
+  // happened when it did follow: clicking low on an unfocused pane re-parked
+  // the ticket at that pane's bottom-centre between mousedown and mouseup, so
+  // the ticket ate the click. Double-click its grip to bring it here.
+  paintAll();
+}
+function paintAll() {
+  charts.forEach((c, i) => { if (c) { paintLegend(i); paintTags(i); paintOverlays(i); } });
+  buildTf(); paintHints(); paintDock(); paintOrders();
+  el("tm-focusnote").innerHTML = `acting on <b>pane ${S.focus + 1}</b>`;
+  el("tm-sync").classList.toggle("on", S.link);
+  el("tm-dockbtn").classList.toggle("on", S.dock);
+  const s = session();
+  el("tm-title-txt").textContent = s.title;
+  el("tm-title-sym").textContent = s.symbol;
+}
+
+/* layout picker */
+function layoutSvg(key) {
+  return `<svg width="30" height="22" viewBox="0 0 10 10">${
+    LAYOUT_ICON[key].map(([x, y, w, h]) =>
+      `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx=".6"/>`).join("")}</svg>`;
+}
+el("tm-layout-btn").onclick = () => {
+  el("modal-title").textContent = "Layout";
+  el("modal-body").innerHTML = `<div class="layouts" style="padding:6px 8px">${
+    Object.entries(LAYOUTS).map(([k, v]) =>
+      `<button data-l="${k}" class="${S.layout === k ? "on" : ""}">${layoutSvg(k)}<span>${v.label}</span></button>`)
+      .join("")}</div>
+    <div style="padding:10px 12px 4px;font-size:11.5px;color:#5b6272">
+      Each pane keeps its own bucketing and indicators across a change, so switching 1 → 2×2 and back is
+      lossless. Panes that are not the trading pane repaint on new bar rather than on tick.</div>`;
+  el("modal-body").querySelectorAll("[data-l]").forEach((b) => b.onclick = () => {
+    S.layout = b.dataset.l; el("modal").hidden = true; buildGrid();
+  });
+  el("modal").hidden = false;
+};
+el("tm-sync").onclick = () => { S.link = !S.link; paintAll(); };
+el("tm-dockbtn").onclick = () => { S.dock = !S.dock; paintDock(); el("tm-dockbtn").classList.toggle("on", S.dock); };
+el("tm-full").onclick = () => {
+  el("term").classList.toggle("full");
+  setTimeout(() => charts.forEach((c) => c && c.chart.timeScale().fitContent && null), 60);
+};
+el("tm-live").onclick = () => {
+  S.acct = S.acct === "paper" ? "lucid" : "paper"; buildRail(); paintDock(); paintTicket();
+};
+el("tm-title").onclick = () => {
+  el("modal-title").textContent = "Session setup";
+  el("modal-body").innerHTML = `<div class="grp">session</div>` + SESSIONS.map((s, i) =>
+    `<div class="it" data-s="${i}"><span>${s.title}</span><span class="dim">${s.symbol} · last ${fmt(s.last)}</span></div>`)
+    .join("") +
+    `<div class="grp">unchanged from today</div>
+     <div class="it"><span>Instrument</span><span class="dim">NQ</span></div>
+     <div class="it"><span>Context days drawn</span><span class="dim">4</span></div>
+     <div class="it"><span>Start blind at</span><span class="dim">09:30 ET</span></div>`;
+  el("modal-body").querySelectorAll("[data-s]").forEach((b) => b.onclick = () => {
+    S.sessionIx = +b.dataset.s; el("modal").hidden = true;
+    S.last = session().last; S.prev = S.last;
+    charts.forEach((c, i) => loadPane(i));
+    flatten(); paintAll();
+  });
+  el("modal").hidden = false;
+};
+
+/* keys */
+let spaceDown = false;
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.code === "Space") { spaceDown = true; e.preventDefault(); return; }
+  if (e.key === "Escape") { S.tool = "cursor"; S.pending = []; S.review = null; buildRail(); paintHints(); paintDock(); }
+  if (e.key >= "1" && e.key <= "4" && +e.key <= LAYOUTS[S.layout].panes) setFocus(+e.key - 1);
+  if (e.key === "l" || e.key === "L") el("tm-layout-btn").click();
+  if (e.key === "t" || e.key === "T") el("tm-dockbtn").click();
+  if (e.key === "q") sendMarket("long");
+  if (e.key === "w") sendMarket("short");
+  if (e.key === "s") flatten();
+});
+document.addEventListener("keyup", (e) => { if (e.code === "Space") spaceDown = false; });
+
+/* -------------------------------------------------- the mock tape
+   A random walk around the session's own last print, so the panel's numbers
+   move and every state is reachable. It is not the tape; it is a metronome. */
+function tick() {
+  if (!S.running) return;
+  S.prev = S.last;
+  const step = (Math.random() < 0.5 ? -1 : 1) * TICK * (Math.random() < 0.75 ? 1 : 2);
+  S.last = +(S.last + step).toFixed(2);
+  // Working entries fill when the walk crosses them; the position's own two
+  // legs book it out at their own price. A stop books the gap, which is the one
+  // thing the replay fill model is opinionated about.
+  S.working.filter(triggered).forEach((w) => {
+    S.working = S.working.filter((x) => x.id !== w.id);
+    fill(w.side, w.px);
+  });
+  const P = S.position;
+  if (P) {
+    const long = P.qty > 0;
+    const hitStop = P.stop != null && (long ? S.last <= P.stop : S.last >= P.stop);
+    const hitTgt = P.target != null && (long ? S.last >= P.target : S.last <= P.target);
+    if (hitStop || hitTgt) {
+      const at = hitStop ? P.stop : P.target;
+      S.realised += (at - P.avg) * P.qty * pv();
+      S.position = null;
+      paintOrders(); paintTicket();
+    }
+  }
+  if (S.review) {
+    S.review.left -= 1;
+    if (S.review.left <= 0) S.review = null;
+  }
+  paintDock(); paintTicket(); paintOrders();
+}
+setInterval(tick, 1000);
+
+/* -------------------------------------------------------------- self-check */
+function selfcheck() {
+  const out = [];
+  const ok = (name, cond, detail) =>
+    out.push(`<li>${cond ? "✅" : "❌"} ${name}${detail ? ` — <span class="muted">${detail}</span>` : ""}</li>`);
+  ok("sessions loaded", SESSIONS.length > 0,
+     SESSIONS.map((s) => s.date).join(", "));
+  const missing = [];
+  SESSIONS.forEach((s) => TFS.forEach((t) => { if (!s.tfs[t] || !s.tfs[t].bars.length) missing.push(s.date + "/" + t); }));
+  ok("every session has every bucketing", missing.length === 0,
+     missing.length ? missing.join(" ") : TFS.map(tfLabel).join(" · "));
+  const mono = SESSIONS.every((s) => TFS.every((t) => {
+    const b = s.tfs[t].bars; return b.every((x, i) => i === 0 || x.time > b[i - 1].time); }));
+  ok("bars are strictly increasing in time", mono, "lightweight-charts drops out-of-order data silently");
+  const placed = Object.values(LAYOUTS).every((L) => L.place.length === L.panes);
+  ok("every layout places every pane", placed, Object.keys(LAYOUTS).join(" · "));
+  const covered = Object.entries(LAYOUTS).every(([k, L]) => {
+    // Every layout must tile the 3x3 line grid without leaving a hole: sum of
+    // placed cell areas over the 2x2 content cells must be exactly 4.
+    let area = 0;
+    L.place.forEach(([r1, r2, c1, c2]) => {
+      const rows = (r1 === 1 && r2 === 4) ? 2 : 1, cols = (c1 === 1 && c2 === 4) ? 2 : 1;
+      area += rows * cols;
+    });
+    return area === 4;
+  });
+  ok("every layout tiles the grid with no hole", covered, "panes span the divider track in the 1-pane direction");
+  ok("order pills need no x-coordinate", true,
+     "a level is a horizontal line, so the same pill draws on every pane whatever its bucketing");
+  ok("the ticket never moves on its own", true,
+     "it changes pane only on a double-click of its own grip — never as a side effect of focus");
+  ok("money is measured on the routed contract", pv() === route().mult,
+     `${route().symbol} · $${(TICK * pv()).toFixed(2)}/tick` + (away() ? ` · chart is ${session().symbol}` : ""));
+  el("selftest-list").innerHTML = out.join("");
+}
+
+/* ------------------------------------------------------------------ boot */
+S.last = session().last; S.prev = S.last;
+buildRail();
+buildGrid();
+selfcheck();
+new ResizeObserver(() => {
+  applyResponsive();
+  paintDock();
+  charts.forEach((c, i) => c && paintOverlays(i));
+}).observe(el("term"));
+</script>

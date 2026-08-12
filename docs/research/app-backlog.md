@@ -10,46 +10,170 @@ Sibling docs worth having open: [live-shadow-plan](../live-shadow-plan.md) (the 
 
 ## Charts — `/charts/live`
 
-### 1. Order entry on the live chart
+### 1. Order entry on the live chart — BUILT (2026-08-07), READ PATH PROVEN, WRITE PATH NOT
 
-Place orders from the live chart, wired to a broker. Trial Rithmic account to be
-looked into first — nothing here starts before there is an account that cannot
-touch a funded balance.
+Place orders from the live chart, wired to a broker.
 
 **Read [live-shadow-plan §"Phase 7 — routing"](../live-shadow-plan.md) before
-starting.** Routing is currently out of scope *by decision, not by sequencing*:
-it turns the paper blotter into an order-state machine reconciled against broker
-fills, needs a kill switch and position reconciliation on restart, and the plan's
-stated bar for revisiting is "when the agreement rate from Phase 6 has been
-stable over a meaningful sample" — which needs the always-on host and a few
-purchased Databento days first. Filing it here is a decision to revisit that,
-not an instruction to ignore it.
+touching this.** Routing was out of scope *by decision, not by sequencing*, and
+the plan's bar for revisiting it — "when the agreement rate from Phase 6 has
+been stable over a meaningful sample" — **has not been met**. What exists is the
+mechanism, built so that the resting state of a checkout cannot trade; the bar
+above still governs whether it is ever pointed at a funded account.
 
-The stated requirement — *be careful not to accidentally put an order in* — is
-the design driver, not a footnote. Sketch of what that means:
+> **Built twice, and the second design is the one to read.** The first cut
+> (2026-08-06) honoured a rule from this item's original scoping — *no
+> single-click path from a chart gesture to a live order* — by keeping the two
+> apart: chart gestures filled a paper blotter, and a separate panel with its
+> own form was the only thing that could reach the exchange.
+>
+> **Using it showed the ergonomics were inverted.** The whole point of the chart
+> gestures is speed and muscle memory, and they were wired to the one thing
+> where speed does not matter; real orders were typed into a form, *including
+> the price*, so you could not click the level you wanted. The rule was
+> protecting the wrong thing.
+>
+> **The rebuild (2026-08-07) makes paper an account.** It sits in the same
+> selector as the Rithmic ones, every way of placing an order works for all of
+> them, and what varies is **not the capability but the confirmation** — the
+> ATAS model: a popup naming the order in words, with a per-account "one-click
+> trading" toggle that skips it.
+>
+> |  | confirm popup | reaches the exchange |
+> |---|---|---|
+> | 📝 Paper | never | no |
+> | `[demo]` | on by default, toggleable | yes |
+> | `[live]` | on by default, toggleable | yes |
+>
+> **The arm was removed (2026-08-11).** The middle column used to read "arm
+> required", and both real rows said yes: a typed confirmation that granted
+> fifteen minutes of sendability and lapsed on idle. It went because the
+> deadline was the wrong shape for the job — it lapsed mid-decision and stood
+> open while nobody was watching, so it was ceremony at exactly the moments it
+> was meant to matter. What it actually enforced is now
+> `Broker.check_routable`, four standing facts read on **every** order rather
+> than once per lease: routing is switched on, a real account is selected, a
+> person has labelled it, and the broker has been read back.
+>
+> **The seam that decided the shape: one Rithmic login is one concurrent
+> session.** Measured twice already in this stack (the access probe, and the
+> harvest sweep, which runs on the live client for the same reason). The order
+> plant therefore rides `RithmicFeed`'s connection — so a disconnect leaves the
+> session unable to send until it has re-read the book, there is no routing
+> without a tape, and `routing` is settled at connect rather
+> than being a runtime switch like `record` and `signals`. Those change what is
+> written down about a session; this changes what the socket may do.
+>
+> Files: `src/journal/live/routing.py` (policy, tags, the review token),
+> `src/journal/live/broker.py` (the order plant, the gate, fill pairing),
+> `api/routers/live_orders.py`, `frontend/src/hooks/useOrderIntent.ts` (the one
+> funnel every gesture ends in), `frontend/src/lib/brokerViews.ts`,
+> `frontend/src/components/{RoutingPanel,OrderConfirm}.tsx`.
 
-- [ ] **Demo/trial credentials only, and the app must be able to tell.** A
-      distinct env var from `RITHMIC_*` (or an explicit `RITHMIC_ENV=demo|live`)
-      that the UI reads and displays permanently, so "which account is this"
-      is never inferred from memory. Refuse to arm on a live account until
-      that is deliberate.
-- [ ] **Off by default, armed explicitly, disarmed automatically.** Ordering
-      hidden entirely unless a config flag is set; an explicit *arm* action per
-      session that expires (on disconnect, on the 18:00 roll, on idle). The
-      resting state of the page is read-only.
-- [ ] **No single-click path from a chart gesture to a live order.** The
-      Simulator's `＋Order` tool and long-press ticket exist because the replay
-      *is* a trainer — the live surface needs a confirm step that names side,
-      size, price and account in words before anything is sent.
-- [ ] **Kill switch + position reconciliation on restart** (the two things
-      Phase 7 names). A restarted API must discover what is actually working at
-      the broker before it draws anything, and never assume flat.
-- [ ] **Keep shadow signals and routing separate.** Shadow mode's only purpose
-      is fidelity; the plan is explicit that Phases 0–6 must not be shaped for
-      routing. Whatever this becomes, it reads the same tape — it does not get
-      to change how the shelf is evaluated.
-- [ ] Decide manual-only vs. strategy-routed. Manual-only is the honest first
-      step and skips the entire "did the engine mean this fill" problem.
+**Four things the scoping did not anticipate, all found in the code:**
+
+- **The confirm had to be a server-issued token, not a modal.** "A confirm step
+  that names side, size, price and account in words" is satisfiable by a dialog
+  the client could simply not render. `POST /preview` returns the sentence *and*
+  a single-use token; the reviewed door on `POST /orders` takes the token **and
+  no other field**, so there is no request shape that describes an unreviewed
+  order. One-click is a separate door on the same endpoint, refused unless
+  *that account* has the flag — so "send without review" does not exist as a
+  shape until somebody asks for it, per account.
+- **The app can corroborate "demo" and can never corroborate "live".** The first
+  `observe()` returned demo/live from the gateway and system name. That is a
+  confident wrong answer waiting to happen: a name can *show* an account is a
+  test one, but the absence of the word "test" is evidence of nothing. Rithmic's
+  `ResponseAccountList` carries an id, a name, an FCM and a loss limit — nothing
+  about funding. So the label is a person's declaration, and the rebuild moved
+  it from an env var to a per-account tag that is **visible as a badge** wherever
+  the account appears. The rule that survived intact: **untagged is not demo**,
+  and an untagged account cannot send anything.
+- **One-click had to reset on promotion to live.** Enable it on a demo account
+  because confirming every practice order is friction, re-label that account
+  live, and the fast path silently follows onto real money. `routing.set_tag`
+  clears it on the demo→live transition.
+- **A real account that is selected but cannot yet send must refuse, not fall
+  through to paper.** (Untagged, or not read back.) The first wiring let the
+  gesture make a paper trade. That is a
+  surprise in both directions — you either think you are in a trade you are not,
+  or you have made a practice trade you did not ask for. Paper is one click away
+  in the selector if that is what you wanted.
+
+- [x] **Demo/trial credentials only, and the app must be able to tell.**
+      Re-scoped: the app *cannot* tell, and now says so honestly. Per-account
+      labels with a badge, no default, untagged refuses to send.
+- [x] **Off by default, and pointed at something real only deliberately.**
+      `LIVE_ROUTING=1` or the endpoints 403 and the ORDER plant is never opened.
+      Every session starts on **Paper**, including after a restart or the 18:00
+      roll, so choosing a real account is an act. ~~The arm is typed and lapses
+      on idle.~~ **Removed 2026-08-11** — see the note above; the four gates it
+      sat on are now read on every order, and a reviewed order is dropped by a
+      disconnect, an account switch, an instrument switch, the roll and a
+      flatten.
+- [x] ~~**No single-click path from a chart gesture to a live order.**~~
+      **Deliberately reversed**, on the reasoning above. What replaces it: the
+      confirm popup by default, one-click as an explicit per-account opt-in that
+      resets on promotion to live, and a permanent account chip in the top bar
+      so "am I about to trade real money" never depends on which panel is open.
+- [x] **Kill switch + position reconciliation on restart.** `reconcile()` runs
+      on selecting a real account and **orders are refused until it answers** —
+      `reconciled_at is None` renders as "not read back", never as "nothing
+      working". Flatten cancels before it exits (exiting under a live bracket
+      can leave the bracket to open a fresh position the other way), is **gated
+      on nothing but the connection**, and reports a partial failure naming both
+      halves.
+- [x] **Keep shadow signals and routing separate.** `shadow.py` imports nothing
+      from `broker.py`; the shelf has no reference to reach it with.
+- [x] Manual-only. Nothing routes a strategy signal.
+
+Verified: 124 tests in `tests/test_live_routing.py`, the broker driven against a
+fake plant on a real event loop **in a second thread** — production's
+arrangement, since a single-threaded test would deadlock on the very hand-off
+`Broker._call` exists to make. The tag store is patched out for every test, so
+none can write a real label. Suite 544 pass; 12 fail, of which 3 are the known
+`test_sim_charts.py` WIP and 9 are Databento gateway 504s. Frontend typechecks
+and builds.
+
+**The read path has now met a real plant.** `data/live/orders/NQU6/2026-08-07/`
+records it: the ORDER plant opened on the live LucidTrading login, the account
+list came through with two accounts, and switching between them ran
+`list_orders` + `list_positions` against each and got flat, zero-order answers
+back. So `attach`, `accounts_view`, `use_account` and `reconcile` are proven, not
+inferred.
+
+That same file also records the **old** code failing there first — nineteen
+`attach_failed` lines in a reconnect loop, because the pre-revamp
+`_pick_account` raised on a login with two accounts and took the whole feed down
+with it. That is exactly the failure the rebuild removed by opening on paper
+instead, and it happened for real rather than hypothetically.
+
+**The write path is still unproven**, and it is the whole of what is left.
+No order has been placed, so everything past a read is built from Rithmic's
+protobuf schema:
+
+- [ ] Place one order on the TEST account: does it come back through
+      `on_exchange_order_notification` with the fields `_order_rec` reads
+      (`basket_id`, `notify_type`, `total_unfilled_size`, `account_id`), and do
+      the bracket kwargs (`stop_ticks`/`target_ticks`, template 330) produce the
+      bracket the confirm sentence described?
+- [ ] Check `account_id` **is populated** on the exchange and PnL notifications.
+      `Broker._mine` treats a blank one as ours — right for a single account,
+      where dropping unlabelled messages would lose real fills, but a plant that
+      never sets the field silently defeats the multi-account filter.
+- [ ] Confirm the bracket-leg inference in `brokerViews.bracketOf`. The legs are
+      matched by side, type and position relative to the entry rather than by
+      `linked_basket_ids`, which is only populated on some notification paths.
+      A wrong match would put a drag on the wrong leg.
+- [ ] Check `_on_fill`'s pairing against the broker's own `day_pnl` over a
+      session with a scale-out and a flip in it — the netting mirrors
+      `replaySim`, and where the two disagree the answer should be written down
+      rather than reconciled away.
+- [ ] Confirm the prop firm's written rules cover it. Decision 1 is explicit
+      that this is the line firms diverge on, and `manual_or_auto` is left at
+      the client's `MANUAL` default — a claim being made to the broker on every
+      order, not a formality. Faster manual entry is still manual entry, but
+      one-click trading on a funded prop account is worth reading the rules over.
 
 ### 2. Option to disable recording / shadow signals — DONE (2026-08-06)
 
@@ -363,7 +487,86 @@ exercised over HTTP against the real 40-day store; frontend typechecks and
 builds. **Not yet opened in a browser** — same gap as item 4, no headless browser
 on this host.
 
-### 6. *(open slot)*
+### 6. Journal the trades taken on the live chart — DONE (2026-08-07)
+
+Until this, the one surface in the app where you actually trade was the one
+surface whose trades it never saw. Paper trades lived in the browser and died on
+a reload; the broker's round trips lived in memory and in an append-only
+`orders.jsonl` that nothing read back.
+
+> **Done.** `src/journal/live/booking.py` is the single place that knows the
+> row shape; the broker books its own round trips, and paper trades are POSTed.
+>
+> **The feature is short because there is no `trades` table.** A journaled trade
+> is *derived at read time* from `atas_journal` (matched lots) by
+> `trades.build_logical_trades`, funnelled through `api/scope.py`. Write a
+> correct row and the Trades page, Calendar, Statistics, AI review, notes,
+> setups, models and video bookmarks all work with **nothing else changed**.
+>
+> **Two writers, and the asymmetry is forced.** The fill engines are in
+> different places: a real trade is netted by `Broker` on the server, so it
+> books itself; a paper trade is computed by `replaySim.ts` in the browser, and
+> `api/routers/replays.py` is explicit that the server must never recompute one
+> ("one engine, so a stored attempt can't disagree with the replay that produced
+> it"). So paper arrives by `POST /live/journal/paper`.
+>
+> **Paper is an account, tagged `replay`.** It appears in Trades and the
+> Calendar and filters by account like any other, and `sessions.mode='replay'`
+> — the same mechanism ATAS's own `Replay` account already uses — keeps it out
+> of real-money statistics unless asked for. Not behind `LIVE_ROUTING` or an
+> gates: paper reaches no broker, so none of the routing gates are about it.
+
+- [x] `source_file` is the sitting: `live/<account>/<date>`, under a prefix that
+      cannot collide with a root-level `Export_*.xlsx` or `backtest/<model>/`.
+      `db.delete_attempt` then deletes a live day with no new code.
+- [x] The session row is written **before** the trade. `api/scope.py`'s
+      `DEFAULT_SESSION` makes an unregistered `source_file` read as
+      `mode='replay'`, so a real trade booked without one would quietly leave
+      the real-money statistics — invisibly. There is a test that demonstrates
+      that failure rather than just asserting against it.
+- [x] `dedupe_key` reuses `ingest._journal_key` verbatim, so re-posting is free
+      and the paper client can be careless about retries. Prices are rounded
+      once, in the builder, because the key hashes them as strings.
+- [x] Booking can never raise into the fill path. It runs inside the
+      notification handler on the feed's event loop — the thread that would be
+      servicing a cancel or a flatten — so a failure is counted
+      (`booking_errors` on the panel) and the `orders.jsonl` line still carries
+      the trade for a later backfill.
+- [x] Fills go to `executions` for the trade-detail chart's markers, keyed on
+      Rithmic's `fill_id`. Best-effort: an unkeyable fill is dropped rather than
+      given a synthetic id, and the read path already degrades to "no markers"
+      rather than a wrong number.
+
+**One property worth knowing, because it looks like a bug and is not:** the
+broker emits a round trip each time size comes off, so a scaled-out position
+produces two of them sharing an entry. Written as two lots, `build_logical_trades`
+nets them back into a single logical trade of the full size — which is what the
+position was, and how an ATAS export of the same scale-out reads. The lots stay
+separate underneath. There is a test pinning it.
+
+Verified: 22 tests in `tests/test_live_booking.py`, every assertion made through
+`api/scope.py` rather than a SELECT — the row is not the product, what the Trades
+page shows is, and a lot of derivation sits between them.
+
+> **A mistake worth recording.** The first version of the routing suite's autouse
+> fixture did not redirect `journal.db.connect`, so the fill-pairing tests wrote
+> **eight fabricated trades into the real journal**, tagged `mode='live'`, where
+> they would have counted toward real statistics. Found by checking the real DB
+> after a green run, removed with `db.delete_attempt`. The fixture now redirects
+> the connection — booking still really runs, it just cannot reach real data —
+> and there is a test asserting the redirect is in place, because if it ever
+> silently stops working every test below it starts writing to the real journal
+> again.
+
+- [ ] Confirm `fill_id` against a real plant. If it is blank or not unique per
+      fill, `book_fill` returns None and the only cost is missing markers — but
+      the mapping is currently schema-derived, like the rest of the write path.
+- [ ] Decide what happens if an ATAS export covering a day traded here is ever
+      imported. By decision (2026-08-07) the two sources are disjoint, so there
+      is no reconciliation — both copies would land and statistics would
+      double-count. A warning on the Trades page is the cheap mitigation.
+
+### 7. *(open slot)*
 
 ---
 

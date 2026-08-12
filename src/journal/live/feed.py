@@ -34,10 +34,14 @@ from ..config import ET_TZ
 from ..sim import ticks as tickmod
 from .session import LiveSession
 
-# How often the feed wakes to publish whatever has "arrived". Fine enough that
-# the chart advances smoothly at 1x, coarse enough that a 60x replay isn't one
-# wake per tick.
-_WAKE_S = 0.1
+# How often the feed wakes to publish whatever has "arrived". Matched to the
+# Rithmic feed's PUBLISH_S so a replayed day and a live one are quantised the
+# same — with the tape now *pushed* on every append (session.subscribe), this
+# wake is the only grain the chart can see, and a fake feed that published on a
+# coarser one would look choppier than the real thing it exists to stand in
+# for. At 60x each wake still batches ~1.2s of tape, nowhere near one wake per
+# tick.
+_WAKE_S = 0.02
 
 
 def source_frame(symbol: str, day: date) -> pd.DataFrame | None:

@@ -1,6 +1,10 @@
 export interface Meta {
   has_data: boolean;
   databento_available: boolean;
+  /** Whether any ticks are cached — what the chart components gate on. An API
+   *  key and a drawable chart are different questions since the charts stopped
+   *  fetching. */
+  chart_ticks_available: boolean;
   ai_available: boolean;
   models: string[];
   display_tzs: string[];

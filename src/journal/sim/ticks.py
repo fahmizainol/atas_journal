@@ -56,6 +56,7 @@ from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from ..config import (CACHE_DIR, CONTRACT_SPECS, DATA_DIR, DATABENTO_DATASET,
                       ET_TZ, continuous_symbol, databento_key, root_symbol)
@@ -67,7 +68,13 @@ TICK_CACHE_DIR = CACHE_DIR / "ticks"
 # above. Nothing written here ever grows the backtest corpus, which is what
 # makes "do live signals match the backtest" a question with an answer: the
 # reference the live day is checked against must not be partly made of the live
-# day. See docs/live-shadow-plan.md decisions 3 and 4.
+# day. See docs/live-shadow-plan.md decision 3, which is permanent.
+#
+# Decision 4 — "recorded days are not replayable either" — is NOT permanent and
+# no longer holds: ``/simulator/days`` lists both stores, tagged by source. That
+# changes what a person can *look at*, and nothing about what a backtest reads.
+# ``get_day_ticks`` still reads the Databento cache and does not fall through
+# here, so a recorded day remains unavailable to the engine.
 #
 # Note this is not ``config.LIVE_DIR`` — that is the ATAS import drop folder,
 # and the collision is only in the word.
@@ -790,6 +797,58 @@ def have_live_day(symbol: str, day: date) -> bool:
     return bool(live_chunks(symbol, day))
 
 
+@lru_cache(maxsize=1024)
+def _live_span_cached(symbol: str, day: date,
+                      chunks: tuple[str, ...]) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """The (first, last) recorded instant, folded over every chunk's footer.
+
+    EVERY chunk, not the first and the last. Chunk names sort in *write* order,
+    and that stopped being time order when the feed learned to backfill — the
+    same caveat ``_read_live_cached`` sorts for. The hull of a set is not the
+    hull of its endpoints once the endpoints can be out of order.
+
+    A chunk whose footer carries no statistics, or will not open, is skipped
+    rather than guessed at; if that is every chunk the answer is None, and a
+    caller that wanted a window gets "cannot say" instead of "no".
+    """
+    d = live_day_dir(symbol, day)
+    lo = hi = None
+    for c in chunks:
+        try:
+            pf = pq.ParquetFile(d / c)
+            i = pf.schema_arrow.names.index("ts_utc")
+            md = pf.metadata
+            for g in range(md.num_row_groups):
+                st = md.row_group(g).column(i).statistics
+                if st is None:
+                    continue
+                a, b = pd.Timestamp(st.min), pd.Timestamp(st.max)
+                lo = a if lo is None or a < lo else lo
+                hi = b if hi is None or b > hi else hi
+        except Exception:  # noqa: BLE001 — one bad chunk must not sink the day
+            continue
+    return None if lo is None or hi is None else (lo, hi)
+
+
+def live_day_span(symbol: str, day: date) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """First and last recorded instant of a session, or None if nothing is.
+
+    Read from the parquet footers, never the ticks: this backs a *listing*, and
+    a listing that opened every chunk of every recorded day would read hundreds
+    of megabytes to answer a question about time spans. Cached on the chunk set,
+    like every other read of this store, so a day that grows invalidates its own
+    entry.
+
+    A hull, not a coverage test. It says where the tape starts and ends, and
+    says nothing about holes in between — ``/live/recordings`` owns that
+    question, and owns it with a manifest rather than a guess.
+    """
+    chunks = live_chunks(symbol, day)
+    if not chunks:
+        return None
+    return _live_span_cached(symbol, day, chunks)
+
+
 @lru_cache(maxsize=8)
 def _read_live_cached(symbol: str, day: date, chunks: tuple[str, ...]) -> pd.DataFrame:
     """A recorded day, concatenated. READ-ONLY, like every other cached read.
@@ -849,6 +908,7 @@ def live_segment(symbol: str, day: date, segment: str) -> pd.DataFrame | None:
 
 def _clear_live_caches() -> None:
     _read_live_cached.cache_clear()
+    _live_span_cached.cache_clear()
 
 
 def cached_rth(symbol: str, day: date) -> pd.DataFrame | None:

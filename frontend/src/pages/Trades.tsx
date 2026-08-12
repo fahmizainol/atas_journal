@@ -118,7 +118,7 @@ export function Trades() {
     <div>
       <div className="section-title">Trades</div>
       <div className="section-cap">Click a row to expand its full detail.</div>
-      <div className="panel">
+      <div className="panel table-scroll-x-narrow">
         <DataTable
           data={data}
           columns={columns}

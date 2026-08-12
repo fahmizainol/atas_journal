@@ -27,6 +27,8 @@ from journal.sim import bars as barmod  # noqa: E402
 from journal.sim import confluences as confmod  # noqa: E402
 from journal.sim import engine, ticks  # noqa: E402
 from journal.sim import profile as profmod  # noqa: E402
+from journal.sim import schema  # noqa: E402
+from journal.sim import vol_regime as volmod  # noqa: E402
 from journal.sim import vwap as vwapmod  # noqa: E402
 from journal.sim.rules import (  # noqa: E402
     DriftFadeConfig, DriftFadeGlobexConfig, FadeConfig, GlobexBounceConfig,
@@ -1086,6 +1088,132 @@ def test_trail_mirrors_onto_a_short():
             assert tr["avg_exit"] >= fs - 1e-9
             assert fs <= e + 1e-9              # breakeven or better
             assert tr["r_multiple"] > -1.0     # a scratch, not the full risk
+
+
+# --- the ATR-scaled trail ----------------------------------------------------
+#
+# Same ratchet, with the DISTANCE read from the daily ATR the session opened with
+# instead of a fixed tick count. The assertions are about which grid the stop
+# lands on, so they compute the expected distance from the same public read the
+# engine uses rather than hard-coding a number that a re-cached day would move.
+
+
+def _atr_trail_ticks(mult: float, day=DAY) -> int | None:
+    atr = volmod.session_atr("NQ", day)
+    return None if atr is None else max(1, round(mult * atr / TICK))
+
+
+def test_trail_atr_off_changes_nothing():
+    """The regression guard behind the version bump: with the multiplier at 0 the
+    trail is the fixed-distance ratchet it has always been."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    base, _, _, _ = engine.run_session(SimConfig(trail_stop_ticks=75), DAY)
+    off, _, _, _ = engine.run_session(
+        SimConfig(trail_stop_ticks=75, trail_atr_mult=0.0), DAY)
+    assert len(base) == len(off)
+    for a, b in zip(base, off):
+        for col in ("avg_entry", "avg_exit", "final_stop_price", "exit_reason"):
+            assert a[col] == b[col], col
+
+
+def test_trail_atr_sets_the_distance():
+    """The trailed stop lands on the ATR's grid, not the configured tick count —
+    and the two really are different distances on this session."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    dist = _atr_trail_ticks(0.05)
+    if dist is None:
+        print("   (skipped: no ATR history cached for this day)")
+        return
+    assert dist != 75, "pick a day where the ATR distance differs from the fixed one"
+    # step 0 so the grid follows the ATR distance too — otherwise the stop would
+    # sit an ATR behind the print but move in fixed-tick clicks.
+    cfg = SimConfig(trail_stop_ticks=75, trail_step_ticks=0, trail_atr_mult=0.05)
+    trades, _, _, _ = engine.run_session(cfg, DAY)
+    assert trades
+    step = dist * TICK
+    moved = 0
+    for tr in trades:
+        fs, e = tr["final_stop_price"], tr["avg_entry"]
+        assert fs >= tr["stop_price"] - 1e-9        # never loosened
+        if abs(fs - tr["stop_price"]) < 1e-9:
+            continue
+        moved += 1
+        n = (fs - e) / step
+        assert abs(n - round(n)) < 1e-9, (fs, e, n)
+    assert moved, "no trade trailed — the test proves nothing"
+
+
+def test_trail_atr_is_read_once_and_not_per_trade():
+    """One ATR for the whole session: every trailed stop on the day sits on the
+    same grid, so the distance cannot have breathed between fills."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    dist = _atr_trail_ticks(0.05)
+    if dist is None:
+        print("   (skipped: no ATR history cached for this day)")
+        return
+    cfg = SimConfig(trail_stop_ticks=75, trail_step_ticks=0, trail_atr_mult=0.05)
+    trades, _, _, _ = engine.run_session(cfg, DAY)
+    grids = {round((tr["final_stop_price"] - tr["avg_entry"]) / (dist * TICK), 6)
+             for tr in trades
+             if abs(tr["final_stop_price"] - tr["stop_price"]) > 1e-9}
+    assert grids, "no trade trailed — the test proves nothing"
+    for n in grids:
+        assert abs(n - round(n)) < 1e-6, n
+
+
+def test_trail_atr_falls_back_to_the_fixed_distance():
+    """A session the ATR can't be read for keeps trailing at the configured tick
+    count. The rule degrading silently to *no trail* would be the bad failure."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    real = volmod.session_atr
+    volmod.session_atr = lambda *a, **k: None
+    try:
+        blind, _, _, _ = engine.run_session(
+            SimConfig(trail_stop_ticks=75, trail_step_ticks=0,
+                      trail_atr_mult=0.05), DAY)
+    finally:
+        volmod.session_atr = real
+    fixed, _, _, _ = engine.run_session(
+        SimConfig(trail_stop_ticks=75, trail_step_ticks=0), DAY)
+    assert len(blind) == len(fixed)
+    for a, b in zip(blind, fixed):
+        for col in ("avg_entry", "avg_exit", "final_stop_price", "exit_reason"):
+            assert a[col] == b[col], col
+
+
+def test_trail_atr_needs_a_trailing_stop():
+    """The multiplier only ever scales an existing trail; with none set it would
+    be a config that claims an ATR trail and takes every trade on the fixed stop."""
+    try:
+        schema.parse({"trail_stop_ticks": 0, "trail_atr_mult": 0.05})
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "trail_stop_ticks" in str(exc)
+    # ...and the pair together is fine.
+    cfg = schema.parse({"trail_stop_ticks": 75, "trail_atr_mult": 0.05})
+    assert cfg.trail_atr_mult == 0.05
+
+
+def test_session_atr_is_causal_and_matches_the_vol_clock():
+    """The engine's per-session read is the same number the vol-clock artifact
+    labels the day with — which is the ATR through the PRIOR session, so a day
+    can never size its trail off its own range."""
+    if not _have_ticks():
+        print("   (skipped: tick cache cold)")
+        return
+    labelled = volmod.range_labels("NQ", DAY, DAY)["days"]
+    if not labelled or labelled[0]["atr"] is None:
+        print("   (skipped: no ATR history cached for this day)")
+        return
+    assert abs(volmod.session_atr("NQ", DAY) - labelled[0]["atr"]) < 0.05
 
 
 def test_trail_applies_to_vetoed_ghosts():

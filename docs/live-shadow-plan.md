@@ -28,6 +28,7 @@ Accounts are prop-firm, routed through **Rithmic**.
 | 4 — shadow signals on a cadence, frozen regime | **done, verified** |
 | 5 — recorder, live-store readers, Rithmic feed, resume | **built, tested off-market** ([below](#phase-5--what-landed)); **history-plant backfill built and verified against the live plant 2026-08-05** ([below](#built-same-day)) |
 | 6 — reconciliation | **built, verified on a re-recorded session** ([below](#phase-6--what-landed)) |
+| 7 — manual order routing | **built 2026-08-06, rebuilt 2026-08-07 (paper as an account), never driven against a real order plant** ([below](#phase-7--routing-built-2026-08-06-beside-phases-06-rather-than-on-top-of-them)). Off unless `LIVE_ROUTING=1`; starts on paper every session; nothing autonomous can reach it |
 
 Phases 5–6 verification: 33 tests in `tests/test_live_record.py`. The load-bearing ones
 are an **end-to-end pass** — record a cached session into the live store, shadow it as it
@@ -161,19 +162,61 @@ Recorded here because they are the part least recoverable from the code.
    order. Prop-firm rules diverge exactly on this line — as of 2026, Apex restricts fully
    autonomous entry *and* exit, and Topstep prohibits automation through the ProjectX API
    on live funded accounts. Read your firm's current written rules before that changes.
-2. **Rithmic, `TICKER_PLANT` only.** Rithmic splits its API into independent plants
-   (ticker / history / order / PnL), each its own socket and login. Shadow mode connects
-   to market data and never opens the order plant — which is both a lighter conformance
-   scope and a completely different question to ask a prop firm than "may I use the API".
+
+   **Amended 2026-08-06, widened 2026-08-07.** Manual order entry exists ([Phase
+   7](#phase-7--routing-built-2026-08-06-beside-phases-06-rather-than-on-top-of-them)),
+   off unless `LIVE_ROUTING=1`, and the chart's own gestures now reach it — including,
+   if an account is explicitly set to one-click, with no confirmation step. What is
+   unchanged is the part of this decision that was ever about the firms: **nothing
+   autonomous routes.** No strategy, no gate and no shadow pass can reach the broker;
+   every order originates in a human gesture, and `manual_or_auto` stays at the
+   client's `MANUAL` default — a claim being made to the broker on every order rather
+   than a formality.
+   
+   The sentence "read your firm's current written rules" is now load-bearing rather
+   than precautionary, and one-click trading on a funded prop account is the specific
+   thing to read them about.
+2. **Rithmic, `TICKER_PLANT` only** — *by default, and unless a routing session was
+   asked for.* Rithmic splits its API into independent plants (ticker / history / order /
+   PnL), each its own socket **but one concurrent session per login**, which is what
+   settles the design: a shadow feed opens ticker (plus history when backfilling) and
+   nothing else, and a routing feed opens ORDER and PNL **on the same connection**,
+   because a second client would force-log-out the first. Chosen once at connect and
+   never afterwards, so a shadow session cannot acquire the ability to trade while it
+   runs. The lighter conformance scope and the different question to ask a prop firm both
+   still apply to every session that does not ask for routing — which is all of them by
+   default.
 3. **Live ticks never enter `data/cache/ticks/`.** Rithmic data stays in `data/live/`,
    permanently. The Databento corpus (606 sessions, 1.8 GB, ending 2026-06-30) remains an
    independent reference, which is what makes "do live signals match the backtest" a
    question with an answer. Recorded days therefore never grow the backtest corpus.
-4. **Recorded days are not replayable either.** The two stores stay fully disjoint;
-   `/simulator/days` keeps globbing only the Databento cache. A recorded day exists to
-   feed the live surface while it happens and to be reconciled afterwards; then it is
-   inert. Reversible if it chafes — glob both stores and tag the source — but not the
-   current design.
+4. ~~**Recorded days are not replayable either.**~~ **Reversed 2026-08-11**, by the exit
+   this decision named for itself: `/simulator/days` globs both stores and tags each day
+   `source: "cache" | "live"`. What chafed was arithmetic — the corpus ends 2026-06-30 at
+   the data budget, so by August every session of the last six weeks was recorded and
+   none of it could be practised on, which is the wrong half of the year to lose.
+
+   The stores stay disjoint on disk, and **decision 3 is untouched**: no tick moves
+   between them, and `get_day_ticks` — what the *engine* loads a session with — still
+   reads the Databento cache and does not fall through. A recorded day became something
+   a person can replay; it did not become something a backtest can quote, which is the
+   whole point of keeping the corpus an independent reference.
+
+   Two bars a recorded day must clear to be listed, and which evidence answers which is
+   the load-bearing part:
+
+   - **settled**, from the manifest's `closed` — never from the tape. This is the trap
+     `journal.live.harvest` documents: a half-day session and a session with a hole in
+     it are identical from the timestamps. 2026-06-19 and 2026-07-03 are real 13:00 ET
+     closes, and a "does the tape reach 16:00" rule drops both as truncated.
+   - **the open is covered**, from the span. A tape that begins after the bell is a
+     fragment however settled it is.
+
+   `ends_early` then reports what is left — this tape stops before the standard close —
+   without claiming to know whether that is a holiday or a short harvest, because
+   nothing at this layer can tell. Across the whole corpus it fires on 23 days, and all
+   23 are the US early-close calendar. `/live/recordings` remains the surface that owns
+   partial recordings, and a session can appear there and not in the replay list.
 5. **Nothing is recorded before Phase 5.** See [The live stack](#the-live-stack).
 6. **RTH-only recording is not a partial win.** A session is 18:00 → 18:00 ET, which from
    Kuala Lumpur is around the clock. But **7 of 13 strategies declare `session="globex"`**
@@ -962,10 +1005,114 @@ learned about a session nobody has seen, and nothing will be until something is 
 
 ---
 
-## Phase 7 — routing (out of scope)
+## Phase 7 — routing (built 2026-08-06, **beside** Phases 0–6 rather than on top of them)
 
-Recorded so nobody designs toward it. Routing would make the poll untenable, turn the paper
-blotter into an order-state machine reconciled against broker fills, and require a kill
-switch plus position reconciliation on restart. **Nothing in Phases 0–6 should be shaped
-for it** — doing so would trade away the fidelity that is shadow mode's only purpose.
-Revisit when the agreement rate from Phase 6 has been stable over a meaningful sample.
+Originally recorded so nobody designed toward it, and that instruction held: **nothing in
+Phases 0–6 was shaped for this**, and the way to check that is that none of them changed.
+The shelf cannot reach the broker (`shadow.py` imports nothing from `broker.py`), the paper
+blotter is untouched, and `live.py`'s "nothing in this router can send an order" is still
+true of that file — everything that can trade is in `live_orders.py`.
+
+**Three of the four worries in the original paragraph turned out to be avoidable rather
+than solved**, and the reason is the same in each case: the paper blotter was not made into
+an order-state machine, because live orders were never merged into it.
+
+- *"Would make the poll untenable"* — it does not touch the tape poll. Routing has its own
+  2s status poll carrying the broker's own word.
+- *"Turn the paper blotter into an order-state machine reconciled against broker fills"* —
+  no. The blotter stays a re-derivable fold over the tape; the broker's working orders and
+  position are a **separate** structure that is never derived, only asked for. They are
+  different kinds of truth and they are kept apart.
+- *"Require a kill switch plus position reconciliation on restart"* — this one was real and
+  is built. `reconcile()` runs on attach and **orders are refused until it answers**;
+  `reconciled_at is None` renders as "not read back", never as "nothing working".
+
+**The seam that decided the shape: one login is one concurrent session** — the same fact
+that forced the harvest sweep onto the live client. The order plant therefore rides
+`RithmicFeed`'s connection, which is why a disconnect leaves the session unable to send
+until it has re-read the book, why there is no routing without a tape, and why `routing` is settled at connect rather than being a runtime switch
+like `record` and `signals`. Those change what is written down about a session; this changes
+what the socket may do.
+
+**Rebuilt 2026-08-07: paper is an account.** The first cut kept the chart's gestures on a
+paper blotter and put real orders behind a form in a side panel, honouring "no
+single-click path from a chart gesture to a live order". Using it showed the ergonomics
+were inverted — the gestures exist for speed, and they were wired to the one thing where
+speed does not matter. Paper now sits in the same selector as the Rithmic accounts, every
+gesture works for all of them, and what varies is the **confirmation**: a popup naming the
+order in words, with a per-account one-click toggle that skips it (the ATAS model).
+
+Four gates, each failing closed, in `journal.live.routing`: `LIVE_ROUTING=1` to be
+reachable at all — the one env var, and the deployment-level "this machine must never
+trade"; a **per-account label** (demo/live) with no default, since Rithmic's account list
+says nothing about funding and an unlabelled account cannot send; a **reconciliation**,
+so nothing goes out against a picture this process made up; and, for accounts that
+confirm, a server-issued review token, so the confirm is a shape of the API rather than a
+habit of the UI. (A fifth gate stood here until 2026-08-11: a typed arm that lapsed on
+idle, disconnect, account switch and the 18:00 roll. It was removed — a lease is the wrong
+shape for a last line of defence, since it expires mid-decision and stands open while
+nobody watches. The four above are read on every order instead of once per lease.) One-click is a separate door on the same endpoint, refused unless that
+account carries the flag — and the flag is cleared whenever an account is labelled live,
+so it cannot be enabled on practice and inherited by real money.
+
+Every session — connect, restart, roll, reconnect — **starts on paper**. There is always an
+active account and by default it cannot trade.
+
+**Trades are journalled, 2026-08-07** (`journal.live.booking`). A closed round trip on a
+real account is booked into `atas_journal` by the broker itself, as `mode='live'`; a paper
+trade is POSTed from the browser and booked as the account `paper` with `mode='replay'`, so
+it is visible in Trades and the Calendar without reaching the real-money statistics. The
+asymmetry is forced by where the fill engines live — the broker nets its own trades on the
+server, and `replaySim.ts` is the only thing that knows a paper fill happened. Booking can
+never raise into the fill path: it runs inside the notification handler on the feed's event
+loop, so a failure is counted (`booking_errors`) and the `orders.jsonl` line still carries
+the trade. Details and the one property that looks like a bug (a scale-out reads as one
+logical trade) are in `docs/research/app-backlog.md` Charts §6.
+
+**The bar in the last sentence of this section still governs.** It was never a bar on
+building the mechanism — it is a bar on trusting it with money, and the agreement rate from
+Phase 6 has not been measured over a meaningful sample yet, because that needs the always-on
+host and a few purchased Databento days. See `docs/research/app-backlog.md` Charts §1 for
+what is left, which is the whole of the against-a-real-plant half.
+
+### Phase 7b — the guardrails (built 2026-08-10)
+
+A **fifth gate**, and a different kind from the four above. Those refuse an *accident* — the
+wrong account, a slipped digit, an order nobody read. This one refuses a *decision*: a
+deliberate order that the person placing it will regret, and that their own book says loses
+money. Levels and derivation: `docs/research/lucidpro-operating-plan.md`, fitted to 2,538 real
+round trips bootstrapped through a $2,000 trailing drawdown.
+
+The rules live in `journal.live.routing` (`Guards`, `DayState`, `day_refusal`, `_check_shape`)
+because that is the module with no socket in it — the part that has to be right is worth
+testing without a market. `journal.live.broker` owns the one input they cannot compute: the
+day's realised total, folded out of the fill stream, per account, net of commission.
+
+Four properties, each of which is the answer to a way the thing could have been useless:
+
+- **`LIVE_GUARDRAILS` defaults to ON.** Unset means enforced; only an explicit
+  `0`/`false`/`no`/`off` disables. Opposite polarity to `LIVE_ROUTING`, deliberately — a
+  permission's safe default is "denied" and a restraint's is "enforced", and both fail toward
+  not losing money. It is an env var rather than a UI control because that *is* the feature:
+  switching the rules off should mean leaving the chart, not reaching a toggle beside the order
+  pad. The levels themselves are app settings (0 disables one rule).
+- **The check runs inside `_submit`, not only in `preview`.** `send(token)` spends a token
+  minted earlier, so a review-time-only check is walked past by staging an order while still
+  allowed and sending it after the day locked.
+- **A reducing order skips the entire layer**, shape rules included. A discipline rule that
+  could refuse a scale-out would be, at the worst possible moment, a rule that keeps you in a
+  trade. `flatten` was already ungated. A *flip* is not a reduce — it is an entry however it is
+  framed, and it is the shape somebody reaches for once refused.
+- **The daily lock latches, and only the 18:00 roll clears it.** Not a recovery back above the
+  line, not a restart, and not an account switch — the day record is per account, so switching
+  away and back restores the lock rather than dropping it. A reviewed order is dropped on the
+  lock only when flat, for the same reason as the point above.
+
+Visible in three places, because a safety layer that is silently off is worse than one never
+built: a chip on the chart's top bar in the same always-on-screen row as the account name, the
+day strip in the order panel, and `snapshot()["guard"]`, which carries both the local realised
+total (what the rules run on) and the broker's own `day_pnl`, with the gap reported rather than
+reconciled.
+
+**Honest caveat, and it is in the doc too:** none of this is un-bypassable by whoever owns the
+machine. It buys friction and visibility, not impossibility.

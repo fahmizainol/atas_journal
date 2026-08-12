@@ -33,6 +33,7 @@ from .routers import (  # noqa: E402
     imports,
     interactions,
     live,
+    live_orders,
     meta,
     models,
     notes,
@@ -170,6 +171,12 @@ app.include_router(research.router, prefix="/api")
 app.include_router(drafts.router, prefix="/api")
 app.include_router(simulator.router, prefix="/api")
 app.include_router(live.router, prefix="/api")
+# Its own module so that live.py's "nothing in this router can send an order"
+# stays a fact about the file rather than a claim about a paragraph in it.
+# Registered unconditionally: every route inside answers 403 with the reason
+# when LIVE_ROUTING is unset, which is more use than a 404 that reads as a
+# missing feature.
+app.include_router(live_orders.router, prefix="/api")
 app.include_router(replays.router, prefix="/api")
 
 

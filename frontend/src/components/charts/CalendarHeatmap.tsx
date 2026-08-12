@@ -27,6 +27,18 @@ function tint(pnl: number, maxAbs: number): string {
   return `rgba(${base}, ${0.12 + ratio * 0.55})`;
 }
 
+// A month is seven columns wide whatever the screen, so on a phone each cell is
+// ~44px and "$1,234.56" does not fit in it. Both spellings are rendered and the
+// stylesheet picks one (see .cal-pnl-wide / .cal-pnl-narrow): dropping the cents
+// and thousands on a heatmap costs nothing — the cell's tint carries the
+// magnitude, the number is only there to say roughly how much and which way.
+function fmtCompact(pnl: number): string {
+  const abs = Math.abs(pnl);
+  const sign = pnl < 0 ? "-" : "";
+  if (abs >= 1000) return `${sign}$${(abs / 1000).toFixed(abs >= 10000 ? 0 : 1)}k`;
+  return `${sign}$${Math.round(abs)}`;
+}
+
 export function CalendarHeatmap({
   year,
   month,
@@ -57,9 +69,9 @@ export function CalendarHeatmap({
         {new Date(year, month - 1, 1).toLocaleString("en-US", { month: "long", year: "numeric" })}{" "}
         — net {fmt(monthTotal)}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
+      <div className="cal-grid">
         {WEEKDAYS.map((w) => (
-          <div key={w} className="muted" style={{ textAlign: "center", fontSize: 11, padding: 4 }}>
+          <div key={w} className="muted cal-weekday">
             {w}
           </div>
         ))}
@@ -72,44 +84,25 @@ export function CalendarHeatmap({
             return (
               <div
                 key={`${wi}-${di}`}
+                className={`cal-cell${info ? "" : " empty"}`}
                 onClick={info ? () => navigate({ pathname: `/calendar/${date}`, search }) : undefined}
                 style={{
-                  minHeight: 64,
-                  borderRadius: 8,
-                  padding: "6px 8px",
+                  // Data-driven, so it stays inline: the tint is a function of the
+                  // day's PnL and the selection ring of the URL.
                   background: info ? tint(info.net_pnl, maxAbs) : "transparent",
-                  border: `1px solid ${isSel ? palette.accent : palette.cardBorder}`,
-                  cursor: info ? "pointer" : "default",
+                  borderColor: isSel ? palette.accent : palette.cardBorder,
                 }}
               >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
-                  <span style={{ fontWeight: 700, fontSize: 12 }}>{day}</span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <div className="cal-cell-head">
+                  <span className="cal-day">{day}</span>
+                  <span className="cal-flags">
                     {info?.has_video && (
-                      <span
-                        title="A recording is linked to this day"
-                        style={{ fontSize: 11, lineHeight: 1 }}
-                      >
-                        🎥
-                      </span>
+                      <span title="A recording is linked to this day">🎥</span>
                     )}
                     {info && info.attempts > 1 && (
                       <span
-                        className="muted"
+                        className="muted cal-attempts"
                         title={`${info.attempts} replay attempts — showing the latest`}
-                        style={{
-                          fontSize: 10,
-                          fontWeight: 700,
-                          padding: "0 4px",
-                          borderRadius: 6,
-                          border: `1px solid ${palette.cardBorder}`,
-                        }}
                       >
                         ·{info.attempts}
                       </span>
@@ -118,10 +111,11 @@ export function CalendarHeatmap({
                 </div>
                 {info && (
                   <>
-                    <div style={{ fontSize: 12 }}>{fmt(info.net_pnl)}</div>
-                    <div className="muted" style={{ fontSize: 11 }}>
-                      {info.trades} trd
+                    <div className="cal-pnl">
+                      <span className="cal-pnl-wide">{fmt(info.net_pnl)}</span>
+                      <span className="cal-pnl-narrow">{fmtCompact(info.net_pnl)}</span>
                     </div>
+                    <div className="muted cal-trades">{info.trades} trd</div>
                   </>
                 )}
               </div>

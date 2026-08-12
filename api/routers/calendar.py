@@ -9,6 +9,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from journal import db, metrics
+from journal.live.booking import REPLAY_PREFIX
 from journal.recordings import parse_attempt_no
 
 from .. import deps
@@ -37,7 +38,7 @@ def _to_display_iso(raw: str | None, tz) -> str | None:
 def _attempts_for_day(
     day_all: pd.DataFrame, imported_at: dict, file_mtime: dict, tz
 ) -> list[dict]:
-    """Replay attempts that touched this day, oldest-modified first.
+    """Takes that touched this day, oldest-modified first.
 
     Each ATAS export is one attempt; we order by the export's "Date modified"
     (upload time, then filename, break ties) so the latest take sorts last (the
@@ -46,17 +47,30 @@ def _attempts_for_day(
     index — so it stays fixed when a take is deleted and lines up with the
     ``-NN`` recording the auto-link scanner matches. ``file_modified`` is that
     same modified time (NULL for files imported before we captured it).
+
+    A Simulator sitting joins the same list, ordered by the same key: it has no
+    export, so ``booking.book_attempt`` writes its start time into ``file_mtime``
+    directly. It gets a *positional* label, which is the opposite of the rule
+    above and for the reason behind that rule: the numbering is pinned to the
+    filename so a deletion can't renumber a take out of step with its recording,
+    and a sitting has no ``-NN`` in its id and no recording to fall out of step
+    with. Parsing one would read every sitting as "Attempt 1".
     """
     files = day_all["source_file"].dropna().unique().tolist()
     files.sort(key=lambda s: (file_mtime.get(s) or "", imported_at.get(s, ""), s))
-    return [
-        {
+    out, sittings = [], 0
+    for sf in files:
+        if str(sf).startswith(REPLAY_PREFIX + "/"):
+            sittings += 1
+            label = f"Sitting {sittings}"
+        else:
+            label = f"Attempt {parse_attempt_no(sf)}"
+        out.append({
             "source_file": sf,
-            "label": f"Attempt {parse_attempt_no(sf)}",
+            "label": label,
             "file_modified": _to_display_iso(file_mtime.get(sf), tz),
-        }
-        for sf in files
-    ]
+        })
+    return out
 
 
 @router.get("/calendar")
@@ -86,9 +100,13 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
     for d, g in t.groupby("date"):
         pnl = g["net_pnl"].astype(float)
         n = len(pnl)
-        # Latest export "Date modified" across the day's attempts, so the table
-        # view can sort by when a day was last re-imported (NULL for days whose
-        # files predate mtime capture). UTC ISO strings sort lexicographically.
+        # Latest "Date modified" across the day's takes, so the table view can
+        # sort by when a day was last worked on — re-imported, for an export;
+        # sat down with, for a Simulator attempt, which has no file and stamps
+        # its start time here instead (see ``booking.book_attempt``). NULL for
+        # days whose files predate mtime capture, and for practice recorded
+        # before that stamp existed until the replay backfill has been run.
+        # UTC ISO strings sort lexicographically.
         mtimes = [scope.file_mtime.get(sf) for sf in files_by_day.get(d, set())]
         latest_mtime = max((m for m in mtimes if m), default=None)
         days.append({

@@ -32,6 +32,7 @@ the weekly seed reads it. It is simply never handed to an engine.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from datetime import date
 
 import numpy as np
@@ -63,6 +64,8 @@ class LiveSession:
         self.gen = gen
         self._lock = threading.Lock()
         self._n = 0
+        # Who wants a nudge when the tape changes — see subscribe().
+        self._listeners: set[Callable[[], None]] = set()
         cap = _INITIAL_CAPACITY
         self._ts = np.empty(cap, dtype="int64")  # epoch ns, UTC
         self._price = np.empty(cap, dtype="float64")
@@ -71,6 +74,39 @@ class LiveSession:
         # Set once the feed says the session is over. The tape stops growing;
         # everything already in it stays readable.
         self.closed = False
+
+    # --- listeners ----------------------------------------------------------
+
+    def subscribe(self, fn: Callable[[], None]) -> None:
+        """Register a nudge fired after every append and once on close.
+
+        The nudge runs on the *producer's* thread — a feed thread, one of the
+        Rithmic loop's executor threads, or the request thread doing a preload —
+        so ``fn`` must be cheap, non-blocking and thread-safe. The intended shape
+        is ``loop.call_soon_threadsafe(event.set)``: a wake, not a payload. What
+        changed is for the woken side to go and read; nothing is delivered here.
+        """
+        with self._lock:
+            self._listeners.add(fn)
+
+    def unsubscribe(self, fn: Callable[[], None]) -> None:
+        """Idempotent — dropping a listener twice is a no-op, not an error."""
+        with self._lock:
+            self._listeners.discard(fn)
+
+    def _notify(self) -> None:
+        # Snapshot under the lock, call outside it: a listener that takes its
+        # time (or re-enters subscribe) must not hold up the producer or
+        # deadlock against it. Each call is isolated — one subscriber whose
+        # event loop has died (a --reload straggler raising "loop is closed")
+        # must not starve the others, and must never break the feed.
+        with self._lock:
+            fns = tuple(self._listeners)
+        for fn in fns:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 — a broken reader is not a broken tape
+                pass
 
     # --- writing ------------------------------------------------------------
 
@@ -100,10 +136,18 @@ class LiveSession:
             # Published last: a reader that sees the new count is guaranteed the
             # rows behind it are already written.
             self._n = at + k
-            return self._n
+            n = self._n
+        self._notify()
+        return n
 
     def close(self) -> None:
         self.closed = True
+        # Closing notifies too, and it is load-bearing: a session is replaced by
+        # closing the old one (`state._roll_to`, `state.stop`), so this is the
+        # only signal a subscriber gets that the tape it watches is finished and
+        # the world may have moved on. Without it a stream would sleep on a
+        # session that will never append again.
+        self._notify()
 
     def _ensure(self, need: int) -> None:
         """Grow to hold ``need`` rows, doubling so appends stay amortised O(1)."""

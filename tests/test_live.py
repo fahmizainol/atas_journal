@@ -182,6 +182,88 @@ def test_a_slice_past_the_end_is_empty_not_an_error():
     assert s.last_ts() is None
 
 
+# --- the listener seam ------------------------------------------------------
+# What the SSE stream stands on: appends and close() nudge subscribers, cheaply
+# and from whatever thread the producer happens to be.
+
+def _tick_frame(k: int = 3) -> pd.DataFrame:
+    ts = pd.date_range("2025-10-13 14:00", periods=k, freq="s", tz="UTC")
+    return pd.DataFrame({"ts_utc": ts, "price": [25000.0 + i for i in range(k)],
+                         "size": [1] * k, "side": ["B"] * k})
+
+
+def test_append_nudges_a_subscriber_and_empty_appends_do_not():
+    s = LiveSession(CONTRACT, DAY, "test")
+    calls = []
+    s.subscribe(lambda: calls.append(s.n))
+    assert s.append(_tick_frame()) == 3
+    assert calls == [3]
+    # The empty append is the poll-idle case: no rows, no wake.
+    s.append(pd.DataFrame({"ts_utc": pd.to_datetime([], utc=True), "price": [],
+                           "size": [], "side": []}))
+    assert calls == [3]
+
+
+def test_close_nudges_subscribers():
+    """Closing is the only signal that the tape will never append again — a
+    session is replaced by closing the old one, so a stream that missed this
+    would sleep forever on a finished tape."""
+    s = LiveSession(CONTRACT, DAY, "test")
+    calls = []
+    s.subscribe(lambda: calls.append("closed" if s.closed else "open"))
+    s.close()
+    assert calls == ["closed"]
+
+
+def test_a_raising_listener_breaks_neither_the_producer_nor_its_peers():
+    s = LiveSession(CONTRACT, DAY, "test")
+    heard = []
+
+    def bad() -> None:
+        raise RuntimeError("Event loop is closed")  # the --reload straggler
+
+    s.subscribe(bad)
+    s.subscribe(lambda: heard.append(True))
+    assert s.append(_tick_frame()) == 3  # append returns normally
+    assert heard == [True]  # and the healthy peer still fired
+
+
+def test_unsubscribe_is_idempotent_and_stops_the_nudges():
+    s = LiveSession(CONTRACT, DAY, "test")
+    calls = []
+    fn = lambda: calls.append(True)  # noqa: E731
+    s.subscribe(fn)
+    s.unsubscribe(fn)
+    s.unsubscribe(fn)  # dropping twice is a no-op, not an error
+    s.append(_tick_frame())
+    assert calls == []
+
+
+def test_the_intended_bridge_wakes_an_event_loop_across_threads():
+    """The real subscriber shape, end to end: a producer thread appends, the
+    nudge is `loop.call_soon_threadsafe(event.set)`, and a coroutine waiting on
+    the event on another thread's loop wakes. This is the whole SSE bridge in
+    miniature — if this test cannot hold, the stream cannot either."""
+    import asyncio
+    import threading
+
+    s = LiveSession(CONTRACT, DAY, "test")
+
+    async def waiter() -> bool:
+        loop = asyncio.get_running_loop()
+        wake = asyncio.Event()
+        s.subscribe(lambda: loop.call_soon_threadsafe(wake.set))
+        t = threading.Thread(target=s.append, args=(_tick_frame(),))
+        t.start()
+        try:
+            await asyncio.wait_for(wake.wait(), timeout=5.0)
+        finally:
+            t.join()
+        return s.n == 3
+
+    assert asyncio.run(waiter())
+
+
 # --- the regime seam --------------------------------------------------------
 
 @needs_ticks

@@ -9,8 +9,10 @@ blotter all live in the browser. This router's only job is:
   - ``/simulator/days``     which sessions have ticks on disk to replay;
   - ``/simulator/session``  one session's full tape (on+rth+post), delta-encoded.
 
-Both are read-only GETs over the existing tick cache — never a Databento fetch,
-so picking a day never spends money (mirrors the regime router's contract).
+Both are read-only GETs over ticks already on disk — never a Databento fetch, so
+picking a day never spends money (mirrors the regime router's contract). "On
+disk" means either store: the Databento corpus, and the Rithmic recordings under
+``data/live/ticks``. Each day says which one it came from.
 
 Session context. The client holds the whole tape, so anything about *today* it
 can develop for itself; the one thing it cannot is what came before. The session
@@ -30,7 +32,7 @@ would be two chances for the one client decoder to be right about only one.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 
 import pandas as pd
@@ -38,6 +40,7 @@ import pyarrow.parquet as pq
 from fastapi import APIRouter, HTTPException, Query
 
 from journal.config import DEFAULT_DISPLAY_TZ, ET_TZ, contract_spec, root_symbol
+from journal.live import recorder as recmod
 from journal.sim import ib as ibmod
 from journal.sim import ticks as tickmod
 from journal.sim import weekly as weeklymod
@@ -67,7 +70,10 @@ def _wall_ms(day: date, t: time, zone) -> int:
 
 @lru_cache(maxsize=4096)
 def _day_file_span(name: str, mtime: float, size: int) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """First/last tick instant of a whole-day parquet, read from its footer.
+    """First/last tick instant of a cached parquet, read from its footer.
+
+    Whole-day file or a single segment — the footer answers the same way, and
+    the legacy layout needs it too now that an early close is reported.
 
     Keyed by (name, mtime, size) so a re-fetched day invalidates itself. The
     listing walks every cached session, and opening ~600 files to read a column
@@ -82,8 +88,40 @@ def _day_file_span(name: str, mtime: float, size: int) -> tuple[pd.Timestamp, pd
     return pd.Timestamp(lo), pd.Timestamp(hi)
 
 
-def _day_file_segments(path, day: date) -> tuple[bool, bool]:
-    """(has_overnight, has_post) for a whole-day file, from its time span alone.
+"""How far short of 16:00 ET a tape may stop and still be called a full session.
+
+A threshold is unavoidable — an RTH-only tape's last print lands microseconds
+*before* the close, so a bare ``hi < close`` marks every ordinary day early. It
+is set at a minute because that is the gap NQ cannot produce while trading: the
+contract prints many times a second through the bell, so a silent minute into
+the close is not a liquid session ending normally. The real early closes this
+has to catch (13:00 ET) miss by three hours, so nothing here rests on the exact
+value — only on its being far below an hour and far above a second.
+"""
+_CLOSE_SLACK = pd.Timedelta(minutes=1)
+
+
+def _span_of(path) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """A cached file's span, or None if the footer cannot answer."""
+    try:
+        st = path.stat()
+        return _day_file_span(path.name, st.st_mtime, st.st_size)
+    except Exception:  # noqa: BLE001 — a listing must not fail on one bad file
+        return None
+
+
+def _ends_early(hi: pd.Timestamp | None, day: date) -> bool:
+    """Does this tape stop materially before the 16:00 ET close?
+
+    False when the span could not be read: "cannot say" is not "yes", and a
+    listing that invented an early close from an unreadable footer would put a
+    warning on a day that does not deserve one.
+    """
+    return bool(hi is not None and hi < tickmod.session_bounds_utc(day)[1] - _CLOSE_SLACK)
+
+
+def _day_file_segments(path, day: date) -> tuple[bool, bool, bool]:
+    """(has_overnight, has_post, ends_early) for a whole-day file, from its span.
 
     The three windows partition the day contiguously in time, so a tape that
     starts before the bell carries the night and one that runs past 16:00 ET
@@ -91,13 +129,55 @@ def _day_file_segments(path, day: date) -> tuple[bool, bool]:
     reports neither rather than guessing — the session endpoint re-derives the
     truth from the ticks it actually slices.
     """
-    try:
-        st = path.stat()
-        lo, hi = _day_file_span(path.name, st.st_mtime, st.st_size)
-    except Exception:  # noqa: BLE001 — a listing must not fail on one bad file
-        return False, False
-    return bool(lo < tickmod.session_bounds_utc(day)[0]), \
-        bool(hi >= tickmod.post_bounds_utc(day)[0])
+    span = _span_of(path)
+    if span is None:
+        return False, False, False
+    lo, hi = span
+    return (bool(lo < tickmod.session_bounds_utc(day)[0]),
+            bool(hi >= tickmod.post_bounds_utc(day)[0]),
+            _ends_early(hi, day))
+
+
+def _live_segments(sym: str, day: date) -> dict | None:
+    """The window flags for a recorded session — None if it is not replayable.
+
+    A recorded day is whatever the recorder happened to see: a session still in
+    progress, one connected to at 10:40, one whose host died at lunch. Listing
+    any of those plays a tape that stops without saying so, which is the exact
+    lie ``/live/recordings``' coverage strip exists to prevent. Two bars, and
+    the interesting thing is which one is asked of what:
+
+      - **settled**, from the manifest — not from the tape. This is the trap
+        ``journal.live.harvest`` documents at length: a half-day session and a
+        session with a hole in it are *identical* from the timestamps, so "does
+        the tape reach 16:00" cannot be the test. 2026-06-19 and 2026-07-03 are
+        real 13:00 ET closes, and a tape-derived rule drops both as truncated.
+        ``closed`` is written when a session rolls or a harvest completes, so it
+        answers the question the timestamps cannot.
+      - **the open is covered**, from the span. A day whose tape begins after
+        the bell is a fragment however settled it is, and replaying from 10:40
+        with no morning behind it is not the session.
+
+    ``ends_early`` is the residue, and it is deliberately not a defect flag: a
+    half day and a session the harvester could not finish both stop before
+    16:00, and by the paragraph above nothing here can tell them apart. It says
+    only what it knows — this tape stops before the standard close — and leaves
+    the difference recoverable where the manifest is, in ``/live/recordings``.
+    """
+    if not (recmod.read_manifest(sym, day) or {}).get("closed"):
+        return None
+    span = tickmod.live_day_span(sym, day)
+    if span is None:
+        return None
+    lo, hi = span
+    rth_open = tickmod.session_bounds_utc(day)[0]
+    if lo > rth_open or hi <= rth_open:
+        return None
+    return {
+        "has_overnight": bool(lo < rth_open),
+        "has_post": bool(hi >= tickmod.post_bounds_utc(day)[0]),
+        "ends_early": _ends_early(hi, day),
+    }
 
 
 @router.get("/simulator/days")
@@ -107,6 +187,24 @@ def simulator_days(root: str | None = Query(None)) -> dict:
     ``root`` filters to one instrument family (e.g. NQ). Each entry carries the
     raw contract symbol from the filename, so the session endpoint reads exactly
     those parquets and never has to resolve a roll.
+
+    **Both stores**, tagged ``source``: ``"cache"`` for the Databento corpus,
+    ``"live"`` for a session recorded off Rithmic. That reverses decision 4 of
+    docs/live-shadow-plan.md, which anticipated the reversal in as many words
+    ("reversible if it chafes — glob both stores and tag the source"). It chafed:
+    the corpus is pinned at the Databento budget and ends 2026-06-30, so every
+    session since has been recorded and unreplayable, which is the wrong half of
+    the year to be unable to practise on.
+
+    Decision 3 is untouched and permanent. Nothing here moves a tick between
+    stores, and ``get_day_ticks`` — what the *engine* loads a session with —
+    still reads the Databento cache alone. A recorded day became something you
+    can replay; it did not become something a backtest can quote.
+
+    Cache first on a collision, mirroring ``ticks.cached_rth`` and
+    ``live._history_source``: a day held in both stores draws the same bars on
+    every surface, or the Simulator and the live chart quietly disagree about a
+    Tuesday.
     """
     found: dict[tuple[str, str], dict] = {}
     for p in sorted(tickmod.TICK_CACHE_DIR.glob("*.parquet")):
@@ -116,14 +214,21 @@ def simulator_days(root: str | None = Query(None)) -> dict:
         sym, d = m.group("sym"), m.group("date")
         if root and root_symbol(sym) != root:
             continue
+        day = date.fromisoformat(d)
         if m.group("seg") == "rth":
             stem = f"{sym}_{d}"
             on = (tickmod.TICK_CACHE_DIR / f"{stem}_on.parquet").exists()
             post = (tickmod.TICK_CACHE_DIR / f"{stem}_post.parquet").exists()
+            # The RTH file's own last print — the post segment, where there is
+            # one, runs past the close by definition and would answer this for
+            # every day at once. An early close is a property of the *session*.
+            early = _ends_early((_span_of(p) or (None, None))[1], day)
         else:
-            on, post = _day_file_segments(p, date.fromisoformat(d))
+            on, post, early = _day_file_segments(p, day)
         # A session held in both layouts is one replayable day: OR the context
         # windows, since cached_overnight/cached_post read across both too.
+        # ``ends_early`` ANDs instead: the two layouts disagreeing means one of
+        # them holds a fuller tape, and the fuller one is what will be served.
         prev = found.get((sym, d))
         found[(sym, d)] = {
             "date": d,
@@ -131,6 +236,26 @@ def simulator_days(root: str | None = Query(None)) -> dict:
             "root": root_symbol(sym),
             "has_overnight": on or bool(prev and prev["has_overnight"]),
             "has_post": post or bool(prev and prev["has_post"]),
+            "ends_early": early and (prev is None or prev["ends_early"]),
+            "source": "cache",
+        }
+    # The live store, second — a day already found above is a cached day, and
+    # skipping it here is what keeps the precedence one rule rather than two.
+    for sym, day in recmod.recorded_days():
+        if root and root_symbol(sym) != root:
+            continue
+        key = (sym, day.isoformat())
+        if key in found:
+            continue
+        segs = _live_segments(sym, day)
+        if segs is None:
+            continue
+        found[key] = {
+            "date": day.isoformat(),
+            "symbol": sym,
+            "root": root_symbol(sym),
+            **segs,
+            "source": "live",
         }
     days = sorted(found.values(), key=lambda r: (r["date"], r["symbol"]))
     roots = sorted({r["root"] for r in days})
@@ -150,6 +275,19 @@ def simulator_session(
     simply doesn't draw that band (``globex_anchor_ms`` is null), and the weekly
     anchor goes with it (``weekly_seed`` is null, as it also is for a week with a
     hole in it — see ``journal.sim.weekly``).
+
+    Serves both stores, because the three ``cached_*`` reads below already did —
+    Databento first, live second, per Phase 5. Listing the live store in
+    ``/simulator/days`` is what made that reachable; no read here changed.
+
+    ``globex_open_ms`` ships beside ``globex_anchor_ms`` so the pair can be
+    compared. On a cached day they are the same instant and always were. On a
+    recorded one they can differ: the anchor is the first print that was
+    actually *captured*, and a night the feed's backfill did not reach in full
+    starts late — Rithmic's replay has been observed to truncate without
+    erroring. The band would then be anchored mid-night and look no different
+    from a correct one, so the client is given both numbers rather than a
+    server-side verdict about how late is too late.
     """
     day = date.fromisoformat(date_)
     zone = _zone(tz)
@@ -175,6 +313,7 @@ def simulator_session(
 
     rth_open_ms = _wall_ms(day, RTH_OPEN, zone)
     rth_close_ms = _wall_ms(day, RTH_CLOSE, zone)
+    globex_open_ms = _wall_ms(day - timedelta(days=1), tickmod.GLOBEX_OPEN, zone)
     globex_anchor_ms = int(_local_ms(on["ts_utc"].iloc[:1], zone)[0]) if on is not None and not on.empty else None
 
     # The weekly anchor, as the (Σv, Σpv, Σp²v) already behind it when this
@@ -207,7 +346,11 @@ def simulator_session(
         "rth_close_ms": rth_close_ms,
         # Default the replay to the RTH bell unless the tape starts after it.
         "default_start_ms": max(rth_open_ms, int(t_ms[0])),
+        "globex_open_ms": globex_open_ms,
         "globex_anchor_ms": globex_anchor_ms,
+        # Which store answered. Mirrors ``cached_rth``'s own precedence rather
+        # than re-deriving it, so the tag can never disagree with the frame.
+        "source": "cache" if tickmod.have_segment(symbol, day, "rth") else "live",
         "weekly_seed": list(weekly_seed) if weekly_seed is not None else None,
         "has_overnight": on is not None and not on.empty,
         "has_post": post is not None and not post.empty,

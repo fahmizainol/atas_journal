@@ -19,7 +19,7 @@ from datetime import date, datetime, time, timedelta
 
 import pandas as pd
 
-from . import databento_client as dbn
+from . import tick_bars
 from .config import ET_TZ
 
 RTH_OPEN = time(9, 30)
@@ -52,7 +52,7 @@ def rth_date_for(ts_utc) -> date:
 
 
 def _rth_bars(instrument: str, d: date) -> pd.DataFrame | None:
-    bars = dbn.get_bars(instrument, _et_utc(d, RTH_OPEN), _et_utc(d, RTH_LAST_BAR))
+    bars = tick_bars.get_bars(instrument, _et_utc(d, RTH_OPEN), _et_utc(d, RTH_LAST_BAR))
     if bars is None or bars.empty:
         return None
     return bars.sort_values("ts_utc")
@@ -78,13 +78,13 @@ def compute_levels(instrument: str, rth_date: date) -> dict | None:
     Returns {onh, onl, prior_high, prior_low, prior_close, today_open} (float or
     None per key), or None when Databento isn't configured at all.
     """
-    if not dbn.is_available():
+    if not tick_bars.is_available():
         return None
 
     levels: dict[str, float | None] = {k: None for k in LEVEL_KEYS}
 
     # Overnight: 18:00 ET (prior evening) .. 09:29 ET, before the cash open.
-    on_bars = dbn.get_bars(
+    on_bars = tick_bars.get_bars(
         instrument, _et_utc(rth_date - timedelta(days=1), GLOBEX_OPEN),
         _et_utc(rth_date, ON_LAST_BAR),
     )

@@ -41,11 +41,18 @@ const MIN_H = 6;
 /** Minimum width, for an event that begins and ends inside one bar — which most
  *  of them do on a minute bar. */
 const MIN_W = 7;
-/** Fill alpha at strength 1, how much the strongest events add, and the ceiling.
- *  The wash sits under the candles, so it can afford to be seen. */
+/** Fill alpha at strength 1 — the wash sits under the candles, so it can afford
+ *  to be seen. A setting rather than a constant, because how loud a band should
+ *  be depends on what else is drawn: with a composite, its nodes and the
+ *  developing profile all on, 0.2 is a lot of colour. Zero is outline-only,
+ *  which still says everything the band's *shape* says.
+ *
+ *  What each event adds over strength 1, and the ceiling, ride with it — they
+ *  are proportions of the base (0.7× and 2.5×), which is what they were at the
+ *  measured default. */
 const FILL_A = 0.2;
-const FILL_GAIN = 0.14;
-const FILL_MAX = 0.5;
+const FILL_GAIN = 0.7;
+const FILL_MAX = 2.5;
 /** The outline, over the candles: opaque, because this is the part that says
  *  where the event was. */
 const EDGE_W = 1.5;
@@ -53,13 +60,25 @@ const EDGE_W = 1.5;
  *  narrow is still unmistakably an event. */
 const FLAG_W = 3;
 /** Strength at which an event gets its lots written on it. Below this it is a
- *  number on every band, and there are ~19 a session. */
+ *  number on every band, and there are ~19 a session — but where the line goes
+ *  is a reading choice, so it is a setting with this as its default. Zero is no
+ *  labels at all. */
 const LABEL_ST = 1.5;
+
+/** How loud the layer draws. Both are strengths/alphas rather than pixels: the
+ *  geometry of a band is the read, and nothing here is allowed to change it. */
+export interface EventStyle {
+  /** Strength at or above which a band carries its lot count. 0 = never. */
+  labelSt: number;
+  /** Fill alpha at strength 1. 0 = outline only. */
+  fill: number;
+}
 
 interface Ctx {
   chart: IChartApi;
   series: ISeriesApi<"Candlestick">;
   events: () => TapeEvent[];
+  style: () => EventStyle;
 }
 
 /** One event resolved to pixels, or null when it can't be (its bars aren't on
@@ -90,13 +109,16 @@ class FillRenderer {
 
   draw(target: any) {
     const events = this.c.events();
-    if (!events.length) return;
+    const base = this.c.style().fill;
+    // Outline-only: the whole wash pass is skipped rather than drawn at alpha 0.
+    if (!events.length || base <= 0) return;
     target.useMediaCoordinateSpace((scope: any) => {
       const ctx: CanvasRenderingContext2D = scope.context;
       for (const e of events) {
         const b = box(this.c, e);
         if (!b) continue;
-        ctx.fillStyle = `rgba(${b.rgb}, ${Math.min(FILL_MAX, FILL_A + FILL_GAIN * (e.st - 1))})`;
+        const a = Math.min(base * FILL_MAX, base * (1 + FILL_GAIN * (e.st - 1)));
+        ctx.fillStyle = `rgba(${b.rgb}, ${a})`;
         ctx.fillRect(b.x, b.y, b.w, b.h);
       }
     });
@@ -110,6 +132,7 @@ class EdgeRenderer {
   draw(target: any) {
     const events = this.c.events();
     if (!events.length) return;
+    const labelSt = this.c.style().labelSt;
     target.useMediaCoordinateSpace((scope: any) => {
       const ctx: CanvasRenderingContext2D = scope.context;
       const labels: { x: number; y: number; text: string; color: string }[] = [];
@@ -130,7 +153,7 @@ class EdgeRenderer {
         ctx.fillStyle = `rgb(${b.rgb})`;
         ctx.fillRect(b.x, b.y, FLAG_W, b.h);
 
-        if (e.st >= LABEL_ST) {
+        if (labelSt > 0 && e.st >= labelSt) {
           labels.push({
             x: b.x + b.w + 4,
             y: b.y + b.h / 2,
@@ -179,6 +202,7 @@ export class EventBandPrimitive {
   private views: View[] = [];
   private requestUpdate?: () => void;
   private _events: TapeEvent[] = [];
+  private _style: EventStyle = { labelSt: LABEL_ST, fill: FILL_A };
 
   /** What to draw, as of the clock — already filtered by the caller (the
    *  strength floor and the two per-kind toggles), because the same filtered
@@ -189,12 +213,20 @@ export class EventBandPrimitive {
     this.requestUpdate?.();
   }
 
+  /** How loud to draw. Separate from `setEvents` because it changes on its own
+   *  clock — a knob turned while the replay is paused has to repaint. */
+  setStyle(style: EventStyle) {
+    this._style = style;
+    this.requestUpdate?.();
+  }
+
   attached(param: any) {
     this.requestUpdate = param.requestUpdate;
     const ctx: Ctx = {
       chart: param.chart,
       series: param.series,
       events: () => this._events,
+      style: () => this._style,
     };
     this.views = [new View(ctx, "bottom"), new View(ctx, "normal")];
     this.requestUpdate?.();

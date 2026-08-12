@@ -1,0 +1,281 @@
+<meta charset="utf-8"/>
+<title>The ATR line vs the one number — demo</title>
+<script>__LWC_JS__</script>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0e13; color:#cbd5e1; font:14px/1.5 Inter,system-ui,sans-serif; }
+  #wrap { max-width:1240px; margin:0 auto; padding:18px 20px 48px; }
+  h1 { font-size:20px; font-weight:600; margin:0 0 4px; }
+  .lede { color:#64748b; font-size:12.5px; margin:0 0 16px; max-width:940px; }
+  .lede b { color:#94a3b8; }
+  .seg button { background:#0b0e13; color:#94a3b8; }
+  .seg button.on { background:#1c2230; color:#e2e8f0; }
+  .tabs { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 18px; border-bottom:1px solid #1c2230; }
+  .tab { padding:8px 15px; cursor:pointer; border:1px solid #1c2230; border-bottom:none;
+         border-radius:8px 8px 0 0; background:#11151d; color:#94a3b8; font:inherit; font-size:12.5px; }
+  .tab.active { background:#1c2230; color:#e2e8f0; }
+  .tab small { color:#64748b; }
+  .tabpane { display:none; } .tabpane.active { display:block; }
+  .why { font-size:12.5px; color:#64748b; margin:0 0 10px; }
+  .info { display:flex; flex-wrap:wrap; gap:6px 22px; margin:0 0 10px; padding:11px 14px;
+          background:#11151d; border:1px solid #1c2230; border-radius:8px; font-size:12.5px; }
+  .info b { color:#e2e8f0; }
+  .info .rule b { color:#4db07f; }
+  .chart { height:560px; background:#0b0e13; border:1px solid #1c2230; border-radius:8px; }
+  .legend { display:flex; flex-wrap:wrap; gap:16px; margin:8px 2px 0; font-size:12px; color:#64748b; }
+  .key { display:inline-block; width:16px; height:0; border-top:2px solid; margin-right:6px; vertical-align:middle; }
+  .key.dash { border-top-style:dashed; } .key.dot { border-top-style:dotted; }
+  #reado { min-height:18px; font-size:12px; color:#94a3b8; margin:6px 2px 0; font-variant-numeric:tabular-nums; }
+  .tbl-card { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; margin-top:18px; }
+  .tbl-card h3 { font-size:12.5px; margin:0 0 2px; color:#e2e8f0; font-weight:600; }
+  .tbl-card p { font-size:12px; color:#64748b; margin:0 0 8px; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th, td { padding:5px 8px; text-align:right; border-bottom:1px solid #1c2230; white-space:nowrap;
+           font-variant-numeric:tabular-nums; }
+  th { color:#94a3b8; font-weight:600; }
+  td:first-child, th:first-child, td:nth-child(2), th:nth-child(2) { text-align:left; }
+  .pos { color:#21c07a; } .neg { color:#f5455f; } .muted { color:#64748b; }
+  .note { margin-top:22px; padding:12px 14px; background:#11151d; border:1px solid #1c2230;
+          border-radius:8px; font-size:12px; color:#64748b; }
+  .note b { color:#94a3b8; }
+  .note ul { margin:6px 0 0; padding-left:18px; } .note li { margin:4px 0; }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#94a3b8; }
+</style>
+
+<div id="wrap">
+  <h1>The ATR line vs the one number</h1>
+  <p class="lede">Top pane: the session's candles. Bottom pane: the same volatility read two ways —
+    the <b>ATR(__ATR_PERIOD__) line exactly as an indicator draws it</b> (in ticks), against three flat references:
+    <b>yesterday's median bar range</b> (at the chart's bar size — the 5-minute version is the one causal number
+    the vol-scaled sizing rule uses), <b>today's median</b> (known only in hindsight), and
+    <b>the current 50-tick stop</b>. The wiggle of the line against the stillness of the flat ones is the whole
+    comparison: the indicator hands you a range that drifts all session; the rule needs one number, fixed before
+    the open. The bar-size switch redraws everything at that resolution — the rule's numbers stay 5-minute.</p>
+
+  <div class="controls" style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#11151d;border:1px solid #1c2230;border-radius:8px;margin:0 0 14px;font-size:12.5px;color:#94a3b8;">
+    <b style="color:#e2e8f0;">bars</b>
+    <span class="seg" style="display:flex;border:1px solid #1c2230;border-radius:6px;overflow:hidden;">
+      <button data-res="5" class="on" style="border:none;padding:5px 11px;font:inherit;font-size:12px;cursor:pointer;">5 min</button>
+      <button data-res="1" style="border:none;padding:5px 11px;font:inherit;font-size:12px;cursor:pointer;">1 min</button>
+    </span>
+    <span class="muted">the sizing rule is calibrated on 5-min ranges; 1 min is what a scalper's eye watches</span>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+  <div id="panes"></div>
+
+  <div class="tbl-card">
+    <h3>All five sessions, side by side</h3>
+    <p>"covers" = stop &divide; today's median 5-min bar. The 50t column is the feeling you reported;
+       the rule column is what holds it steady.</p>
+    <table id="cmp">
+      <thead><tr>
+        <th>day</th><th>felt like</th><th>yday r5</th><th>V</th><th>rule says</th><th>$ risk</th>
+        <th>today r5</th><th>ATR line span</th><th>50t / 5m bar</th><th>50t / 1m bar</th><th>rule / 5m bar</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <b>How to read it, and what each number is</b>
+    <ul>
+      <li><b>The blue line is your indicator, verbatim</b> — Wilder's ATR(__ATR_PERIOD__) on __BAR_MIN__-minute bars,
+        warmed through the overnight so it has a value at 09:30, converted to ticks (&times;4). Its first hour is
+        mostly the open-spike being digested; after that it still drifts by ~2&times; within a session. That drift is
+        why "read the ATR" never produced one number you could size from.</li>
+      <li><b>The green dashed line is the number the sizing rule uses</b> — <em>yesterday's</em> 10:00&ndash;16:00 median
+        5-min bar range. Yesterday's, because a rule keyed to today's full-session figure is lookahead: you can't know it
+        at entry. Median, not mean, so the open and single monster bars don't drag it.</li>
+      <li><b>The rule</b>: V = yesterday's median &divide; __R5_REF__t &middot; stop = __STOP_BASE__t &times; V &middot;
+        size = floor($<span>500</span> &divide; stop) MNQ, which caps risk at $__RISK_USD__. Target and trail scale by the
+        same V. At V &asymp; 1 it collapses to the current 1&nbsp;NQ &times; 50t exactly.</li>
+      <li><b>Orange vs green gap</b> = the rule's honest error: vol autocorrelates day to day but not perfectly, so
+        yesterday's number misses today's by that gap. It is still far steadier than eyeballing the blue line.</li>
+      <li><b>The yellow line is today's number read live</b> — the expanding median of bar ranges since 10:00, which
+        by construction ends the day on the orange line. Where it flattens early (often by ~11:00), the day's
+        character was knowable mid-morning; where it climbs all afternoon (a vol event arriving), no pre-open number
+        — yesterday's included — would have caught it. It is drawn to show how early the day is knowable, <em>not</em>
+        as an invitation to resize mid-session: unlike the goldfish-memory ATR it never un-learns the morning, but a
+        rule that re-reads it after entry is still the feel-driven adjustment the study record argues against.</li>
+      <li><b>The 1-minute view is a trap if read alone.</b> 1-min bars are individually about half the height of
+        5-min bars, so the same 50t stop "covers" twice as much of one — but the risk didn't change: the same move
+        just arrives as several stacked candles. That's why the sizing rule stays keyed to the 5-minute number
+        whichever chart is displayed. Flip the switch on the same day and watch the coverage percentages move while
+        the tape doesn't.</li>
+      <li><b>Not adopted.</b> This page illustrates the rule; the LucidPro survivability sim has not been re-run with the
+        vol ladder, the routing/guards are NQ-only today, and MNQ pays ~43% more commission per point captured.
+        See the operating plan before trading it.</li>
+      <li><b>Data</b> — tick cache first, live recorder store for July/August (<code>data/live/ticks/</code>).
+        Nothing is fetched.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const SESSIONS = __SESSIONS_JSON__;
+const C = { atr:'#3987e5', today:'#d95926', yday:'#199e70', dev:'#c98500',
+            fifty:'#64748b', up:'#21c07a', dn:'#f5455f' };
+
+const tabs = document.getElementById('tabs');
+const panes = document.getElementById('panes');
+const built = {};
+let RES = '5';
+let CUR = 0;
+
+const fmtT = t => {
+  const d = new Date(t * 1000);
+  return String(d.getUTCHours()).padStart(2,'0') + ':' + String(d.getUTCMinutes()).padStart(2,'0');
+};
+
+SESSIONS.forEach((s, i) => {
+  const b = document.createElement('button');
+  b.className = 'tab' + (i === 0 ? ' active' : '');
+  b.innerHTML = `<b>${s.date}</b> <small>· ${s.feel}</small>`;
+  b.onclick = () => select(i);
+  tabs.appendChild(b);
+
+  const r = s.rule;
+  const d = document.createElement('div');
+  d.className = 'tabpane' + (i === 0 ? ' active' : '');
+  d.innerHTML = `
+    <p class="why">${s.why}</p>
+    <div class="info">
+      <span>${s.contract} ~<b>${s.level.toLocaleString()}</b></span>
+      <span class="rule">rule (from ${s.prior_date}, 5-min): yday r5 <b>${s.prior_r5}t</b>
+        &rarr; V <b>${r.v.toFixed(2)}</b>
+        &rarr; stop <b>${r.stop}t</b> &times; <b>${r.qty} ${r.inst}</b> = $${r.risk} risk</span>
+      <span id="dyn${i}"></span>
+    </div>
+    <div class="chart" id="chart${i}_5" style="display:block"></div>
+    <div class="chart" id="chart${i}_1" style="display:none"></div>
+    <div class="legend">
+      <span><span class="key" style="border-color:${C.atr}"></span>ATR(__ATR_PERIOD__) in ticks — the indicator</span>
+      <span><span class="key dash" style="border-color:${C.yday}"></span>yesterday's median bar range — what the rule reads (at 5 min)</span>
+      <span><span class="key" style="border-color:${C.today}"></span>today's median bar range — hindsight</span>
+      <span><span class="key" style="border-color:${C.dev}"></span>today's median, developing — same number read live</span>
+      <span><span class="key dot" style="border-color:${C.fifty}"></span>the current 50t stop</span>
+    </div>
+    <div id="reado" data-i="${i}"></div>`;
+  panes.appendChild(d);
+});
+
+function strip(i) {
+  const f = SESSIONS[i].res[RES];
+  document.getElementById('dyn' + i).innerHTML =
+    `on ${RES}-min bars: today's median <b>${f.day_r}t</b> &middot; yday <b>${f.prior_r}t</b>
+     &middot; ATR line ranged <b>${f.atr_min}&ndash;${f.atr_max}t</b> after 10:00 (settled ~${f.atr_med}t)
+     &middot; 50t = <b>${Math.round(f.cover50 * 100)}%</b> of a median bar`;
+}
+
+function build(i) {
+  const key = i + ':' + RES;
+  if (built[key]) return;
+  built[key] = true;
+  const s = { ...SESSIONS[i], ...SESSIONS[i].res[RES] };
+  const el = document.getElementById('chart' + i + '_' + RES);
+  const chart = LightweightCharts.createChart(el, {
+    autoSize: true,
+    layout: { background: { color: '#0b0e13' }, textColor: '#94a3b8', fontSize: 11,
+              panes: { separatorColor: '#1c2230', separatorHoverColor: '#1c2230' } },
+    grid: { vertLines: { color: '#11151d' }, horzLines: { color: '#11151d' } },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#1c2230' },
+    rightPriceScale: { borderColor: '#1c2230' },
+    crosshair: { mode: 0 },
+  });
+  const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: C.up, downColor: C.dn, wickUpColor: C.up, wickDownColor: C.dn,
+    borderVisible: false, priceLineVisible: false, lastValueVisible: false,
+  });
+  candles.setData(s.candles);
+
+  const atr = chart.addSeries(LightweightCharts.LineSeries, {
+    color: C.atr, lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
+    priceFormat: { type: 'custom', formatter: v => v.toFixed(0) + 't', minMove: 1 },
+    // The pane must always show the 50t line — on a hot day it sits far below
+    // the ATR trace, and that distance is the point of the page.
+    autoscaleInfoProvider: orig => {
+      const r = orig();
+      if (r && r.priceRange) r.priceRange.minValue = Math.min(r.priceRange.minValue, 40);
+      return r;
+    },
+  }, 1);
+  atr.setData(s.atr);
+  atr.createPriceLine({ price: s.day_r, color: C.today, lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Solid, title: 'today ' + s.day_r + 't' });
+  atr.createPriceLine({ price: s.prior_r, color: C.yday, lineWidth: 2,
+    lineStyle: LightweightCharts.LineStyle.Dashed, title: 'yday ' + s.prior_r + 't' });
+  atr.createPriceLine({ price: 50, color: C.fifty, lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dotted, title: '50t' });
+
+  const dev = chart.addSeries(LightweightCharts.LineSeries, {
+    color: C.dev, lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    priceFormat: { type: 'custom', formatter: v => v.toFixed(0) + 't', minMove: 1 },
+  }, 1);
+  dev.setData(s.dev);
+
+  chart.panes()[1].setHeight(180);
+  chart.timeScale().fitContent();
+
+  const reado = document.querySelector(`#reado[data-i="${i}"]`);
+  chart.subscribeCrosshairMove(p => {
+    if (!p || p.time === undefined) { reado.textContent = ''; return; }
+    const c = p.seriesData.get(candles), a = p.seriesData.get(atr), dv = p.seriesData.get(dev);
+    const bits = [fmtT(p.time)];
+    if (c) bits.push(`O ${c.open}  H ${c.high}  L ${c.low}  C ${c.close}  (bar ${Math.round((c.high - c.low) * 4)}t)`);
+    if (a) bits.push(`ATR ${a.value.toFixed(0)}t`);
+    if (dv) bits.push(`median so far ${dv.value.toFixed(0)}t`);
+    reado.textContent = bits.join('   ·   ');
+  });
+}
+
+function show(i) {
+  ['5', '1'].forEach(r => {
+    const el = document.getElementById(`chart${i}_${r}`);
+    if (el) el.style.display = r === RES ? 'block' : 'none';
+  });
+  build(i);
+  strip(i);
+}
+
+function select(i) {
+  CUR = i;
+  document.querySelectorAll('.tab').forEach((t, j) => t.classList.toggle('active', j === i));
+  document.querySelectorAll('.tabpane').forEach((p, j) => p.classList.toggle('active', j === i));
+  show(i);
+}
+
+document.querySelectorAll('.seg button[data-res]').forEach(b => {
+  b.onclick = () => {
+    RES = b.dataset.res;
+    document.querySelectorAll('.seg button[data-res]').forEach(x =>
+      x.classList.toggle('on', x === b));
+    show(CUR);
+  };
+});
+
+const m = location.hash.match(/^#(\d+)(?:-(1|5))?$/);
+if (m && m[2]) {
+  RES = m[2];
+  document.querySelectorAll('.seg button[data-res]').forEach(x =>
+    x.classList.toggle('on', x.dataset.res === RES));
+}
+const hash = m ? parseInt(m[1], 10) : 0;
+select(hash >= 0 && hash < SESSIONS.length ? hash : 0);
+
+const tbody = document.querySelector('#cmp tbody');
+SESSIONS.forEach(s => {
+  const r = s.rule, f5 = s.res['5'], f1 = s.res['1'];
+  const tr = document.createElement('tr');
+  const cls = v => v < 0.35 ? 'neg' : v > 0.6 ? 'pos' : '';
+  tr.innerHTML = `
+    <td>${s.date}</td><td class="muted">${s.feel}</td>
+    <td>${s.prior_r5}t</td><td>${r.v.toFixed(2)}</td>
+    <td>${r.stop}t &times; ${r.qty} ${r.inst}</td><td>$${r.risk}</td>
+    <td>${f5.day_r}t</td><td class="muted">${f5.atr_min}&ndash;${f5.atr_max}t</td>
+    <td class="${cls(f5.cover50)}">${Math.round(f5.cover50 * 100)}%</td>
+    <td class="${cls(f1.cover50)}">${Math.round(f1.cover50 * 100)}%</td>
+    <td class="${cls(s.cover_rule)}">${Math.round(s.cover_rule * 100)}%</td>`;
+  tbody.appendChild(tr);
+});
+</script>

@@ -1,0 +1,613 @@
+<meta charset="utf-8"/>
+<title>Modern VWAP [GBB] on our tape — demo</title>
+<script>__LWC_JS__</script>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0e13; color:#cbd5e1; font:14px/1.5 Inter,system-ui,sans-serif; }
+  #wrap { max-width:1760px; margin:0 auto; padding:18px 20px 48px; }
+  h1 { font-size:20px; font-weight:600; margin:0 0 4px; }
+  .lede { color:#64748b; font-size:12.5px; margin:0 0 14px; max-width:960px; }
+  .lede b { color:#94a3b8; }
+  .warn { display:flex; gap:10px; padding:10px 13px; margin:0 0 16px; font-size:12.5px;
+          background:#1a1410; border:1px solid #3a2a18; border-radius:8px; color:#c8a06a; }
+  .warn b { color:#e0b878; }
+  .steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; margin:0 0 16px; }
+  .step { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; font-size:12px; color:#94a3b8; }
+  .step h3 { margin:0 0 4px; font-size:12px; color:#e2e8f0; font-weight:600; }
+  .step .tag { float:right; font-size:10.5px; text-transform:uppercase; letter-spacing:.4px; color:#64748b; }
+  .step.new .tag { color:#8b5cf6; }
+  .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 26px; padding:12px 14px;
+              background:#11151d; border:1px solid #1c2230; border-radius:8px; margin:0 0 16px; }
+  .ctl { display:flex; align-items:center; gap:9px; font-size:12.5px; color:#94a3b8; }
+  .ctl b { color:#e2e8f0; font-weight:600; }
+  .seg { display:flex; border:1px solid #1c2230; border-radius:6px; overflow:hidden; }
+  .seg button { background:#0b0e13; color:#94a3b8; border:none; padding:5px 11px; font:inherit; font-size:12px; cursor:pointer; }
+  .seg button.on { background:#1c2230; color:#e2e8f0; }
+  .tabs { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 18px; border-bottom:1px solid #1c2230; }
+  .tab { padding:8px 15px; cursor:pointer; border:1px solid #1c2230; border-bottom:none;
+         border-radius:8px 8px 0 0; background:#11151d; color:#94a3b8; font:inherit; font-size:12.5px; }
+  .tab.active { background:#1c2230; color:#e2e8f0; }
+  .tabpane { display:none; } .tabpane.active { display:block; }
+  .info { display:flex; flex-wrap:wrap; gap:6px 22px; margin:0 0 10px; padding:11px 14px;
+          background:#11151d; border:1px solid #1c2230; border-radius:8px; font-size:12.5px; }
+  .info b { color:#e2e8f0; }
+  /* Split view: the indicator on the left, the chart we already read on the
+     right. `one` collapses it back to a single column and hides the captions. */
+  /* minmax(0,…), not 1fr: a chart canvas carries its current pixel width as
+     intrinsic min-content, so a plain 1fr track would refuse to shrink below
+     the width the chart already had and push the second column off the page. */
+  .split { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:start; }
+  .split.one { grid-template-columns:minmax(0,1fr); }
+  .split .col { min-width:0; }
+  .split.one .col.right { display:none; }
+  .chart { height:560px; background:#0b0e13; border:1px solid #1c2230; border-radius:8px; }
+  .cap { display:flex; align-items:baseline; gap:8px; font-size:12px; color:#64748b; margin:0 2px 6px; }
+  .cap b { color:#e2e8f0; font-size:12.5px; font-weight:600; }
+  .split.one .cap { display:none; }
+  .legend { display:flex; flex-wrap:wrap; gap:18px; margin:8px 2px 0; font-size:12px; color:#64748b; }
+  .key { display:inline-block; width:16px; height:0; border-top-width:2px; margin-right:6px; vertical-align:middle; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:3px; margin-right:6px; vertical-align:middle; }
+  .tbl-card { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; margin-top:14px; }
+  .tbl-card h3 { font-size:12.5px; margin:0 0 2px; color:#e2e8f0; font-weight:600; }
+  .tbl-card p { font-size:12px; color:#64748b; margin:0 0 8px; }
+  .scroll { max-height:330px; overflow:auto; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th, td { padding:4px 8px; text-align:right; border-bottom:1px solid #1c2230; white-space:nowrap; }
+  th { color:#94a3b8; font-weight:600; position:sticky; top:0; background:#11151d; }
+  td:first-child, th:first-child { text-align:left; }
+  tr.row { cursor:pointer; } tr.row:hover { background:#161b26; } tr.row.sel { background:#1b2333; }
+  tr.dead td { color:#475569; }
+  .pos { color:#21c07a; } .neg { color:#f5455f; } .muted { color:#64748b; } .amber { color:#e0b878; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:99px; font-size:11px; border:1px solid; }
+  .pill.long { color:#21c07a; border-color:#1c5340; background:#0f2019; }
+  .pill.short { color:#f5455f; border-color:#5c2230; background:#1f1014; }
+  .pill.blocked { color:#64748b; border-color:#252c3a; }
+  .pill.trend { color:#c79bff; border-color:#3d2a5c; background:#170f24; }
+  .pill.range { color:#e8d34a; border-color:#4a4113; background:#1d1a0b; }
+  .note { margin-top:22px; padding:12px 14px; background:#11151d; border:1px solid #1c2230;
+          border-radius:8px; font-size:12px; color:#64748b; }
+  .note b { color:#94a3b8; }
+  .note ul { margin:6px 0 0; padding-left:18px; } .note li { margin:4px 0; }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#94a3b8; }
+  @media (max-width: 1180px) { .split { grid-template-columns:minmax(0,1fr); } }
+</style>
+
+<div id="wrap">
+  <h1>Modern VWAP [GBB] — on our tape</h1>
+  <p class="lede">A port of the published Pine (<code>data/research/modern-vwap/modern_vwap_gbb.pine</code>), run over
+    cached NQ sessions on <b class="js-tflist"></b> bars. Four constructions: a <b>swing anchor</b> that re-anchors at every
+    confirmed pivot instead of at a fixed time, <b>KER-adaptive bands</b>, a two-axis <b>regime</b> read, and two
+    <b>regime-gated signals</b>. Switch the anchor and watch what the line does at a pivot — that is the part of this
+    indicator we have neither built nor falsified. The <b>split</b> view puts the plain session VWAP we already read
+    beside it, on the same bars.</p>
+
+  <div class="warn"><b>Not a backtest.</b>
+    <span>No exit rule, no sample worth a statistic. The table reports how far price travelled in the
+    __FWD_MIN__ minutes after each signal — distances, not results. The author's own six-year test across
+    BTC/ETH/SOL came back at <b>zero</b>, and he says so in the video.</span></div>
+
+  <div class="steps">
+    <div class="step new"><span class="tag">untested here</span><h3>Anchor</h3>
+      Session / week / <b>swing</b>. A swing anchor resets the accumulator at each confirmed pivot — strict on both sides,
+      confirmed <em>pivot</em> bars later, then backfilled from the pivot bar. Our VWAP work has only ever used clock anchors.</div>
+    <div class="step"><span class="tag">band renamed?</span><h3>Bands</h3>
+      1/2/3 volume-weighted sigma, optionally scaled by <code>1 + __KER_WEIGHT__ x (1 − KER)</code> so chop widens them by up to 50%.
+      Off by default in his own script.</div>
+    <div class="step"><span class="tag">drawn</span><h3>Regime</h3>
+      KER(__KER_LEN__) vs its __REGIME_LEN__-bar median &times; ATR(__ATR_LEN__)% vs its __REGIME_LEN__-bar median. Four quadrants;
+      the low-efficiency half colours <span style="color:#e8d34a">ranging</span>, the high half
+      <span style="color:#c79bff">trending</span>. Only the KER axis gates anything.</div>
+    <div class="step"><span class="tag">artifact watch</span><h3>Signals</h3>
+      <b>MR</b>: close outside &plusmn;2&sigma;, then close back inside — ranging only.
+      <b>TC</b>: one side of the VWAP for __OCC_MIN__ of the last __OCC_WINDOW__ closes, touch it, close back on side within
+      __HOLD_BARS__ bars — trending only.</div>
+  </div>
+
+  <div class="controls">
+    <div class="ctl"><b>bars</b><span class="seg" id="tfSeg"></span></div>
+    <div class="ctl"><b>view</b>
+      <span class="seg" id="viewSeg">
+        <button data-v="single" class="on">single</button>
+        <button data-v="split">split vs session VWAP</button>
+      </span></div>
+    <div class="ctl"><b>anchor</b><span class="seg" id="modeSeg"></span></div>
+    <div class="ctl"><b>compare</b><span class="seg" id="cmpSeg"></span></div>
+    <div class="ctl"><b>bands</b>
+      <span class="seg" id="adaptSeg">
+        <button data-a="0" class="on">fixed</button>
+        <button data-a="1">KER-adaptive</button>
+      </span></div>
+    <div class="ctl"><b>signals</b>
+      <span class="seg" id="sigSeg">
+        <button data-s="gated" class="on">gate applied</button>
+        <button data-s="all">all, blocked dimmed</button>
+        <button data-s="none">none</button>
+      </span></div>
+    <div class="ctl"><b>anchor marks</b>
+      <span class="seg" id="ancSeg">
+        <button data-m="0" class="on">off</button>
+        <button data-m="1">on</button>
+      </span></div>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+  <div id="panes"></div>
+
+  <div class="note">
+    <b>How this is put together</b>
+    <ul>
+      <li><b>Data</b> — the existing tick cache only (<code>data/cache/ticks/*.parquet</code>). Nothing is fetched, so the page costs nothing to rebuild.
+        Bars are ET bars built from trade prints at <span class="js-tflist"></span>, and they exist only where ticks do — a hole in the tape closes up rather than becoming an empty bar,
+        which is what the Pine sees too. Every window in the indicator counts bars, not minutes.</li>
+      <li><b>The bar size is not a resample.</b> Each timeframe is a full rebuild: KER(__KER_LEN__), the __REGIME_LEN__-bar medians and the pivot lengths
+        are all bar counts, so they cover different amounts of clock at each size and the regime, the anchors and the signals genuinely differ.
+        Only the onside/offside window is held constant in time (__FWD_MIN__ min), so those two columns mean the same thing on every timeframe.</li>
+      <li><b>Warm-up</b> — the regime medians need __REGIME_LEN__ bars, so the indicator runs across the three cached days behind each session and only the session is drawn.
+        Context days must be the <em>same contract</em>: a roll inside the window would put a price gap through the middle of every trailing median.
+        Where fewer same-contract days are on disk, the regime reads undefined (grey) until its medians fill.</li>
+      <li><b>Anchors</b> — <code>swing5/10/20</code> are his swing anchor at three pivot lengths (at the current bar size, <code>swing10</code> wants <span class="js-swing"></span> of confirmation each side).
+        <code>globex</code> is the CME trading day (18:00 ET), which is what <code>timeframe.change("D")</code> resolves to on a futures feed and so the closest thing to his "session";
+        <code>rth</code> is our own 09:30 NY anchor, there for comparison. Month is dropped — a month anchor over a five-day window is one flat line.</li>
+      <li><b>The split view</b> — the same bars, the same candles, with a plain <code>globex</code>-anchored VWAP and fixed 1/2/3&sigma; bands: no swing re-anchoring, no KER scaling, no regime colour.
+        The two charts share a time axis and a crosshair, so a signal on the left can be read against where price actually sat on the session VWAP at that moment.
+        Its price scale is its own — the bands differ, so the two autoscale slightly differently.</li>
+      <li><b>The line steps, it does not repaint.</b> A swing confirms <em>pivot</em> bars after the fact and the accumulator is backfilled from the pivot bar, so the line jumps at the confirmation bar.
+        Bars already drawn keep the old anchor's values. What a live trader sees is a step, not a rewritten past — the video's "redraws backwards once" is not what this code does.</li>
+      <li><b>The gate is recorded, not applied.</b> Every raw trigger is kept; <span class="pill blocked">blocked</span> means the regime it fired in was not the one it belongs to.
+        You cannot see what a gate is doing by looking only at what survived it, so the switch above shows both.</li>
+      <li><b>Onside / offside</b> — the furthest price got each way within <span class="js-fwd"></span> (__FWD_MIN__ min) of the next bar's open, which is his backtest's entry and the only honest one for a close-confirmed signal.
+        No target, no exit rule, no stop: these are distances.</li>
+      <li><b>Two things to watch for.</b> MR is our touch-bar close-back shape verbatim — the one the weekly-band context study resolved as an artifact of scoring the touch bar's own close.
+        And a band scaled by a vol proxy is the shape the ATR &times; upper-band study resolved as "intraday ATR is the band renamed". Neither is a reason not to look; both are reasons not to build off a first impression.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const SESSIONS = __SESSIONS_JSON__;
+const MODES = __MODES_JSON__;
+const TFS = __TFS_JSON__;
+const KW = __KER_WEIGHT__;
+const SPLIT = "__SPLIT_MODE__";
+let tf = "__DEFAULT_TF__";
+let mode = "__DEFAULT_MODE__";
+let cmp = "__DEFAULT_COMPARE__";
+let view = "single";
+let adapt = 0;
+let sigMode = "gated";
+let showAnchors = false;
+const key = () => mode + "|" + adapt;
+
+const C = {
+  up:'#21c07a', dn:'#f5455f', grid:'#161b26',
+  // His own instance-A colour is amber, which on this page sits a few degrees
+  // from the yellow the bands go when the regime reads ranging. The regime is
+  // the informative thing here, so the bands keep his palette and the line
+  // gives up its own.
+  vwap:'#e8edf5',
+  cmp:'#00FFAA',             // his instance-B colour
+  long:'#00E676', short:'#FF3D71', blocked:'#5b6472',
+  // The split half: amber line, plain grey bands. Nothing on that side is
+  // coloured by anything the indicator computes — that is the point of it.
+  plain:'#e0b878', plainBand:'#5b6472',
+};
+// His own regime palette: purple = trending, yellow = ranging, grey = undefined.
+const REG = { t:[184,77,255], r:[255,230,0], u:[120,123,134] };
+const regRGB = r => r < 0 ? REG.u : r >= 2 ? REG.t : REG.r;
+const regColor = (r, a) => { const c = regRGB(r); return `rgba(${c[0]},${c[1]},${c[2]},${a})`; };
+
+const fmtET = t => {
+  const d = new Date(t * 1000);
+  return String(d.getUTCHours()).padStart(2,'0') + ':' + String(d.getUTCMinutes()).padStart(2,'0');
+};
+const med = xs => {
+  if (!xs.length) return null;
+  const a = [...xs].sort((p, q) => p - q), h = a.length >> 1;
+  return a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2;
+};
+const MODE_LABEL = m => m.startsWith('swing') ? 'swing ' + m.slice(5) : m;
+const PIVOT_OF = m => m.startsWith('swing') ? +m.slice(5) : 0;
+const mins = n => n >= 60 && n % 60 === 0 ? (n / 60) + 'h' : n + ' min';
+
+// A session ships one payload per bar size; every read of the data goes through
+// here so the timeframe switch is a re-read rather than a rebuild of the page.
+// A day with nothing built at the selected size falls back to whatever it does
+// have — the header states the size it is actually drawing.
+const payload = s => s.tf[tf] || s.tf[Object.keys(s.tf)[0]];
+
+// --- shared chart scaffolding -------------------------------------------
+function baseChart(el) {
+  return LightweightCharts.createChart(el, {
+    autoSize: true,
+    layout: { background: { color: '#0b0e13' }, textColor: '#94a3b8', fontSize: 11 },
+    grid: { vertLines: { color: C.grid }, horzLines: { color: C.grid } },
+    // Both charts hold the same minimum axis width so the two plot areas line
+    // up column for column in the split view.
+    rightPriceScale: { borderColor: '#1c2230', minimumWidth: 64 },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: {
+      borderColor: '#1c2230', timeVisible: true, secondsVisible: false,
+      // Bar times are ET wall-clock stamped as UTC seconds, so the axis must be
+      // read in UTC or the browser's own zone would shift every label.
+      tickMarkFormatter: fmtET,
+    },
+    localization: { timeFormatter: fmtET },
+  });
+}
+
+function candleSeries(chart) {
+  return chart.addSeries(LightweightCharts.CandlestickSeries, {
+    upColor: C.up, downColor: C.dn, borderVisible: false,
+    wickUpColor: C.up, wickDownColor: C.dn,
+  }, 0);
+}
+
+const lineOn = (chart, color, width, style) =>
+  chart.addSeries(LightweightCharts.LineSeries, {
+    color, lineWidth: width || 1, lineStyle: style || 0,
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  }, 0);
+
+// Time axis and crosshair move together. The two charts carry identical bars,
+// so a logical range transfers exactly — no interpolation, no drift.
+function link(a, b) {
+  let busy = false;
+  const pair = (from, to) => {
+    from.chart.timeScale().subscribeVisibleLogicalRangeChange(r => {
+      if (busy || !r) return;
+      busy = true; to.chart.timeScale().setVisibleLogicalRange(r); busy = false;
+    });
+    from.chart.subscribeCrosshairMove(p => {
+      if (busy) return;
+      busy = true;
+      if (p.time === undefined) to.chart.clearCrosshairPosition();
+      else {
+        const v = p.seriesData.get(from.candles);
+        if (v) to.chart.setCrosshairPosition(v.close, p.time, to.candles);
+      }
+      busy = false;
+    });
+  };
+  pair(a, b); pair(b, a);
+}
+
+// --- one session ---------------------------------------------------------
+function makeView(s, pane) {
+  const chart = baseChart(pane.querySelector('.chart.left'));
+  const candles = candleSeries(chart);
+  const line = (color, width, style) => lineOn(chart, color, width, style);
+  const S = LightweightCharts.LineStyle;
+  const vwapL = line(C.vwap, 2);
+  // 3 sigma is decoration — nothing keys off it, and letting it into the
+  // autoscale spends a third of the pane on empty air above and below the
+  // bands the signals actually use. Drawn, not fitted. (2 sigma stays in the
+  // fit: MR fires on a close outside it, so it has to be on screen.)
+  const bands = [[1, .45, 1], [2, .8, 1], [3, .3, 0]].map(([k, a, fit]) => {
+    const b = { k, a, up: line(C.vwap, 1), dn: line(C.vwap, 1) };
+    if (!fit) [b.up, b.dn].forEach(s => s.applyOptions({ autoscaleInfoProvider: () => null }));
+    return b;
+  });
+  const cmpL = line(C.cmp, 2, S.Dashed);
+
+  // KER had a lower pane here once. It is gone: the band colour already says
+  // which quadrant every bar is in, so the pane was the same read twice and it
+  // was taking 90px off the candles. The series is still shipped and still
+  // drives both the colour and the adaptive scaling.
+  const marks = LightweightCharts.createSeriesMarkers(candles, []);
+
+  const scale = (d, i) => adapt ? 1 + KW * (1 - (d.ker[i] == null ? 1 : d.ker[i])) : 1;
+  const point = (d, v, i, a) => v == null ? { time: d.times[i] }
+    : { time: d.times[i], value: v, color: regColor(d.regime[i], a) };
+
+  // The right half is built the first time it is asked for: a chart created
+  // inside a display:none column would size itself at 0x0.
+  let right = null;
+  function buildRight() {
+    const chart2 = baseChart(pane.querySelector('.chart.right'));
+    const candles2 = candleSeries(chart2);
+    const vwap2 = lineOn(chart2, C.plain, 2);
+    // A session VWAP's 3-sigma band is a long way from price by the afternoon,
+    // and letting it into the autoscale squashes the candles into the bottom
+    // fifth of the pane. Bands are drawn but excluded from the fit, so this
+    // chart scales on the same thing the left one does — the candles.
+    const bandLine = () => {
+      const s = lineOn(chart2, C.plainBand, 1);
+      s.applyOptions({ autoscaleInfoProvider: () => null });
+      return s;
+    };
+    const bands2 = [1, 2, 3].map(k => ({ k, up: bandLine(), dn: bandLine() }));
+    const marks2 = LightweightCharts.createSeriesMarkers(candles2, []);
+    right = { chart: chart2, candles: candles2, vwap: vwap2, bands: bands2, marks: marks2 };
+    link({ chart, candles }, right);
+    return right;
+  }
+
+  function drawRight(d) {
+    if (!right) return;
+    right.candles.setData(d.bars);
+    const inst = d.inst[SPLIT];
+    const T = d.times;
+    right.vwap.setData(T.map((t, i) => inst.vwap[i] == null ? { time: t }
+      : { time: t, value: inst.vwap[i] }));
+    right.bands.forEach(b => {
+      const up = [], dn = [];
+      T.forEach((t, i) => {
+        const v = inst.vwap[i], g = inst.sigma[i];
+        if (v == null || g == null) { up.push({ time: t }); dn.push({ time: t }); return; }
+        up.push({ time: t, value: +(v + b.k * g).toFixed(2) });
+        dn.push({ time: t, value: +(v - b.k * g).toFixed(2) });
+      });
+      b.up.setData(up); b.dn.setData(dn);
+    });
+    // The same triggers, on the plain chart, with no label — where a signal
+    // sat relative to the session VWAP is the whole question here.
+    const ms = sigMode === 'none' ? [] : rows().map(x => ({
+      time: x.time,
+      position: x.side === 'long' ? 'belowBar' : 'aboveBar',
+      color: x.gated ? (x.side === 'long' ? C.long : C.short) : C.blocked,
+      shape: x.side === 'long' ? 'arrowUp' : 'arrowDown',
+    }));
+    ms.sort((a, b) => a.time - b.time);
+    right.marks.setMarkers(ms);
+  }
+
+  function draw() {
+    const d = payload(s), T = d.times;
+    candles.setData(d.bars);
+    const inst = d.inst[mode];
+    vwapL.setData(T.map((t, i) => inst.vwap[i] == null ? { time: t }
+      : { time: t, value: inst.vwap[i] }));
+    bands.forEach(b => {
+      const up = [], dn = [];
+      T.forEach((t, i) => {
+        const v = inst.vwap[i], g = inst.sigma[i];
+        if (v == null || g == null) { up.push({ time: t }); dn.push({ time: t }); return; }
+        const w = b.k * scale(d, i) * g;
+        up.push(point(d, +(v + w).toFixed(2), i, b.a));
+        dn.push(point(d, +(v - w).toFixed(2), i, b.a));
+      });
+      b.up.setData(up); b.dn.setData(dn);
+    });
+
+    const ci = cmp === 'none' ? null : d.inst[cmp];
+    cmpL.setData(T.map((t, i) => (!ci || ci.vwap[i] == null) ? { time: t }
+      : { time: t, value: ci.vwap[i] }));
+    cmpL.applyOptions({ visible: !!ci });
+
+    const ms = [];
+    if (showAnchors) {
+      inst.anchors.forEach(t => ms.push({
+        time: t, position: 'belowBar', color: '#3b4658', shape: 'circle', size: 0,
+      }));
+    }
+    if (sigMode !== 'none') {
+      rows().forEach(x => ms.push({
+        time: x.time,
+        position: x.side === 'long' ? 'belowBar' : 'aboveBar',
+        color: x.gated ? (x.side === 'long' ? C.long : C.short) : C.blocked,
+        shape: x.kind === 'MR' ? (x.side === 'long' ? 'arrowUp' : 'arrowDown')
+                               : (x.side === 'long' ? 'circle' : 'circle'),
+        text: x.kind,
+      }));
+    }
+    // Markers must be handed over in time order or the library drops them.
+    ms.sort((a, b) => a.time - b.time);
+    marks.setMarkers(ms);
+    drawRight(d);
+  }
+
+  const rows = () => {
+    const all = payload(s).signals[key()] || [];
+    return sigMode === 'gated' ? all.filter(x => x.gated) : all;
+  };
+
+  const splitEl = pane.querySelector('.split');
+  const infoBar = pane.querySelector('.head');
+  const sumBar = pane.querySelector('.sum');
+  const capL = pane.querySelector('.cap.left b');
+  const tbody = pane.querySelector('tbody');
+  let sel = null;
+
+  function heads() {
+    const d = payload(s), i = d.info;
+    infoBar.innerHTML = `
+      <span><b>${i.symbol}</b> ${i.title}</span>
+      <span>range <b>${i.range}</b> (${i.range_pts} pt)</span>
+      <span><b>${d.tf}m</b> · <b>${i.bars}</b> bars <span class="muted">+${i.warmup} warm-up</span></span>
+      <span>regime <b>${i.trend_pct}%</b> trending${i.undef_pct ? `
+        <span class="muted">· ${i.undef_pct}% undefined</span>` : ''}</span>`;
+    capL.textContent = 'Modern VWAP · ' + MODE_LABEL(mode) + ' anchor';
+  }
+
+  function table() {
+    const d = payload(s);
+    const all = d.signals[key()] || [];
+    const kept = all.filter(x => x.gated);
+    const mr = kept.filter(x => x.kind === 'MR'), tc = kept.filter(x => x.kind === 'TC');
+    const anchors = d.inst[mode].anchors.length;
+    const on = med(kept.map(x => x.mfe).filter(v => v != null));
+    const off = med(kept.map(x => x.mae).filter(v => v != null));
+    sumBar.innerHTML = `
+      <span><b>${anchors}</b> anchors</span>
+      <span><b>${all.length}</b> raw triggers → <b>${kept.length}</b> pass the gate
+        <span class="muted">(${all.length - kept.length} blocked)</span></span>
+      <span><b>${mr.length}</b> MR · <b>${tc.length}</b> TC</span>
+      ${kept.length ? `<span>median onside <span class="pos">+${on.toFixed(1)}</span> ·
+        offside <span class="neg">−${off.toFixed(1)}</span> pt
+        <span class="muted">in ${d.fwd_bars} bars (${d.fwd_min} min)</span></span>` : ''}`;
+
+    const list = rows();
+    tbody.innerHTML = '';
+    list.forEach((x, i) => {
+      const tr = document.createElement('tr');
+      tr.className = 'row' + (x.gated ? '' : ' dead') + (i === sel ? ' sel' : '');
+      const reg = x.regime < 0 ? '<span class="pill blocked">—</span>'
+        : x.regime >= 2 ? `<span class="pill trend">trending ${x.regime}</span>`
+        : `<span class="pill range">ranging ${x.regime}</span>`;
+      tr.innerHTML = `
+        <td>${x.clock}</td>
+        <td>${x.kind}</td>
+        <td><span class="pill ${x.side}">${x.side}</span></td>
+        <td>${reg}</td>
+        <td>${x.gated ? '<span class="muted">passes</span>' : '<span class="pill blocked">blocked</span>'}</td>
+        <td>${x.close}</td>
+        <td>${x.vwap ?? '—'}</td>
+        <td>${x.entry ?? '—'}</td>
+        <td>${x.mfe == null ? '—' : `<span class="pos">+${x.mfe}</span>`}</td>
+        <td>${x.mae == null ? '—' : `<span class="neg">−${x.mae}</span>`}</td>`;
+      tr.onclick = () => {
+        sel = i; table();
+        // The left chart is the one driven; the right follows it through the
+        // time-scale link rather than being ranged separately.
+        chart.timeScale().setVisibleRange({ from: x.time - 60 * 60, to: x.time + 90 * 60 });
+      };
+      tbody.appendChild(tr);
+    });
+    if (!list.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="muted">no triggers on this session at these settings</td></tr>';
+    }
+  }
+
+  function layout() {
+    const on = view === 'split';
+    splitEl.classList.toggle('one', !on);
+    if (on && !right) { buildRight(); drawRight(payload(s)); }
+  }
+
+  const fit = () => {
+    chart.timeScale().fitContent();
+    if (right) right.chart.timeScale().fitContent();
+  };
+
+  layout(); heads(); draw(); table(); fit();
+  return {
+    fit,
+    refresh: () => { sel = null; layout(); heads(); draw(); table(); },
+    // A timeframe swap changes the bars under everything, so the visible range
+    // that was set on the old ones means nothing — refit.
+    reload: () => { sel = null; layout(); heads(); draw(); table(); fit(); },
+  };
+}
+
+// --- shell ---------------------------------------------------------------
+const tabs = document.getElementById('tabs'), panes = document.getElementById('panes');
+const views = [];
+
+SESSIONS.forEach((s, i) => {
+  const tab = document.createElement('button');
+  tab.className = 'tab' + (i === 0 ? ' active' : '');
+  tab.dataset.i = i;
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach((t, j) => t.classList.toggle('active', i === j));
+    document.querySelectorAll('.tabpane').forEach((p, j) => p.classList.toggle('active', i === j));
+    views[i].fit();
+  };
+  tabs.appendChild(tab);
+
+  const pane = document.createElement('div');
+  pane.className = 'tabpane' + (i === 0 ? ' active' : '');
+  pane.innerHTML = `
+    <div class="info head"></div>
+    <div class="info sum"></div>
+    <div class="split one">
+      <div class="col left">
+        <div class="cap left"><b></b><span>bands coloured by regime</span></div>
+        <div class="chart left"></div>
+      </div>
+      <div class="col right">
+        <div class="cap right"><b>Session VWAP · globex 18:00 anchor</b><span>plain 1/2/3&sigma;, no KER, no gate</span></div>
+        <div class="chart right"></div>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i class="key" style="border-top:2px solid ${C.vwap}"></i>VWAP (anchor above)</span>
+      <span><i class="key" style="border-top:2px dashed ${C.cmp}"></i>compare anchor</span>
+      <span><i class="key" style="border-top:2px solid ${C.plain}"></i>session VWAP (split)</span>
+      <span><i class="dot" style="background:rgb(184,77,255)"></i>bands: trending</span>
+      <span><i class="dot" style="background:rgb(255,230,0)"></i>ranging</span>
+      <span><i class="dot" style="background:rgb(120,123,134)"></i>undefined</span>
+    </div>
+    <div class="tbl-card">
+      <h3>Triggers</h3>
+      <p>Click a row to jump the chart to it. Greyed rows fired in the wrong regime and the gate blocked them —
+        switch <b>signals</b> to <em>all</em> to see them on the chart too.</p>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>time</th><th>kind</th><th>side</th><th>regime</th><th>gate</th>
+          <th>close</th><th>vwap</th><th>entry</th><th>onside</th><th>offside</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>`;
+  panes.appendChild(pane);
+  views.push(makeView(s, pane));
+});
+
+// Tab labels carry the trending share, which is a per-timeframe number.
+function tabLabels() {
+  document.querySelectorAll('.tab').forEach(t => {
+    const s = SESSIONS[+t.dataset.i], d = payload(s);
+    t.innerHTML = `${s.date} <span class="muted">· ${d ? d.info.trend_pct + '% trending' : 'n/a'}</span>`;
+  });
+}
+
+// Prose that depends on the bar size, filled from the data rather than baked in.
+function prose() {
+  const list = TFS.map(t => t + '-minute').join(' / ');
+  document.querySelectorAll('.js-tflist').forEach(e => { e.textContent = list; });
+  const pl = PIVOT_OF('swing10') || 10;
+  document.querySelectorAll('.js-swing').forEach(e => { e.textContent = mins(pl * +tf); });
+  const d = payload(SESSIONS[0]);
+  document.querySelectorAll('.js-fwd').forEach(e => {
+    e.textContent = d ? d.fwd_bars + ' bars' : '—';
+  });
+}
+
+// --- controls ------------------------------------------------------------
+function segment(host, items, current, apply, after) {
+  items.forEach(([val, label]) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.className = val === current ? 'on' : '';
+    b.onclick = () => {
+      apply(val);
+      [...host.children].forEach(c => c.classList.toggle('on', c === b));
+      (after || (() => views.forEach(v => v.refresh())))();
+    };
+    host.appendChild(b);
+  });
+}
+
+segment(document.getElementById('tfSeg'), TFS.map(t => [String(t), t + 'm']),
+        tf, v => { tf = v; },
+        () => { prose(); tabLabels(); views.forEach(v => v.reload()); });
+segment(document.getElementById('modeSeg'), MODES.map(m => [m, MODE_LABEL(m)]),
+        mode, v => { mode = v; });
+segment(document.getElementById('cmpSeg'),
+        [['none', 'none']].concat(MODES.map(m => [m, MODE_LABEL(m)])),
+        cmp, v => { cmp = v; });
+
+document.querySelectorAll('#viewSeg button').forEach(b => b.onclick = () => {
+  view = b.dataset.v;
+  document.querySelectorAll('#viewSeg button').forEach(c => c.classList.toggle('on', c === b));
+  // A chart that has just been un-hidden has to be re-fitted, not just redrawn.
+  views.forEach(v => v.reload());
+});
+document.querySelectorAll('#adaptSeg button').forEach(b => b.onclick = () => {
+  adapt = +b.dataset.a;
+  document.querySelectorAll('#adaptSeg button').forEach(c => c.classList.toggle('on', c === b));
+  views.forEach(v => v.refresh());
+});
+document.querySelectorAll('#sigSeg button').forEach(b => b.onclick = () => {
+  sigMode = b.dataset.s;
+  document.querySelectorAll('#sigSeg button').forEach(c => c.classList.toggle('on', c === b));
+  views.forEach(v => v.refresh());
+});
+document.querySelectorAll('#ancSeg button').forEach(b => b.onclick = () => {
+  showAnchors = b.dataset.m === '1';
+  document.querySelectorAll('#ancSeg button').forEach(c => c.classList.toggle('on', c === b));
+  views.forEach(v => v.refresh());
+});
+
+prose(); tabLabels();
+</script>

@@ -62,10 +62,23 @@ from collections import Counter, deque
 import numpy as np
 import pandas as pd
 
-# How often the publisher drains what has arrived. Same figure as the fake feed:
-# fine enough that the chart advances smoothly, coarse enough that a busy market
-# is one batch rather than one call per print.
-PUBLISH_S = 0.1
+# How often the publisher drains what has arrived. This is the floor under every
+# cadence downstream of it: a print cannot reach the chart sooner than the drain
+# that publishes it, so the browser's own `TAPE_POLL_MS` is only ever as useful
+# as this is fine. Walked down from 0.1 when the live chart read as stepped
+# rather than moving — the drain is a lock and an array copy, so asking more
+# often costs little and simply makes the batches smaller.
+#
+# There is a floor worth knowing, and it is set by the market rather than by the
+# code: RTH prints arrive at something like 50-500/s, so a drain every 10ms is
+# already carrying a handful of ticks and one much below that mostly wakes to an
+# empty buffer — full cost, no batch. ``latency()``'s ``lag_p90`` is the canary:
+# above roughly twice this figure the publisher is starving the socket read on
+# the same loop, which is the failure this constant can actually cause.
+#
+# No longer the same figure as the fake feed, which keeps its own `_WAKE_S` in
+# `feed.py`: that one is scaled by a replay speed and means something different.
+PUBLISH_S = 0.02
 # Reconnect backoff, seconds — doubling to the cap. The daily maintenance halt
 # (17:00-18:00 ET) is not a disconnect, so this only ever runs on a real fault.
 RECONNECT_MIN_S = 2.0
@@ -437,11 +450,19 @@ class RithmicFeed:
                  creds: dict | None = None,
                  backfill_from: pd.Timestamp | None = None,
                  resume_frame: pd.DataFrame | None = None,
-                 sweep_days: int | None = None) -> None:
+                 sweep_days: int | None = None,
+                 broker=None) -> None:
         self.route = route
         self.symbol = symbol
         self.exchange = exchange
         self._creds = creds or credentials()
+        # A `journal.live.broker.Broker`, or None for the ordinary shadow feed.
+        # Its presence is what decides whether ORDER_PLANT is ever opened, and
+        # it is settled at construction on purpose: routing is not a mode that
+        # can be switched on under a running connection, the way recording and
+        # the shelf are. Those two change what is *written*; this one changes
+        # what the socket is allowed to do.
+        self.broker = broker
         # Where the session begins — the instant the backfill reaches back to.
         # None turns the backfill off entirely, which is what the tests and any
         # caller that only wants the live stream pass.
@@ -551,6 +572,11 @@ class RithmicFeed:
             "timing": self.timing(),
             "backfills": list(self.backfills),
             "harvested": list(self.harvested),
+            # Said on the feed's own status rather than only on the routing
+            # endpoint: "is this connection one that can send orders" is a
+            # property of the socket, and it belongs where the socket is
+            # described. False here and the ORDER plant was never opened.
+            "routing": self.broker is not None,
         }
 
     def timing(self) -> dict[str, int]:
@@ -565,10 +591,10 @@ class RithmicFeed:
 
         ``lag_*`` is arrival to publish *inside this process*, and it is bounded
         below by ``PUBLISH_S`` — a p50 near half of it is the cadence, not a
-        fault. It earns its place as a starvation signal: a p90 far above 100ms
-        means something (a shadow pass, a parquet seal, a sim sweep on the same
-        cores) is holding the event loop, which is the one latency this code can
-        actually do something about.
+        fault. It earns its place as a starvation signal: a p90 far above twice
+        ``PUBLISH_S`` means something (a shadow pass, a parquet seal, a sim sweep
+        on the same cores) is holding the event loop, which is the one latency
+        this code can actually do something about.
 
         **End-to-end latency is deliberately absent.** It needs the host clock
         against the exchange's, and the host clock is off by a second in a
@@ -632,18 +658,31 @@ class RithmicFeed:
 
         client = RithmicClient(**self._creds)
         client.on_tick += self._on_tick
-        # Market data plants only. The default opens all four, including ORDER.
-        # HISTORY is opened only when there is a stretch to backfill, and its
-        # absence must never cost the live feed: an account entitled to the
-        # ticker plant and not the history plant would otherwise fail to connect
-        # at all, trading a whole session for the stretch in front of it.
+        # Market data plants only, unless a broker was handed in. The default
+        # opens all four, including ORDER. HISTORY is opened only when there is a
+        # stretch to backfill, and its absence must never cost the live feed: an
+        # account entitled to the ticker plant and not the history plant would
+        # otherwise fail to connect at all, trading a whole session for the
+        # stretch in front of it.
+        #
+        # ORDER and PNL are opened together and only for a routing session
+        # (`journal.live.broker` — one login means one connection, so the order
+        # path has to ride here). A session started without one can never
+        # acquire it: the plants are chosen at connect, which is what keeps the
+        # shadow-only connection exactly the shape decision 2 describes.
         plants = [SysInfraType.TICKER_PLANT]
         if self._from_ns:
             plants.append(SysInfraType.HISTORY_PLANT)
+        if self.broker is not None:
+            plants += [SysInfraType.ORDER_PLANT, SysInfraType.PNL_PLANT]
         try:
             await client.connect(plants=plants)
         except Exception as e:  # noqa: BLE001
-            if len(plants) == 1:
+            if len(plants) == 1 or self.broker is not None:
+                # With a broker attached the fallback is not offered. Dropping to
+                # a ticker-only connection would leave the page believing it can
+                # route — and the failure that got us here is as likely to be the
+                # order plant as the history one.
                 raise
             self.stats["history_plant_unavailable"] += 1
             print(f"[live-rithmic] history plant refused ({type(e).__name__}: {e}) "
@@ -656,6 +695,14 @@ class RithmicFeed:
         self.connected = True
         self.error = None
         try:
+            # Before the tape, and it raises if it cannot: a routing session that
+            # came up not knowing its account, or not having asked what is
+            # already working, is the one state this must not be reachable in.
+            # `_main` catches it into `self.error` and backs off like any other
+            # connect failure, so the page says why rather than showing a feed
+            # with a dead order panel beside it.
+            if self.broker is not None:
+                await self.broker.attach(client)
             # The bulk of the session is replayed BEFORE subscribing, and that
             # ordering was measured rather than chosen: a 13-hour replay takes
             # 12s on a quiet event loop and **66s** with a LAST_TRADE
@@ -686,6 +733,12 @@ class RithmicFeed:
                 await self._drain()
         finally:
             self.connected = False
+            # First, and outside every other `try`: the permission to send must
+            # not outlive the socket it was granted over, and a reconnect has to
+            # come back read-only. Detaching before the unsubscribe means even a
+            # teardown that throws leaves routing disarmed.
+            if self.broker is not None:
+                self.broker.detach("feed disconnected")
             try:
                 await client.unsubscribe_from_market_data(
                     self.symbol, self.exchange, DataType.LAST_TRADE)

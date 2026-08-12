@@ -1,9 +1,25 @@
 """Replay attempts: what you did in the Simulator, kept.
 
-Deliberately NOT in journal.db, for the reason ``journal.sim.store`` gives about
-engine runs: that database is the real trading record, and a fill invented
-against a replayed tape is not one. An attempt is a practice artifact — delete
-the folder and it is gone.
+**This module is still the attempt's home.** The log, the trades it produced,
+the rewinds that erased some of them and the aggregates over the rest live in
+files, and nothing below reads or writes journal.db.
+
+What changed (2026-08-08): the trades are *also* mirrored into journal.db by
+``api.routers.replays``, under the `replay` account with each sitting tagged
+``sessions.mode='replay'``. The earlier position here — that a fill against a
+re-runnable tape is not a trade and stays on disk — drew the line in the wrong
+place. Practice is the majority of the trading that actually gets done, and
+keeping it out of the journal meant keeping it out of the Trades page, the
+calendar, notes, setups and every review tool built on them; the harm that line
+was drawn against (practice contaminating real-money statistics) is already
+prevented by the mode tag, which is exactly how ATAS's own `Replay` account and
+`/charts/live`'s paper account are handled.
+
+The two records cannot drift, because the journal side is a projection of this
+one and never an independent event log: each ``save`` replaces the sitting's
+journal rows wholesale, so a rewind withdraws what it erased, and ``delete``
+withdraws the lot. "Delete the folder and it is gone" still holds — the folder
+is simply no longer the only place it goes.
 
     data/replays/<session_date>/<attempt_id>/
         attempt.json     # identity, tape fingerprint, ticket, status, note, rewinds

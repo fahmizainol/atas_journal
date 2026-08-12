@@ -150,6 +150,18 @@ FIELDS: tuple[Field, ...] = (
           help="How far behind the best price the trade has seen the stop follows. "
                "Nothing moves until the trade is this far in front, and the first "
                "move is to breakeven — the trail can never tighten a loss."),
+    Field("trail_atr_mult", "float", "exit", "Scale the trail to the day's ATR",
+          unit="x daily ATR", min=0.005, max=0.5, zero_means_off=True,
+          on_default=0.05,
+          help="Set the trail's distance from the volatility the session opened "
+               "with — this multiple of the daily ATR(14) through the previous "
+               "session — instead of a fixed tick count. Read once, at the open: "
+               "wider on a hot day, tighter on a quiet one, and it never breathes "
+               "intraday. The multiple is a fraction because a daily range dwarfs "
+               "an intraday trail: on NQ 0.05 is about 78 ticks on a median day, "
+               "stretching past 175 on the hottest and down toward 42 on the "
+               "quietest. The fixed distance stays the fallback for a day with no "
+               "ATR history cached."),
     Field("trail_step_ticks", "int", "exit", "Trail step", unit="ticks", min=0,
           help="The grid the trailing stop moves on, measured from its first level: "
                "with a 50-tick trail and a 25-tick step it sits at the first level "
@@ -1358,6 +1370,14 @@ def _check_cross_field(cfg) -> None:
             "daily_loss_exit_open needs a daily_loss_stop set: it flattens the "
             "open trade against that limit, and without one there is nothing to "
             "trip on")
+    if getattr(cfg, "trail_atr_mult", 0.0) and not cfg.trail_stop_ticks:
+        # The ATR multiplier only ever replaces the trail's DISTANCE; with no
+        # trailing stop there is no rule for it to size, so the run would take
+        # every trade on the fixed stop while its config claims an ATR trail.
+        # (getattr: only the bounce family carries the knob.)
+        raise ValueError(
+            "trail_atr_mult needs trail_stop_ticks set: the multiplier scales the "
+            "trail's distance, and with no trailing stop there is nothing to scale")
     if isinstance(cfg, SimConfig):
         if (cfg.entry_variant == "A"
                 and cfg.entry_limit_offset_ticks > cfg.acceptance_min_ticks):

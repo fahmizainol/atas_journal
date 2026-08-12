@@ -34,7 +34,7 @@ import type { ExitReason, Log, Trade } from "./replaySim";
 /** Bumped by hand when replaySim's fill semantics change. Stored on every
  *  attempt so a rebuild under new rules is never mistaken for the numbers you
  *  actually traded. */
-export const SIM_ENGINE_VERSION = 1;
+export const SIM_ENGINE_VERSION = 2;
 
 /** Below this many trades, a win rate is a coin flip with an opinion. The
  *  headline KPIs stay visible but say so — 12 of the last 13 gates this repo
@@ -54,7 +54,14 @@ export interface Totals {
   shorts: number;
   /** Contracts closed, summed over trades — the size the attempt actually did. */
   contracts: number;
+  /** Net of commission — the number the account would have printed. */
   net_usd: number;
+  /** Commission paid, always ≥ 0. `net_usd + fees_usd` is what the same trades
+   *  would have made under perfect fills *minus the spread*, which is not
+   *  recoverable from here: the spread is inside the fill prices, so it lives in
+   *  `net_points` and cannot be added back. Commission can, which is exactly why
+   *  it is the one cost carried separately. */
+  fees_usd: number;
   net_points: number;
   /** Sum of stake R over the trades that had risk on. */
   net_r: number;
@@ -116,6 +123,7 @@ export function emptyTotals(): Totals {
     shorts: 0,
     contracts: 0,
     net_usd: 0,
+    fees_usd: 0,
     net_points: 0,
     net_r: 0,
     n_with_r: 0,
@@ -177,6 +185,9 @@ export function totalsOf(trades: Trade[]): Totals {
     if (tr.side === "long") t.longs += 1;
     else t.shorts += 1;
     t.net_usd += tr.pnl;
+    // Older stored attempts have no `fees` on their trades (engine version 1
+    // charged none), so this reads as zero for them rather than as NaN.
+    t.fees_usd += tr.fees ?? 0;
     t.net_points += tr.pts;
     if (tr.rCash != null) {
       t.net_r += tr.rCash;
@@ -243,6 +254,7 @@ export function pool(summaries: Partial<AttemptSummary>[]): Totals & Derived {
     t.shorts += s.shorts ?? 0;
     t.contracts += s.contracts ?? 0;
     t.net_usd += s.net_usd ?? 0;
+    t.fees_usd += s.fees_usd ?? 0;
     t.net_points += s.net_points ?? 0;
     t.net_r += s.net_r ?? 0;
     t.n_with_r += s.n_with_r ?? 0;

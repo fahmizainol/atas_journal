@@ -67,7 +67,10 @@ export function CalendarTable({
   return (
     <div className="panel">
       <div className="section-cap">Click a row to explore the day's trades.</div>
-      <div className="table-scroll" style={{ height: 480, overflow: "auto" }}>
+      {/* .table-scroll already scrolls both ways and pins the header; the height
+          lives in CSS so a phone can trade some of it back (see the Journal
+          mobile block) rather than spending most of a 844px screen on it. */}
+      <div className="table-scroll calendar-table-scroll">
         <DataTable
           data={days}
           columns={columns}

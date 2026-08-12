@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "concurrently --names \"api,web\" --prefix-colors \"yellow,cyan\" --kill-others-on-fail \"pnpm dev:api\" \"pnpm dev:web\"",
     "dev:api": "uv run uvicorn api.main:app --reload --port 8000",
-    "dev:web": "pnpm --dir frontend dev"
+    "dev:web": "pnpm --dir frontend dev",
+    "smoke": "node tools/browser/smoke.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

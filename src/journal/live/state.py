@@ -37,6 +37,7 @@ means "throw yours away and start again" rather than "here is some data".
 from __future__ import annotations
 
 import itertools
+import os
 import threading
 import time
 from datetime import date
@@ -53,6 +54,13 @@ from .shadow import ShadowRunner
 
 _lock = threading.Lock()
 _counter = itertools.count(1)
+# Folded into every gen so two *processes* can never mint the same token. The
+# counter alone restarts at 1 per boot, so a uvicorn restart on the same
+# symbol+day would reissue an old gen — and a client that held rows across the
+# restart would splice new ticks onto a tape whose row indices it no longer
+# shares (the recorder drops unflushed rows on a kill). With the boot id in the
+# token the client sees a mismatch and resets, which is the honest outcome.
+_BOOT = os.getpid()
 
 # How often the recorder's heartbeat is rewritten. It is a liveness signal, not
 # a data structure — the chunks on disk are the tape whatever this says.
@@ -87,7 +95,26 @@ class Live:
     def signals(self) -> bool:
         return self.shadow.enabled
 
+    @property
+    def broker(self):
+        """The order plant, if this session's feed opened one. None otherwise.
+
+        Read off the feed rather than stored, for the same reason ``recording``
+        is: there is one answer to "can this session send an order" and it is
+        the object that would be doing the sending. A resumed session (no feed)
+        and a simulated one (a fake feed, which has no such attribute) both
+        answer None, which is the correct answer and not a special case.
+        """
+        return getattr(self.feed, "broker", None)
+
     def stop(self) -> None:
+        # Before anything else. `feed.stop()` is bounded at five seconds and the
+        # feed's own teardown detaches the broker, but "eventually" is the wrong
+        # guarantee for the ability to trade: stopping the session must leave
+        # routing unable to send by the time the call returns.
+        broker = self.broker
+        if broker is not None:
+            broker.detach("session stopped")
         if self.feed is not None:
             self.feed.stop()
         self.shadow.stop()
@@ -118,7 +145,7 @@ def _new_session(symbol: str, day: date, record: bool, signals: bool = True,
     run over the same **live tape** — so a journal with no tape behind it has
     nothing to be checked against. Hence ``record and signals``, not ``signals``.
     """
-    gen = f"{symbol}:{day.isoformat()}:{next(_counter)}"
+    gen = f"{symbol}:{day.isoformat()}:{_BOOT}-{next(_counter)}"
     session = LiveSession(symbol, day, gen)
     recorder = TickRecorder(symbol, day) if record else None
     if recorder is not None:
@@ -258,6 +285,16 @@ def _roll_to(symbol: str, day: date) -> Live | None:
             # session, its recorder and its shadow turn over.
             fresh.feed = live.feed
             live.feed = None
+            # The broker rides on the feed, so it comes across too — the socket
+            # is the same socket. What it had *staged* does not: `roll_day`
+            # opens a journal for the new day and drops any reviewed order,
+            # which was priced in the session that just ended. Note the
+            # ordering — this has
+            # to happen after the feed has moved, because `live.stop()` below
+            # reads the broker off `live.feed` and would otherwise detach the
+            # connection the fresh session is about to use.
+            if fresh.broker is not None:
+                fresh.broker.roll_day(day)
             live.stop()
         _preload(fresh)
         _current = fresh
@@ -298,7 +335,8 @@ def start(symbol: str, day: date, speed: float = 1.0,
 
 def start_rithmic(symbol: str, exchange: str = "CME", day: date | None = None,
                   backfill: bool = True, sweep_days: int | None = None,
-                  record: bool = True, signals: bool = True) -> Live:
+                  record: bool = True, signals: bool = True,
+                  routing: bool = False) -> Live:
     """Connect the **real** ticker plant and start recording.
 
     ``symbol`` must be a raw contract (``NQU6``), never a root: ``contract_for``
@@ -328,8 +366,19 @@ def start_rithmic(symbol: str, exchange: str = "CME", day: date | None = None,
     to run in rather than opened and then corrected. They obey the same rule —
     see ``check_modes``.
 
+    ``routing`` is **not** a third switch of that kind, and the asymmetry is the
+    point. Those two change what gets *written down* about a session that is
+    being watched either way; this one decides whether the connection opens
+    Rithmic's ORDER plant at all. Settled here and unchangeable afterwards, so a
+    shadow session can never grow the ability to trade under a running page — it
+    would have to be stopped and started deliberately, which is a person's
+    decision and looks like one. Refused outright unless the environment allows
+    it (``journal.live.routing.policy``), because connecting an order plant
+    that could never send is a socket opened for nothing.
+
     Raises ``LookupError`` if the Rithmic credentials are not configured, and
-    ``ValueError`` for a mode pair that would run the shelf blind.
+    ``ValueError`` for a mode pair that would run the shelf blind or a routing
+    request the environment refuses.
     """
     global _current
     from . import harvest
@@ -337,6 +386,24 @@ def start_rithmic(symbol: str, exchange: str = "CME", day: date | None = None,
 
     check_modes("rithmic", record, signals)
     creds = credentials()
+    broker = None
+    if routing:
+        from ..config import contract_spec
+        from .broker import Broker
+        from .routing import policy
+
+        pol = policy()
+        refusal = pol.refusal()
+        if refusal:
+            raise ValueError(refusal)
+        broker = Broker(symbol, exchange,
+                        day or tickmod.session_date_for(pd.Timestamp.now(tz="UTC")),
+                        pol, tick_size=float(contract_spec(symbol)["tick_size"]),
+                        point_value=float(contract_spec(symbol)["point_value"]),
+                        # Qualifies the account tags: an account id is unique
+                        # within a login, so a tag following the id alone could
+                        # label a different firm's account of the same name.
+                        system=creds.get("system_name", ""))
     day = day or tickmod.session_date_for(pd.Timestamp.now(tz="UTC"))
     with _lock:
         if _current is not None:
@@ -357,10 +424,12 @@ def start_rithmic(symbol: str, exchange: str = "CME", day: date | None = None,
                 # second one — Rithmic allows one session per login, and a sweep
                 # with its own client would log this feed straight out.
                 sweep_days=sweep_days if sweep_days is not None
-                else harvest.HARVEST_DAYS)
+                else harvest.HARVEST_DAYS,
+                broker=broker)
         else:
             _preload(live)
-            live.feed = RithmicFeed(_Router(symbol), symbol, exchange, creds=creds)
+            live.feed = RithmicFeed(_Router(symbol), symbol, exchange, creds=creds,
+                                    broker=broker)
         _current = live
     live.feed.start()
     live.shadow.start()
@@ -379,7 +448,9 @@ def resume(symbol: str | None = None) -> Live | None:
 
     Returns None when nothing has been recorded for the current session date;
     only *today's* session is resumed, because an older one is a finished day and
-    finished days are inert (decision 4).
+    a finished day has nothing left to do *here*. It is not inert — since decision
+    4 was reversed it is replayable in the Simulator — but that is a reader of the
+    store, not a session to bring back up.
 
     ``symbol`` (defaulting to ``LIVE_SYMBOL``) says which contract to pick up when
     more than one has been recorded today. Without it the choice falls to the

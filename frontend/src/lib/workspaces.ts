@@ -66,10 +66,9 @@ export const WORKSPACES: Workspace[] = [
     label: "Charts",
     filterBar: false,
     chrome: false,
-    // Replay leads because switching workspace lands on tabs[0], and Live is
-    // still a stub — a workspace whose front door says "not built yet" is worse
-    // than one that opens on the working chart. Swap the order once Live has a
-    // feed behind it.
+    // Replay leads because switching workspace lands on tabs[0]. Live is a full
+    // chart now, so this is a choice, not a necessity: Replay is the page you
+    // can open at any hour, Live is only alive while the feed is.
     tabs: [
       { to: "/charts/replay", label: "Replay" },
       { to: "/charts/live", label: "Live" },

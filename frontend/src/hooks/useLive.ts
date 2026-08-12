@@ -1,11 +1,12 @@
 // Reading a session that is still happening.
 //
 // Three of the four reads are ordinary polls and go through react-query. The
-// tape is not: one poll's payload is thousands of JS numbers that exist only to
-// be prefix-summed into typed arrays and thrown away, and holding them in a query
-// cache would keep every block of the day alive alongside the tape they were
-// already folded into. Same reasoning as `useSimulatorHistory` — decode and drop
-// is the whole point, so the tape poll is a hand-rolled loop.
+// tape is not — twice over. Its payloads are thousands of JS numbers that exist
+// only to be prefix-summed into typed arrays and thrown away, so a query cache
+// would keep every block of the day alive alongside the tape they were already
+// folded into. And it does not poll at all: the server pushes blocks over SSE
+// the moment ticks land (`/live/tape/stream`), so the chart moves on the
+// market's own rhythm instead of a timer's.
 
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -20,11 +21,6 @@ import type {
 } from "../lib/liveTypes";
 import type { Tape } from "../lib/replayEngine";
 
-/** How often the tape is asked for what has arrived. Fast enough that the chart
- *  moves like a feed, slow enough that a session is a few thousand requests and
- *  not a few hundred thousand. The chart's own clock comes from the last print
- *  received, so a slower poll shows as a slightly staler chart, never a wrong one. */
-const TAPE_POLL_MS = 500;
 /** The signal cadence is server-side (a bar close, floored at ~5s), so asking
  *  much faster than that only re-reads an unchanged answer. */
 const SIGNAL_POLL_MS = 3000;
@@ -127,8 +123,13 @@ export function startRithmicFeed(params: {
   backfill?: boolean;
   record?: boolean;
   signals?: boolean;
+  /** Also open the ORDER and PnL plants. Unlike `record` and `signals` this is
+   *  not a mode: one Rithmic login is one socket, so the order path rides this
+   *  connection and the plants are chosen once, here. A session started without
+   *  it cannot acquire the ability to trade later. */
+  routing?: boolean;
 }) {
-  return apiSend<{ gen: string; recording: boolean; signals: boolean }>(
+  return apiSend<{ gen: string; recording: boolean; signals: boolean; routing: boolean }>(
     "POST",
     `/live/feed/rithmic?${toQuery(params)}`,
   );
@@ -166,22 +167,33 @@ export interface LiveTapeState {
 }
 
 /**
- * Keep a growing tape fed from `/live/tape`.
+ * Keep a growing tape fed from `/live/tape/stream`.
+ *
+ * Server-sent events, not a poll: the server holds the connection and pushes a
+ * block the moment ticks land, so blocks arrive on the market's own irregular
+ * rhythm — the thing a fixed poll grid cannot fake, however fine. Each `data:`
+ * payload is byte-for-byte a `/live/tape` response, so the decode path is
+ * unchanged.
+ *
+ * The cursor lives on the server. Every event carries `id: {gen}|{next}`, and
+ * on a drop the browser reconnects with that id in `Last-Event-ID` — which the
+ * server honours over the URL's stale `since` — so a blip costs latency, never
+ * a tick, same as the poll's contract. A `reset` block answers a gen the
+ * server no longer recognises; `event: gone` says the live state itself is
+ * over, and the stream closes for good (the status poll is what tears the page
+ * down, as it always was).
  *
  * `onReset` fires with a brand-new tape whenever the session underneath changes
  * — a restart, a different day — because the row indices the caller was holding
  * describe a tape that no longer exists. `onAppend` fires after every block that
  * carried rows, which is the cue to advance the chart.
  *
- * Polling is a `setTimeout` chain rather than `setInterval`: a slow reply must
- * delay the next request, not stack a second one behind it.
- *
  * `context` is the prior days drawn to the left, seeded in front of row zero
  * (see `createGrowableTape`). It is read **only when a tape is created**, which
  * is the point: tick indices have to be stable for the life of the session, so
  * context is a precondition of starting rather than something spliced in later.
- * `contextKey` is what the loop restarts on — an array identity changes every
- * render and would tear the poll down with it.
+ * `contextKey` is what the stream restarts on — an array identity changes every
+ * render and would tear the connection down with it.
  */
 export function useLiveTape(opts: {
   enabled: boolean;
@@ -204,43 +216,46 @@ export function useLiveTape(opts: {
 
   useEffect(() => {
     if (!enabled || !gen) return;
-    let cancelled = false;
-    let timer: number | undefined;
     let tape: GrowableTape | null = null;
-    let cursor = 0;
 
-    const tick = async () => {
-      try {
-        const block = await apiGet<TapeBlock>("/live/tape", { since: cursor, gen, tz });
-        if (cancelled) return;
-        if (!tape || block.reset) {
-          tape = createGrowableTape(tickSize, pointValue, cb.current.context ?? []);
-          cursor = 0;
-          cb.current.onReset(tape);
-        }
-        if (block.n > 0) {
-          tape.append(block);
-          // Advance on `next`, never on `rows`: the tape kept growing while the
-          // request was being served, so `rows` is ahead of the block and using
-          // it as the cursor would skip every tick in between.
-          cursor = block.next;
-          cb.current.onAppend(tape, block.n);
-        }
-        setState({ rows: block.rows, closed: block.closed, error: null });
-      } catch (e) {
-        if (cancelled) return;
-        // A failed poll is not a failed session: the next one asks from the same
-        // cursor, so a blip costs latency and never a tick.
-        setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e) }));
+    const qs = toQuery({ since: 0, gen, tz });
+    const es = new EventSource(`/api/live/tape/stream?${qs}`);
+
+    es.onmessage = (ev) => {
+      const block = JSON.parse(ev.data) as TapeBlock;
+      if (!tape || block.reset) {
+        tape = createGrowableTape(tickSize, pointValue, cb.current.context ?? []);
+        cb.current.onReset(tape);
       }
-      if (!cancelled) timer = window.setTimeout(tick, TAPE_POLL_MS);
+      if (block.n > 0) {
+        tape.append(block);
+        cb.current.onAppend(tape, block.n);
+      }
+      // Also what clears a reconnect's error: the stream is speaking again.
+      setState({ rows: block.rows, closed: block.closed, error: null });
     };
-    void tick();
 
-    return () => {
-      cancelled = true;
-      if (timer != null) window.clearTimeout(timer);
+    es.addEventListener("gone", () => {
+      // The live state is over, said out loud. Close for good — reconnecting
+      // would only collect another `gone` — and let the status poll tear the
+      // page down the way it always has.
+      es.close();
+    });
+
+    es.onerror = () => {
+      // EventSource reconnects on its own, resuming via `Last-Event-ID` — so
+      // an error is information, not a task. CLOSED is the one terminal state
+      // (a non-200 or wrong content-type: deployment breakage, not a blip).
+      setState((s) => ({
+        ...s,
+        error:
+          es.readyState === EventSource.CLOSED
+            ? "tape stream closed"
+            : "tape stream reconnecting…",
+      }));
     };
+
+    return () => es.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, gen, tz, tickSize, pointValue, contextKey]);
 

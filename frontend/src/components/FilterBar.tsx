@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useFilters } from "../hooks/useFilters";
 import { useFiltersData } from "../hooks/useMeta";
 
@@ -11,7 +12,15 @@ const MODE_LABELS: Record<string, string> = {
 // Top filter bar — mirrors the bordered container in app.py: view radio, session
 // mode, instrument multiselect, date range, model + tag multiselects, archive
 // toggle. All state is in the URL.
+//
+// Nine fields is a comfortable two rows on a desktop and the entire first screen
+// of a phone, so on a narrow viewport the bar collapses to a single summary line
+// (see the Journal mobile block in index.css). The toggle is rendered
+// unconditionally and hidden off-mobile, and the `collapsed` class only means
+// anything inside that media query — so the desktop bar is untouched by this and
+// there is no width-watching state to keep in sync with the stylesheet.
 export function FilterBar() {
+  const [open, setOpen] = useState(false);
   const {
     scope, setView, setInstruments, setAccounts, setDates, setTags,
     setMode, setModels, setIncludeArchived,
@@ -27,9 +36,36 @@ export function FilterBar() {
   const multi = (e: React.ChangeEvent<HTMLSelectElement>): string[] =>
     Array.from(e.target.selectedOptions, (o) => o.value);
 
+  // What the collapsed bar says it is doing. Only the scope-narrowing choices
+  // earn a word: an empty multiselect means "everything", which is the default
+  // and not worth a chip. The two that are always set (view + session mode) lead,
+  // because they are the two that change what the numbers below actually mean.
+  const summary = [
+    MODE_LABELS[scope.mode] ?? scope.mode,
+    scope.view === "logical" ? "Logical" : "ATAS rows",
+    scope.instruments.length ? `${scope.instruments.length} instr` : null,
+    scope.accounts.length ? `${scope.accounts.length} acct` : null,
+    scope.models.length ? `${scope.models.length} model` : null,
+    scope.tags.length ? `${scope.tags.length} tag` : null,
+    scope.includeArchived ? "archived" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
-    <div className="filter-bar">
-      <div className="field">
+    <div className={`filter-bar${open ? "" : " collapsed"}`}>
+      <button
+        type="button"
+        className="filter-bar-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span>{open ? "▾" : "▸"} Filters</span>
+        <span className="filter-bar-summary">{summary}</span>
+      </button>
+      {/* field-wide: a button group, not a control — half a phone's width wraps
+          these into two ragged rows that read as two separate pickers. */}
+      <div className="field field-wide">
         <label>Trade view</label>
         <div className="radio-group">
           <button
@@ -49,7 +85,7 @@ export function FilterBar() {
 
       {/* Single-select on purpose: live is real money, replay and backtest are
           practice, and one number over all three means nothing. */}
-      <div className="field">
+      <div className="field field-wide">
         <label>Session</label>
         <div className="radio-group">
           {modes.map((m) => (

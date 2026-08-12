@@ -49,7 +49,9 @@ export function EdgeTable<T extends EdgeRow>({
     <div className="panel">
       <div className="section-cap">{title}</div>
       {data && data.length > 0 ? (
-        <DataTable data={data} columns={columns ?? (edgeColumns as ColumnDef<T, any>[])} />
+        <div className="table-scroll-x">
+          <DataTable data={data} columns={columns ?? (edgeColumns as ColumnDef<T, any>[])} />
+        </div>
       ) : (
         <div className="muted">No data.</div>
       )}

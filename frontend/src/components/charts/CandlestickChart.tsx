@@ -11,7 +11,17 @@ import {
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
-import { emaPalette, ibPalette, palette, profilePalette, regimePalette, vwapPalette } from "../../theme";
+import {
+  candleSchemes,
+  chartSurfaces,
+  emaPalette,
+  ibPalette,
+  palette,
+  profilePalette,
+  regimePalette,
+  vwapPalette,
+} from "../../theme";
+import { applyAppearance, appearanceSettings, recolorVolume, volumeColors } from "./chartAppearance";
 import { TradeRectanglePrimitive } from "./TradeRectanglePrimitive";
 import { RulerPrimitive } from "./RulerPrimitive";
 import { MarkerPrimitive } from "./MarkerPrimitive";
@@ -21,10 +31,13 @@ import { VolumeProfilePrimitive } from "./VolumeProfilePrimitive";
 import { RangeProfilePrimitive } from "./RangeProfilePrimitive";
 import { InteractionPrimitive } from "./InteractionPrimitive";
 import { IndicatorLegend, type IndicatorKey, type LegendItem } from "./IndicatorLegend";
-import { ChartToolButton } from "./ChartToolButton";
+import { ChartToolButton, ChartToolSep } from "./ChartToolButton";
 import {
+  loadChartAppearance,
   loadIndicatorVisibility,
+  saveChartAppearance,
   saveIndicatorVisibility,
+  type ChartAppearance,
   type IndicatorVisibility,
 } from "../../lib/chartPrefs";
 import {
@@ -168,8 +181,7 @@ type DragMode = "new" | "left" | "right" | "move";
 /** How close (px) the pointer must be to an edge to grab it rather than the body. */
 const HANDLE_PX = 6;
 
-const VOL_UP = "rgba(33,192,122,0.5)";
-const VOL_DOWN = "rgba(245,69,95,0.5)";
+// (Volume bar colours follow the candle scheme — see chartAppearance.volumeColors.)
 
 // --- `focusOnTrade` framing (the by-trade view's default zoom) ---
 // A fixed window centred on the trade: FOCUS_BARS wide and FOCUS_TICKS tall. If
@@ -301,6 +313,21 @@ export function CandlestickChart({
   };
   const revealRef = useRef(reveal);
   revealRef.current = reveal;
+
+  // The chart's own colours — same sticky-global shape as the toggles above, and
+  // the same rule about the build effect: recolouring goes through applyOptions
+  // (see the effect below), never through a rebuild, so it can't cost you your
+  // zoom. The ref is what the build effect reads, so a chart rebuilt for some
+  // other reason comes back in the colours you last chose.
+  const [appearance, setAppearance] = useState<ChartAppearance>(loadChartAppearance);
+  const appearanceRef = useRef(appearance);
+  appearanceRef.current = appearance;
+  const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const changeAppearance = (next: ChartAppearance) => {
+    setAppearance(next);
+    saveChartAppearance(next);
+  };
 
   // Fixed-range profile tool. `armed` = waiting for the drag that defines a new
   // profile; `ranges` are the ones already on the chart, any of which can be
@@ -436,12 +463,16 @@ export function CandlestickChart({
     // Handle for the debug-readout animation loop (focusOnTrade + debugZoom only),
     // cancelled on teardown.
     let debugRaf = 0;
+    // Read, not subscribed to: appearance is applied live by its own effect
+    // below, and a rebuild here would throw away zoom and scroll.
+    const surf = chartSurfaces[appearanceRef.current.surface];
+    const sch = candleSchemes[appearanceRef.current.candles];
     const chart: IChartApi = createChart(ref.current, {
       width: ref.current.clientWidth,
       height,
       layout: {
-        background: { type: ColorType.Solid, color: palette.bg },
-        textColor: palette.text,
+        background: { type: ColorType.Solid, color: surf.bg },
+        textColor: surf.text,
         fontFamily: "Inter, sans-serif",
         // Axis labels are smaller than the default 12px so the right price scale
         // (a wide 5-digit NQ price + ".25") takes a narrower gutter — the scale
@@ -449,22 +480,23 @@ export function CandlestickChart({
         fontSize: 9,
       },
       grid: {
-        vertLines: { color: palette.grid },
-        horzLines: { color: palette.grid },
+        vertLines: { color: surf.grid },
+        horzLines: { color: surf.grid },
       },
-      rightPriceScale: { borderColor: palette.grid },
-      timeScale: { borderColor: palette.grid, timeVisible: true, secondsVisible: false },
+      rightPriceScale: { borderColor: surf.grid },
+      timeScale: { borderColor: surf.grid, timeVisible: true, secondsVisible: false },
       crosshair: { mode: CrosshairMode.Normal },
     });
     chartApiRef.current = chart;
 
     const candle = chart.addSeries(CandlestickSeries, {
-      upColor: palette.green,
-      downColor: palette.red,
-      wickUpColor: palette.green,
-      wickDownColor: palette.red,
+      upColor: sch.up,
+      downColor: sch.down,
+      wickUpColor: sch.up,
+      wickDownColor: sch.down,
       borderVisible: false,
     });
+    candleRef.current = candle;
     candle.setData(
       bars.map((b) => ({
         time: b.time as Time,
@@ -528,12 +560,14 @@ export function CandlestickChart({
       priceFormat: { type: "volume" },
       priceScaleId: "",
     });
+    volumeRef.current = volume;
     volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    const volc = volumeColors(appearanceRef.current);
     volume.setData(
       bars.map((b) => ({
         time: b.time as Time,
         value: b.volume,
-        color: b.close >= b.open ? VOL_UP : VOL_DOWN,
+        color: b.close >= b.open ? volc.up : volc.down,
       })),
     );
 
@@ -1558,6 +1592,8 @@ export function CandlestickChart({
     return () => {
       if (debugRaf) cancelAnimationFrame(debugRaf);
       chartApiRef.current = null;
+      candleRef.current = null;
+      volumeRef.current = null;
       applyRef.current = null;
       armApplyRef.current = null;
       rulerApplyRef.current = null;
@@ -1603,6 +1639,14 @@ export function CandlestickChart({
     pointValue,
     height,
   ]);
+
+  // Recolour in place. Declared after the build effect so that on mount it runs
+  // with the refs already set — and on a colour change it is the only effect
+  // that runs at all, which is the whole point: the chart keeps its range.
+  useEffect(() => {
+    applyAppearance(chartApiRef.current, candleRef.current, appearance);
+    recolorVolume(candleRef.current, volumeRef.current, appearance);
+  }, [appearance]);
 
   // Re-frame on a new selected day without rebuilding: when the tape spans many
   // sessions and only the focus span changes (same bars), scroll to it in place
@@ -1736,9 +1780,13 @@ export function CandlestickChart({
               : "Anchored VWAP — click any bar to draw a VWAP + ±1σ/±2σ bands from that point forward. σ is bar-derived (not tick-exact). Click again to re-anchor."
           }
         />
+        {/* Below the hairline: the tools that take things away. They come and go
+            with what is on the chart, so they live at the foot of the rail where
+            appearing doesn't move anything above them. */}
+        {(avwapAnchor != null || selected != null || ranges.length > 1) && <ChartToolSep />}
         {avwapAnchor != null && (
           <ChartToolButton
-            icon="⚓✕"
+            icon={<span className="chart-tool-pair">⚓✕</span>}
             label="Clear VWAP"
             onClick={clearAvwap}
             title="Remove the anchored VWAP"
@@ -1768,7 +1816,8 @@ export function CandlestickChart({
           style={{
             position: "absolute",
             top: 8,
-            left: 8,
+            // Clear of the tool rail, same gutter the legend uses.
+            left: "calc(14px + var(--chart-rail, 36px))",
             zIndex: 10,
             pointerEvents: "none",
             background: palette.card,
@@ -1798,7 +1847,12 @@ export function CandlestickChart({
           boxShadow: "0 4px 16px rgba(0,0,0,0.45)",
         }}
       />
-      <IndicatorLegend items={legendItems} visibility={vis} onToggle={toggle} />
+      <IndicatorLegend
+        items={legendItems}
+        visibility={vis}
+        onToggle={toggle}
+        appearance={appearanceSettings(appearance, changeAppearance)}
+      />
     </div>
   );
 }

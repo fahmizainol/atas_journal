@@ -95,6 +95,10 @@ function FieldRow({
             value={value as number}
             min={field.min}
             max={field.max}
+            // Same rule as the plain numeric branch below: a float knob left on
+            // the default step of 1 reads its own value back as invalid (the
+            // daily loss stop is $1995.01; the ATR trail multiplier is 0.05).
+            step={field.type === "int" ? 1 : "any"}
             disabled={!enabled}
             onChange={(e) => onChange(field.name, e.target.valueAsNumber)}
           />

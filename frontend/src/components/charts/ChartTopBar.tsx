@@ -2,6 +2,14 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { NavMenu } from "../NavMenu";
 import { CHARTS } from "../../lib/workspaces";
+import {
+  armAudio,
+  previewCue,
+  setSoundOn,
+  setSoundPack,
+  soundOn,
+  soundPack,
+} from "../../lib/orderSound";
 
 /** Is native fullscreen actually available for a plain element?
  *
@@ -12,6 +20,21 @@ const CAN_FULLSCREEN =
   typeof document !== "undefined" &&
   document.fullscreenEnabled === true &&
   typeof document.documentElement.requestFullscreen === "function";
+
+/** What the order cues are set to: silent, the platform tones, or the spoken
+ *  pack. The mute state and the pack choice as one setting, because that is how
+ *  the button presents them. */
+type CueMode = "off" | "tones" | "voice";
+
+// Off first, so the cycle starts by turning something on rather than by
+// silencing it, and quiet-to-loud after that.
+const NEXT_CUE: Record<CueMode, CueMode> = { off: "tones", tones: "voice", voice: "off" };
+const CUE_ICON: Record<CueMode, string> = { off: "🔇", tones: "🔊", voice: "🗣" };
+const CUE_LABEL: Record<CueMode, string> = {
+  off: "off",
+  tones: "tones",
+  voice: "spoken",
+};
 
 export type ChartTopBarProps = {
   /** What session this is. A node rather than a string because blind replay
@@ -54,6 +77,20 @@ export type ChartTopBarProps = {
 export function ChartTopBar({ title, onTitle, titleOpen, children, right }: ChartTopBarProps) {
   const { search } = useLocation();
   const [isFull, setIsFull] = useState(false);
+  // The sound switch lives here rather than on either page's setup panel for the
+  // same reason the fullscreen button does: both chart pages make the same
+  // noises, and a setting that has to be found twice gets set twice differently.
+  //
+  // One button, three states, because they are three points on one scale — how
+  // much the app says out loud — rather than two independent settings. A mute
+  // checkbox plus a pack dropdown would be two controls on a 36px bar to express
+  // a choice you make by pressing until it sounds right, which is what the cycle
+  // lets you do: every press plays the setting it just landed on.
+  const [cue, setCue] = useState<CueMode>(() => (soundOn() ? soundPack() : "off"));
+
+  // Audio cannot start outside a user gesture, and a fill is not one — so the
+  // bar that is always on screen is what arms it (see lib/orderSound).
+  useEffect(armAudio, []);
 
   useEffect(() => {
     if (!CAN_FULLSCREEN) return;
@@ -106,6 +143,24 @@ export function ChartTopBar({ title, onTitle, titleOpen, children, right }: Char
             </NavLink>
           ))}
         </nav>
+        <button
+          type="button"
+          className={`chart-topbar-btn${cue === "off" ? "" : " on"}`}
+          onClick={() => {
+            const next = NEXT_CUE[cue];
+            setCue(next);
+            setSoundOn(next !== "off");
+            if (next !== "off") setSoundPack(next);
+            // Hear what you just chose. Pressed through to "off" this is silent,
+            // which is its own answer.
+            previewCue();
+          }}
+          aria-pressed={cue !== "off"}
+          aria-label={`Order sounds: ${CUE_LABEL[cue]}`}
+          title={`Order sounds: ${CUE_LABEL[cue]} — click for ${CUE_LABEL[NEXT_CUE[cue]]}`}
+        >
+          {CUE_ICON[cue]}
+        </button>
         {CAN_FULLSCREEN && (
           <button
             type="button"

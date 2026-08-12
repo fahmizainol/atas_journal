@@ -118,3 +118,10 @@ export const fmtR = (r: number | null): string =>
  *  the UTC fields of a Date built from one *are* that wall clock. */
 export const fmtClock = (ms: number): string =>
   Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString().slice(11, 19) : "—";
+/** A short duration, m:ss — what the bar-close countdown reads in. Floors the
+ *  seconds so the display counts …3, 2, 1, 0 and never shows the next bar's
+ *  full span a frame early. */
+export const fmtCountdown = (ms: number): string => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};

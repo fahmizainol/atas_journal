@@ -41,6 +41,7 @@ from . import confluences as confmod
 from . import profile as profmod
 from . import regime as regmod
 from . import ticks as tickmod
+from . import vol_regime as volmod
 from . import vwap as vwapmod
 from . import weekly as weeklymod
 from .rules import SimConfig
@@ -370,6 +371,19 @@ def run_session(
     # grid — see _trail). A 0 step means "one click per trail distance"; a 0
     # breakeven offset puts the first click on the entry itself.
     trail_dist_t = cfg.trail_stop_ticks
+    # ATR-scaled distance: one read at the session's open (the daily ATR through
+    # the PRIOR session — the day never sees its own range), so the trail is set
+    # by the volatility the trade was entered into and then holds still. Read only
+    # when both knobs are on, and only ever as a replacement for the distance —
+    # trail_stop_ticks stays the master switch and the fallback for a session the
+    # ATR can't be read for, so an unlabelled day trails at the fixed distance
+    # rather than dropping the rule without saying so. The step is resolved AFTER
+    # this, so a 0 step follows the ATR distance instead of the fixed one.
+    trail_atr_mult = float(getattr(cfg, "trail_atr_mult", 0.0) or 0.0)
+    if trail_dist_t and trail_atr_mult:
+        atr_pts = volmod.session_atr(cfg.contract, day)
+        if atr_pts is not None:
+            trail_dist_t = max(1, round(trail_atr_mult * atr_pts / tick))
     trail_step_t = cfg.trail_step_ticks or trail_dist_t
     trail_be_t = cfg.trail_breakeven_ticks
     # A breakeven stop, not a trail: the first click is the only one.

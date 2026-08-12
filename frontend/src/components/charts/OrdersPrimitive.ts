@@ -35,6 +35,12 @@ export interface WorkingOrderView {
    *  is drawn for them: a sketched-in stop that isn't coming is the chart
    *  making a promise the simulation won't keep. */
   inert?: boolean;
+  /** What this order's contract is worth, when that is **not** the contract the
+   *  tape is on — same story as `PositionLine.pointValue`, and for the same
+   *  reason: the leg chips are dollars, and live routing can be pointed at the
+   *  mini's micro while the chart stays on the mini. Omitted on paper, which
+   *  trades the tape's own contract by construction. */
+  pointValue?: number;
 }
 
 export type OrderLeg = "price" | "stop" | "target" | "cancel";
@@ -74,11 +80,19 @@ const inside = (r: Rect, x: number, y: number) =>
 const decimalsOf = (tick: number): number =>
   !tick || tick >= 1 ? 2 : Math.min(6, Math.ceil(-Math.log10(tick)));
 
+/** Same shape the position chips print money in — see PositionPrimitive. */
+const fmtUsd = (v: number): string =>
+  `${v < 0 ? "−" : "+"}$${Math.abs(v).toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  })}`;
+
 interface Ctx {
   series: ISeriesApi<"Candlestick">;
   orders: () => WorkingOrderView[];
   mark: () => number;
   tickSize: () => number;
+  pointValue: () => number;
   hover: () => OrderHit | null;
   setLayout: (l: Layout | null) => void;
 }
@@ -98,6 +112,7 @@ class Renderer {
       const W = scope.mediaSize.width;
       const hover = this.c.hover();
       const mark = this.c.mark();
+      const tapePv = this.c.pointValue();
 
       // No prices in the chips, as on the position overlay: every level drawn
       // here carries its own price-axis label, and printing it twice only makes
@@ -171,6 +186,16 @@ class Renderer {
       for (const o of orders) {
         const yL = series.priceToCoordinate(o.price);
         if (yL == null) continue;
+        // What each leg is worth if this order fills where it rests — the same
+        // money the position chips print, one step earlier. Prospective, so it
+        // is measured off the resting price rather than a fill: a stop entry
+        // that gaps through its trigger carries its legs with it, and the chip
+        // will say so once the fill exists. Silent when nothing has told us what
+        // a point is worth — a bracket priced at a guessed multiplier is worse
+        // than a bare "SL".
+        const pv = (o.pointValue ?? tapePv) * o.size;
+        const riskPts = o.stop != null ? Math.abs(o.price - o.stop) : null;
+
         // The attached bracket first, so the resting price draws over it.
         const leg = (price: number | null, color: string, label: string, key: OrderLeg) => {
           if (price == null) return;
@@ -178,7 +203,17 @@ class Renderer {
           if (y == null) return;
           const h: OrderHit = { id: o.id, leg: key };
           line(y, color, [2, 3], h);
-          const rect = chip(y, [{ text: label, color }], color, null);
+          const pts = Math.abs(price - o.price);
+          const segs = [{ text: label, color }];
+          if (pv > 0) {
+            // R rides on the target only, and only when there is a stop to be
+            // one of: it is the ratio between the two legs, so printing it on
+            // the stop would just say 1R at every price.
+            const r = key === "target" && riskPts ? pts / riskPts : null;
+            const money = fmtUsd(key === "stop" ? -pts * pv : pts * pv);
+            segs.push({ text: `${money}${r != null ? ` · ${r.toFixed(1)}R` : ""}`, color });
+          }
+          const rect = chip(y, segs, color, null);
           chips.push({ hit: h, rect });
         };
         if (!o.inert) {
@@ -281,12 +316,16 @@ export class OrdersPrimitive {
   private _orders: WorkingOrderView[] = [];
   private _mark = NaN;
   private _tick = 0.25;
+  /** $/point of the tape's contract; 0 until a session says. See the leg chips:
+   *  unknown means the money is left off rather than guessed at. */
+  private _pv = 0;
   private _hover: OrderHit | null = null;
   private _layout: Layout | null = null;
 
-  setOrders(orders: WorkingOrderView[], tickSize?: number) {
+  setOrders(orders: WorkingOrderView[], tickSize?: number, pointValue?: number) {
     this._orders = orders;
     if (tickSize) this._tick = tickSize;
+    if (pointValue) this._pv = pointValue;
     if (!orders.length) this._layout = null;
     // The library caches axis views on the array's identity, so only rebuild it
     // when the *set* of orders changes — a drag re-publishes prices constantly
@@ -319,6 +358,10 @@ export class OrdersPrimitive {
     return this._tick;
   }
 
+  pointValue(): number {
+    return this._pv;
+  }
+
   /** Called from the chart's pointer handlers — highlights the grabbed leg. */
   setHover(h: OrderHit | null) {
     const a = this._hover;
@@ -344,6 +387,7 @@ export class OrdersPrimitive {
       orders: () => this._orders,
       mark: () => this._mark,
       tickSize: () => this._tick,
+      pointValue: () => this._pv,
       hover: () => this._hover,
       setLayout: (l) => {
         this._layout = l;

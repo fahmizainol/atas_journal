@@ -24,8 +24,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ReplayChart, type ReplayChartHandle } from "../components/charts/ReplayChart";
 import type { IndicatorSettingsMap } from "../components/charts/IndicatorLegend";
-import type { SettingField } from "../components/charts/IndicatorSettings";
+import { buildChartKnobs } from "../components/charts/indicatorKnobs";
+import type { ModernVwapParams } from "../lib/modernVwap";
 import { SimIndicators } from "../components/charts/SimIndicators";
+import { QuickDock } from "../components/charts/QuickDock";
 import { TimeframeControl } from "../components/charts/TimeframeControl";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
@@ -34,6 +36,7 @@ import {
   useSimulatorHistory,
   useSimulatorSession,
   type HistDay,
+  type SimDay,
 } from "../hooks/useSimulator";
 import { useReplayAttempt } from "../hooks/useReplayAttempt";
 import { useReplayAttemptDetail, type AttemptDetail } from "../hooks/useReplays";
@@ -42,6 +45,7 @@ import {
   concatTapes,
   ReplayEngine,
   decodeTape,
+  type EventTuning,
   type IbBox,
   type RangeBox,
   type SessionPayload,
@@ -67,6 +71,7 @@ import {
 } from "../lib/replaySim";
 import {
   fmtClock,
+  fmtCountdown,
   fmtPts,
   fmtR,
   fmtUsd,
@@ -77,19 +82,74 @@ import {
   type BarAt,
 } from "../lib/simViews";
 import {
-  BIG_LOT_OPTIONS,
   DEFAULT_SIM_PREFS,
-  EVENT_STRENGTH_OPTIONS,
   HISTORY_DAY_OPTIONS,
   loadSimPrefs,
-  NODE_PROM_OPTIONS,
   saveSimPrefs,
+  clampSplit,
   SIM_SPEEDS,
 } from "../lib/simPrefs";
-import type { CompositeRule, CompositeSpan } from "../lib/compositeProfile";
 import type { TapeRange } from "../lib/volumeProfile";
 import { MIN_SAMPLE, SIM_ENGINE_VERSION } from "../lib/replayStats";
+import {
+  DEFAULT_FILL_MODEL,
+  isPerfect,
+  loadFillModel,
+  PERFECT_FILLS,
+  saveFillModel,
+  type FillCfg,
+} from "../lib/fillModel";
+import { FillCues, playCue, simMark } from "../lib/orderSound";
+import { dayRead, VERDICT_LINE, type DayRead, type DayVerdict } from "../lib/dayRead";
+import {
+  DEFAULT_GUARDS,
+  dayRefusal,
+  dayState,
+  equityStop,
+  isReducing,
+  shapeRefusal,
+} from "../lib/guardRules";
+import { useGuardLevels } from "../hooks/useRouting";
+import type { GuardLevels } from "../lib/routingTypes";
 import { palette } from "../theme";
+
+/**
+ * How often the context pane may repaint while the replay plays, in ms.
+ *
+ * Bar close alone is not enough, and shipping it that way was wrong: a 5m pane
+ * closes a bar every five minutes of session time, so at 1× speed the pane sat
+ * frozen for five real minutes at a stretch. Nothing was broken — a seek moved
+ * it, because a seek re-snapshots — but a chart whose last price never moves
+ * reads as a dead chart, and being told "that is the gate working" is no comfort
+ * while you are watching it.
+ *
+ * So: bar close *or* this, whichever comes first. At 200ms the pane redraws ~5
+ * times a second against the trading pane's 60, which is 8% of a pane's draw
+ * cost — still inside the noise the split was measured at — and the forming bar
+ * visibly moves, which is the whole reason to have the pane up.
+ */
+const PANE_DRAW_MS = 200;
+
+/** The caveats on a replayable day, as one suffix on its picker entry.
+ *
+ *  An `<option>` is text and nothing else, so these cannot be badges — and they
+ *  are better as text anyway. Every one of them is a way the tape is not the
+ *  ordinary bell-to-bell session with a whole night behind it, which is a thing
+ *  to read *before* choosing rather than discover at the open.
+ *
+ *  `rithmic` is not a warning. It says the day came from the live recordings
+ *  instead of the Databento corpus, which is what every session after
+ *  2026-06-30 is — the corpus is pinned at the data budget. The tape is real
+ *  either way; the label is there because the two stores are stamped by
+ *  different clocks (~287µs apart, far below a bar) and because a recorded day
+ *  is the one kind that can have been backfilled short. */
+function dayNotes(d: SimDay): string {
+  const notes: string[] = [];
+  if (d.source === "live") notes.push("rithmic");
+  if (!d.has_overnight) notes.push("no overnight");
+  if (d.ends_early) notes.push("ends early");
+  return notes.length ? ` (${notes.join(", ")})` : "";
+}
 
 /** How far the ticket has to be dragged down before letting go puts it away. */
 const GRAB_DISMISS_PX = 64;
@@ -124,6 +184,9 @@ export function Simulator() {
   // Read once, on mount: everything below seeds from it, and from then on the
   // React state is the truth and the store just trails it.
   const [prefs] = useState(loadSimPrefs);
+  // What a fill costs, and it is not a Simulator setting — Live runs the same
+  // engine and reads the same model (see lib/fillModel).
+  const [fills, setFills] = useState(loadFillModel);
   const [root, setRoot] = useState<string>(prefs.root);
   const daysQ = useSimulatorDays(root);
   const [sel, setSel] = useState<{ symbol: string; date: string } | null>(null);
@@ -174,7 +237,28 @@ export function Simulator() {
   const [composite, setComposite] = useState(prefs.composite);
   const [compositeSpan, setCompositeSpan] = useState(prefs.compositeSpan);
   const [nodeProm, setNodeProm] = useState(prefs.nodeProm);
-  const [eventStrength, setEventStrength] = useState(prefs.eventStrength);
+  // Modern VWAP's parameters. One object, patched rather than replaced, because
+  // the indicator takes them as one and half the knobs are only meaningful
+  // beside another (a pivot length without a swing anchor, an occupancy floor
+  // without its window).
+  const [mvParams, setMvParams] = useState(prefs.modernVwap);
+  const patchMv = useCallback(
+    (patch: Partial<ModernVwapParams>) => setMvParams((p) => ({ ...p, ...patch })),
+    [],
+  );
+  // The tape events, in two halves: what selects them (ten knobs the engine
+  // detects by, so a change re-derives the tape) and how they draw (three that
+  // are a repaint). Kept apart because the cost is different and the panels say
+  // so — nothing on a chart should quietly rebuild a million ticks.
+  const [evTuning, setEvTuning] = useState(prefs.eventTuning);
+  // Mirrored for the session loader, which builds the engine and deliberately
+  // doesn't re-run on anything but a new tape — the same reason the timeframe and
+  // the big-trade threshold are mirrored.
+  const evTuningRef = useRef(evTuning);
+  evTuningRef.current = evTuning;
+  const [evLabelSt, setEvLabelSt] = useState(prefs.eventLabelSt);
+  const [evFill, setEvFill] = useState(prefs.eventFill);
+  const [evMarginal, setEvMarginal] = useState(prefs.eventMarginal);
   // The day-scale indicator strip over the chart's foot (see SimIndicators): the
   // IB-width chip and the range-budget gauge. A reading choice like the bar size
   // and the big-trade threshold — it cannot move the clock or fill an order.
@@ -279,6 +363,11 @@ export function Simulator() {
   const simRef = useRef<SimState>(newSim());
   const sigRef = useRef("");
   const openRef = useRef<Position | null>(null);
+  // What the blotter looked like last time it was published, so a fill can be
+  // heard as the difference. Re-synced — and so adopted in silence — by every
+  // path that re-derives a *different* sitting rather than advancing this one: a
+  // resume, a seek, a session swap. See lib/orderSound: that is the whole rule.
+  const cuesRef = useRef(new FillCues());
 
   /** Note where the replay currently stands, for the next visit.
    *
@@ -330,6 +419,10 @@ export function Simulator() {
   // it cannot have changed the day's range).
   const geoRef = useRef<{ ib: IbBox | null; range: RangeBox | null }>({ ib: null, range: null });
   const [trades, setTrades] = useState<SimState["trades"]>([]);
+  // Why the last gesture was refused, if it was. Transient — it clears itself,
+  // because it is a reply to something you just did rather than a state of the
+  // page.
+  const [refused, setRefused] = useState<string | null>(null);
   const [openPos, setOpenPos] = useState<Position | null>(null);
   const [working, setWorking] = useState<WorkingOrderView[]>([]);
   const [size, setSize] = useState(prefs.size);
@@ -378,6 +471,12 @@ export function Simulator() {
     startTime,
     blind,
     timeframe: tfId,
+    // What the fills were charged. Stamped with the ticket because it is the
+    // other half of the same question: a net figure only means something
+    // alongside the rules that priced it.
+    commission: fills.commission,
+    slipTicks: fills.slipTicks,
+    queueTicks: fills.queueTicks,
   };
   // Whether the tape running out has already closed this attempt. One shot per
   // session: reaching the end again after a rewind is not a second ending.
@@ -411,6 +510,27 @@ export function Simulator() {
   // see it — see the rail section further down for what it does.
   const [railPinned, setRailPinned] = useState(prefs.railPinned);
 
+  // The context pane's own carried settings, up here for the same reason. What
+  // the pane *is* lives further down, with the engine that feeds it.
+  const [panes, setPanes] = useState(prefs.panes);
+  const [paneTfId, setPaneTfId] = useState(prefs.paneTf);
+  const [splitPct, setSplitPct] = useState(prefs.splitPct);
+  const chart2Ref = useRef<ReplayChartHandle>(null);
+  const engine2Ref = useRef<ReplayEngine | null>(null);
+  const paneTf = timeframeById(paneTfId);
+  const paneTfRef = useRef(paneTf);
+  paneTfRef.current = paneTf;
+  const panesRef = useRef(panes);
+  panesRef.current = panes;
+  /** rAF timestamp of the context pane's last repaint — see PANE_DRAW_MS. */
+  const paneDrawnRef = useRef(0);
+
+  // The fill model follows you to the next visit too, and to the Live page —
+  // hence its own store rather than a corner of this page's prefs.
+  useEffect(() => {
+    saveFillModel(fills);
+  }, [fills]);
+
   // The ticket, the transport speed and the session you set up from are settings,
   // not replay state — they follow you to the next visit.
   useEffect(() => {
@@ -433,9 +553,16 @@ export function Simulator() {
       composite,
       compositeSpan,
       nodeProm,
-      eventStrength,
+      modernVwap: mvParams,
+      eventTuning: evTuning,
+      eventLabelSt: evLabelSt,
+      eventFill: evFill,
+      eventMarginal: evMarginal,
       indicators,
       railPinned,
+      panes,
+      paneTf: paneTfId,
+      splitPct,
     });
   }, [
     root,
@@ -456,9 +583,16 @@ export function Simulator() {
     composite,
     compositeSpan,
     nodeProm,
-    eventStrength,
+    mvParams,
+    evTuning,
+    evLabelSt,
+    evFill,
+    evMarginal,
     indicators,
     railPinned,
+    panes,
+    paneTfId,
+    splitPct,
   ]);
 
   // The app shell scrolls in normal document flow, so there is no ancestor
@@ -499,23 +633,12 @@ export function Simulator() {
   // bottom on a fingertip) has to sit above them.
   //
   // Measured rather than declared — the row is one height or two depending on
-  // whether a position is open and how far its buttons wrapped. Published as
+  // whether a position is open and how far its buttons wrapped — and reported by
+  // the window itself, which is the only thing that knows whether it is still
+  // parked down there or has been dragged off onto the chart. Published as
   // --chart-floor and read by the chart's own stylesheet, so the chart never has
   // to know what this page keeps down there.
-  const dockRef = useRef<HTMLDivElement>(null);
   const [floor, setFloor] = useState(0);
-  useEffect(() => {
-    const el = dockRef.current;
-    if (!el) {
-      setFloor(0);
-      return;
-    }
-    const read = () => setFloor(el.getBoundingClientRect().height);
-    const ro = new ResizeObserver(read);
-    ro.observe(el);
-    read();
-    return () => ro.disconnect();
-  }, []);
 
   // The transport's height, for the one thing that has to clear it: the ticket
   // panel is positioned against `.sim-body`, whose bottom edge is under the
@@ -601,6 +724,48 @@ export function Simulator() {
 
   const tickSize = sessionRef.current?.tick_size ?? 0.25;
   const pointValue = sessionRef.current?.point_value ?? 20;
+  // Everything a fill needs to be priced: what the instrument is worth, and what
+  // the account is charged. Rebuilt when either changes, which is what makes
+  // turning commission on re-derive the whole log at the new rules rather than
+  // leaving the trades already booked under the old ones.
+  const fillCfg = useMemo<FillCfg>(
+    () => ({ ...fills, pointValue, tickSize }),
+    [fills, pointValue, tickSize],
+  );
+
+  // The guardrail levels, from the one place that owns them. Practice has to
+  // refuse what the funded account refuses, so these come down from
+  // `/live/routing` rather than being a second set of constants — and fall back
+  // to `DEFAULT_GUARDS` (the same numbers the server defaults to) when there is
+  // no session to ask, which is the ordinary case for a replay.
+  const guards = useGuardLevels().data ?? DEFAULT_GUARDS;
+  const tickUsd = tickSize * pointValue;
+  // Everything the rules and the behaviour strip need, re-derived whenever the
+  // simulation is. Cheap: a couple of passes over a day's trades.
+  const day = useMemo(() => dayState(guards, trades), [guards, trades]);
+
+  // The day-type readout (lib/dayRead): TIDE and SWING off the trailing tape,
+  // EXT off the last few entries. Quantised to 15s of tape so the HUD's ~80ms
+  // pushes don't recompute a window scan sixty times a second, and gen-guarded
+  // like every other clock reading so a session swap can't read the old day.
+  const readClockMs =
+    hud.gen === sessGenRef.current ? Math.floor(hud.clockMs / 15_000) * 15_000 : 0;
+  const read = useMemo<DayRead | null>(() => {
+    const tape = tapeRef.current;
+    if (!tape || readClockMs <= 0) return null;
+    return dayRead(tape, trades, readClockMs, tickSize);
+  }, [readClockMs, trades, tickSize]);
+  // The verdict the UI wears flips only on two consecutive agreeing reads. A
+  // 5-entry median twitches at one trade a minute; 30 seconds of agreement is
+  // the difference between a reading and a mood. Going dark is immediate —
+  // withholding a verdict needs no second opinion.
+  const prevVerdictRef = useRef<DayVerdict | null>(null);
+  const [dayVerdict, setDayVerdict] = useState<DayVerdict | null>(null);
+  useEffect(() => {
+    const raw = read?.verdict ?? null;
+    if (raw === null || raw === prevVerdictRef.current) setDayVerdict(raw);
+    prevVerdictRef.current = raw;
+  }, [read]);
 
   // --- helpers --------------------------------------------------------------
   /** The mark: the last print the replay has reached. */
@@ -629,10 +794,22 @@ export function Simulator() {
     // skips the render.
     setTrades(st.trades.slice());
     setOpenPos(st.open && { ...st.open });
+    // Every change to the simulation passes through here, which makes this the
+    // one place a fill can be noticed — the engine has no incremental fill
+    // callback to hook, by design (see replaySim), so a fill *is* a difference
+    // between two published states.
+    cuesRef.current.observe(simMark(st));
     setWorking(views);
     chartRef.current?.setPosition(st.open ? posLine(st.open, barAt) : null);
     chartRef.current?.setOrders(views);
-    chartRef.current?.setTrades(st.trades.map((t) => tradeMark(t, barAt)));
+    const marks = st.trades.map((t) => tradeMark(t, barAt));
+    chartRef.current?.setTrades(marks);
+    // The context pane gets the position and the fills but never the working
+    // orders: a resting order is a thing you drag, and the pane it is drawn on
+    // does not take gestures. Seeing where you are and where you traded is the
+    // reading; seeing a level you cannot move is an invitation to try.
+    chart2Ref.current?.setPosition(st.open ? posLine(st.open, barAt) : null);
+    chart2Ref.current?.setTrades(marks);
     // Every path that changes the simulation ends here, which makes this the one
     // place the recorder has to be told. It writes nothing until a fill has
     // happened, and nothing again until something changes.
@@ -658,10 +835,18 @@ export function Simulator() {
     (clock: number) => {
       const tape = tapeRef.current;
       if (!tape) return;
-      publish(runSim(tape, logRef.current, clock, pointValue), clock);
+      publish(runSim(tape, logRef.current, clock, fillCfg), clock);
     },
-    [publish, pointValue],
+    [publish, fillCfg],
   );
+
+  // A refusal is a reply, not a state. Left up it would read as a property of
+  // the ticket rather than as an answer to the last click.
+  useEffect(() => {
+    if (!refused) return;
+    const t = window.setTimeout(() => setRefused(null), 7000);
+    return () => window.clearTimeout(t);
+  }, [refused]);
 
   const openPnl = useCallback(
     (lastPrice: number): number => {
@@ -691,11 +876,73 @@ export function Simulator() {
       const tape = tapeRef.current;
       if (!tape) return;
       const st = simRef.current;
-      stepSim(tape, logRef.current, st, from, to, clock, pointValue);
+      stepSim(tape, logRef.current, st, from, to, clock, fillCfg);
       if (simSig(st) !== sigRef.current) publish(st, clock);
     },
-    [pointValue, publish],
+    [fillCfg, publish],
   );
+
+  // --- the context pane -----------------------------------------------------
+  // A second chart beside the trading one: its own ReplayEngine on its own
+  // bucketing over the same tape, read-only, and repainting only when a bar
+  // closes on *it*.
+  //
+  // That gate is the whole reason the pane is affordable, and it was measured
+  // rather than assumed (tools/browser/README): a second pane repainting every
+  // frame costs about a quarter of the frame rate, and one gated on bar close
+  // costs nothing measurable. A 5m pane closing a bar every five minutes of
+  // session time simply has nothing to redraw in between — the forming bar's
+  // last tick is not a reading you take off a context chart.
+  //
+  // Deliberately a second *engine* rather than a second bucketing threaded
+  // through the first. An engine over a tape it shares by reference costs ~1MB
+  // and re-derives in ~60ms, so here the cheap thing and the simple thing are
+  // the same thing, and the first one stays a class about one grid.
+
+  // --- the divider ----------------------------------------------------------
+  // Dragged against the split container's own box rather than against the
+  // window: the chart card is inset by the rail and whatever chrome the viewport
+  // wrapped, so a percentage taken off clientX would drift from the pointer by
+  // exactly that inset. Pointer capture is what keeps the drag alive when the
+  // pointer outruns a 7px target, which at speed it always does.
+  const splitRef = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const startSplitDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const host = splitRef.current;
+    if (!host) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    setDragging(true);
+    const onMove = (ev: PointerEvent) => {
+      const box = host.getBoundingClientRect();
+      if (box.width <= 0) return;
+      setSplitPct(clampSplit(((ev.clientX - box.left) / box.width) * 100));
+    };
+    const onUp = () => {
+      setDragging(false);
+      el.releasePointerCapture?.(e.pointerId);
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onUp);
+    };
+    // On the captured element, not the window: capture routes every move here
+    // until it is released, and a pointercancel (the OS taking the pointer for a
+    // gesture of its own) is what stops a drag that would otherwise never end.
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onUp);
+  }, []);
+
+  /** Repaint the context pane from its own engine, as of the clock the trading
+   *  pane is at. Every path that re-derives the primary calls this too — the two
+   *  panes are one session, and a context chart showing a different session than
+   *  the one under it is worse than no context chart. */
+  const resyncPane = useCallback((reframe?: boolean | "follow") => {
+    const e2 = engine2Ref.current;
+    if (!e2) return;
+    chart2Ref.current?.setSnapshot(e2.snapshotTo(clockRef.current), { reframe });
+  }, []);
 
   // --- playback loop --------------------------------------------------------
   const stop = useCallback(() => {
@@ -721,6 +968,16 @@ export function Simulator() {
       );
       const r = engineRef.current.advance(clock);
       chartRef.current?.applyStep(r);
+      // The context pane advances every frame regardless — the engine step is
+      // 0.006ms, and skipping it would leave its bars behind the clock. Only the
+      // *draw* is gated, because the draw is the part that costs anything.
+      if (engine2Ref.current) {
+        const r2 = engine2Ref.current.advance(clock);
+        if (r2.newBar || ts - paneDrawnRef.current >= PANE_DRAW_MS) {
+          paneDrawnRef.current = ts;
+          chart2Ref.current?.applyStep(r2);
+        }
+      }
       geoRef.current = { ib: r.ib, range: r.range };
       clockRef.current = clock;
       advanceSim(r.fromIdx, r.toIdx, clock);
@@ -769,12 +1026,19 @@ export function Simulator() {
       // The view follows the clock at the zoom the user set: a seek is a move
       // through time, not a request to be put back at the default bar spacing.
       chartRef.current?.setSnapshot(snap, { reframe: "follow" });
+      resyncPane("follow");
       // A rewind un-develops the day's range along with everything else: the
       // snapshot is re-derived from tick zero, so the extremes are whatever had
       // actually printed by the new clock.
       geoRef.current = { ib: snap.ib, range: snap.range };
       clockRef.current = clamped;
       rebuild(clamped);
+      // A seek is not something happening, it is a move to somewhere it already
+      // happened — so the blotter on the other side of it is adopted in silence,
+      // in both directions. Forward past a resting order does fill it, and
+      // announcing that would announce a fill you jumped over rather than
+      // watched.
+      cuesRef.current.sync(simMark(simRef.current));
       pushHud(snap.lastPrice, clamped, true);
       // Going back past a fill is a do-over, and the record says so. The
       // surviving trades are a prefix of what there was — the walk is
@@ -853,7 +1117,37 @@ export function Simulator() {
     if (!eng) return;
     eng.setBigLots(lots);
     chartRef.current?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
-  }, []);
+    engine2Ref.current?.setBigLots(lots);
+    resyncPane(false);
+  }, [resyncPane]);
+
+  /**
+   * Change what selects a tape event — one knob at a time, the whole tuning
+   * re-derived.
+   *
+   * Exactly the path above, for a stronger version of the same reason: a burst is
+   * a cluster of sweeps and an absorption is scored against a running median, so
+   * neither can be recovered by filtering what a different setting published. The
+   * clock and the log are untouched; only the bands change.
+   */
+  const changeEvTuning = useCallback((patch: Partial<EventTuning>) => {
+    setEvTuning((t) => ({ ...t, ...patch }));
+    const eng = engineRef.current;
+    if (!eng) return;
+    eng.setEventTuning(patch);
+    chartRef.current?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
+    engine2Ref.current?.setEventTuning(patch);
+    resyncPane(false);
+  }, [resyncPane]);
+
+  // The event layer as the chart takes it: what selected the bands (for the
+  // legend rows, which quote the thresholds their counts were counted at) and
+  // how they draw. Its presence is what offers the layer at all — the Live chart
+  // passes nothing and has no event rows.
+  const eventOverlay = useMemo(
+    () => ({ tuning: evTuning, style: { labelSt: evLabelSt, fill: evFill }, marginal: evMarginal }),
+    [evTuning, evLabelSt, evFill, evMarginal],
+  );
 
   // The chart's own knobs, hung off the legend row each one tunes (rendered by
   // IndicatorSettings, behind the "…" on the row). They used to be a line of
@@ -871,87 +1165,46 @@ export function Simulator() {
   // composite row exists at all — a knob that can delete its own panel has to
   // live somewhere else. It stays in the setup row with the rest of the pre-run
   // configuration.
-  const indicatorSettings = useMemo<IndicatorSettingsMap>(() => {
-    // One prominence for both node readers, and one strength floor for both
-    // event kinds — it is one question asked of two layers, and two knobs for it
-    // would only ever be set to the same number. Each appears on both of its
-    // rows, saying so.
-    const nodes: SettingField = {
-      key: "nodeProm",
-      label: "Prominence floor",
-      help: "Mark high- and low-volume nodes on the composite and on the developing NY profile. A hump counts once it stands this far clear of the deeper valley beside it, as a share of the tallest hump — lower finds more. LVNs are only drawn between two accepted humps.",
-      value: nodeProm,
-      options: NODE_PROM_OPTIONS.map((p) => ({
-        value: p,
-        label: p === 0 ? "off" : `${Math.round(p * 100)}%`,
-      })),
-      onChange: (v) => setNodeProm(Number(v)),
-      note: "Shared with the other node reader — the composite's and the NY profile's are one setting.",
-    };
-    const events: SettingField = {
-      key: "eventStrength",
-      label: "Strength floor",
-      help: "Draw tape events as bands: clustered big sweeps (≥150 lots within 60s and 5pt) and absorption (a 15s window whose lots-per-point runs ≥3× the session's own median so far). The floor multiplies both thresholds. Not a signal — measured, both land further from a frozen composite's levels than the session's own volume does.",
-      value: eventStrength,
-      options: EVENT_STRENGTH_OPTIONS.map((s) => ({ value: s, label: s === 0 ? "off" : `≥${s}×` })),
-      onChange: (v) => setEventStrength(Number(v)),
-      note: "Shared with the other event kind — one floor multiplies both thresholds.",
-    };
-    return {
-      bigTrades: {
-        title: "Big trades",
-        fields: [
-          {
-            key: "bigLots",
-            label: "Sweep size",
-            help: "Mark sweeps over this many lots. A sweep is consecutive same-side fills within 250ms and 4 ticks — the shape an order gets worked through the book in, which single prints mostly miss.",
-            value: bigLots,
-            options: BIG_LOT_OPTIONS.map((n) => ({ value: n, label: `>${n} lots` })),
-            onChange: (v) => changeBigLots(Number(v)),
-          },
-        ],
-      },
-      compositeProfile: {
-        title: "Composite VP",
-        fields: [
-          {
-            key: "composite",
-            label: "Rule",
-            help: "Composite the prior days into one profile. 'Balance run' takes only the days still in the same auction (each one's value area must touch the composite's, cap 5) — measured as the better rule on NQ, where balance runs are median 2 days and a fixed 10-day window merges about eight auctions.",
-            value: composite,
-            options: [
-              { value: "off", label: "off" },
-              { value: "balance", label: "balance run" },
-              { value: "days", label: "all prior days" },
-            ],
-            onChange: (v) => setComposite(v as CompositeRule),
-            note: `Built from the ${historyDays} prior session${historyDays === 1 ? "" : "s"} loaded — "Prior days" in the setup row, since each one is a whole tape to fetch.`,
-          },
-          // Only once there is a composite for it to cut: which part of each day
-          // goes in is not a question about a profile that isn't being built.
-          ...(composite === "off"
-            ? []
-            : [
-                {
-                  key: "compositeSpan",
-                  label: "Span",
-                  help: "Which part of each prior day the composite is built from. 'Globex + RTH' takes the whole day from the 18:00 open to the 16:00 close; 'RTH only' takes the day session, which is the span the balance-run and value-area numbers in the write-up were measured on. Wider spans mean wider value areas, which touch more often — so the balance rule keeps more days under Globex.",
-                  value: compositeSpan,
-                  options: [
-                    { value: "globex", label: "globex + RTH" },
-                    { value: "rth", label: "RTH only" },
-                  ],
-                  onChange: (v: string | number) => setCompositeSpan(v as CompositeSpan),
-                } satisfies SettingField,
-              ]),
-        ],
-      },
-      compositeNodes: { title: "Composite nodes", fields: [nodes] },
-      developingVpNyNodes: { title: "NY nodes", fields: [nodes] },
-      sweepBursts: { title: "Sweep bursts", fields: [events] },
-      absorption: { title: "Absorption", fields: [events] },
-    };
-  }, [bigLots, changeBigLots, composite, compositeSpan, eventStrength, historyDays, nodeProm]);
+  const indicatorSettings = useMemo<IndicatorSettingsMap>(
+    () =>
+      buildChartKnobs({
+        bigLots,
+        onBigLots: changeBigLots,
+        nodeProm,
+        onNodeProm: setNodeProm,
+        modernVwap: { params: mvParams, onChange: patchMv },
+        composite,
+        onComposite: setComposite,
+        compositeSpan,
+        onCompositeSpan: setCompositeSpan,
+        compositeNote: `Built from the ${historyDays} prior session${historyDays === 1 ? "" : "s"} loaded — "Prior days" in the setup row, since each one is a whole tape to fetch.`,
+        events: {
+          tuning: evTuning,
+          labelSt: evLabelSt,
+          fill: evFill,
+          marginal: evMarginal,
+          onTuning: changeEvTuning,
+          onLabelSt: setEvLabelSt,
+          onFill: setEvFill,
+          onMarginal: setEvMarginal,
+        },
+      }),
+    [
+      bigLots,
+      changeBigLots,
+      changeEvTuning,
+      composite,
+      compositeSpan,
+      evFill,
+      evLabelSt,
+      evMarginal,
+      evTuning,
+      historyDays,
+      mvParams,
+      nodeProm,
+      patchMv,
+    ],
+  );
 
   // The context days that may actually be glued on: in wall-clock order, no
   // overlaps, and all of them wholly before the session. A day that fails the
@@ -997,6 +1250,48 @@ export function Simulator() {
     return out;
   }, [contextDays, compositeSpan]);
 
+  const contextRangesRef = useRef(contextRanges);
+  contextRangesRef.current = contextRanges;
+
+  /**
+   * Stand the context pane up: its own engine over the tape in hand, handed to
+   * its chart.
+   *
+   * Deliberately idempotent and deliberately called from both sides, because
+   * neither side can be relied on to be last. The page learns about a tape in an
+   * effect; the pane's chart is built in an effect of the chart's own; and React
+   * is free to throw that chart away and build another (StrictMode does it to
+   * every mount in development, and a pane appearing mid-replay does it for
+   * real). The first version pushed once, from the page, and lost the race —
+   * the pane came up drawn on a chart that no longer existed, which reads as a
+   * blank pane and was caught only by measuring the ink on it.
+   *
+   * So: this runs when the pane's settings change *and* whenever the chart says
+   * it has just been (re)built, and re-running it costs one ~60ms re-derivation
+   * over a tape that is already in memory.
+   */
+  const primePane = useCallback(() => {
+    const tape = tapeRef.current;
+    const data = sessionRef.current;
+    const chart = chart2Ref.current;
+    if (panesRef.current < 2 || !tape || !data || !chart) return;
+    const e2 = new ReplayEngine(tape, data, paneTfRef.current);
+    e2.setBigLots(bigLotsRef.current);
+    e2.setEventTuning(evTuningRef.current);
+    engine2Ref.current = e2;
+    chart.setTape(tape, { contextRanges: contextRangesRef.current });
+    chart.setSnapshot(e2.snapshotTo(clockRef.current));
+    paneDrawnRef.current = 0;
+  }, []);
+
+  useEffect(() => {
+    if (panes < 2) {
+      engine2Ref.current = null;
+      return;
+    }
+    primePane();
+  }, [panes, paneTf, contextRanges, primePane]);
+
   // Decode + build the engine whenever a new session lands — or whenever the
   // context days in front of it change, which is the same construction with the
   // replay left where it stands.
@@ -1041,6 +1336,7 @@ export function Simulator() {
     const anchor = fresh ? null : (engineRef.current?.anchor() ?? null);
     engineRef.current = new ReplayEngine(tape, data, tfRef.current);
     engineRef.current.setBigLots(bigLotsRef.current);
+    engineRef.current.setEventTuning(evTuningRef.current);
     if (anchor != null) engineRef.current.setAnchor(anchor);
     // The chart profiles bar ranges straight off the tape, so it needs the same
     // typed arrays the engine got. On a new day that also resets its hand-drawn
@@ -1123,6 +1419,11 @@ export function Simulator() {
         ));
     const snap = engineRef.current.snapshotTo(clock);
     chartRef.current?.setSnapshot(snap, fresh ? undefined : { reframe: false });
+    // The context pane's own engine over the same tape — the same one path a
+    // pane switched on mid-replay takes, so there is only one way it is ever
+    // built. It reads the refs this effect has just written.
+    if (panesRef.current > 1) primePane();
+    else engine2Ref.current = null;
     geoRef.current = { ib: snap.ib, range: snap.range };
     clockRef.current = clock;
     // A sitting resumed at the end of its tape has already had its ending — the
@@ -1176,6 +1477,12 @@ export function Simulator() {
     // a resumed session that log is not empty, so this is also what puts the
     // open position and the resting orders back on it.
     if (!fresh || resumed) rebuild(clock);
+    // Silently, in the sound sense: a resumed sitting arrives with its trades
+    // already booked and possibly a position on, and none of that is happening
+    // now. Whatever the blotter is once it has been re-derived — a restored one
+    // or an empty one — is the baseline the first real fill will be heard
+    // against.
+    cuesRef.current.sync(simMark(simRef.current));
     pushHud(snap.lastPrice, clock, true);
     // Note where this session now stands, without waiting for the timer below:
     // switching day and closing the tab in the same breath should still come
@@ -1191,6 +1498,7 @@ export function Simulator() {
   // rebuild's own `setTape` is not doubled up on.
   useEffect(() => {
     chartRef.current?.setContextRanges(contextRanges);
+    chart2Ref.current?.setContextRanges(contextRanges);
   }, [contextRanges]);
 
   useEffect(() => () => stop(), [stop]);
@@ -1232,12 +1540,41 @@ export function Simulator() {
     [rebuild],
   );
 
+  // Changing what a fill costs re-derives the sitting under the new rules, the
+  // same way every other action does. The log is untouched — what you did is
+  // what you did — but each fill it implies is priced again, so switching
+  // commission on doesn't leave the trades already booked reading at the old
+  // numbers while the next one pays. Waits for the tape: there is nothing to
+  // re-derive against until the session is loaded.
+  useEffect(() => {
+    if (ready) rebuild(clockRef.current);
+  }, [fillCfg, ready, rebuild]);
+
   /** Place an order. `at` is the price its bracket is measured from — the mark
    *  for a market order, the resting price for a limit or a stop. */
   const placeOrder = useCallback(
     (type: OrderType, side: Side, price: number | null, at: number) => {
       const eng = engineRef.current;
       if (!eng) return;
+      // The discipline layer, at the one gesture every order path funnels
+      // through — the dock, q/w/s, space+click, the long-press ticket and the
+      // ＋Order tool all land here, so there is no route around it and no
+      // second copy of the rules to fall out of step.
+      //
+      // Skipped entirely for an order that *reduces*: closing size has no
+      // target to be too tight, and a practice rule that could refuse an exit
+      // would teach the one habit nobody wants.
+      const reducing = isReducing(openRef.current, side, size);
+      if (!reducing) {
+        const why =
+          dayRefusal(day, false) ??
+          shapeRefusal(guards, { stopTicks, targetTicks, size, tickUsd });
+        if (why) {
+          setRefused(why);
+          playCue("canceled");
+          return;
+        }
+      }
       const dir = side === "long" ? 1 : -1;
       const rec: OrderRec = {
         id: idRef.current++,
@@ -1267,10 +1604,15 @@ export function Simulator() {
         edits: [],
         cancelMs: null,
       };
+      // A market order is its own fill and the rebuild below will sound as one —
+      // the tick and the chime a few milliseconds apart would read as one
+      // stuttering noise. Only an order that goes on to *rest* gets the tick.
+      if (type !== "market") playCue("placed");
       const log = logRef.current;
       append({ ...log, orders: [...log.orders, rec] });
     },
-    [append, size, stopTicks, targetTicks, tickSize, trailTicks, trailStepTicks, trailBeTicks, trailBeOnly],
+    [append, day, guards, size, stopTicks, targetTicks, tickSize, tickUsd,
+     trailTicks, trailStepTicks, trailBeTicks, trailBeOnly],
   );
 
   const placeMarket = useCallback(
@@ -1338,6 +1680,7 @@ export function Simulator() {
   const cancelOrder = useCallback(
     (id: number) => {
       const log = logRef.current;
+      if (log.orders.some((o) => o.id === id && o.cancelMs == null)) playCue("canceled");
       append({
         ...log,
         orders: log.orders.map((o) =>
@@ -1356,6 +1699,10 @@ export function Simulator() {
   const editOrder = useCallback(
     (id: number, next: { price: number | null; stop: number | null; target: number | null }) => {
       const log = logRef.current;
+      // Once per landed drag, not per pixel: the chart reports a move on release
+      // (see ReplayChart's pointer-up), which is what makes this survivable as a
+      // sound at all.
+      playCue("changed");
       append({
         ...log,
         orders: log.orders.map((o) =>
@@ -1372,6 +1719,7 @@ export function Simulator() {
   const moveBracket = useCallback(
     (b: { stop: number | null; target: number | null }) => {
       if (!openRef.current) return;
+      playCue("changed");
       const log = logRef.current;
       append({ ...log, brackets: [...log.brackets, { ms: clockRef.current, ...b }] });
     },
@@ -1391,6 +1739,36 @@ export function Simulator() {
     pushHud(markPrice(), clockRef.current, true);
   }, [append, markPrice, pushHud]);
 
+  // The daily stop, acting rather than refusing.
+  //
+  // Watches equity — realised plus what the open position is currently down —
+  // because the account's drawdown does not wait for a loss to be booked. It
+  // closes the position the way `closeManual` does, by appending to the log, so
+  // a rewind un-does it like any other action and the sim stays a pure fold over
+  // what happened.
+  //
+  // Fires once per crossing: `openRef` going null is the reset, so a position
+  // re-opened after the stop can be closed again if it also breaches. Nothing
+  // stops that entry being placed, because the day lock already refuses it.
+  //
+  // It lands a beat late. `hud.openPnl` arrives on the throttled ~80ms tick,
+  // which at speed 30 is a couple of seconds of market time — fine to rehearse
+  // against, not a number to quote.
+  const autoClosedRef = useRef(false);
+  useEffect(() => {
+    if (!openRef.current) {
+      autoClosedRef.current = false;
+      return;
+    }
+    if (autoClosedRef.current) return;
+    const why = equityStop(guards, day, hud.openPnl, true);
+    if (!why) return;
+    autoClosedRef.current = true;
+    setRefused(why);
+    playCue("canceled");
+    closeManual();
+  }, [closeManual, day, guards, hud.openPnl]);
+
   /**
    * Everything off: the position at the last print, and every order still
    * working with it.
@@ -1404,6 +1782,12 @@ export function Simulator() {
     const live = new Set(workingOrders(simRef.current).map((o) => o.id));
     const hadPos = openRef.current != null;
     if (!hadPos && live.size === 0) return;
+    // One flatten is one event, and if it took a position off, *that* is the
+    // event — the exit cue follows from the rebuild below. Only a flatten that
+    // did nothing but pull orders announces itself as a cancel; announcing both
+    // would make the more important half the one you hear second, or not at all
+    // (see the anti-stack guard in playCue).
+    if (!hadPos) playCue("canceled");
     const log = logRef.current;
     const ms = clockRef.current;
     append({
@@ -1438,30 +1822,6 @@ export function Simulator() {
     endAttempt();
   }, [endAttempt, hud.clockMs, hud.gen]);
 
-  // The three things you do faster than a hand can find a button: get out (q),
-  // buy (w), sell (s). Left-hand keys next to each other, because the other hand
-  // is on the mouse placing levels on the chart.
-  //
-  // Deliberately unmodified single keys — a trading key with a chord in front of
-  // it is a key you don't press in time — so everything that could be *typing*
-  // is let through untouched: a field with the caret in it, a chord, and an
-  // autorepeat (a held w must not machine-gun market orders).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-      const el = e.target as HTMLElement | null;
-      const tag = el?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
-      const k = e.key.toLowerCase();
-      if (k !== "q" && k !== "w" && k !== "s") return;
-      e.preventDefault();
-      if (k === "q") closeAll();
-      else placeMarket(k === "w" ? "long" : "short");
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [closeAll, placeMarket]);
-
   const stepBar = useCallback(() => {
     const s = sessionRef.current;
     const eng = engineRef.current;
@@ -1478,6 +1838,86 @@ export function Simulator() {
     advanceSim(r.fromIdx, r.toIdx, clock);
     pushHud(r.lastPrice, clock, true);
   }, [advanceSim, pushHud, stop]);
+
+  /** One bar back. A seek, not a step: the tape can't run in reverse, so the
+   *  engine re-derives to the previous bar's close — which also means anything
+   *  done inside the un-happened bar un-happens, exactly as the scrubber's
+   *  rewind does, rewind record and all. */
+  const stepBack = useCallback(() => {
+    const eng = engineRef.current;
+    if (!eng || !sourceRef.current.canSeek) return;
+    seekTo(eng.prevBarClockMs());
+  }, [seekTo]);
+
+  /** Step the speed along the offered ladder — the keyboard's version of the
+   *  transport's <select>. */
+  const nudgeSpeed = useCallback((d: 1 | -1) => {
+    const i = SIM_SPEEDS.indexOf(speedRef.current);
+    const j = Math.max(0, Math.min(SIM_SPEEDS.length - 1, (i < 0 ? 0 : i) + d));
+    speedRef.current = SIM_SPEEDS[j];
+    setSpeed(SIM_SPEEDS[j]);
+  }, []);
+
+  // The three things you do faster than a hand can find a button: get out (q),
+  // buy (w), sell (s). Left-hand keys next to each other, because the other hand
+  // is on the mouse placing levels on the chart.
+  //
+  // Deliberately unmodified single keys — a trading key with a chord in front of
+  // it is a key you don't press in time — so everything that could be *typing*
+  // is let through untouched: a field with the caret in it, a chord, and an
+  // autorepeat (a held w must not machine-gun market orders).
+  //
+  // The transport rides the same guards: k play/pause, , and . step a bar back
+  // and forward, [ and ] walk the speed ladder, 1–8 pick the bar size. Video
+  // keys rather than invented ones — a replay is a video of the tape, and k/,/.
+  // are what every scrubbing tool binds. Space is deliberately NOT play/pause:
+  // it is the order modifier on the chart, and a focused button's trigger
+  // everywhere else.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      const k = e.key.toLowerCase();
+      if (k === "q" || k === "w" || k === "s") {
+        e.preventDefault();
+        if (k === "q") closeAll();
+        else placeMarket(k === "w" ? "long" : "short");
+        return;
+      }
+      if (k === "k") {
+        e.preventDefault();
+        if (playingRef.current) stop();
+        else play();
+        return;
+      }
+      if (k === ",") {
+        e.preventDefault();
+        stepBack();
+        return;
+      }
+      if (k === ".") {
+        e.preventDefault();
+        stepBar();
+        return;
+      }
+      if (k === "[" || k === "]") {
+        e.preventDefault();
+        nudgeSpeed(k === "]" ? 1 : -1);
+        return;
+      }
+      if (/^[1-8]$/.test(k)) {
+        const tf = TIMEFRAMES[Number(k) - 1];
+        if (tf) {
+          e.preventDefault();
+          changeTimeframe(tf.id);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [changeTimeframe, closeAll, nudgeSpeed, placeMarket, play, stepBack, stepBar, stop]);
 
   const onSpeed = (v: number) => {
     speedRef.current = v;
@@ -1505,6 +1945,15 @@ export function Simulator() {
   const sess = sessionRef.current;
   const scrubMin = sess?.session_start_ms ?? 0;
   const scrubMax = sess?.session_end_ms ?? 1;
+  // Time left in the bar now forming, for the clock to carry. Time bars only:
+  // a tick bar closes on a count of prints, which the wall clock knows nothing
+  // about, so showing it a countdown would be showing it a guess. Anchored at
+  // the bell like the engine's own boundaries (see nextBarClockMs), so the two
+  // can't disagree about where a bar ends.
+  const countdownMs =
+    ready && tf.kind === "time" && sess
+      ? tf.ms - ((((hud.clockMs - sess.rth_open_ms) % tf.ms) + tf.ms) % tf.ms)
+      : null;
 
   const btn = (bg: string): React.CSSProperties => ({
     background: bg,
@@ -1529,6 +1978,17 @@ export function Simulator() {
   /** One optional bracket leg. The tickbox says whether the leg is attached at
    *  all; unticked, the distance box empties and reads "none" — which is also
    *  what clearing the box by hand does, so the two say the same thing. */
+  /** What the guardrails will accept for this leg, as a short label. Empty when
+   *  the rule is switched off (a level of 0). */
+  const legBound = (key: "stop" | "target"): string =>
+    key === "stop"
+      ? guards.stop_ticks_max > 0
+        ? `${guards.stop_ticks_min}–${guards.stop_ticks_max}`
+        : ""
+      : guards.min_target_ticks > 0
+        ? `≥${guards.min_target_ticks}`
+        : "";
+
   const legField = (
     key: "stop" | "target",
     label: string,
@@ -1549,6 +2009,12 @@ export function Simulator() {
             title={`Trade with ${key === "stop" ? "a stop" : "a target"}`}
           />
           <label htmlFor={on ? `sim-${key}` : `sim-${key}-on`}>{label}</label>
+          {/* The bound the guardrails will refuse outside of, on the control
+              that sets it — a rule you only meet by being refused is one you
+              read as the app being broken. */}
+          {on && legBound(key) && (
+            <span style={{ fontSize: 9, marginLeft: "auto" }}>{legBound(key)}</span>
+          )}
         </span>
         <input
           id={`sim-${key}`}
@@ -1624,6 +2090,23 @@ export function Simulator() {
           primary={["500t", "1m", "5m", "15m"]}
           compact
         />
+        {/* The split, next to the bucketing it splits: both answer "what am I
+            looking at", and this is the other thing you change mid-read. Hidden
+            on a narrow viewport — two half-width charts on a phone is two charts
+            you cannot read, and the mobile pass deliberately stops at the Lab. */}
+        <button
+          type="button"
+          className="sim-pane-toggle"
+          aria-pressed={panes > 1}
+          onClick={() => setPanes((n) => (n > 1 ? 1 : 2))}
+          title={
+            panes > 1
+              ? "One chart"
+              : `Add a ${paneTf.label} context chart beside this one (read-only)`
+          }
+        >
+          {panes > 1 ? "◧◨" : "◫"}
+        </button>
       </ChartTopBar>
       {/* A press anywhere else puts the setup panel away — the touch screen's
           replacement for Escape, which a phone does not have. Under the bar, so
@@ -1695,7 +2178,7 @@ export function Simulator() {
               {(daysQ.data?.days ?? []).map((d) => (
                 <option key={`${d.symbol}|${d.date}`} value={`${d.symbol}|${d.date}`}>
                   {d.date} · {d.symbol}
-                  {d.has_overnight ? "" : " (no overnight)"}
+                  {dayNotes(d)}
                 </option>
               ))}
             </select>
@@ -1754,6 +2237,70 @@ export function Simulator() {
           Start time (ET)
           <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
         </label>
+        {/* What a fill costs. Pre-run configuration like everything else left in
+            this panel — except that unlike the rest of it, these three *can*
+            change a fill, which is why editing one re-derives the sitting on the
+            spot instead of applying to the next trade only. */}
+        <label
+          style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}
+          title="Commission per contract per side. A round turn on one contract costs twice this, and it is charged when the trade closes."
+        >
+          Commission $/side
+          <input
+            type="number"
+            min={0}
+            step={0.05}
+            value={fills.commission}
+            onChange={(e) =>
+              setFills((f) => ({ ...f, commission: Math.max(0, Number(e.target.value) || 0) }))
+            }
+            style={{ width: 76 }}
+          />
+        </label>
+        <label
+          style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}
+          title="Ticks paid for crossing the book. Charged on market orders and on stops once they trigger — never on a limit, which fills at its own price or not at all. On NQ the book is a tick wide, so 1 is the honest number."
+        >
+          Spread (ticks)
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={fills.slipTicks}
+            onChange={(e) =>
+              setFills((f) => ({ ...f, slipTicks: Math.max(0, Math.floor(Number(e.target.value) || 0)) }))
+            }
+            style={{ width: 60 }}
+          />
+        </label>
+        <label
+          style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}
+          title="How far the tape has to trade past a resting limit — an entry limit or a target — before it counts as filled. A print at your price was the queue's; 1 tick stops the replay filling every wick that kissed a level and turned around."
+        >
+          Queue (ticks)
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={fills.queueTicks}
+            onChange={(e) =>
+              setFills((f) => ({ ...f, queueTicks: Math.max(0, Math.floor(Number(e.target.value) || 0)) }))
+            }
+            style={{ width: 60 }}
+          />
+        </label>
+        <button
+          type="button"
+          style={{ ...btn(palette.bg2), color: palette.muted, alignSelf: "end", padding: "6px 10px", fontSize: 11, fontWeight: 500 }}
+          onClick={() => setFills(isPerfect(fills) ? { ...DEFAULT_FILL_MODEL } : { ...PERFECT_FILLS })}
+          title={
+            isPerfect(fills)
+              ? "Charge fills the way a funded account does: $3.50 a side, a tick of spread, a tick of queue"
+              : "Fill at the level, for free — the tape read with the account taken out of it"
+          }
+        >
+          {isPerfect(fills) ? "Charge fills" : "Perfect fills"}
+        </button>
         <button
           type="button"
           style={btn(palette.accent)}
@@ -1786,7 +2333,14 @@ export function Simulator() {
 
       <div className="sim-body">
         <div className="sim-chart-card">
-          <div className="sim-chart">
+          <div className="sim-chart" ref={splitRef}>
+            {/* The trading pane. Everything the page floats over a chart — the
+                indicator strip, the order dock — is inside it rather than beside
+                it, so a split moves them with the chart they belong to. */}
+            <div
+              className="sim-pane"
+              style={panes > 1 ? { flex: `0 0 ${splitPct}%` } : undefined}
+            >
             <ReplayChart
               ref={chartRef}
               onAnchorChange={setAnchor}
@@ -1809,8 +2363,10 @@ export function Simulator() {
               bigLots={bigLots}
               composite={historyDays > 0 ? composite : "off"}
               nodeProm={nodeProm}
-              eventStrength={eventStrength}
+              modernVwap={mvParams}
+              events={eventOverlay}
               indicatorSettings={indicatorSettings}
+              drawingsKey={sel ? `${sel.symbol}|${sel.date}` : undefined}
             />
             {/* Over the chart rather than beside it: fullscreen is the chart and
                 nothing else, and an instrument you calibrate against has to be
@@ -1839,8 +2395,12 @@ export function Simulator() {
               Both stay up while a position is open — with a netted position
               they are how you scale in and out, so hiding them behind Close
               would put the two things you most want to do mid-trade out of
-              reach. */}
-            <div ref={dockRef} className="sim-quick">
+              reach.
+
+              One small window rather than a row, and a window that moves: it
+              starts at the foot of the tape and can be dragged anywhere on the
+              chart, remembering where it was left (see QuickDock). */}
+            <QuickDock onFloorChange={setFloor}>
               {openPos && (
                 <>
                   <span className="sim-quick-pos">
@@ -1890,7 +2450,59 @@ export function Simulator() {
                 <span>BUY</span>
                 <b>{Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}</b>
               </button>
+            </QuickDock>
             </div>
+            {panes > 1 && (
+              <>
+                <div
+                  className="sim-pane-divider"
+                  data-dragging={dragging ? "1" : undefined}
+                  onPointerDown={startSplitDrag}
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize the context pane"
+                  title="Drag to resize — double-click to even them up"
+                  onDoubleClick={() => setSplitPct(DEFAULT_SIM_PREFS.splitPct)}
+                />
+                {/* The context pane. Read-only by construction: it is handed no
+                    order callbacks and no ticket, so there is no gesture on it
+                    that could reach the blotter. What it draws is the session
+                    you are trading, on a bucketing you are not. */}
+                <div className="sim-pane">
+                  <ReplayChart
+                    ref={chart2Ref}
+                    canPlaceOrders={false}
+                    hideDates={hidden}
+                    secondsAxis={showsSeconds(paneTf)}
+                    bigLots={bigLots}
+                    composite={historyDays > 0 ? composite : "off"}
+                    nodeProm={nodeProm}
+                    modernVwap={mvParams}
+                    events={eventOverlay}
+                    indicatorSettings={indicatorSettings}
+                    drawingsKey={sel ? `${sel.symbol}|${sel.date}` : undefined}
+                    prefsPane="b"
+                    onReady={primePane}
+                  />
+                  {/* The pane's own bucketing, on the pane — the same control
+                      the trading pane drives from the top bar, so every
+                      timeframe is reachable here too and the ⋯ holds the rest.
+                      It sits *on* the chart rather than in the bar because it
+                      belongs to this pane and the bar belongs to the page. */}
+                  <div className="sim-pane-tf">
+                    <TimeframeControl
+                      value={paneTfId}
+                      onChange={setPaneTfId}
+                      options={TIMEFRAMES.map((t) => ({ key: t.id, label: t.label }))}
+                      // The slow end: a context pane on 500-tick bars is a
+                      // second copy of the chart you are already reading.
+                      primary={["5m", "15m", "1h"]}
+                      compact
+                    />
+                  </div>
+                </div>
+              </>
+            )}
           </div>
           {/* The transport keeps a permanent row — the one deliberate exception
               to this page summoning its chrome. It is not something you
@@ -1900,10 +2512,31 @@ export function Simulator() {
               Play button, which is the control pressed most. ~34px, and only
               Replay pays it — Live has no transport. */}
           <div ref={footRef} className="sim-transport">
-              <button type="button" style={btn(playing ? palette.red : palette.green)} onClick={() => (playing ? stop() : play())} disabled={!ready}>
+              <button
+                type="button"
+                style={btn(playing ? palette.red : palette.green)}
+                onClick={() => (playing ? stop() : play())}
+                disabled={!ready}
+                title={playing ? "Pause (k)" : "Play (k)"}
+              >
                 {playing ? "❚❚ Pause" : "▶ Play"}
               </button>
-              <button type="button" style={btn(palette.card)} onClick={stepBar} disabled={!ready || playing}>
+              <button
+                type="button"
+                style={btn(palette.card)}
+                onClick={stepBack}
+                disabled={!ready}
+                title="One bar back (,) — a rewind: anything done inside the un-happened bar un-happens"
+              >
+                ⏮
+              </button>
+              <button
+                type="button"
+                style={btn(palette.card)}
+                onClick={stepBar}
+                disabled={!ready || playing}
+                title="One bar forward (.)"
+              >
                 ⏭ Step {tf.label}
               </button>
               <label style={{ fontSize: 12, color: palette.muted }} title="Replay speed">
@@ -1929,6 +2562,11 @@ export function Simulator() {
               />
               <span className="sim-clock" style={{ fontFamily: "monospace", color: palette.text, minWidth: 78 }}>
                 {fmtClock(hud.clockMs)}
+                {countdownMs != null && (
+                  <span className="sim-countdown" title={`This ${tf.label} bar closes in ${fmtCountdown(countdownMs)}`}>
+                    −{fmtCountdown(countdownMs)}
+                  </span>
+                )}
               </span>
               {/* ⛶ lives on ChartTopBar now, where it means only what the app
                   cannot do for itself: hide the browser's own chrome. */}
@@ -1978,6 +2616,16 @@ export function Simulator() {
               {working.length}
             </span>
           )}
+          {/* The day-type readout, distilled to a dot — the one thing the rail
+              can say with the panel away. The numbers behind it are on the
+              strip in the panel; the hover carries them here. */}
+          {read && (
+            <span
+              className="sim-rail-read"
+              style={{ background: dayVerdict ? VERDICT_COLOR[dayVerdict] : palette.muted }}
+              title={readTitle(read, dayVerdict)}
+            />
+          )}
         </div>
 
         {/* Ticket, working orders, attempt summary and blotter. Laid over the
@@ -2008,6 +2656,8 @@ export function Simulator() {
             <span />
           </div>
           <div className="sim-card sim-ticket">
+            <Discipline day={day} guards={guards} refused={refused} />
+            <DayReadStrip read={read} verdict={dayVerdict} />
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 22, fontFamily: "monospace" }}>
               <span style={{ color: palette.muted, fontSize: 12, alignSelf: "center" }}>Last</span>
               <span style={{ color: palette.text }}>{Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}</span>
@@ -2179,7 +2829,9 @@ export function Simulator() {
               <span style={{ color: palette.orange }}>right</span> a stop. Or{" "}
               <b>press and hold</b> (right-click) a price for the full ticket.
               <br />
-              Keys: <b>w</b> buy · <b>s</b> sell · <b>q</b> flatten and cancel everything.
+              Keys: <b>w</b> buy · <b>s</b> sell · <b>q</b> flatten and cancel everything ·{" "}
+              <b>k</b> play/pause · <b>,</b>/<b>.</b> bar back/forward · <b>[</b>/<b>]</b> speed ·{" "}
+              <b>1–8</b> bar size.
             </div>
             {openPos && (
               <div style={{ marginTop: 10, fontSize: 13 }}>
@@ -2391,6 +3043,16 @@ export function Simulator() {
                       {s.best_usd != null ? fmtUsd(s.best_usd) : "—"} · worst{" "}
                       {s.worst_usd != null ? fmtUsd(s.worst_usd) : "—"}
                       {s.avg_hold_s != null && ` · held ${Math.round(s.avg_hold_s / 60)}m avg`}
+                      {/* The broker's share, spelled out. Net is already after
+                          it — this says how much of the distance between a good
+                          day and a flat one was commission. The spread is not in
+                          here and cannot be: it is inside the fill prices. */}
+                      {s.fees_usd > 0 && (
+                        <span title={`${s.contracts} contract(s) × 2 sides × $${fills.commission.toFixed(2)}. Net is already after this.`}>
+                          {" "}
+                          · fees {fmtUsd(s.fees_usd)}
+                        </span>
+                      )}
                     </div>
                     <textarea
                       // Keyed by attempt so a new sitting never inherits the
@@ -2464,12 +3126,198 @@ export function Simulator() {
                         <span style={{ opacity: 0.6 }}> · {fmtR(t.r)}e</span>
                       )}
                     </span>
-                    <span style={{ fontFamily: "monospace", color: t.pnl >= 0 ? palette.green : palette.red }}>{fmtUsd(t.pnl)}</span>
+                    {/* Net, like everything else on this page — the gross and
+                        the fee are in the tooltip, where the difference is
+                        worth seeing without the column having to carry it. */}
+                    <span
+                      style={{ fontFamily: "monospace", color: t.pnl >= 0 ? palette.green : palette.red }}
+                      title={
+                        t.fees > 0
+                          ? `${fmtUsd(t.pnl + t.fees)} gross − ${fmtUsd(t.fees)} commission · in ${t.entryPrice} out ${t.exitPrice}`
+                          : `in ${t.entryPrice} out ${t.exitPrice}`
+                      }
+                    >
+                      {fmtUsd(t.pnl)}
+                    </span>
                   </div>
                 ))}
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The day, against the rules — and the three numbers worth logging after it.
+ *
+ * Two halves, and they are different kinds of thing on purpose.
+ *
+ * **Above the line: what is enforced.** The running total and the daily stop,
+ * which refuse a new entry once crossed. Closing out is never refused, here or
+ * on the live side, so a locked day is a day you can still get out of.
+ *
+ * **Below it: what is only measured.** Share of trades resolving inside 30
+ * seconds, median gap between entries, and whether anything was opened while
+ * already in the hole. These are the operating plan's after-session three, and
+ * they are counters rather than rules for two separate reasons. The 30-second
+ * habit is an *entry* problem — 85% of its damage is the stop firing, not an
+ * early manual exit — so there is no exit rule that could catch it. And pace
+ * cannot be enforced against a compressed clock at all: at speed 30 a two-minute
+ * gap is four seconds of yours, so a rule would train nothing. Measuring is what
+ * a replay can honestly do with a real-time habit.
+ */
+const VERDICT_COLOR: Record<DayVerdict, string> = {
+  paying: palette.green,
+  grudging: palette.orange,
+  dry: palette.red,
+};
+
+/** The rail dot's hover: the whole strip in a sentence, for when the panel is
+ *  away. */
+function readTitle(read: DayRead, verdict: DayVerdict | null): string {
+  const t = (v: number | null) => (v == null ? "—" : `${Math.round(v)}t`);
+  const tide =
+    read.tideTicks == null
+      ? "—"
+      : `${read.tideTicks < 0 ? "▼" : "▲"}${Math.abs(Math.round(read.tideTicks))}t`;
+  const head = `Tide ${tide} · swing ${t(read.swingTicks)} · ext ${t(read.extTicks)} (${read.scored} scored)`;
+  return verdict ? `${head} — ${VERDICT_LINE[verdict]}` : `${head} — reading the day`;
+}
+
+/**
+ * The day-type readout: TIDE (10-min net drift), SWING (median leg before a
+ * 25t reversal), EXT (median 3-min excursion of the last few entries), and the
+ * verdict EXT buckets into. A readout and not a gate — the thresholds stand on
+ * three sittings (docs/research/replay-trail-whatif.md), so it says what it
+ * sees and refuses nothing. Causal throughout, so safe on a blind replay.
+ */
+function DayReadStrip({ read, verdict }: { read: DayRead | null; verdict: DayVerdict | null }) {
+  if (!read) return null;
+  const num = (v: number | null) => (v == null ? "—" : `${Math.round(v)}`);
+  const stat = (label: string, value: string, title: string) => (
+    <span title={title} style={{ whiteSpace: "nowrap" }}>
+      {label} <b style={{ color: palette.text, fontFamily: "monospace" }}>{value}</b>
+    </span>
+  );
+  return (
+    <div style={{ borderBottom: `1px solid ${palette.cardBorder}`, paddingBottom: 8, marginBottom: 8 }}>
+      <div style={{ display: "flex", gap: 10, fontSize: 10, color: palette.muted }}>
+        <span style={{ letterSpacing: 0.4 }}>READ</span>
+        {stat(
+          "tide",
+          read.tideTicks == null
+            ? "—"
+            : `${read.tideTicks < 0 ? "▼" : "▲"}${Math.abs(Math.round(read.tideTicks))}`,
+          "Net drift over the last 10 minutes of tape, in ticks. Which way the session is actually going — thrash cancels out, tide doesn't.",
+        )}
+        {stat(
+          "swing",
+          num(read.swingTicks),
+          "Median run before a 25-tick reversal, over the same window. A trail distance inside this number exits on routine wiggles.",
+        )}
+        {stat(
+          "ext",
+          read.extTicks == null ? "—" : `${num(read.extTicks)}·${read.scored}`,
+          "Median 3-minute favorable excursion of your last few entries (scored 3 minutes after entry, so it lags by a trade or two). The number that separated paying days from dry ones in the trail study.",
+        )}
+      </div>
+      <div
+        style={{
+          fontSize: 11,
+          marginTop: 4,
+          color: verdict ? VERDICT_COLOR[verdict] : palette.muted,
+          lineHeight: 1.4,
+        }}
+      >
+        {verdict ? VERDICT_LINE[verdict] : `reading the day — ${read.scored}/3 entries scored`}
+      </div>
+    </div>
+  );
+}
+
+function Discipline({
+  day,
+  guards,
+  refused,
+}: {
+  day: ReturnType<typeof dayState>;
+  guards: GuardLevels;
+  refused: string | null;
+}) {
+  const tone = day.locked ? palette.red : day.slow ? palette.orange : palette.muted;
+  const pct = (x: number | null) => (x == null ? "—" : `${Math.round(x * 100)}%`);
+  const secs = (x: number | null) => (x == null ? "—" : `${Math.round(x)}s`);
+  return (
+    <div style={{ borderBottom: `1px solid ${palette.cardBorder}`, paddingBottom: 8, marginBottom: 8 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 12 }}>
+        <span style={{ fontSize: 10, color: palette.muted, letterSpacing: 0.4 }}>DAY</span>
+        <strong
+          style={{
+            color: day.realized > 0 ? palette.green : day.realized < 0 ? tone : palette.muted,
+            fontFamily: "monospace",
+          }}
+        >
+          {fmtUsd(day.realized)}
+        </strong>
+        <span style={{ color: palette.muted, fontSize: 11 }}>
+          {day.trades} trade{day.trades === 1 ? "" : "s"}
+        </span>
+        <span
+          style={{ marginLeft: "auto", fontSize: 10, color: palette.muted }}
+          title={`Stop ${fmtUsd(-guards.daily_loss_stop)} · slow ${fmtUsd(-guards.slow_down_at)} · target ≥${guards.min_target_ticks}tk · stop ${guards.stop_ticks_min}–${guards.stop_ticks_max}tk · risk ≤${fmtUsd(guards.max_risk_usd)}`}
+        >
+          stop {fmtUsd(-guards.daily_loss_stop)}
+        </span>
+      </div>
+
+      {day.locked ? (
+        <div style={{ fontSize: 11, color: palette.red, marginTop: 4, lineHeight: 1.5 }}>
+          <b>Day over</b> — {day.locked}. New entries refused; closing out still
+          works. A rewind lifts it, because that un-happens the trades.
+        </div>
+      ) : day.slow ? (
+        <div style={{ fontSize: 11, color: palette.orange, marginTop: 4, lineHeight: 1.5 }}>
+          <b>In the hole.</b> Past {fmtUsd(-guards.slow_down_at)} your measured
+          expectancy flips sign. Live, entries space out here — replay cannot
+          enforce that against a compressed clock, so watch the gap below.
+        </div>
+      ) : null}
+
+      {refused && (
+        <div style={{ fontSize: 11, color: palette.orange, marginTop: 4, lineHeight: 1.5 }}>
+          ⚠ refused — {refused}
+        </div>
+      )}
+
+      <div
+        style={{
+          display: "flex",
+          gap: 10,
+          marginTop: 6,
+          fontSize: 10,
+          color: palette.muted,
+        }}
+      >
+        <span title="Trades that resolved inside 30 seconds. About half your real entries, winning 26% of the time — the one habit the audit found that actually costs money. An entry problem, so it is counted and never blocked.">
+          &lt;30s{" "}
+          <b style={{ color: (day.fastShare ?? 0) > 0.5 ? palette.orange : palette.muted }}>
+            {pct(day.fastShare)}
+          </b>
+        </span>
+        <span title="Median seconds between one entry and the next. Your green days ran 136s and your red days 76s — with the trade COUNT identical. Volume is not the problem; speed is.">
+          gap{" "}
+          <b style={{ color: (day.medianGapS ?? 999) < 76 ? palette.orange : palette.muted }}>
+            {secs(day.medianGapS)}
+          </b>
+        </span>
+        <span title="Was anything opened while the day was already past the slow-down level? A bad start slowed down on costs $147/day; the same start sped up on costs $803.">
+          in the hole{" "}
+          <b style={{ color: day.tradedInTheHole ? palette.orange : palette.muted }}>
+            {day.tradedInTheHole ? "yes" : "no"}
+          </b>
+        </span>
       </div>
     </div>
   );

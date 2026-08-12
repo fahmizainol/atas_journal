@@ -38,6 +38,14 @@
 
 import type { Timeframe } from "./timeframes";
 
+/** Which tick store a session came out of.
+ *
+ *  `"cache"` is the Databento corpus the backtests read; `"live"` is a session
+ *  recorded off Rithmic. They are separate stores on purpose (decision 3 of
+ *  docs/live-shadow-plan.md) and the corpus is pinned at the data budget, so in
+ *  practice this splits the calendar: bought up to 2026-06-30, recorded after. */
+export type TickSource = "cache" | "live";
+
 export interface SessionPayload {
   symbol: string;
   root: string;
@@ -57,7 +65,17 @@ export interface SessionPayload {
   rth_open_ms: number;
   rth_close_ms: number;
   default_start_ms: number;
+  /** The 18:00 ET Globex open, where the night's VWAP *should* be anchored. */
+  globex_open_ms: number;
+  /** Where it actually is: the first overnight print the tape carries. Equal to
+   *  `globex_open_ms` on a bought day and on a recorded one the feed backfilled
+   *  whole; later than it when a Rithmic replay came back short, which it can do
+   *  without erroring. The gap is the only thing that says the band is anchored
+   *  mid-night, since a wrongly-anchored VWAP draws like a right one. */
   globex_anchor_ms: number | null;
+  /** Which store served this session — see `SimDay.source`. Optional so a
+   *  payload from an older server still decodes. */
+  source?: TickSource;
   /** (Σv, Σpv, Σp²v) already behind the weekly anchor when this session's Globex
    *  open arrives — the week's earlier sessions, collapsed to the three sums the
    *  accumulation needs (journal.sim.weekly). Null when there is no honest
@@ -238,27 +256,80 @@ export interface TapeEvent {
   n: number;
 }
 
-// The demo page's constants, unchanged so that an event means the same thing in
-// the replay as it does in the write-up. Deliberately *not* wired to the
-// big-trade threshold the setup bar exposes: that one is a reading choice about
-// which prints to mark, these are the numbers the proxies were measured at.
-const SWEEP_LOTS = 50; // a sweep this size counts toward a burst
-const BURST_GAP_S = 60; // big sweeps this close in time join one burst …
-const BURST_SPAN_PTS = 5.0; // … if they also stay this close in price
-const BURST_LOTS = 150; // a burst needs this much size (strength 1.0)
+/**
+ * What selects an event, as settings rather than constants.
+ *
+ * They *start* at the demo pages' numbers, so an untouched chart means the same
+ * thing as the write-up — but which sweeps are one order being worked, and how
+ * concentrated is concentrated, are facts about the instrument and the day, not
+ * about the code. The same argument the big-trade threshold has always had.
+ *
+ * A change here re-derives the whole tape (`setEventTuning` then `snapshotTo`,
+ * the path a timeframe change takes): none of this is a filter over what was
+ * already published — a wider gap clusters sweeps that were separate bursts, a
+ * different window re-medians the session. Compare only within one setting: an
+ * event's strength is in units of the threshold that selected it.
+ */
+export interface EventTuning {
+  /** Lots a single sweep must reach to count toward a burst. Deliberately not
+   *  the big-trade threshold: that one is a reading choice about which prints to
+   *  mark, this one is what the clusterer is allowed to see. */
+  sweepLots: number;
+  /** Big sweeps this close in time join one burst … */
+  burstGapS: number;
+  /** … if they also stay this close in price. */
+  burstSpanPts: number;
+  /** Lots a burst needs before it is published — strength 1.0. Below it the
+   *  burst still accumulates; it simply hasn't happened yet. */
+  burstLots: number;
+  /** The window absorption is measured over. What "went nowhere" means in time:
+   *  short finds jabs, long finds shelves. */
+  absorbWinMs: number;
+  /** Concentration this many × the baseline median = strength 1.0. Selects the
+   *  window *and* decides which adjacent hot windows merge, so it shapes the
+   *  bands as well as choosing them. */
+  absorbMult: number;
+  /** Windows that must have closed before the median means anything. Until it is
+   *  met nothing is scored at all. */
+  absorbMinWindows: number;
+  /** Which tape the windows are measured over. `rth` restarts the baseline at
+   *  the bell — the overnight trades a fraction of the volume through a fraction
+   *  of the range, so a median across both has the open firing on every window.
+   *  `all` scores the night too, on one baseline, and is a different instrument. */
+  absorbScope: "rth" | "all";
+  /** The baseline: 0 = every window that has closed so far, N = the last N only.
+   *  Session-to-date answers "concentrated for today"; a rolling window answers
+   *  "concentrated for right now", which drifts with the regime. */
+  absorbBaseline: number;
+  /** Whether adjacent hot windows read as one tall event or as several. */
+  absorbMerge: boolean;
+}
 
-// Absorption is scored *relative to the session*, never in absolute points: the
-// same band means opposite things in a quiet and a violent regime (measured:
-// median 15s RTH range 4.75-6.00pt on 2025-26 NQ, and an absolute
-// 60s/≤4pt/≥900-lot rule fired zero times in three sessions). Concentration is
-// lots per point traversed, scored against the median of the windows that have
-// already closed — the demo's whole-session median is lookahead in a replay, so
-// here it develops, exactly like every other layer on this chart.
-const ABSORB_WIN_MS = 15_000;
-const ABSORB_MULT = 3.0; // concentration this many × the median = strength 1.0
-/** Windows that must have closed before the median means anything (five
- *  minutes). The demo's own floor, and until it is met nothing is scored. */
-const ABSORB_MIN_WINDOWS = 20;
+/**
+ * The measured defaults: `demo/big_trades_demo.py` for the burst half and
+ * `demo/composite_profile_demo.py` for the absorption half.
+ *
+ * Absorption is scored *relative to the session*, never in absolute points: the
+ * same band means opposite things in a quiet and a violent regime (measured:
+ * median 15s RTH range 4.75-6.00pt on 2025-26 NQ, and an absolute
+ * 60s/≤4pt/≥900-lot rule fired zero times in three sessions). Concentration is
+ * lots per point traversed, scored against the median of the windows that have
+ * already closed — the demo's whole-session median is lookahead in a replay, so
+ * here it develops, exactly like every other layer on this chart. The 20-window
+ * warm-up is five minutes at the default window, and is the demo's own floor.
+ */
+export const DEFAULT_EVENT_TUNING: EventTuning = {
+  sweepLots: 50,
+  burstGapS: 60,
+  burstSpanPts: 5.0,
+  burstLots: 150,
+  absorbWinMs: 15_000,
+  absorbMult: 3.0,
+  absorbMinWindows: 20,
+  absorbScope: "rth",
+  absorbBaseline: 0,
+  absorbMerge: true,
+};
 
 export interface Snapshot {
   bars: Bar[];
@@ -593,9 +664,14 @@ export class ReplayEngine {
   private bN = 0;
   private bEndMs = 0;
 
-  // The 15-second window now accumulating, the concentrations of the windows
-  // that have already closed (kept sorted, for the running median), and the
-  // absorption event adjacent hot windows are merging into.
+  // What selects an event. Settings, for the reason `EventTuning` gives, and
+  // like the big-trade threshold they are recorded here and re-derived through
+  // `snapshotTo` rather than applied to what is already on the chart.
+  private ev: EventTuning = { ...DEFAULT_EVENT_TUNING };
+
+  // The window now accumulating, the concentrations of the windows that have
+  // already closed (kept sorted, for the running median), and the absorption
+  // event adjacent hot windows are merging into.
   private absKey = -1;
   private absIdx = 0;
   private absLo = 0;
@@ -605,6 +681,10 @@ export class ReplayEngine {
   private absFrom = 0;
   private absTo = 0;
   private absConc: number[] = [];
+  // The same concentrations in arrival order, kept only when the baseline is a
+  // rolling one — a median over "the last N" has to know which is the oldest,
+  // which the sorted copy can't say.
+  private absQ: number[] = [];
   private absPos = -1;
   private absPrevKey = -1;
   private absBuyAcc = 0;
@@ -720,7 +800,10 @@ export class ReplayEngine {
         continue;
       }
       const bt = this.timeBucket(t.t[i]);
-      if (!bar || bar.time !== bt) {
+      // `bt > bar.time` rather than `!==`, for the reason `applyTick` gives: a
+      // stamp that steps backwards folds into the open bar instead of opening
+      // one behind it, because the chart asserts on a descending series.
+      if (!bar || bt > bar.time) {
         bar = { time: bt, open: price, high: price, low: price, close: price, volume: size, i0: i, i1: i };
         out.push(bar);
       } else {
@@ -752,6 +835,23 @@ export class ReplayEngine {
 
   bigLots(): number {
     return this.bigMin;
+  }
+
+  /**
+   * What selects a tape event. Records the choice only, exactly like
+   * `setBigLots` — the caller rebuilds through `snapshotTo`, because a burst is
+   * a cluster and an absorption is scored against a median, and neither can be
+   * recovered from the events a different setting published.
+   *
+   * Partial: one knob moves at a time, and the panel that moves it has no reason
+   * to hold the other nine.
+   */
+  setEventTuning(t: Partial<EventTuning>): void {
+    this.ev = { ...this.ev, ...t };
+  }
+
+  eventTuning(): EventTuning {
+    return this.ev;
   }
 
   /**
@@ -812,6 +912,24 @@ export class ReplayEngine {
     }
     const step = this.tf.ms;
     return (Math.floor((this.clockMs - this.rthOpenMs) / step) + 1) * step + this.rthOpenMs;
+  }
+
+  /**
+   * The clock at which the bar before the live edge had just completed — what
+   * "step one bar back" seeks to, the mirror of `nextBarClockMs`.
+   *
+   * Read off the bars actually built rather than off a boundary formula, so it
+   * means the same thing on a tick bar (whose edges fall wherever the tape
+   * decided) as on a time bar: the last print of the previous closed bar.
+   * Whatever was forming at the live edge un-happens, which is exactly what a
+   * seek to this clock produces. With less than two bars there is nowhere
+   * earlier to stand, so it answers the session's first print and the caller's
+   * clamp does the rest.
+   */
+  prevBarClockMs(): number {
+    const bars = this.bars;
+    if (bars.length < 2) return this.tape.n ? this.tape.t[this.i0] : this.clockMs;
+    return this.tape.t[Math.max(this.i0, bars[bars.length - 2].i1)];
   }
 
   // The last applied tick's price (the fill price at the current clock), and the
@@ -881,6 +999,7 @@ export class ReplayEngine {
     this.bN = 0;
     this.absKey = -1;
     this.absConc = [];
+    this.absQ = [];
     this.absPos = -1;
     this.absPrevKey = -1;
     this.absBuyAcc = 0;
@@ -966,7 +1085,7 @@ export class ReplayEngine {
    * price are exactly what is worth seeing.
    */
   private endRun(): void {
-    if (this.runLots < SWEEP_LOTS || this.runIdx < 0) return;
+    if (this.runLots < this.ev.sweepLots || this.runIdx < 0) return;
     // Consumed: the same run must not be folded in twice (an untagged print and
     // then the next run's break would both end it).
     const lots = this.runLots;
@@ -974,7 +1093,7 @@ export class ReplayEngine {
     if (this.bIdx >= 0) {
       const gap = (this.runStartMs - this.bEndMs) / 1000;
       const span = Math.max(Math.abs(this.runHi - this.bMinLo), Math.abs(this.runHi - this.bMaxLo));
-      if (gap > BURST_GAP_S || span > BURST_SPAN_PTS) this.bIdx = -1;
+      if (gap > this.ev.burstGapS || span > this.ev.burstSpanPts) this.bIdx = -1;
     }
     if (this.bIdx < 0) {
       this.bIdx = this.runIdx;
@@ -998,7 +1117,7 @@ export class ReplayEngine {
     if (this.runHi > this.bHi) this.bHi = this.runHi;
     this.bTo = this.runBtEnd;
     this.bEndMs = this.runMs;
-    if (this.bLots < BURST_LOTS) return;
+    if (this.bLots < this.ev.burstLots) return;
     const ev: TapeEvent = {
       kind: "sweep",
       idx: this.bIdx,
@@ -1007,7 +1126,7 @@ export class ReplayEngine {
       lo: this.bLo,
       hi: this.bHi,
       lots: this.bLots,
-      st: this.bLots / BURST_LOTS,
+      st: this.bLots / this.ev.burstLots,
       buy: this.bBuy >= this.bLots / 2,
       n: this.bN,
     };
@@ -1019,15 +1138,15 @@ export class ReplayEngine {
   }
 
   /**
-   * Accumulate one RTH tick into the 15-second window absorption is measured on.
+   * Accumulate one tick into the window absorption is measured on.
    *
-   * RTH only, and the baseline restarts at the bell: the overnight trades a
-   * fraction of the volume through a fraction of the range, so a median taken
-   * across both would have the open firing absorption on every window. That is
-   * also the window the demo measured — its concentrations are RTH.
+   * Which ticks reach here is `absorbScope`'s call, and the default is the
+   * demo's: RTH only, baseline restarting at the bell, because the overnight
+   * trades a fraction of the volume through a fraction of the range and a median
+   * taken across both has the open firing absorption on every window.
    */
   private applyAbsorb(i: number, ms: number, price: number, size: number, bt: number): void {
-    const key = Math.floor(ms / ABSORB_WIN_MS);
+    const key = Math.floor(ms / this.ev.absorbWinMs);
     if (key !== this.absKey) {
       if (this.absKey >= 0) this.closeAbsorbWindow();
       this.absKey = key;
@@ -1045,14 +1164,28 @@ export class ReplayEngine {
     this.absTo = bt;
   }
 
-  /** Median of the closed windows' concentrations. Kept sorted on insert, which
-   *  is cheaper than sorting on read: a session closes ~1,500 windows and every
-   *  one of them asks for the median. */
+  /** Median of the baseline's concentrations. Kept sorted on insert, which is
+   *  cheaper than sorting on read: a session closes ~1,500 windows and every one
+   *  of them asks for the median. */
   private absMedian(): number {
     const a = this.absConc;
     const n = a.length;
     const m = n >> 1;
     return n % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  }
+
+  /** Index of the leftmost entry ≥ `v` in the sorted concentrations — the insert
+   *  point, and (when `v` is known to be present) the entry to drop. */
+  private absAt(v: number): number {
+    const a = this.absConc;
+    let lo = 0;
+    let hi = a.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (a[mid] < v) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
   }
 
   /**
@@ -1062,7 +1195,8 @@ export class ReplayEngine {
    * band as well as adding volume, so it is only taken while the *merged* block
    * still clears the bar. Otherwise the reported concentration could fall below
    * the threshold that selected the event, and a strength floored at 1.0 would
-   * be a lie.
+   * be a lie. With `absorbMerge` off each hot window stands alone, which is the
+   * same tape read as "three windows agreed" rather than "one block".
    *
    * The floor moves as the median develops, and an event keeps the strength it
    * was published at. That is the honest causal version of the demo's fixed
@@ -1073,23 +1207,31 @@ export class ReplayEngine {
     const tick = this.tape.tickSize;
     const conc = this.absVol / Math.max(this.absHi - this.absLo, tick);
     const a = this.absConc;
-    let lo = 0;
-    let hi = a.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (a[mid] < conc) lo = mid + 1;
-      else hi = mid;
+    a.splice(this.absAt(conc), 0, conc);
+    // A rolling baseline drops the oldest window as the newest lands, so the
+    // median answers "concentrated for right now" instead of "for today".
+    const roll = this.ev.absorbBaseline;
+    if (roll > 0) {
+      this.absQ.push(conc);
+      while (this.absQ.length > roll) {
+        const old = this.absQ.shift() as number;
+        const at = this.absAt(old);
+        if (at < a.length) a.splice(at, 1);
+      }
     }
-    a.splice(lo, 0, conc);
     const key = this.absKey;
-    if (a.length < ABSORB_MIN_WINDOWS) return;
-    const floor = ABSORB_MULT * this.absMedian();
+    // A warm-up longer than the rolling baseline would never be met — the pool
+    // stops growing at N — so it is clamped rather than left to silently switch
+    // the layer off on a combination of two reasonable-looking settings.
+    if (a.length < (roll > 0 ? Math.min(this.ev.absorbMinWindows, roll) : this.ev.absorbMinWindows))
+      return;
+    const floor = this.ev.absorbMult * this.absMedian();
     if (!(floor > 0)) return;
     if (conc < floor) {
       this.absPos = -1; // a cold window ends the run
       return;
     }
-    if (this.absPos >= 0 && this.absPrevKey === key - 1) {
+    if (this.ev.absorbMerge && this.absPos >= 0 && this.absPrevKey === key - 1) {
       const ev = this.events[this.absPos];
       const bLo = Math.min(ev.lo, this.absLo);
       const bHi = Math.max(ev.hi, this.absHi);
@@ -1204,7 +1346,15 @@ export class ReplayEngine {
           : Math.floor(ms / 1000);
     } else {
       bt = this.timeBucket(ms);
-      newBar = !bar || bar.time !== bt;
+      // `>`, not `!==`: a tape whose stamps step backwards would otherwise open
+      // a bar *behind* the one forming, and the chart asserts on a series that
+      // is not strictly ascending — which takes the whole page down with it.
+      // Tick bars have been immune all along (the stamp above is a max), which
+      // is why this only ever showed on a timeframe switch. The out-of-order
+      // print is folded into the bar that is open instead: it is one print in
+      // the wrong second, and a bar it cannot phase is the honest place for it.
+      newBar = !bar || bt > bar.time;
+      if (bar && !newBar) bt = bar.time;
     }
     if (newBar) {
       // The bar that was forming has just closed: settle its value areas from the
@@ -1239,12 +1389,14 @@ export class ReplayEngine {
     if (this.nyOpen) {
       this.nyv.add(price, size);
       this.nHist.add(t.level[i], size);
-      this.applyAbsorb(i, ms, price, size, bt);
       // The day's range, on the same window the NY anchor runs on — NaN-safe on
       // the first tick, like the IB below.
       if (!(price <= this.rthHigh)) this.rthHigh = price;
       if (!(price >= this.rthLow)) this.rthLow = price;
     }
+    // Absorption's own window, which is not the NY one unless it is asked to be:
+    // scoring the night means one baseline across two very different tapes.
+    if (this.nyOpen || this.ev.absorbScope === "all") this.applyAbsorb(i, ms, price, size, bt);
     if (this.anchorMs != null && ms >= this.anchorMs) this.a.add(price, size);
     this.applyBig(i, ms, price, size, bt);
     // Refresh (or append) the band point for the current bar.

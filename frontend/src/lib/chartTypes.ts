@@ -153,6 +153,10 @@ export type Footprint = number[][][];
 
 export interface TradeChartData {
   available: boolean;
+  /** Why there are no bars, when there are none — names the session and the
+   *  contract whose ticks are missing, so an empty chart isn't ambiguous with
+   *  a session that simply had no trades. */
+  reason?: string;
   bars?: Bar[];
   vwap_globex?: VwapPoint[];
   vwap_ny?: VwapPoint[];
@@ -190,6 +194,10 @@ export interface TradeChartData {
 
 export interface DayChartData {
   available: boolean;
+  /** Why there are no bars, when there are none — names the session and the
+   *  contract whose ticks are missing, so an empty chart isn't ambiguous with
+   *  a session that simply had no trades. */
+  reason?: string;
   instrument?: string;
   bars?: Bar[];
   vwap_globex?: VwapPoint[];

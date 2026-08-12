@@ -18,11 +18,26 @@
 //   - No step-bar: `nextBarClockMs()` reads forward on a tick timeframe, and the
 //     print that would complete the forming bar has not happened yet.
 //
-// SHADOW SIGNALS ARE NOT ORDERS. The right-hand panel says where each registered
+// SHADOW SIGNALS ARE NOT ORDERS. The signals rail says where each registered
 // strategy *would have* signalled — prefix re-runs of the same `run_session` the
-// backtest calls, so live cannot disagree with the backtest. Nothing on this page
-// can route an order, and nothing about it should be shaped as though it might
-// (docs/live-shadow-plan.md § Phase 7).
+// backtest calls, so live cannot disagree with the backtest. Nothing in it can
+// route anything, and the shelf has no path to the broker at all: `shadow.py`
+// imports nothing from `broker.py`, so strategy-routed entry is absent by
+// construction rather than by omission (docs/live-shadow-plan.md § Phase 7).
+//
+// EVERY GESTURE ROUTES, AND ALL OF THEM THROUGH ONE FUNNEL. `placeMarket`,
+// `placeAt`, `placeResting`, the long-press ticket, the BUY/SELL dock and the
+// q/w/s keys each end at `useOrderIntent.submit`, which is the single place that
+// decides paper-or-broker — see the note at the top of that file for why the
+// alternative (each gesture checking for itself) fails silently rather than
+// loudly. On paper `submit` declines and the caller folds the order into
+// `logRef` over the tape; on a real account it goes to the exchange, behind the
+// confirm unless one-click is on for that account.
+//
+// AND THEY ALL MEASURE THE SAME ORDER. Size and the bracket are one piece of
+// state on this page (`ticket`), handed to the chart *and* to the routing
+// panel's pad. There were two once — the panel kept its own — and setting the
+// stop in one while placing from the other sent a bracket nobody had typed.
 //
 // THE FEED IS SIMULATED, AND SAYS SO. Until Phase 5 there is no live tick source
 // in this project, so the source is a cached Databento day replayed at wall-clock
@@ -33,12 +48,43 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ReplayChart, type ReplayChartHandle } from "../components/charts/ReplayChart";
+import type { IndicatorSettingsMap } from "../components/charts/IndicatorLegend";
+import { buildChartKnobs } from "../components/charts/indicatorKnobs";
+import type { ModernVwapParams } from "../lib/modernVwap";
 import { TimeframeControl } from "../components/charts/TimeframeControl";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import { SimIndicators } from "../components/charts/SimIndicators";
+import { QuickDock } from "../components/charts/QuickDock";
 import { TapeCoverage } from "../components/TapeCoverage";
+import { RoutingPanel } from "../components/RoutingPanel";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
 import { useSimulatorDays } from "../hooks/useSimulator";
+import {
+  cancelBrokerOrder,
+  flattenAll,
+  journalPaperTrades,
+  modifyBrokerOrder,
+  useRoutingStatus,
+} from "../hooks/useRouting";
+import {
+  BasketIds,
+  bracketOf,
+  brokerSig,
+  positionLine,
+  tradeViews,
+  workingViews,
+} from "../lib/brokerViews";
+import { useOrderIntent } from "../hooks/useOrderIntent";
+import { OrderConfirm, OrderFlash } from "../components/OrderConfirm";
+import { brokerMark, FillCues, playCue, simMark } from "../lib/orderSound";
+import { loadLiveHistoryDays, saveLiveHistoryDays } from "../lib/chartPrefs";
+import type {
+  BrokerOrder,
+  BrokerPosition,
+  BrokerState,
+  GuardState,
+  OrderDraft,
+} from "../lib/routingTypes";
 import {
   setLiveModes,
   startFakeFeed,
@@ -53,14 +99,23 @@ import {
 import { useTapeHistory } from "../hooks/useTapeHistory";
 import type { TapeRange } from "../lib/volumeProfile";
 import type { CompositeRule } from "../lib/compositeProfile";
+import type { LiveTicket } from "../lib/simPrefs";
+import {
+  loadLiveChartKnobs,
+  loadLiveTicket,
+  saveLiveChartKnobs,
+  saveLiveTicket,
+} from "../lib/simPrefs";
 import type { GrowableTape } from "../lib/growableTape";
 import {
   sessionPayloadFor,
   type LiveBackfill,
+  type LiveHeader,
   type LiveSignals,
   type ShadowStrategy,
 } from "../lib/liveTypes";
-import { ReplayEngine, type IbBox, type RangeBox, type Tape } from "../lib/replayEngine";
+import { ReplayEngine, type EventTuning, type IbBox, type RangeBox, type Tape } from "../lib/replayEngine";
+import { loadFillModel, type FillCfg } from "../lib/fillModel";
 import { liveSource } from "../lib/tapeSource";
 import { showsSeconds, timeframeById, TIMEFRAMES } from "../lib/timeframes";
 import {
@@ -79,6 +134,7 @@ import {
 } from "../lib/replaySim";
 import {
   fmtClock,
+  fmtCountdown,
   fmtPts,
   fmtUsd,
   orderView,
@@ -91,17 +147,17 @@ import { palette } from "../theme";
 const TZ = "New York";
 const SPEEDS = [1, 5, 15, 60, 300, 900];
 
-/** How many prior sessions to draw behind the live one, and the choices offered.
+/** The prior-session counts offered behind the live one. The default, and where
+ *  the choice is kept, are in `lib/chartPrefs` — it sticks across reloads.
  *
- *  A week by default. It is the span the levels you trade off are actually made
- *  of — the shelf the week has been sat on, Monday's high — and a live chart
- *  that starts at the Globex open has none of them on it.
+ *  A week to start with. It is the span the levels you trade off are actually
+ *  made of — the shelf the week has been sat on, Monday's high — and a live
+ *  chart that starts at the Globex open has none of them on it.
  *
  *  It costs something, which is why it is a control and not a constant: each day
  *  is a whole tape to fetch, ~0.5M prints and a few megabytes, and they are
- *  fetched before the session's own tape starts (see `useLiveTape`). Five is
- *  about four seconds on a cold cache and nothing at all on a warm one. */
-const HISTORY_DAYS_DEFAULT = 5;
+ *  fetched before the session's own tape starts (see `useLiveTape`). Cold, that
+ *  is seconds per day; warm, nothing at all. */
 const HISTORY_DAY_OPTIONS = [0, 1, 2, 3, 5, 10];
 
 /** First index in a tape's (ascending) times at or after `ms`, or `n` if there
@@ -116,6 +172,27 @@ const firstAt = (t: Float64Array, n: number, ms: number): number => {
   }
   return lo;
 };
+
+/**
+ * Everything the engine reads off the header that a session in progress can
+ * still learn, as one comparable string.
+ *
+ * A live header is not constant. `has_overnight` is "are there overnight rows on
+ * the tape *yet*", and the Globex anchor and the weekly seed are both null until
+ * it is true — so a connect whose backfill lands after the first live print
+ * hands the engine a session with no night in it, and the Globex VWAP, its band
+ * and the weekly line are then absent for the rest of the sitting. That was the
+ * bug you fixed by reloading the page: the reload built the engine from a header
+ * that had since been answered.
+ */
+const geoSig = (h: LiveHeader): string =>
+  [
+    h.has_overnight ? 1 : 0,
+    h.globex_anchor_ms ?? "-",
+    h.rth_open_ms,
+    h.rth_close_ms,
+    h.weekly_seed ? h.weekly_seed.join(",") : "-",
+  ].join("|");
 
 export function LiveChart() {
   const statusQ = useLiveStatus();
@@ -136,13 +213,50 @@ export function LiveChart() {
   // opening a file. `missing` comes back with the answer because the live store
   // has long stretches with nothing recorded, and gluing across one would draw a
   // continuous chart out of a discontinuous week.
-  const [historyDays, setHistoryDays] = useState(HISTORY_DAYS_DEFAULT);
+  // Remembered, because it is the page's biggest opening cost and not a taste —
+  // see `loadLiveHistoryDays`. A reload that went back to five was five tapes
+  // to fetch and decode before the live one could start, however few you asked
+  // for last time.
+  const [historyDays, setHistoryDaysState] = useState(loadLiveHistoryDays);
+  const setHistoryDays = useCallback((n: number) => {
+    setHistoryDaysState(n);
+    saveLiveHistoryDays(n);
+  }, []);
   const histDaysQ = useLiveHistoryDays(header?.symbol ?? null, header?.date ?? null, historyDays);
   const histDates = useMemo(
     () => (histDaysQ.data?.days ?? []).map((d) => d.date),
     [histDaysQ.data],
   );
   const histQ = useTapeHistory("/live/history/session", header?.symbol ?? null, histDates, TZ);
+
+  // The chart's reading knobs — the same set the Simulator hangs off its legend
+  // rows, persisted in their own store (see lib/simPrefs, loadLiveChartKnobs).
+  // All of them are reading choices: none can move the clock, fill an order, or
+  // reach a broker. Declared up here because the composite span cuts the
+  // context ranges below.
+  const [knobs] = useState(loadLiveChartKnobs);
+  const [bigLots, setBigLotsState] = useState(knobs.bigLots);
+  const bigLotsRef = useRef(bigLots);
+  bigLotsRef.current = bigLots;
+  const [nodeProm, setNodeProm] = useState(knobs.nodeProm);
+  // Modern VWAP's parameters — see the Simulator's copy for why they are patched
+  // as one object. Kept in this page's own store, so the two pages can be
+  // looking at different settings of a study layer.
+  const [mvParams, setMvParams] = useState(knobs.modernVwap);
+  const patchMv = useCallback(
+    (patch: Partial<ModernVwapParams>) => setMvParams((p) => ({ ...p, ...patch })),
+    [],
+  );
+  const [compositeRule, setCompositeRule] = useState(knobs.composite);
+  const [compositeSpan, setCompositeSpan] = useState(knobs.compositeSpan);
+  const [evTuning, setEvTuning] = useState(knobs.eventTuning);
+  const evTuningRef = useRef(evTuning);
+  evTuningRef.current = evTuning;
+  const [evLabelSt, setEvLabelSt] = useState(knobs.eventLabelSt);
+  const [evFill, setEvFill] = useState(knobs.eventFill);
+  const [evMarginal, setEvMarginal] = useState(knobs.eventMarginal);
+  // The store is written wholesale further down, once the page posture it also
+  // carries (timeframe, indicator strip, rail pin) has been declared.
 
   // The days that may actually be seeded: in wall-clock order and not
   // overlapping. A day that fails the test is dropped rather than drawn — bars
@@ -170,21 +284,24 @@ export function LiveChart() {
   // deliberately not among them: a composite fed by the day in progress is a
   // level that day could never violate.
   //
-  // Ends at the 16:00 close either way. The post-close hour belongs to the
-  // *next* day's overnight, and counting it here would put the same ticks in two
-  // days.
+  // How much of a day counts is the span knob, exactly as on Replay: under
+  // "globex" it starts at the day's first tick (the 18:00 open the evening
+  // before), under "rth" at the bell. Ends at the 16:00 close either way. The
+  // post-close hour belongs to the *next* day's overnight, and counting it here
+  // would put the same ticks in two days.
   const contextRanges = useMemo(() => {
     const out: TapeRange[] = [];
     let off = 0;
     for (const d of histQ.days) {
       const t = d.tape;
       if (!contextTapes.includes(t)) continue;
+      const i0 = compositeSpan === "globex" ? 0 : firstAt(t.t, t.n, d.rthOpenMs);
       const i1 = firstAt(t.t, t.n, d.rthCloseMs) - 1;
-      if (i1 >= 0) out.push({ i0: off, i1: off + i1 });
+      if (i1 >= i0) out.push({ i0: off + i0, i1: off + i1 });
       off += t.n;
     }
     return out;
-  }, [contextTapes, histQ.days]);
+  }, [compositeSpan, contextTapes, histQ.days]);
   const ctxRangeRef = useRef<TapeRange[]>([]);
   ctxRangeRef.current = contextRanges;
 
@@ -194,7 +311,7 @@ export function LiveChart() {
   // progress is never in it, which is the rule that stops it becoming a level
   // today could not violate. "off" with no days behind it, since there would be
   // nothing to build it from.
-  const composite: CompositeRule = contextTapes.length > 0 ? "balance" : "off";
+  const composite: CompositeRule = contextTapes.length > 0 ? compositeRule : "off";
 
   // The tape cannot start until the context is decided: rows seeded in front of
   // it shift every index behind them, and an order's `idx` is a position in that
@@ -210,7 +327,17 @@ export function LiveChart() {
   );
 
 
-  const [tfId, setTfId] = useState("t500");
+  // --- where an order goes --------------------------------------------------
+  // The account selector lives in the routing panel, but *which account is
+  // active* is a page-level fact: it decides whether a chart gesture fills the
+  // paper blotter or reaches the exchange. So the status is read here and the
+  // panel shares the query (react-query dedupes on the key), rather than the
+  // page having to ask a panel that may not be mounted.
+  const routingQ = useRoutingStatus(!!status?.routing);
+  const brokerState = routingQ.data?.broker ?? null;
+  const intent = useOrderIntent(brokerState, () => void routingQ.refetch());
+
+  const [tfId, setTfId] = useState(knobs.timeframe);
   const tf = useMemo(() => timeframeById(tfId), [tfId]);
   const tfRef = useRef(tf);
   tfRef.current = tf;
@@ -222,6 +349,20 @@ export function LiveChart() {
   const clockRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const idRef = useRef(1);
+  const sessionStartRef = useRef(0);
+  // The header the running engine was built from, as `geoSig` renders it. The
+  // header is not constant — see below — so this is what says whether the engine
+  // is still built on the truth.
+  const geoSigRef = useRef("");
+  // basket_id <-> the numeric id the chart primitives key orders by, stable for
+  // the life of the session (see lib/brokerViews).
+  const basketsRef = useRef(new BasketIds());
+  const brokerSigRef = useRef("");
+  // The broker's last word, for the drag handlers. Refs rather than state
+  // because those handlers are passed to the chart and would otherwise be
+  // re-made on every poll, tearing down the chart's own bindings twice a second.
+  const brokerOrdersRef = useRef<BrokerOrder[] | null>(null);
+  const brokerPosRef = useRef<BrokerPosition | null>(null);
   // Made once, and never re-made: it closes over the tape *ref*, not over a tape,
   // so a session swap needs no new source. The clock is the newest print — never
   // the wall clock, which on a quiet market would run the chart past its data.
@@ -246,34 +387,73 @@ export function LiveChart() {
   if (ladderRef.current === null) ladderRef.current = new SimLadder();
   const ladder = ladderRef.current;
 
+  // Two fill watchers because there are two blotters, and only one of them is on
+  // screen at a time (see `drawBrokerRef`). Keeping both fed — the hidden one
+  // silently — is what stops switching accounts from announcing everything the
+  // other side did while you were not looking at it. See lib/orderSound.
+  const paperCuesRef = useRef(new FillCues());
+  const brokerCuesRef = useRef(new FillCues());
+
   // --- display state --------------------------------------------------------
   const [ready, setReady] = useState(false);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [openPos, setOpenPos] = useState<Position | null>(null);
   const [working, setWorking] = useState<WorkingOrderView[]>([]);
   const [setupOpen, setSetupOpen] = useState(false);
-  // Open by default, unlike the replay's ticket: this rail carries a feed of what
-  // the shelf believed, and a signal you have to remember to go and look at is
-  // the failure mode the whole shadow stack exists to avoid. Not on a phone,
-  // where it covers most of the chart it is about.
+  // Closed on mount, like the replay's ticket: the panel lays over the tape it is
+  // about, and the chart is what you came to the page for. The rail button opens
+  // it in one click, and the feed it holds is a log — what happened while it was
+  // shut is still there when you open it.
   //
-  // Unpinned, though — the feed lays over the tape rather than taking a column
-  // off it. Pinning is there when you want to read the two side by side.
+  // Unpinned by default — the feed lays over the tape rather than taking a
+  // column off it. Pinning is there when you want to read the two side by side,
+  // and it sticks (live.chartKnobs): it is a statement about how you work, not
+  // a fact about the session.
   //
   // One panel, two views, rather than a second panel for coverage: they would
   // otherwise stack in the unpinned overlay and fight over the same column when
   // pinned, and the layout rules for that are a second set to keep in step for
   // no gain. Coverage is something you consult, not something you watch.
-  const narrow = () => window.matchMedia("(max-width: 640px)").matches;
-  const [railView, setRailView] = useState<"signals" | "coverage" | null>(() =>
-    narrow() ? null : "signals",
-  );
+  const [railView, setRailView] = useState<"signals" | "coverage" | "routing" | null>(null);
   const signalsOpen = railView === "signals";
-  const [railPinned, setRailPinned] = useState(false);
-  const [indicators, setIndicators] = useState(true);
-  const [size, setSize] = useState(1);
-  const [stopTicks, setStopTicks] = useState(40);
-  const [targetTicks, setTargetTicks] = useState(80);
+  const [railPinned, setRailPinned] = useState(knobs.railPinned);
+  const [indicators, setIndicators] = useState(knobs.indicators);
+  // Everything the store carries, written wholesale — same shape as the load.
+  useEffect(() => {
+    saveLiveChartKnobs({
+      bigLots,
+      nodeProm,
+      composite: compositeRule,
+      compositeSpan,
+      eventTuning: evTuning,
+      eventLabelSt: evLabelSt,
+      eventFill: evFill,
+      eventMarginal: evMarginal,
+      modernVwap: mvParams,
+      timeframe: tfId,
+      indicators,
+      railPinned,
+    });
+  }, [bigLots, nodeProm, compositeRule, compositeSpan, evTuning, evLabelSt, evFill, evMarginal, mvParams, tfId, indicators, railPinned]);
+  // THE ticket — one object, and the page owns it. Size and the bracket that
+  // every origination point on this page measures its order with: the setup
+  // drawer below, the chart's own long-press ticket, and the routing panel's
+  // order pad, which is handed this rather than keeping a second copy of it.
+  // Two tickets is how an order goes out carrying a bracket nobody typed.
+  //
+  // Defaults and the validators are in `lib/simPrefs` (DEFAULT_LIVE_TICKET), and
+  // it is loaded from there rather than hard-coded: what you set last time is
+  // what the page opens on. `trailTicks`/`beTicks` are real accounts only — the
+  // paper blotter deliberately does not imitate the ratchet, see `draftFor`.
+  const [ticket, setTicket] = useState(loadLiveTicket);
+  const { size, stopTicks, targetTicks, trailTicks, beTicks, beLock } = ticket;
+  useEffect(() => saveLiveTicket(ticket), [ticket]);
+  /** One field of the ticket, changed. Everything that edits it comes here. */
+  const setTicketField = useCallback(
+    <K extends keyof LiveTicket>(key: K, v: LiveTicket[K]) =>
+      setTicket((t) => (t[key] === v ? t : { ...t, [key]: v })),
+    [],
+  );
   // The IB/range boxes ride along so the day-scale indicator strip can read
   // them: they are already tracked in geoRef for the chart's own overlays, and
   // going through the throttled HUD is what keeps the strip off a render per
@@ -288,23 +468,25 @@ export function LiveChart() {
   const lastHudRef = useRef(0);
   const geoRef = useRef<{ ib: IbBox | null; range: RangeBox | null }>({ ib: null, range: null });
 
-  // How much of the foot of the chart the market buttons are using, published as
-  // --chart-floor so anything the chart parks down there (the order ticket, on a
-  // fingertip) sits above them rather than under them.
-  const dockRef = useRef<HTMLDivElement>(null);
+  // How much of the foot of the chart the market-order window is using, published
+  // as --chart-floor so anything the chart parks down there (the order ticket, on
+  // a fingertip) sits above it rather than under it. Reported by the window,
+  // which knows whether it is still parked at the foot or has been dragged onto
+  // the chart — floated, it claims no floor at all.
   const [floor, setFloor] = useState(0);
-  useEffect(() => {
-    const el = dockRef.current;
-    if (!el) return;
-    const read = () => setFloor(el.getBoundingClientRect().height);
-    const ro = new ResizeObserver(read);
-    ro.observe(el);
-    read();
-    return () => ro.disconnect();
-  }, []);
 
   const tickSize = header?.tick_size ?? 0.25;
   const pointValue = header?.point_value ?? 20;
+  // What the paper side charges a fill, read from the same store the Simulator
+  // writes (lib/fillModel) — the shadow account and the practice account are one
+  // engine, so they are one set of costs. Read once, on mount: the model is set
+  // on the Replay page, and a live sitting that re-priced its own fills
+  // mid-session would be re-writing trades that have already been shadowed.
+  const fillsRef = useRef(loadFillModel());
+  const fillCfg = useMemo<FillCfg>(
+    () => ({ ...fillsRef.current, pointValue, tickSize }),
+    [pointValue, tickSize],
+  );
 
   // --- helpers --------------------------------------------------------------
   const markPrice = useCallback((): number => {
@@ -337,6 +519,14 @@ export function LiveChart() {
     [openPnl],
   );
 
+  // Whose orders the chart is currently drawing. The paper simulation keeps
+  // running underneath a real account — it costs nothing and it means switching
+  // back finds the blotter where you left it — but it must not be on screen,
+  // because a paper order drawn while a real account is selected is the single
+  // most expensive confusion this page could offer.
+  const drawBrokerRef = useRef(false);
+  drawBrokerRef.current = intent.real;
+
   const publish = useCallback(
     (st: SimState, clock: number) => {
       simRef.current = st;
@@ -347,6 +537,15 @@ export function LiveChart() {
       // in place, so React would see the same reference and skip the render.
       setTrades(st.trades.slice());
       setOpenPos(st.open && { ...st.open });
+      if (drawBrokerRef.current) {
+        // The paper simulation is still running under the real account, and it
+        // must not be heard any more than it is seen — but its baseline is kept
+        // current so that switching back doesn't sound the fills it took while
+        // it was off screen.
+        paperCuesRef.current.sync(simMark(st));
+        return;                            // the broker owns the chart layers
+      }
+      paperCuesRef.current.observe(simMark(st));
       setWorking(views);
       chartRef.current?.setPosition(st.open ? posLine(st.open, barAt) : null);
       chartRef.current?.setOrders(views);
@@ -371,9 +570,9 @@ export function LiveChart() {
     (clock: number) => {
       const tape = tapeRef.current;
       if (!tape) return;
-      publish(ladder.run(tape, logRef.current, clock, pointValue), clock);
+      publish(ladder.run(tape, logRef.current, clock, fillCfg), clock);
     },
-    [ladder, publish, pointValue],
+    [ladder, publish, fillCfg],
   );
 
   const advanceSim = useCallback(
@@ -381,10 +580,10 @@ export function LiveChart() {
       const tape = tapeRef.current;
       if (!tape) return;
       const st = simRef.current;
-      stepSim(tape, logRef.current, st, from, to, clock, pointValue);
+      stepSim(tape, logRef.current, st, from, to, clock, fillCfg);
       if (simSig(st) !== sigRef.current) publish(st, clock);
     },
-    [pointValue, publish],
+    [fillCfg, publish],
   );
 
   // --- the frame loop -------------------------------------------------------
@@ -421,6 +620,7 @@ export function LiveChart() {
   const onReset = useCallback((tape: GrowableTape) => {
     tapeRef.current = tape;
     engineRef.current = null;
+    geoSigRef.current = "";
     clockRef.current = 0;
     logRef.current = newLog();
     // Belt and braces: the ladder already drops everything when the tape it was
@@ -430,6 +630,10 @@ export function LiveChart() {
     ladder.reset();
     simRef.current = newSim();
     sigRef.current = simSig(simRef.current);
+    // The blotter that made the last noises no longer exists. Without this the
+    // fresh one's first booked trade would be compared against a count it can't
+    // beat, and would pass unheard.
+    paperCuesRef.current.sync(simMark(simRef.current));
     openRef.current = null;
     idRef.current = 1;
     setTrades([]);
@@ -450,8 +654,15 @@ export function LiveChart() {
       // seeded it is the first row *after* it; the engine binary-searches this
       // back into an index and draws everything before it as context bars.
       const payload = sessionPayloadFor(header, tape.t[tape.ctx]);
+      // Kept for the broker's position line: when the broker never said when a
+      // position opened — this process attached to one already running — the
+      // honest fallback is the session's own start rather than an invented bar.
+      sessionStartRef.current = tape.t[tape.ctx];
       const eng = new ReplayEngine(tape as Tape, payload, tfRef.current);
+      eng.setBigLots(bigLotsRef.current);
+      eng.setEventTuning(evTuningRef.current);
       engineRef.current = eng;
+      geoSigRef.current = geoSig(header);
       chartRef.current?.setTape(tape as Tape, { contextRanges: ctxRangeRef.current });
       const clock = tape.t[tape.n - 1];
       const snap = eng.snapshotTo(clock);
@@ -478,6 +689,191 @@ export function LiveChart() {
     onAppend,
   });
 
+  // --- the chart, when the broker owns it -----------------------------------
+  // Working orders and the open position come off the routing poll and are
+  // drawn through the *same* primitives the paper blotter uses — `WorkingOrderView`
+  // carries no x-coordinate, so an order that exists only at Rithmic needs
+  // nothing this tape could not give it (see lib/brokerViews).
+  //
+  // Deliberately not optimistic. Nothing is drawn until the broker has said it,
+  // which is what makes a rejected order or a rejected drag self-reporting: the
+  // line simply never moves, or moves back. The cost is up to one poll of lag,
+  // and that is the honest price of "the chart shows what is true".
+  const brokerOrders = brokerState?.working;
+  const brokerPos = brokerState?.position ?? null;
+  const brokerTrades = brokerState?.trades;
+  // Orders that are no longer working, newest first. Not drawn — it is read only
+  // to name a fill (see `brokerMark`).
+  const brokerRecent = brokerState?.recent;
+  brokerOrdersRef.current = brokerOrders ?? null;
+  brokerPosRef.current = brokerPos;
+  // **The contract orders actually go to**, which is not always the one on
+  // screen: routing can be pointed at the mini's micro while the tape stays on
+  // the mini, because one login is one socket and the subscription was made at
+  // connect. Everything drawn from broker state is measured with this rather
+  // than with the tape's, or the chips price an MNQ position at NQ's $20 a
+  // point and read ten times the money that is on. Both numbers come down on
+  // the routing poll and follow `broker.symbol` (see routingTypes).
+  const routedTick = brokerState?.tick_size ?? tickSize;
+  const routedPoint = brokerState?.point_value ?? pointValue;
+  useEffect(() => {
+    if (!intent.real || !brokerOrders) return;
+    const sig = brokerSig(brokerOrders, brokerPos, brokerTrades ?? []);
+    if (sig === brokerSigRef.current) return;
+    // The first word this account has said — the account was just selected, or
+    // the page was just opened. Whatever is held and working at that point is
+    // the state we found, not something that happened, and this process may well
+    // have attached to a position that was opened before it started.
+    const attaching = brokerSigRef.current === "";
+    brokerSigRef.current = sig;
+    // `recent` rides along so a fill on a resting order can be named as one: it
+    // is the only place a real account says what type of order just filled.
+    const mark = brokerMark(brokerPos, brokerTrades ?? [], brokerRecent ?? []);
+    if (attaching) brokerCuesRef.current.sync(mark);
+    else brokerCuesRef.current.observe(mark);
+    // The routed contract's tick, not the tape's: `stop_ticks` on a working
+    // entry is a distance in the contract it was sent to, and NQ and MNQ only
+    // happen to share a tick size.
+    const views = workingViews(
+      brokerOrders,
+      brokerPos,
+      basketsRef.current,
+      routedTick,
+      routedPoint,
+    );
+    setWorking(views);
+    chartRef.current?.setOrders(views);
+    chartRef.current?.setPosition(
+      positionLine(brokerPos, brokerOrders, barAt, sessionStartRef.current, {
+        tickSize: routedTick,
+        pointValue: routedPoint,
+      }),
+    );
+    // Round trips the server paired out of the fill stream, drawn with the same
+    // marks the paper blotter uses — same primitive, same vocabulary for the
+    // exit reason, so the two kinds of trade read identically on one chart.
+    chartRef.current?.setTrades(tradeViews(brokerTrades ?? [], barAt));
+  }, [barAt, brokerOrders, brokerPos, brokerRecent, brokerTrades, intent.real,
+      routedPoint, routedTick]);
+
+  // Switching account swaps whose orders are on the chart. Cleared first and
+  // rebuilt from scratch rather than diffed: the two sets are different kinds of
+  // thing keyed in different ways, and a leftover line from the other one is
+  // exactly the confusion this page must not offer.
+  const activeAccount = brokerState?.account_id ?? null;
+  useEffect(() => {
+    basketsRef.current.clear();
+    brokerSigRef.current = "";
+    chartRef.current?.setOrders([]);
+    chartRef.current?.setPosition(null);
+    chartRef.current?.setTrades([]);
+    setWorking([]);
+    // Back on paper: repaint the blotter, which has been running underneath all
+    // along and is exactly where it was left.
+    if (!drawBrokerRef.current) rebuild(clockRef.current);
+  }, [activeAccount, rebuild]);
+
+  // --- paper trades reach the journal ---------------------------------------
+  // The one surface in this app where you actually trade used to be the one
+  // surface whose trades it never saw: this blotter lived in the browser and
+  // died on a reload. Each closed paper trade is now posted and booked under the
+  // account `paper`, tagged replay so it shows up in Trades and the Calendar
+  // without inflating real-money statistics.
+  //
+  // A high-water mark rather than a diff, because on this page the log is
+  // append-only — there is no rewind, by construction — so `trades` only ever
+  // grows and everything past the mark is new. Re-posting is harmless anyway
+  // (the server dedupes on a content hash), which is what lets this stay a
+  // fire-and-forget effect with no retry logic.
+  const journaledRef = useRef(0);
+  useEffect(() => {
+    if (intent.real || !header) return;      // a real account books server-side
+    const fresh = trades.slice(journaledRef.current);
+    if (fresh.length === 0) return;
+    journaledRef.current = trades.length;
+    void journalPaperTrades({
+      symbol: header.symbol,
+      date: header.date,
+      trades: fresh.map((t) => ({
+        side: t.side,
+        size: t.size,
+        entry_price: t.entryPrice,
+        entry_ms: t.entryMs,
+        exit_price: t.exitPrice,
+        exit_ms: t.exitMs,
+        pnl: t.pnl,
+        pts: t.pts,
+        reason: t.reason,
+      })),
+    }).catch((e) => {
+      // Put the mark back so the next closed trade carries these along. The
+      // blotter is still on screen and correct; only the journal is behind.
+      journaledRef.current -= fresh.length;
+      intent.fail(e);
+    });
+  }, [header, intent, trades]);
+
+  // --- the feed dropping ----------------------------------------------------
+  // The one cue on this page that is not about an order, and the one worth the
+  // most: a chart that has stopped updating looks exactly like a quiet market.
+  //
+  // Only a real feed can lose a connection — the fake one has no `feed_status`
+  // at all — and only a feed that *was* connected can lose one, which is what
+  // the ref is for: the flag starts false, and announcing that would greet you
+  // with "connection lost" every time you opened the page before connecting.
+  // Silent on the way back up, deliberately: the tape resuming is visible on the
+  // chart, and a reconnect chime on a flapping socket is a chime every minute.
+  const connected = status?.feed_status?.connected;
+  const wasConnectedRef = useRef(false);
+  useEffect(() => {
+    if (connected === undefined) return;      // not a feed that reports one
+    if (wasConnectedRef.current && !connected) playCue("connectionLost");
+    wasConnectedRef.current = connected;
+  }, [connected]);
+
+  // A re-seed clears the blotter (every order's `idx` is a tick index into a
+  // tape that stopped existing), so the mark has to go back to zero with it —
+  // otherwise the next paper trade of the new sitting would be treated as
+  // already booked. What was journalled stays journalled: those trades happened.
+  useEffect(() => {
+    journaledRef.current = 0;
+  }, [contextKey]);
+
+  // The header answering something it could not answer when the engine was
+  // built. See `geoSig`: the night, the Globex anchor and the weekly seed all
+  // arrive late on a connect whose backfill lands behind the first live print,
+  // and an engine built in that window develops no Globex VWAP, no Globex band
+  // and no weekly line for the rest of the sitting.
+  //
+  // A whole new engine rather than a setter, because these are constructor
+  // facts: the anchors decide what every accumulator has been fed since tick
+  // zero, so repairing them *is* a re-derivation from the start of the tape —
+  // the same one a timeframe change does, on the same path. The view is held
+  // rather than reframed: nothing about what you are looking at has changed.
+  useEffect(() => {
+    const tape = tapeRef.current;
+    if (!header || !engineRef.current || !tape || tape.n <= tape.ctx) return;
+    const sig = geoSig(header);
+    if (sig === geoSigRef.current) return;
+    geoSigRef.current = sig;
+    // The ⚓ is the user's, and it is placed on a bar time — which a repaired
+    // header doesn't move. Carried across the rebuild, as on Replay.
+    const anchor = engineRef.current.anchor();
+    const eng = new ReplayEngine(
+      tape as Tape,
+      sessionPayloadFor(header, tape.t[tape.ctx]),
+      tfRef.current,
+    );
+    eng.setBigLots(bigLotsRef.current);
+    eng.setEventTuning(evTuningRef.current);
+    if (anchor != null) eng.setAnchor(anchor);
+    engineRef.current = eng;
+    const snap = eng.snapshotTo(clockRef.current);
+    chartRef.current?.setSnapshot(snap, { reframe: false });
+    geoRef.current = { ib: snap.ib, range: snap.range };
+    rebuild(clockRef.current);
+  }, [header, rebuild]);
+
   // A timeframe change is a re-derivation of the same tape, exactly as on the
   // replay page: the log and therefore every fill are untouched, because fills
   // come off tick indices and those don't know what a bar is.
@@ -491,6 +887,99 @@ export function LiveChart() {
     geoRef.current = { ib: snap.ib, range: snap.range };
     rebuild(clockRef.current);
   }, [rebuild, tf]);
+
+  // A change of span re-cuts the same days without touching the tape. The chart
+  // no-ops when they are the ranges it already holds, so the seed path's own
+  // setTape is not doubled up on — same arrangement as Replay.
+  useEffect(() => {
+    chartRef.current?.setContextRanges(contextRanges);
+  }, [contextRanges]);
+
+  // The chart's ⚓ tool moved. The anchored band develops from the tape like the
+  // session anchors do, so the engine owns it and the picture is rebuilt through
+  // the one path that already exists for that — without re-framing the viewport,
+  // since placing an anchor isn't a move through time. The frame loop carries on
+  // from the same clock and keeps extending the band as prints arrive.
+  const setAnchor = useCallback((barTime: number | null) => {
+    const eng = engineRef.current;
+    if (!eng) return;
+    eng.setAnchor(barTime);
+    const snap = eng.snapshotTo(clockRef.current);
+    chartRef.current?.setSnapshot(snap, { reframe: false });
+    geoRef.current = { ib: snap.ib, range: snap.range };
+  }, []);
+
+  /** Change what counts as a big trade — a re-derivation, exactly as on Replay:
+   *  which sweeps clear the threshold is a question about the tape, so the
+   *  engine re-runs it rather than the chart filtering marks it was given. */
+  const changeBigLots = useCallback((lots: number) => {
+    setBigLotsState(lots);
+    const eng = engineRef.current;
+    if (!eng) return;
+    eng.setBigLots(lots);
+    chartRef.current?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
+  }, []);
+
+  /** Change what selects a tape event — the same path, for a stronger version
+   *  of the same reason: a burst is a cluster and an absorption is scored
+   *  against a median, so neither can be recovered by filtering what a
+   *  different setting published. */
+  const changeEvTuning = useCallback((patch: Partial<EventTuning>) => {
+    setEvTuning((t) => ({ ...t, ...patch }));
+    const eng = engineRef.current;
+    if (!eng) return;
+    eng.setEventTuning(patch);
+    chartRef.current?.setSnapshot(eng.snapshotTo(clockRef.current), { reframe: false });
+  }, []);
+
+  // The event layer as the chart takes it — its presence is what offers the
+  // layer at all, and this page now offers it: the engine has always been
+  // detecting, the bands just never reached the canvas here.
+  const eventOverlay = useMemo(
+    () => ({ tuning: evTuning, style: { labelSt: evLabelSt, fill: evFill }, marginal: evMarginal }),
+    [evTuning, evLabelSt, evFill, evMarginal],
+  );
+
+  const indicatorSettings = useMemo<IndicatorSettingsMap>(
+    () =>
+      buildChartKnobs({
+        bigLots,
+        onBigLots: changeBigLots,
+        nodeProm,
+        onNodeProm: setNodeProm,
+        modernVwap: { params: mvParams, onChange: patchMv },
+        composite: compositeRule,
+        onComposite: setCompositeRule,
+        compositeSpan,
+        onCompositeSpan: setCompositeSpan,
+        compositeNote: `Built from the ${contextTapes.length} prior session${contextTapes.length === 1 ? "" : "s"} drawn — "Prior days" in the ticket panel, since each one is a whole tape to fetch.`,
+        events: {
+          tuning: evTuning,
+          labelSt: evLabelSt,
+          fill: evFill,
+          marginal: evMarginal,
+          onTuning: changeEvTuning,
+          onLabelSt: setEvLabelSt,
+          onFill: setEvFill,
+          onMarginal: setEvMarginal,
+        },
+      }),
+    [
+      bigLots,
+      changeBigLots,
+      changeEvTuning,
+      compositeRule,
+      compositeSpan,
+      contextTapes.length,
+      evFill,
+      evLabelSt,
+      evMarginal,
+      evTuning,
+      mvParams,
+      nodeProm,
+      patchMv,
+    ],
+  );
 
   // --- trading --------------------------------------------------------------
   const append = useCallback(
@@ -524,10 +1013,47 @@ export function LiveChart() {
         edits: [],
         cancelMs: null,
       };
+      // Resting orders only: a market order is its own fill and the rebuild
+      // sounds it as one a moment later. The real-account path makes its own
+      // noise where the order actually goes out (see useOrderIntent) — this
+      // function is never reached on that side.
+      if (type !== "market") playCue("placed");
       const log = logRef.current;
       append({ ...log, orders: [...log.orders, rec] });
     },
     [append, size, stopTicks, targetTicks, tickSize],
+  );
+
+  /** The bracket the ticket is set to, as the broker wants it: ticks, not
+   *  prices. The paper path measures its own from the fill; a real order carries
+   *  the distances and Rithmic attaches the legs.
+   *
+   *  The trail is the one asymmetry, and it is deliberate: a real order hands
+   *  Rithmic a trailing bracket that ratchets server-side, while `placeOrder`
+   *  keeps `trail: null` on paper. Making the paper blotter imitate it would be
+   *  the wrong kind of faithful — the replay's ladder measures tick by tick off
+   *  the local tape, Rithmic's rides off its own last-trade feed, and a blotter
+   *  that quietly disagreed with the broker by a rung would be worse than one
+   *  that plainly does not trail. Practise the trail in the Simulator, where the
+   *  ladder is the point; run it here, where Rithmic owns it. */
+  const draftFor = useCallback(
+    (side: Side, type: "market" | "limit" | "stop", price: number | null): OrderDraft => ({
+      // The chart speaks long/short (a position), the broker speaks buy/sell (an
+      // instruction). Translated here rather than anywhere else, so there is one
+      // place where the two vocabularies meet.
+      side: side === "long" ? "buy" : "sell",
+      qty: size,
+      type,
+      price,
+      stop_ticks: stopTicks,
+      target_ticks: targetTicks,
+      trail_trigger_ticks: stopTicks ? trailTicks : 0,
+      be_trigger_ticks: stopTicks ? beTicks : 0,
+      // Never sent without its trigger, and never sent as 0 with one: the
+      // server refuses both, and a draft that reliably 422s is a bug in here.
+      be_ticks: stopTicks && beTicks ? Math.max(1, beLock) : 0,
+    }),
+    [size, stopTicks, targetTicks, trailTicks, beTicks, beLock],
   );
 
   const placeMarket = useCallback(
@@ -535,9 +1061,13 @@ export function LiveChart() {
       if (!ready) return;
       const px = markPrice();
       if (!Number.isFinite(px)) return;
+      // `submit` returns false only when the active account is paper — then,
+      // and only then, the gesture falls through to the blotter. Which way it
+      // went is never decided here.
+      if (intent.submit(draftFor(side, "market", null))) return;
       placeOrder("market", side, null, px);
     },
-    [markPrice, placeOrder, ready],
+    [draftFor, intent, markPrice, placeOrder, ready],
   );
 
   /** Rest an order at a price, held one tick clear of the mark on the side its
@@ -551,9 +1081,13 @@ export function LiveChart() {
       const px = Math.round(price / tickSize) * tickSize;
       const above = type === "stop" ? side === "long" : side === "short";
       const rest = above ? Math.max(px, mk + tickSize) : Math.min(px, mk - tickSize);
+      // The clamp applies to both paths: an order resting on the wrong side of
+      // the market is a fill at a price the tape cannot give you on paper, and a
+      // rejection at the exchange on a real account. Same gesture, same rule.
+      if (intent.submit(draftFor(side, type, rest))) return;
       placeOrder(type, side, rest, rest);
     },
-    [markPrice, placeOrder, ready, tickSize],
+    [draftFor, intent, markPrice, placeOrder, ready, tickSize],
   );
 
   /** Space + click at a price: the left button places the passive order there (a
@@ -574,7 +1108,25 @@ export function LiveChart() {
 
   const cancelOrder = useCallback(
     (id: number) => {
+      // On a real account the ✕ cancels at the broker. No confirm, deliberately
+      // and consistently with `closeAll`: taking risk off is never the thing
+      // that needs slowing down, and a cancel you have to confirm is a cancel
+      // you sometimes don't make.
+      if (drawBrokerRef.current) {
+        const basket = basketsRef.current.id(id);
+        if (!basket) return;   // a stale paper view — not this account's order
+        void cancelBrokerOrder(basket)
+          .then(() => {
+            // On the acknowledgement, like `placed` on this side: the sound
+            // means the broker took it, not that you asked.
+            playCue("canceled");
+            void routingQ.refetch();
+          })
+          .catch((e) => intent.fail(e));
+        return;
+      }
       const log = logRef.current;
+      if (log.orders.some((o) => o.id === id && o.cancelMs == null)) playCue("canceled");
       append({
         ...log,
         orders: log.orders.map((o) =>
@@ -582,12 +1134,44 @@ export function LiveChart() {
         ),
       });
     },
-    [append],
+    [append, intent, routingQ],
   );
 
   const editOrder = useCallback(
     (id: number, next: { price: number | null; stop: number | null; target: number | null }) => {
+      // A working order's resting price, dragged. On a real account it is a
+      // modify at the broker; the chart has already drawn it where it landed,
+      // and the next poll either confirms that or moves it back — which is the
+      // whole error-reporting mechanism, so there is nothing optimistic to undo.
+      if (drawBrokerRef.current) {
+        const basket = basketsRef.current.id(id);
+        if (!basket || next.price == null) return;
+        // Only the resting price is a modify. The legs sketched behind a working
+        // entry are the bracket Rithmic will attach when it fills — they do not
+        // exist as orders yet, so there is nothing there to move, and sending
+        // the unchanged entry price on a leg drag would put a pointless modify
+        // on the wire. The leg snaps back on the next poll, which is this
+        // page's standing way of saying "that didn't take".
+        const held = brokerOrdersRef.current?.find((o) => o.basket_id === basket);
+        const at = held ? held.trigger_price || held.price : null;
+        // The routed contract's tick — this order rests at the broker, on
+        // whatever routing is pointed at, not on whatever the tape is drawing.
+        if (at != null && Math.abs(at - next.price) < routedTick / 2) return;
+        void modifyBrokerOrder({ basket_id: basket, price: next.price })
+          .then(() => {
+            playCue("changed");
+            void routingQ.refetch();
+          })
+          .catch((e) => {
+            intent.fail(e);
+            void routingQ.refetch();
+          });
+        return;
+      }
       const log = logRef.current;
+      // Once per landed drag — the chart reports a move on release, not per
+      // pixel (see ReplayChart's pointer-up).
+      playCue("changed");
       append({
         ...log,
         orders: log.orders.map((o) =>
@@ -595,7 +1179,7 @@ export function LiveChart() {
         ),
       });
     },
-    [append],
+    [append, intent, routedTick, routingQ],
   );
 
   // The open position's bracket, dragged. Its own channel in the log rather than
@@ -603,19 +1187,98 @@ export function LiveChart() {
   // one position, "the stop" belongs to the position, not to any of them.
   const moveBracket = useCallback(
     (b: { stop: number | null; target: number | null }) => {
+      // The open position's stop or target, dragged. On a real account those
+      // legs are separate orders at Rithmic, so the drag becomes a modify on
+      // whichever leg moved — and **only** the one that moved: Rithmic refuses
+      // two bracket operations at once ('Atomic order operation in progress'),
+      // and sending an unchanged leg alongside the changed one would trip it.
+      if (drawBrokerRef.current) {
+        const pos = brokerPosRef.current;
+        const orders = brokerOrdersRef.current;
+        if (!pos || pos.net === 0 || !orders) return;
+        const cur = bracketOf(orders, pos);
+        // Exactly one leg per drag, and it has to be the right one: the legs are
+        // separate orders at Rithmic, and it refuses two bracket operations at
+        // once. Which one moved is decided by comparing against what the broker
+        // last said, not by what the chart is drawing.
+        const moved =
+          b.stop !== cur.stop
+            ? ({ id: cur.stopId, body: { stop: b.stop }, leg: "stop" } as const)
+            : b.target !== cur.target
+              ? ({ id: cur.targetId, body: { target: b.target }, leg: "target" } as const)
+              : null;
+        if (!moved) return;
+        if (!moved.id) {
+          // That leg is not working, so there is nothing to move — and Rithmic
+          // cannot attach one after the fact. Said rather than ignored: a drag
+          // that appeared to do nothing would read as a UI bug when it is a
+          // property of the order you placed.
+          intent.fail(
+            new Error(
+              `this position has no working ${moved.leg} — Rithmic cannot attach ` +
+                "one after the fact. Place it as its own order, or cancel and " +
+                "re-enter with a bracket.",
+            ),
+          );
+          return;
+        }
+        if (moved.leg === "stop" && cur.stopManaged) {
+          // Rithmic owns this stop. It rides at a fixed distance behind the
+          // extreme and recomputes from it — so a drag would hold only until the
+          // next tick of profit and then be put back *wider*, which is the
+          // direction that costs money and the one the chart would go on
+          // drawing wrong. Refused here to save the round trip; the broker
+          // refuses it too, and catches the breakeven-only bracket that leaves
+          // no mark on the leg for this to read.
+          intent.fail(
+            new Error(
+              "Rithmic is trailing this stop — it re-derives it from the high " +
+                "water mark, so a drag here would be silently put back, wider. " +
+                "Flatten, or re-enter without a trail.",
+            ),
+          );
+          return;
+        }
+        void modifyBrokerOrder({ basket_id: moved.id, ...moved.body })
+          .then(() => {
+            playCue("changed");
+            void routingQ.refetch();
+          })
+          .catch((e) => {
+            intent.fail(e);
+            void routingQ.refetch();
+          });
+        return;
+      }
       if (!openRef.current) return;
+      playCue("changed");
       const log = logRef.current;
       append({ ...log, brackets: [...log.brackets, { ms: clockRef.current, ...b }] });
     },
-    [append],
+    [append, intent, routingQ],
   );
 
   /** Everything off: the position at the last print, and every order working
    *  with it — one append, so half a flatten is not a state this can sit in. */
   const closeAll = useCallback(() => {
+    // On a real account this is the kill switch, and it is deliberately gated
+    // on nothing but the connection and put behind no confirm — the moment you
+    // most want it is the one where something is misbehaving. It cancels
+    // everything working and exits the position, at the broker.
+    if (brokerState && !brokerState.paper && brokerState.attached) {
+      void flattenAll()
+        .then(() => void routingQ.refetch())
+        .catch(() => void routingQ.refetch());
+      return;
+    }
     const live = new Set(workingOrders(simRef.current).map((o) => o.id));
     const hadPos = openRef.current != null;
     if (!hadPos && live.size === 0) return;
+    // A flatten that took a position off is announced by the exit cue the
+    // rebuild produces; only one that just pulled orders says "canceled". Same
+    // rule as the replay page. On the broker path above neither is said here —
+    // both the cancels and the exit come back through the poll.
+    if (!hadPos) playCue("canceled");
     const log = logRef.current;
     const ms = clockRef.current;
     append({
@@ -626,7 +1289,14 @@ export function LiveChart() {
       closes: hadPos ? [...log.closes, { ms }] : log.closes,
     });
     pushHud(markPrice(), ms, true);
-  }, [append, markPrice, pushHud]);
+    // `brokerState` and `routingQ` are read above and MUST be listed, or this
+    // closes over the state as it was on first render — which is `null`, before
+    // the routing poll has answered. That is not a stale number, it is the
+    // wrong branch: q takes the paper path forever and silently flattens a
+    // blotter while the real position stays open. Every other broker-aware
+    // callback on this page reaches through a ref for exactly this reason;
+    // this one read the state directly and did not declare it.
+  }, [append, brokerState, markPrice, pushHud, routingQ]);
 
   // q / w / s, the same three keys as the replay page — the muscle memory is the
   // point, so it does not get its own bindings here.
@@ -638,19 +1308,38 @@ export function LiveChart() {
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
       const k = e.key.toLowerCase();
       if (k !== "q" && k !== "w" && k !== "s") return;
+      // Stand down while a confirm is open. The dialog owns Enter and Esc, and
+      // a second w behind an unanswered one is the fastest way to send two
+      // orders when you meant one — a stuck key would do it on its own.
+      if (intent.pending) return;
       e.preventDefault();
       if (k === "q") closeAll();
       else placeMarket(k === "w" ? "long" : "short");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [closeAll, placeMarket]);
+  }, [closeAll, intent.pending, placeMarket]);
 
-  const net = trades.reduce((a, t) => a + t.pnl, 0);
+  // The running total behind the title, for whichever account is active. The
+  // paper simulation keeps running underneath a real account, so this has to
+  // pick rather than sum — showing paper's total while a real account is live
+  // would be a number that means nothing about the money at risk.
+  const shownTrades = intent.real ? (brokerState?.trades ?? []) : trades;
+  const net = shownTrades.reduce((a, t) => a + t.pnl, 0);
   // Is there anything on the blotter that re-seeding the tape would take with
   // it? A closed trade counts: the session's record is the point of the page,
   // and "net" above is read off it.
-  const blotterBusy = trades.length > 0 || working.length > 0 || openPos != null;
+  // Only ever about the *paper* blotter: re-seeding the tape renumbers tick
+  // indices, and those are what a paper order's `idx` is. A broker order does
+  // not have one, so a real account's working list is no reason to lock this.
+  const blotterBusy = trades.length > 0 || openPos != null;
+  // Time left in the bar now forming, for the top-bar clock to carry. Time bars
+  // only — a tick bar closes on a count the wall clock knows nothing about.
+  // Anchored at the bell like the engine's own boundaries.
+  const countdownMs =
+    ready && tf.kind === "time" && header
+      ? tf.ms - ((((hud.clockMs - header.rth_open_ms) % tf.ms) + tf.ms) % tf.ms)
+      : null;
 
   if (!status?.running) {
     return <NoSession onStarted={() => void statusQ.refetch()} />;
@@ -677,8 +1366,30 @@ export function LiveChart() {
         titleOpen={setupOpen}
         right={
           <>
+            {/* Which account the chart's gestures go to, in the one place that
+                is always on screen. The routing panel can be closed, pinned or
+                unmounted; "am I about to trade real money" must not depend on
+                which of those it happens to be. */}
+            {status.routing && brokerState && (
+              <AccountChip broker={brokerState} routes={intent.routes} />
+            )}
+            {/* And whether the rules are on, in the same always-on-screen
+                place and for the same reason. The routing panel can be closed
+                or unmounted; "is the daily stop being enforced" must not
+                depend on which. */}
+            {status.routing && brokerState && !brokerState.paper && (
+              <GuardChip guard={brokerState.guard} />
+            )}
             <span className="sim-topbar-num" title="Session clock">
               {fmtClock(hud.clockMs)}
+              {countdownMs != null && (
+                <span
+                  className="sim-countdown"
+                  title={`This ${tf.label} bar closes in ${fmtCountdown(countdownMs)}`}
+                >
+                  −{fmtCountdown(countdownMs)}
+                </span>
+              )}
             </span>
             <span className="sim-topbar-num" title="Last print">
               {Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}
@@ -717,7 +1428,7 @@ export function LiveChart() {
             type="number"
             min={1}
             value={size}
-            onChange={(e) => setSize(Math.max(1, Number(e.target.value) || 1))}
+            onChange={(e) => setTicketField("size", Math.max(1, Number(e.target.value) || 1))}
             style={{ width: 72 }}
           />
         </label>
@@ -727,7 +1438,7 @@ export function LiveChart() {
             type="number"
             min={0}
             value={stopTicks}
-            onChange={(e) => setStopTicks(Math.max(0, Number(e.target.value) || 0))}
+            onChange={(e) => setTicketField("stopTicks", Math.max(0, Number(e.target.value) || 0))}
             style={{ width: 72 }}
           />
         </label>
@@ -737,10 +1448,103 @@ export function LiveChart() {
             type="number"
             min={0}
             value={targetTicks}
-            onChange={(e) => setTargetTicks(Math.max(0, Number(e.target.value) || 0))}
+            onChange={(e) => setTicketField("targetTicks", Math.max(0, Number(e.target.value) || 0))}
             style={{ width: 72 }}
           />
         </label>
+        {/* Real accounts only, and shown only there — on paper it would be a
+            control with no effect, since the blotter does not imitate the
+            ratchet (see `draftFor`). One number because Rithmic's trail has one
+            free variable: it rides at the stop above, so the choice is when it
+            wakes up, not how far back it sits. */}
+        {status.routing && brokerState && !brokerState.paper && (
+          <label
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              fontSize: 12,
+              color: trailTicks && stopTicks ? palette.orange : palette.muted,
+              opacity: stopTicks ? 1 : 0.5,
+            }}
+            title={
+              stopTicks
+                ? `Rithmic ratchets the stop up behind the high once the trade is ` +
+                  `this far in profit, riding ${stopTicks} ticks back. Rithmic moves ` +
+                  `it, not this app — so it keeps working through a reload or ` +
+                  `this page being closed. 0 is off.`
+                : "Needs a stop: the trail rides at the stop's own distance behind the high."
+            }
+          >
+            Trail after (t)
+            <input
+              type="number"
+              min={0}
+              disabled={!stopTicks}
+              value={trailTicks}
+              onChange={(e) => setTicketField("trailTicks", Math.max(0, Number(e.target.value) || 0))}
+              style={{ width: 72 }}
+            />
+          </label>
+        )}
+        {/* The breakeven jump. A separate mechanism from the trail, not a mode
+            of it: this fires once and stops, the trail keeps going. They can be
+            armed together — though that combination has not been measured
+            against Rithmic, only each alone. */}
+        {status.routing && brokerState && !brokerState.paper && (
+          <label
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              fontSize: 12,
+              color: beTicks && stopTicks ? palette.orange : palette.muted,
+              opacity: stopTicks ? 1 : 0.5,
+            }}
+            title={
+              stopTicks
+                ? "Once the trade is this far in profit, Rithmic jumps the stop " +
+                  "to lock the amount beside it in. Fires once. 0 is off."
+                : "Needs a stop: there is no leg to jump without one."
+            }
+          >
+            Breakeven after (t)
+            <input
+              type="number"
+              min={0}
+              disabled={!stopTicks}
+              value={beTicks}
+              onChange={(e) => setTicketField("beTicks", Math.max(0, Number(e.target.value) || 0))}
+              style={{ width: 72 }}
+            />
+          </label>
+        )}
+        {/* Revealed only once breakeven is on — a lock with no trigger never
+            fires, and the server says so rather than sending it. Minimum 1:
+            "exactly at the fill" is a proto3 zero and never reaches Rithmic. */}
+        {status.routing && brokerState && !brokerState.paper && beTicks > 0 && stopTicks > 0 && (
+          <label
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              fontSize: 12,
+              color: palette.orange,
+            }}
+            title={
+              "How much profit that jump locks in, always in your favour on " +
+              "either side. At least 1 tick: Rithmic cannot be told 'exactly at " +
+              "the fill' — a zero is a protobuf default and never reaches it. " +
+              "A 1-tick lock still owes the round turn."
+            }
+          >
+            …locking (t)
+            <input
+              type="number"
+              min={1}
+              value={beLock}
+              onChange={(e) => setTicketField("beLock", Math.max(1, Number(e.target.value) || 1))}
+              style={{ width: 72 }}
+            />
+          </label>
+        )}
         {/* The days behind this one. Here rather than in the bar because it is
             set once and because it costs something — each day is a whole tape,
             and changing it restarts the session's own tape from row zero (the
@@ -803,8 +1607,15 @@ export function LiveChart() {
           </span>
         )}
         <span style={{ alignSelf: "flex-end", paddingBottom: 6, fontSize: 12, color: palette.muted }}>
-          {trades.length} closed · net {fmtUsd(net)}
-          {openPos ? ` · open ${fmtUsd(hud.openPnl)}` : ""}
+          {intent.real ? `${brokerState?.account_id} · ` : "paper · "}
+          {shownTrades.length} closed · net {fmtUsd(net)}
+          {intent.real
+            ? brokerPos && brokerPos.net !== 0 && brokerPos.open_pnl != null
+              ? ` · open ${fmtUsd(brokerPos.open_pnl)}`
+              : ""
+            : openPos
+              ? ` · open ${fmtUsd(hud.openPnl)}`
+              : ""}
         </span>
       </div>
 
@@ -813,6 +1624,7 @@ export function LiveChart() {
           <div className="sim-chart">
             <ReplayChart
               ref={chartRef}
+              onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
               onFlatten={closeAll}
               onOrderMove={(o) =>
@@ -822,15 +1634,28 @@ export function LiveChart() {
               onPlaceOrder={placeAt}
               onPlaceTyped={(o) => placeResting(o.price, o.side, o.type)}
               ticket={{ size, stopTicks, targetTicks }}
-              onTicketChange={(t) => {
-                setSize(t.size);
-                setStopTicks(t.stopTicks);
-                setTargetTicks(t.targetTicks);
-              }}
+              onTicketChange={(t) =>
+                setTicket((p) => ({
+                  ...p,
+                  size: t.size,
+                  stopTicks: t.stopTicks,
+                  targetTicks: t.targetTicks,
+                }))
+              }
               mark={hud.lastPrice}
+              // The ticket prices its SL/TP boxes in money, so it needs the
+              // contract the order would actually go to — the routed one while
+              // this is going to the broker, the tape's while it is paper.
+              pointValue={intent.real ? routedPoint : pointValue}
               canPlaceOrders={ready}
               secondsAxis={showsSeconds(tf)}
+              bigLots={bigLots}
               composite={composite}
+              nodeProm={nodeProm}
+              modernVwap={mvParams}
+              events={eventOverlay}
+              indicatorSettings={indicatorSettings}
+              drawingsKey={header ? `${header.symbol}|${header.date}` : undefined}
             />
             {/* The same day-scale strip the replay carries. It was written for a
                 tape that grows print by print, which is what a live session is —
@@ -846,36 +1671,54 @@ export function LiveChart() {
               open={indicators}
               onToggle={() => setIndicators((v) => !v)}
             />
-            {/* Market orders under the thumb, as on the replay. Both sides quote
-                the last print, and that is not a stand-in for a bid/ask — this
-                page fills off the same tape the chart draws. */}
-            <div ref={dockRef} className="sim-quick">
+            {/* A receipt for a one-click order, or the reason one failed. Over
+                the chart because that is where you were looking when you sent
+                it — a fill you have to go and find in a panel is a fill you
+                assume happened. */}
+            <OrderFlash flash={intent.flash} error={intent.error} onDismiss={intent.clearError} />
+            {/* Market orders under the thumb, as on the replay. On paper both
+                sides quote the last print and fill off the same tape the chart
+                draws; on a real account the same two buttons go to the exchange,
+                which is what the colour change says. The same small window too,
+                dragged anywhere on the chart and remembered there — one saved
+                spot across both clocks. */}
+            <QuickDock onFloorChange={setFloor}>
               {openPos && (
                 <button type="button" className="sim-quick-btn flat" onClick={closeAll} title="Flatten (q)">
                   Close
                 </button>
               )}
-              <button
-                type="button"
-                className="sim-quick-btn sell"
-                onClick={() => placeMarket("short")}
-                disabled={!ready}
-                title="Sell at market (s)"
-              >
-                <span>SELL</span>
-                <b>{Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}</b>
-              </button>
-              <button
-                type="button"
-                className="sim-quick-btn buy"
-                onClick={() => placeMarket("long")}
-                disabled={!ready}
-                title="Buy at market (w)"
-              >
-                <span>BUY</span>
-                <b>{Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}</b>
-              </button>
-            </div>
+              {(["short", "long"] as const).map((side) => (
+                <button
+                  key={side}
+                  type="button"
+                  className={`sim-quick-btn ${side === "long" ? "buy" : "sell"}`}
+                  onClick={() => placeMarket(side)}
+                  disabled={!ready}
+                  // The outline is the whole tell. These two buttons mean
+                  // different things on different accounts and look otherwise
+                  // identical, so the one state worth drawing is "this reaches
+                  // an exchange" — and on a live account, in red.
+                  style={
+                    intent.routes
+                      ? {
+                          outline: `2px solid ${brokerState?.kind === "live" ? palette.red : palette.orange}`,
+                          outlineOffset: -2,
+                        }
+                      : undefined
+                  }
+                  title={
+                    intent.routes
+                      ? `${side === "long" ? "Buy" : "Sell"} at market on ${brokerState?.account_id}` +
+                        (brokerState?.one_click ? " — one-click, no confirm" : " — with confirm")
+                      : `${side === "long" ? "Buy" : "Sell"} at market (${side === "long" ? "w" : "s"}) — paper`
+                  }
+                >
+                  <span>{side === "long" ? "BUY" : "SELL"}</span>
+                  <b>{Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}</b>
+                </button>
+              ))}
+            </QuickDock>
           </div>
         </div>
 
@@ -900,6 +1743,23 @@ export function LiveChart() {
           >
             ▦
           </button>
+          {/* Only on a session that opened the ORDER plant. Hidden rather than
+              disabled, and this is the one place in the suite where hiding is
+              right: a permanently greyed order button on a shadow session is an
+              invitation to look for the way to enable it, and there isn't one —
+              routing is decided at connect. The panel itself explains that when
+              you reach it from a session that has it. */}
+          {status.routing && (
+            <button
+              type="button"
+              className={`sim-rail-btn${railView === "routing" ? " on" : ""}`}
+              onClick={() => setRailView((v) => (v === "routing" ? null : "routing"))}
+              aria-pressed={railView === "routing"}
+              title="Order entry — the only thing on this page that can reach an exchange"
+            >
+              ⌁
+            </button>
+          )}
           {railView && (
             <button
               type="button"
@@ -931,6 +1791,22 @@ export function LiveChart() {
               <TapeCoverage symbol={status.symbol} compact />
             </div>
           </div>
+        ) : railView === "routing" ? (
+          // Mounted only while it is showing, like the coverage read — it polls
+          // the broker, and there is no reason for that to run behind a panel
+          // nobody has opened.
+          <div className="sim-panel open">
+            {/* The page's ticket, not a second one. The pad in there sends
+                through the same endpoints the chart gestures do, so a bracket
+                set in either place has to be the bracket both of them send —
+                see `lib/simPrefs`, DEFAULT_LIVE_TICKET. */}
+            <RoutingPanel
+              mark={hud.lastPrice}
+              tickSize={tickSize}
+              ticket={ticket}
+              onTicket={setTicketField}
+            />
+          </div>
         ) : (
           <SignalPanel data={signalsQ.data} working={working.length} open={signalsOpen} />
         )}
@@ -939,6 +1815,19 @@ export function LiveChart() {
       {/* The status strip is a footer: it is state you glance at, not something
           you act on continuously, and above the chart it was pushing the tape
           down by a row you were not reading. */}
+      {/* The confirm. Rendered at the page root rather than inside the chart
+          card so nothing can clip it, and only while there is something to
+          answer — `useOrderIntent` owns Enter and Esc for exactly that long. */}
+      {intent.pending && (
+        <OrderConfirm
+          pending={intent.pending}
+          kind={brokerState?.kind ?? null}
+          busy={intent.busy}
+          onConfirm={intent.confirm}
+          onCancel={intent.cancel}
+        />
+      )}
+
       <FeedBanner
         source={status.source ?? "fake"}
         symbol={status.symbol ?? "—"}
@@ -968,6 +1857,118 @@ export function LiveChart() {
         }}
       />
     </div>
+  );
+}
+
+/**
+ * Where the chart's gestures land, always on screen.
+ *
+ * Three states worth telling apart, and the middle one is why this is not just
+ * a name: an account can be *selected* without gestures reaching it, because
+ * nobody has labelled it demo or live yet or the broker has not been read back.
+ * In that window q/w/s refuses rather than filling paper, and reading the chip
+ * as "I'm on the live account" would have somebody expect an order that never
+ * went.
+ */
+function AccountChip({ broker, routes }: { broker: BrokerState; routes: boolean }) {
+  const paper = broker.paper;
+  const live = broker.kind === "live";
+  const color = paper
+    ? palette.blue
+    : !routes
+      ? palette.muted
+      : live
+        ? palette.red
+        : palette.orange;
+  return (
+    <span
+      title={
+        paper
+          ? "Paper. Every order gesture fills the blotter and nothing reaches a broker."
+          : routes
+            ? `Live on ${broker.account_id} (${broker.kind}). q/w/s, the dock and space+click send real orders` +
+              (broker.one_click ? ", with no confirmation." : ", each behind a confirm.")
+            : `${broker.account_id} is selected but cannot send yet — label it, or wait for the broker to be read back.`
+      }
+      style={{
+        fontSize: 10,
+        letterSpacing: 0.4,
+        padding: "1px 6px",
+        borderRadius: 10,
+        border: `1px solid ${color}`,
+        color,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {paper ? "📝 PAPER" : `${broker.account_id}${routes ? " ●" : " ○"}`}
+      {/* The contract, but only when it is not the one on screen. "Am I about
+          to trade real money" acquired a second half the moment routing could
+          be pointed somewhere else, and this chip is the one thing on the page
+          that is always visible — the routing panel can be closed. Silent while
+          they agree, so the common case stays uncluttered. */}
+      {!paper && broker.symbol !== broker.feed_symbol && (
+        <b style={{ marginLeft: 4 }}> {broker.symbol}</b>
+      )}
+    </span>
+  );
+}
+
+/**
+ * Are the rules on, and what is the day doing against them.
+ *
+ * Four states and the first is the one this chip exists for: **off**. Turning
+ * the guardrails off is a `.env` edit and a restart, so it is easy to have done
+ * last week and be trading on today — and a safety layer that is silently off is
+ * worse than one that was never built, because it gets traded as though it were
+ * there. So "off" is red, permanent, and sits beside the account name rather
+ * than inside a panel that can be closed.
+ *
+ * The other three are the day: locked (red), slowed (orange), and running
+ * (muted, with the number). The number is the total the rules are actually
+ * enforced on, which is not always the broker's own day P&L — the panel shows
+ * both and flags the gap.
+ */
+function GuardChip({ guard }: { guard: GuardState }) {
+  const lv = guard.levels;
+  const spec = !guard.on
+    ? {
+        c: palette.red,
+        t: "GUARDS OFF",
+        title:
+          "LIVE_GUARDRAILS is switched off in .env. The daily stop, the slow-down threshold, the minimum target and the stop-width clamp are NOT being enforced.",
+      }
+    : guard.locked
+      ? {
+          c: palette.red,
+          t: "DAY OVER",
+          title: `${guard.locked}. New entries are refused; closing orders and Flatten still work. It stays over even if the running total comes back.`,
+        }
+      : guard.slow
+        ? {
+            c: palette.orange,
+            t: `SLOW ${fmtUsd(guard.equity)}`,
+            title: `Past ${fmtUsd(-lv.slow_down_at)} down — entries go no closer than ${Math.round(lv.min_gap_s)}s apart. Daily stop at ${fmtUsd(-lv.daily_loss_stop)}.`,
+          }
+        : {
+            c: palette.muted,
+            t: `🛡 ${fmtUsd(guard.equity)}`,
+            title: `Guarded. Realised today net of commission, plus the open position — the equity figure the daily stop fires on. Slow-down at ${fmtUsd(-lv.slow_down_at)}, daily stop at ${fmtUsd(-lv.daily_loss_stop)}${lv.daily_profit_lock > 0 ? `, profit lock at ${fmtUsd(lv.daily_profit_lock)}` : ""}.`,
+          };
+  return (
+    <span
+      title={spec.title}
+      style={{
+        fontSize: 10,
+        letterSpacing: 0.4,
+        padding: "1px 6px",
+        borderRadius: 10,
+        border: `1px solid ${spec.c}`,
+        color: spec.c,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {spec.t}
+    </span>
   );
 }
 
@@ -1084,8 +2085,8 @@ function FeedBanner(props: {
             "hop — the exchange's stamp to Rithmic's send stamp. Both ride in the " +
             "same message, so no local clock enters into it.\n\n" +
             "lag — arrival to publish inside the API, on the monotonic clock. It is " +
-            "bounded below by the 100ms publish cadence, so a p50 near 50ms is the " +
-            "cadence rather than a fault; a p90 far above 100ms means something (a " +
+            "bounded below by the 20ms publish cadence, so a p50 near 10ms is the " +
+            "cadence rather than a fault; a p90 far above 20ms means something (a " +
             "shadow pass, a sim sweep on the same cores) is holding the event loop.\n\n" +
             "There is no end-to-end figure, deliberately: it would need the host clock " +
             "against the exchange's, and this host measured a second off in a direction " +
@@ -1506,10 +2507,34 @@ function NoSession({ onStarted }: { onStarted: () => void }) {
  */
 function RithmicStart({ onStarted }: { onStarted: () => void }) {
   const [symbol, setSymbol] = useState("NQU6");
+  // The shelf off, the recording on, and the asymmetry is about what each one
+  // costs rather than about which is more useful. The shelf is a study surface:
+  // this page is opened to trade far more often than to watch thirteen
+  // strategies re-run, so it is asked for rather than assumed.
+  //
+  // The recording is the opposite — leaving it off is what costs, and the bill
+  // arrives on the *next* connect rather than this one. The backfill's own rows
+  // are written (only the disk-resume frame is not), so a session recorded from
+  // 18:00 is a session a restart reads back off parquet in a moment; one that
+  // wrote nothing re-fetches the whole night off the history plant, measured at
+  // ~38s for a 16-hour head. And it has to be decided *here*: `set_modes`
+  // resumes writing from the tape's tail and never goes back for what already
+  // arrived, so switching it on mid-session leaves two disjoint stretches on
+  // disk — the one hole `RithmicFeed._backfill` documents it cannot repair.
   const [record, setRecord] = useState(true);
-  const [signals, setSignals] = useState(true);
+  const [signals, setSignals] = useState(false);
+  // Off, always, whatever was chosen last time. There is no persistence of this
+  // choice anywhere and there should not be: a connection that could trade
+  // because of something you clicked on a previous visit is the accident.
+  const [routing, setRouting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Whether this deployment permits routing at all, and which kind of account it
+  // says these credentials are. Read before connecting because the answer
+  // decides whether the switch below is even offered — and because "which
+  // account is this" is a question worth answering before the socket, not after.
+  const routingQ = useRoutingStatus();
+  const rs = routingQ.data;
 
   // Same rule as the running session's switches, applied before there is a
   // session to apply it to: the shelf reads this day's earlier windows off disk,
@@ -1525,12 +2550,14 @@ function RithmicStart({ onStarted }: { onStarted: () => void }) {
     <div style={{ marginBottom: 28 }}>
       <h3 style={{ marginBottom: 4 }}>Rithmic feed</h3>
       <p className="muted" style={{ marginTop: 0 }}>
-        Market data only — the ticker plant, never the order plant, and nothing
-        here can send an order. Recorded, every print goes to{" "}
-        <code>data/live/</code>, which is what the Globex gates and the weekly
-        seed read off disk — so the shelf can only run over a session that is
-        being written. Live ticks never join the Databento corpus. Both switches
-        can be thrown again while the session runs.
+        Market data by default — the ticker plant, and the order plant only if
+        you ask for it below. Recorded, every print goes to <code>data/live/</code>,
+        including the backfilled night: that is what the Globex gates and the
+        weekly seed read off disk, and it is what a reconnect resumes from
+        instead of re-fetching sixteen hours off the history plant. The shelf
+        starts off — it is a study surface, and it needs the recording anyway.
+        Live ticks never join the Databento corpus. The first two switches can be
+        thrown again while the session runs; the third cannot.
       </p>
       <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
         <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
@@ -1542,7 +2569,16 @@ function RithmicStart({ onStarted }: { onStarted: () => void }) {
             style={{ width: 100 }}
           />
         </label>
-        <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
+        <label
+          style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}
+          title={
+            "Every print to data/live/, the replayed night included. It is what " +
+            "a reconnect resumes from: with this off, the next connect re-fetches " +
+            "the whole night off the history plant (~38s for a 16-hour head) " +
+            "instead of reading it back. Decide it here — switched on later it " +
+            "writes only from that moment, and the gap is not repairable."
+          }
+        >
           <input
             type="checkbox"
             checked={record}
@@ -1574,13 +2610,44 @@ function RithmicStart({ onStarted }: { onStarted: () => void }) {
           />
           Run shadow signals
         </label>
+        {/* The third switch, and the only one that is not a mode. It decides
+            whether the connection opens Rithmic's ORDER plant — one login is one
+            socket, so the order path has to ride this one, which is why it is
+            settled here and not toggleable later. Absent entirely when the
+            deployment does not permit routing: there is nothing to explain on a
+            page whose job is to start a feed, and the refusal (with the env var
+            to set) is one click away in the panel. */}
+        {rs?.enabled && !rs.refusal && (
+          <label
+            style={{
+              display: "flex",
+              gap: 5,
+              alignItems: "center",
+              fontSize: 12,
+              color: routing ? palette.orange : undefined,
+            }}
+            title={
+              "Opens the ORDER and PnL plants alongside the tape, so the real " +
+              "accounts appear in the order-entry selector. The session still " +
+              "starts on the paper account: sending needs a real account and a " +
+              "label on it. Cannot be switched on later — stop and reconnect."
+            }
+          >
+            <input
+              type="checkbox"
+              checked={routing}
+              onChange={(e) => setRouting(e.target.checked)}
+            />
+            Enable order entry
+          </label>
+        )}
         <button
           disabled={busy || symbol.trim().length < 4}
           onClick={async () => {
             setBusy(true);
             setErr(null);
             try {
-              await startRithmicFeed({ symbol: symbol.trim(), record, signals });
+              await startRithmicFeed({ symbol: symbol.trim(), record, signals, routing });
               onStarted();
             } catch (e) {
               setErr(e instanceof Error ? e.message : String(e));
@@ -1589,7 +2656,13 @@ function RithmicStart({ onStarted }: { onStarted: () => void }) {
             }
           }}
         >
-          {busy ? "Connecting…" : record ? "Connect & record" : "Connect (no recording)"}
+          {busy
+            ? "Connecting…"
+            : routing
+              ? "Connect with order entry"
+              : record
+                ? "Connect & record"
+                : "Connect (no recording)"}
         </button>
       </div>
       {err && <p style={{ color: palette.red, fontSize: 12 }}>{err}</p>}

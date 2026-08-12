@@ -42,28 +42,30 @@ function ComplianceTable({ stat }: { stat: ModelStat }) {
     );
   return (
     <>
-      <table className="data-table">
-        <thead>
-          <tr>
-            <th>Compliance</th>
-            <th>Trades</th>
-            <th>Win rate</th>
-            <th>Expectancy</th>
-            <th>Net PnL</th>
-          </tr>
-        </thead>
-        <tbody>
-          {c.buckets.map((b) => (
-            <tr key={b.label}>
-              <td>{BUCKET_LABEL[b.label] ?? b.label}</td>
-              <td>{fmtInt(b.trades)}</td>
-              <td>{fmtPct(b.win_rate)}</td>
-              <td>{fmt(b.expectancy)}</td>
-              <td><Pnl v={b.net_pnl} /></td>
+      <div className="table-scroll-x">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Compliance</th>
+              <th>Trades</th>
+              <th>Win rate</th>
+              <th>Expectancy</th>
+              <th>Net PnL</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {c.buckets.map((b) => (
+              <tr key={b.label}>
+                <td>{BUCKET_LABEL[b.label] ?? b.label}</td>
+                <td>{fmtInt(b.trades)}</td>
+                <td>{fmtPct(b.win_rate)}</td>
+                <td>{fmt(b.expectancy)}</td>
+                <td><Pnl v={b.net_pnl} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       {c.unscored > 0 && (
         <div className="section-cap" style={{ marginTop: 6 }}>
           {fmtInt(c.unscored)} trade{c.unscored === 1 ? "" : "s"} assigned to this
@@ -78,28 +80,30 @@ function ComplianceTable({ stat }: { stat: ModelStat }) {
 function RuleStatsTable({ rows }: { rows: RuleStat[] }) {
   if (rows.length === 0) return null;
   return (
-    <table className="data-table">
-      <thead>
-        <tr>
-          <th>Rule</th>
-          <th>Met</th>
-          <th>Expectancy (met)</th>
-          <th>Missed</th>
-          <th>Expectancy (missed)</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.id}>
-            <td>{r.label}</td>
-            <td>{fmtInt(r.met_trades)}</td>
-            <td>{r.met_trades ? fmt(r.met_expectancy) : "—"}</td>
-            <td>{fmtInt(r.missed_trades)}</td>
-            <td>{r.missed_trades ? fmt(r.missed_expectancy) : "—"}</td>
+    <div className="table-scroll-x">
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>Rule</th>
+            <th>Met</th>
+            <th>Expectancy (met)</th>
+            <th>Missed</th>
+            <th>Expectancy (missed)</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id}>
+              <td>{r.label}</td>
+              <td>{fmtInt(r.met_trades)}</td>
+              <td>{r.met_trades ? fmt(r.met_expectancy) : "—"}</td>
+              <td>{fmtInt(r.missed_trades)}</td>
+              <td>{r.missed_trades ? fmt(r.missed_expectancy) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -185,50 +189,52 @@ function RuleEditor({ model }: { model: Model }) {
       {model.rules.length === 0 ? (
         <div className="section-cap">No entry rules yet.</div>
       ) : (
-        <table className="data-table">
-          <tbody>
-            {model.rules.map((r, i) => (
-              <tr key={r.id}>
-                <td>{r.label}</td>
-                <td style={{ whiteSpace: "nowrap", width: 1 }}>
-                  <button
-                    type="button"
-                    onClick={() => move(i, -1)}
-                    disabled={busy || i === 0}
-                    title="Move up"
-                  >
-                    ↑
-                  </button>{" "}
-                  <button
-                    type="button"
-                    onClick={() => move(i, 1)}
-                    disabled={busy || i === model.rules.length - 1}
-                    title="Move down"
-                  >
-                    ↓
-                  </button>{" "}
-                  <button
-                    type="button"
-                    className="btn-danger"
-                    disabled={busy}
-                    title="Retire this rule. Trades already scored against it keep their score."
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Retire the rule “${r.label}”? It leaves the checklist, but ` +
-                            `trades already scored against it keep their compliance score.`,
+        <div className="table-scroll-x">
+          <table className="data-table">
+            <tbody>
+              {model.rules.map((r, i) => (
+                <tr key={r.id}>
+                  <td>{r.label}</td>
+                  <td style={{ whiteSpace: "nowrap", width: 1 }}>
+                    <button
+                      type="button"
+                      onClick={() => move(i, -1)}
+                      disabled={busy || i === 0}
+                      title="Move up"
+                    >
+                      ↑
+                    </button>{" "}
+                    <button
+                      type="button"
+                      onClick={() => move(i, 1)}
+                      disabled={busy || i === model.rules.length - 1}
+                      title="Move down"
+                    >
+                      ↓
+                    </button>{" "}
+                    <button
+                      type="button"
+                      className="btn-danger"
+                      disabled={busy}
+                      title="Retire this rule. Trades already scored against it keep their score."
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Retire the rule “${r.label}”? It leaves the checklist, but ` +
+                              `trades already scored against it keep their compliance score.`,
+                          )
                         )
-                      )
-                        retire.mutate(r.id);
-                    }}
-                  >
-                    Retire
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                          retire.mutate(r.id);
+                      }}
+                    >
+                      Retire
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
       <form onSubmit={add} style={{ display: "flex", gap: 8, marginTop: 8 }}>
         <input
@@ -344,15 +350,12 @@ function ModelManager() {
       </button>
       {open && (
         <div style={{ marginTop: 12 }}>
-          <form
-            onSubmit={add}
-            style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 12 }}
-          >
+          <form onSubmit={add} className="model-add-form">
             <input
+              className="model-add-name"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="new model name…"
-              style={{ flex: "0 0 26%" }}
             />
             <input
               value={newDesc}
@@ -378,20 +381,22 @@ function ModelManager() {
           ) : models.length === 0 ? (
             <div className="section-cap">No models yet — add one above.</div>
           ) : (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Description</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {models.map((m) => (
-                  <ModelRow key={m.id} model={m} />
-                ))}
-              </tbody>
-            </table>
+            <div className="table-scroll-x">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Description</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {models.map((m) => (
+                    <ModelRow key={m.id} model={m} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
           <div className="section-cap" style={{ marginTop: 10 }}>
             Archiving a model or retiring a rule is a soft delete: trades already

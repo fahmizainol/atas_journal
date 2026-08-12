@@ -114,6 +114,7 @@ export function Sidebar() {
       <h3 style={{ marginTop: 24 }}>Status</h3>
       <div className="muted" style={{ fontSize: 12, lineHeight: 1.8 }}>
         <div>Databento: {meta?.databento_available ? "connected" : "disabled"}</div>
+        <div>Chart ticks: {meta?.chart_ticks_available ? "cached" : "none"}</div>
         <div>AI: {meta?.ai_available ? "ready" : "disabled"}</div>
       </div>
     </aside>

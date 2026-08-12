@@ -171,7 +171,13 @@ export function ReplayHistory() {
       label: "Net",
       value: fmtUsd(totals.net_usd),
       tone: toneOf(totals.net_usd),
-      sub: `${sample.length} attempt${sample.length === 1 ? "" : "s"} · ${totals.trades} trades`,
+      // Net is already after commission; the fee line says how much of the
+      // distance to it the broker took. Only shown once something has paid —
+      // attempts recorded under a zeroed fill model, and every attempt from
+      // before there was one, total nothing here and shouldn't claim a row.
+      sub:
+        `${sample.length} attempt${sample.length === 1 ? "" : "s"} · ${totals.trades} trades` +
+        (totals.fees_usd > 0 ? ` · ${fmtUsd(totals.fees_usd)} fees` : ""),
       hero: true,
     },
     {

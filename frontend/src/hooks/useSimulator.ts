@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../lib/api";
-import type { SessionPayload } from "../lib/replayEngine";
+import type { SessionPayload, TickSource } from "../lib/replayEngine";
 import { useTapeHistory, type HistoryTapes } from "./useTapeHistory";
 
 // Re-exported so the Simulator's imports stay where they were: the types belong
@@ -13,7 +13,15 @@ export interface SimDay {
   root: string;
   has_overnight: boolean;
   has_post: boolean;
+  /** The tape stops materially before the 16:00 ET close — a holiday half day,
+   *  or a recording that could not be finished. The server cannot tell those
+   *  apart from timestamps (see `_live_segments`), so neither can this: it marks
+   *  the day short and does not call it broken. */
+  ends_early: boolean;
+  source: TickSource;
 }
+
+export type { TickSource };
 
 export function useSimulatorDays(root: string | null) {
   return useQuery({

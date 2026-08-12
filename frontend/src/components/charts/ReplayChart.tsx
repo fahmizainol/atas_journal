@@ -34,12 +34,23 @@ import {
   LineSeries,
   LineStyle,
   createChart,
+  type AutoscaleInfo,
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
-import { compositePalette, ibPalette, palette, profilePalette, vwapPalette } from "../../theme";
+import {
+  candleSchemes,
+  chartSurfaces,
+  compositePalette,
+  ibPalette,
+  modernVwapPalette,
+  palette,
+  profilePalette,
+  vwapPalette,
+} from "../../theme";
+import { applyAppearance, appearanceSettings, recolorVolume, volumeColors } from "./chartAppearance";
 import type {
   BandPt,
   Bar,
@@ -50,21 +61,36 @@ import type {
   StepResult,
   Tape,
   TapeEvent,
+  EventTuning,
 } from "../../lib/replayEngine";
 import type { TapeRange } from "../../lib/volumeProfile";
 import type { VwapPoint } from "../../lib/chartTypes";
+import { VR_STOP_TICKS, computeVolRuler } from "../../lib/volRuler";
+import {
+  computeModernVwap,
+  type ModernVwapParams,
+  type MvPoint,
+} from "../../lib/modernVwap";
+import { ModernVwapPrimitive } from "./ModernVwapPrimitive";
 import {
   IndicatorLegend,
   type IndicatorKey,
   type IndicatorSettingsMap,
   type LegendItem,
 } from "./IndicatorLegend";
-import { ChartToolButton } from "./ChartToolButton";
+import { ChartToolButton, ChartToolSep } from "./ChartToolButton";
 import {
+  loadChartAppearance,
+  loadDrawings,
   loadIndicatorVisibility,
+  saveChartAppearance,
+  saveDrawings,
   saveIndicatorVisibility,
+  type ChartAppearance,
   type IndicatorVisibility,
 } from "../../lib/chartPrefs";
+import { playCue } from "../../lib/orderSound";
+import { focusChart, hasChartFocus, mountChart, nextChartId, unmountChart } from "../../lib/chartFocus";
 import { VwapBandPrimitive } from "./VwapBandPrimitive";
 import { VolumeProfilePrimitive } from "./VolumeProfilePrimitive";
 import { RangeProfilePrimitive } from "./RangeProfilePrimitive";
@@ -79,8 +105,8 @@ import { TradesPrimitive, type TradeMarkView } from "./TradesPrimitive";
 import { BigTradePrimitive } from "./BigTradePrimitive";
 import { CompositeProfilePrimitive } from "./CompositeProfilePrimitive";
 import { DevelopingProfilePrimitive } from "./DevelopingProfilePrimitive";
-import { EventBandPrimitive } from "./EventBandPrimitive";
-import { DEFAULT_BIG_LOTS } from "../../lib/replayEngine";
+import { EventBandPrimitive, type EventStyle } from "./EventBandPrimitive";
+import { DEFAULT_BIG_LOTS, SIDE_BUY, SIDE_SELL } from "../../lib/replayEngine";
 import {
   LiveTapeProfile,
   computeTapeProfile,
@@ -95,8 +121,7 @@ import {
 } from "../../lib/compositeProfile";
 import { COARSE_POINTER, byPointer } from "../../lib/pointer";
 
-const VOL_UP = "rgba(33,192,122,0.5)";
-const VOL_DOWN = "rgba(245,69,95,0.5)";
+// (Volume bar colours follow the candle scheme — see chartAppearance.volumeColors.)
 
 /** How tall one row of the volume profile is, in points — two ticks on NQ. The
  *  tape can be read at its own tick, but four rows to the point draw as a comb;
@@ -115,6 +140,15 @@ export interface PositionLine {
   target: number | null;
   /** Bar time (epoch seconds) of the entry — where the risk/reward zones start. */
   entryTime: number;
+  /** What this position's contract is worth, when that is **not** the contract
+   *  the tape is on. Live routing can be pointed at the mini's micro while the
+   *  chart stays on the mini (one login is one socket, so the tape cannot
+   *  follow) — and the chips on this line are dollars, so a position held in
+   *  MNQ priced at NQ's $20 a point reads ten times the money it is. Omitted
+   *  everywhere else, including for the paper blotter, which trades the tape's
+   *  own contract by construction. */
+  pointValue?: number;
+  tickSize?: number;
 }
 
 /** The bracket a chart-placed order is measured with — the page's ticket, shown
@@ -172,10 +206,6 @@ export interface ReplayChartHandle {
 }
 
 interface Props {
-  /** Fixed pixel height. Omit to fill the parent box, which is what the
-   *  Simulator does — the page hands the chart whatever viewport is left over
-   *  after its controls, and the chart's own autoSize keeps up with it. */
-  height?: number;
   /** The ⚓ tool moved (a bar time in epoch seconds) or was cleared. The page
    *  owns the engine, so it relays this to `ReplayEngine.setAnchor` and hands
    *  back a fresh snapshot — the chart never touches the tape itself. */
@@ -211,6 +241,11 @@ interface Props {
   /** The page's order ticket, so the menu can show and edit it in place. */
   ticket?: TicketDraft;
   onTicketChange?: (t: TicketDraft) => void;
+  /** What a point is worth in the contract this page's orders are **routed** to,
+   *  when that is not the contract the tape is on — the ticket prices its two
+   *  bracket boxes in money, and the story is the same one `PositionLine`
+   *  carries it for. Omitted everywhere the two agree. */
+  pointValue?: number;
   /** The mark, for the menu's own use: which of the four order types a price can
    *  legally be is a question about where the market is. The overlays get theirs
    *  from the playback (see `mark`), which never re-renders — this one has to. */
@@ -241,20 +276,75 @@ interface Props {
   /** Prominence floor for the composite's HVN/LVN nodes, as a share of its
    *  tallest hump. Zero leaves the node reader off. */
   nodeProm?: number;
-  /** Strength floor for the tape-event bands, in units of each kind's own
-   *  threshold. Zero leaves the layer off. */
-  eventStrength?: number;
+  /** The tape-event layer, or absent for a chart that doesn't offer it at all —
+   *  which is the layer's off switch in the sense the *page* means it, distinct
+   *  from the per-row indicator toggles a reader flicks. The engine is always
+   *  detecting; without this the events simply never reach the canvas.
+   *
+   *  It carries the tuning as well as the style because the legend rows quote the
+   *  thresholds an event was selected at, and a row that said "≥150 lots" while
+   *  the engine was clustering at 500 would be worse than a row that said
+   *  nothing. */
+  events?: EventOverlay;
+  /** Modern VWAP's parameters. Present offers the layer; absent and the two rows
+   *  never appear, the same way `events` gates the band layer. The chart owns
+   *  none of it — the page holds the state and hands the knobs back through
+   *  `indicatorSettings`. See lib/modernVwap for what the thing is. */
+  modernVwap?: ModernVwapParams;
   /** The knobs above, as the page offers them back to the user — hung off the
    *  "…" on the legend row each one belongs to. The chart doesn't own any of
    *  this state (it arrives as the props above and leaves through these
    *  callbacks); it only knows which row each knob goes on. */
   indicatorSettings?: IndicatorSettingsMap;
+  /** Which session the hand-drawn tools belong to (`SYMBOL|date`). With it set,
+   *  the fixed-range profiles, the ⚓ anchor and the price lines survive a
+   *  reload: they are saved as they change and restored by the `setTape` that
+   *  reopens the same session. Absent, nothing is kept — the ruler never is
+   *  either way, since a measurement is a question, not a level. */
+  drawingsKey?: string;
+  /**
+   * The chart surface has just been built and is ready to be given data.
+   *
+   * Fires on every build, not only the first: React can remount a component —
+   * StrictMode does it to everything in development, and a pane appearing does
+   * it for real — and each remount throws the old chart away and makes a new,
+   * empty one. A page that pushed its tape in an effect of its own has no way to
+   * know that happened, and hands the data to a chart that is about to be
+   * destroyed; the pane then comes up blank and stays blank until something
+   * unrelated re-pushes. So the chart says when it is ready instead of the page
+   * guessing, and the page's push becomes idempotent.
+   */
+  onReady?: () => void;
+  /** Which pane's copy of the per-chart display preferences (indicator
+   *  visibility, legend open) this chart reads and writes. Omitted on the
+   *  primary, which keeps the shared keys every other chart in the app uses —
+   *  a secondary pane passes something short and stable like `"b"`, since the
+   *  key has to survive a reload and so cannot be a runtime instance id. */
+  prefsPane?: string;
+}
+
+/** Everything the chart needs to draw the tape events, as the page holds it: the
+ *  thresholds they were detected at (for the legend rows), how loud the bands
+ *  are, and whether they also draw down the profile gutters. */
+export interface EventOverlay {
+  tuning: EventTuning;
+  style: EventStyle;
+  /** The marginal over the volume profiles — the same events read against price
+   *  instead of against time. Its own switch because it answers its own
+   *  question, and because a gutter can only hold so much. */
+  marginal: boolean;
 }
 
 type BandKey = "mid" | "u1" | "l1" | "u2" | "l2";
 const BAND_KEYS: BandKey[] = ["mid", "u1", "l1", "u2", "l2"];
 type ProfKey = "vah" | "val" | "poc";
 const PROF_KEYS: ProfKey[] = ["vah", "val", "poc"];
+/** Modern VWAP's seven line series. Module scope because they are referenced
+ *  from inside the build effect's closure, which lives for the life of the
+ *  chart — a per-render array there is a stale-capture question nobody should
+ *  have to think about. */
+const MV_KEYS = ["mid", "u1", "l1", "u2", "l2", "u3", "l3"] as const;
+type MvKey = (typeof MV_KEYS)[number];
 
 /** The bar a time sits on (or the nearest one). Bars are strictly ascending, so
  *  it is a plain binary search — used to hold a viewport across a `setData` that
@@ -293,6 +383,20 @@ interface RangeSel {
   from: number;
   to: number;
 }
+/** One hand-drawn horizontal price line. Every line is also an alert: `armed`
+ *  goes false the moment the tape crosses the price (one chime, and the line
+ *  dims rather than disappears — the level is still the level). Dragging it
+ *  re-arms it, which is also the honest reading of the gesture: a moved line is
+ *  a level the tape hasn't answered yet. */
+interface HLine {
+  id: number;
+  price: number;
+  armed: boolean;
+}
+/** The lines' hue. The violet the developing-NY histogram draws in — a reading
+ *  aid's colour, deliberately not the gold/blue the profile levels own. */
+const HLINE_COLOR = "#c4b5fd";
+const HLINE_DIM = "rgba(196, 181, 253, 0.45)";
 /** What a press grabbed: a fresh drag, an edge to resize, or the body to move. */
 type DragMode = "new" | "left" | "right" | "move";
 /** How close (px) the pointer must be to an edge to grab it rather than the body.
@@ -318,6 +422,39 @@ const MENU_MARGIN = byPointer(108, 132);
  *  which level the ticket belongs to is still on screen. */
 const DOCK_MENU = COARSE_POINTER;
 
+/** The frame the chart chooses for itself, in bars: the tail of the tape plus a
+ *  little room past the newest bar to place an order into. Counted in bar
+ *  indices rather than in minutes so it means the same thing on every timeframe
+ *  — a time-based range would be 90 minutes of 30s bars or 90 hours of hourly
+ *  ones. Used twice: when a session opens, and when the ◎ button puts the view
+ *  back on the price (see `frameTail`). */
+const FRAME_BARS = 90;
+const FRAME_ROOM = 12;
+/** How little of the price scale the bars in view can own before the chart says
+ *  so (the ◎ lights up). A quarter of the pane: below that the candles are a
+ *  ribbon and the day cannot be read off them, which on a chart that carries a
+ *  weekly VWAP and a multi-session composite is a thing autoscale does on its
+ *  own, without anyone touching the scale. */
+const RIBBON = 0.25;
+/** Put the viewport on the tail of a `last`-indexed bar array. */
+function frameTail(chart: IChartApi, last: number) {
+  chart
+    .timeScale()
+    .setVisibleLogicalRange({ from: Math.max(0, last - FRAME_BARS), to: last + FRAME_ROOM });
+}
+/** What the tape covers across a slice of bars, inclusive — null if the slice is
+ *  empty. The tape's own extent, not the price scale's: the difference between
+ *  the two is what the ◎ is about. */
+function barRange(bars: Bar[], from: number, to: number): { hi: number; lo: number } | null {
+  let hi = -Infinity;
+  let lo = Infinity;
+  for (let i = Math.max(0, from); i <= Math.min(bars.length - 1, to); i++) {
+    if (bars[i].high > hi) hi = bars[i].high;
+    if (bars[i].low < lo) lo = bars[i].low;
+  }
+  return hi > -Infinity ? { hi, lo } : null;
+}
+
 /** The four resting orders, and which side of the mark each one may sit on. A
  *  bid rests under the market and an offer over it; a stop is the other way
  *  round, because it is the order you have to be run through to fill. */
@@ -341,6 +478,7 @@ function OrderMenu({
   price,
   mark,
   tick,
+  tickUsd,
   ticket,
   docked,
   onTicket,
@@ -351,6 +489,10 @@ function OrderMenu({
   price: number;
   mark: number;
   tick: number;
+  /** What one tick of one contract is worth, so the two bracket boxes can say
+   *  what they cost as well as how far they are. 0 when nothing has told us —
+   *  then they say ticks and nothing else, rather than a guessed multiplier. */
+  tickUsd: number;
   ticket: TicketDraft;
   /** Docked at the foot of the chart rather than hung off the ＋ — the same
    *  controls, laid out wide and shallow because that is the shape of the strip
@@ -362,14 +504,26 @@ function OrderMenu({
   onClose: () => void;
 }) {
   const known = Number.isFinite(mark);
+  // What a bracket leg costs, at the size on the ticket — the thing you are
+  // actually deciding when you type a number of ticks. Blank at 0 (the box is
+  // saying "no leg") and blank when the contract's money is unknown.
+  const money = (ticks: number): string =>
+    ticks > 0 && tickUsd > 0
+      ? `$${Math.round(ticks * tickUsd * Math.max(1, ticket.size)).toLocaleString("en-US")}`
+      : "";
   const field = (
     key: keyof TicketDraft,
     label: string,
     min: number,
     title: string,
+    /** The money this box is worth, and the colour it belongs to. */
+    hint?: { text: string; color: string },
   ) => (
     <label className="replay-omenu-f" title={title}>
-      {label}
+      <span className="replay-omenu-l">
+        {label}
+        {hint?.text ? <b style={{ color: hint.color }}>{hint.text}</b> : null}
+      </span>
       <input
         type="number"
         min={min}
@@ -416,8 +570,20 @@ function OrderMenu({
       <div className="replay-omenu-foot">
         <div className="replay-omenu-row">
           {field("size", "Size", 1, "Contracts")}
-          {field("stopTicks", "SL", 0, "Stop, in ticks from the fill — optional, leave empty for none")}
-          {field("targetTicks", "TP", 0, "Target, in ticks from the fill — optional, leave empty for none")}
+          {field(
+            "stopTicks",
+            "SL",
+            0,
+            "Stop, in ticks from the fill — optional, leave empty for none. The figure beside it is what it risks at this size.",
+            { text: money(ticket.stopTicks), color: palette.red },
+          )}
+          {field(
+            "targetTicks",
+            "TP",
+            0,
+            "Target, in ticks from the fill — optional, leave empty for none. The figure beside it is what it makes at this size.",
+            { text: money(ticket.targetTicks), color: palette.green },
+          )}
         </div>
         <div className="replay-omenu-px">
           <button type="button" onClick={() => onNudge(-tick)} title={`Down one tick (${tick})`}>
@@ -457,7 +623,6 @@ const toVwapPoint = (p: BandPt): VwapPoint => ({
 
 export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayChart(
   {
-    height,
     onAnchorChange,
     onBracketChange,
     onFlatten,
@@ -467,6 +632,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     onPlaceTyped,
     ticket,
     onTicketChange,
+    pointValue: pointValueProp,
     mark: markProp = NaN,
     canPlaceOrders = true,
     hideDates = false,
@@ -474,12 +640,29 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     bigLots = DEFAULT_BIG_LOTS,
     composite = "off",
     nodeProm = 0,
-    eventStrength = 0,
+    events: eventOverlay,
+    modernVwap: mvParams,
     indicatorSettings,
+    drawingsKey,
+    prefsPane,
+    onReady,
   },
   ref,
 ) {
   const elRef = useRef<HTMLDivElement>(null);
+  /** The crosshair readout's element — written imperatively, see the
+   *  subscribeCrosshairMove block. */
+  const ohlcRef = useRef<HTMLDivElement>(null);
+  // This pane's identity, for the keyboard election in lib/chartFocus. Assigned
+  // once per mounted instance — `useRef(nextChartId())` would burn a fresh id on
+  // every render, since the argument is evaluated whether or not it is used.
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+
+  const paneIdRef = useRef<number | null>(null);
+  if (paneIdRef.current == null) paneIdRef.current = nextChartId();
+  const paneId = paneIdRef.current;
+
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volRef = useRef<ISeriesApi<"Histogram"> | null>(null);
@@ -577,8 +760,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   compositeRef.current = composite;
   const nodePromRef = useRef(nodeProm);
   nodePromRef.current = nodeProm;
-  const eventStrengthRef = useRef(eventStrength);
-  eventStrengthRef.current = eventStrength;
+  const eventOvRef = useRef(eventOverlay);
+  eventOvRef.current = eventOverlay;
   // Mark price, mirrored off the playback so the position chip's open P&L moves
   // with the tape without a React render per frame.
   const lastPriceRef = useRef<number>(NaN);
@@ -589,6 +772,82 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   const barsRef = useRef<Bar[]>([]);
   const tapeRef = useRef<Tape | null>(null);
   const ibRef = useRef<IbBox | null>(null);
+
+  // --- back to the price ------------------------------------------------------
+  // Roll back through the morning and the live edge ends up off screen to the
+  // right; roll too far the other way and it is off to the left. The scale can
+  // lose it too, and more quietly: autoscale has to hold every layer at once, so
+  // a weekly VWAP or a composite level far under the session leaves the whole
+  // day as a ribbon at the top of the pane, and dragging the axis by hand can
+  // put the tape anywhere. Getting back is a scroll in a direction you have to
+  // guess at a distance nobody knows — so this is the one press that always ends
+  // with the session's price in the middle of the chart.
+  //
+  // The root element carries the chart's own price-axis width as a CSS var: the
+  // button sits at the top right *of the tape*, and the axis under it is 50-70px
+  // depending on how many digits the scale is printing (see the size-change
+  // subscription in the build effect).
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // Whether the tape has got away — the button lights up exactly when pressing
+  // it would change something.
+  const [offTape, setOffTape] = useState(false);
+  const syncOffTape = () => {
+    const chart = chartRef.current;
+    const last = barsRef.current.length - 1;
+    if (!chart || last < 0) {
+      setOffTape(false);
+      return;
+    }
+    const lr = chart.timeScale().getVisibleLogicalRange();
+    // Off to the right (panned back in time) or off to the left (scrolled past
+    // the end into the empty room).
+    if (lr != null && (lr.to < last || lr.from > last)) {
+      setOffTape(true);
+      return;
+    }
+    const pr = chart.priceScale("right").getVisibleRange();
+    if (pr == null || !(pr.to > pr.from)) {
+      setOffTape(false);
+      return;
+    }
+    // Off the top or the bottom of a scale someone set by hand, or one the tape
+    // has since walked out of.
+    const p = lastPriceRef.current;
+    if (Number.isFinite(p) && (p < pr.from || p > pr.to)) {
+      setOffTape(true);
+      return;
+    }
+    // On screen but unreadable: the bars in view own so little of the pane that
+    // the session is a ribbon. That is autoscale holding the scale open for a
+    // layer far under the tape, and it is the case the button was asked for.
+    const br = barRange(barsRef.current, lr ? Math.round(lr.from) : 0, lr ? Math.round(lr.to) : last);
+    setOffTape(br != null && (br.hi - br.lo) / (pr.to - pr.from) < RIBBON);
+  };
+  const jumpToPrice = () => {
+    const chart = chartRef.current;
+    const bars = barsRef.current;
+    const last = bars.length - 1;
+    if (!chart || last < 0) return;
+    frameTail(chart, last);
+    // And the price scale, by hand rather than by turning autoscale back on:
+    // autoscale is usually what lost the price in the first place. It has to
+    // hold every series on the scale at once, so a weekly VWAP anchored 800
+    // points under the session, or a composite level off a quiet week, crushes
+    // the whole day into a ribbon at the top of the pane. Fitting the bars we
+    // just framed is a different question from fitting the chart, and it is the
+    // one that means "show me where price is".
+    const br = barRange(bars, last - FRAME_BARS, last);
+    if (!br) return;
+    // Room above and below so the newest bar isn't against an edge — and a tick
+    // floor, because a range that opens dead flat would otherwise zoom to a line.
+    const tick = tapeRef.current?.tickSize ?? 0.25;
+    const pad = Math.max((br.hi - br.lo) * 0.12, tick * 8);
+    chart.priceScale("right").setVisibleRange({ from: br.lo - pad, to: br.hi + pad });
+    // The scale is manual from here (double-click the axis for autoscale back).
+    // Which is why the button keeps watching: when the tape walks out of the
+    // window it just set, it lights up again.
+    syncOffTape();
+  };
 
   const onAnchorRef = useRef(onAnchorChange);
   onAnchorRef.current = onAnchorChange;
@@ -639,7 +898,11 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // frame of a bracket drag.
   const pushPos = () => posPrimRef.current?.setData(posRef.current);
   const pushOrders = () =>
-    ordPrimRef.current?.setOrders(workingRef.current, tapeRef.current?.tickSize);
+    ordPrimRef.current?.setOrders(
+      workingRef.current,
+      tapeRef.current?.tickSize,
+      tapeRef.current?.pointValue,
+    );
   const pushTrades = () =>
     tradesPrimRef.current?.setTrades(tradesRef.current, tapeRef.current?.tickSize);
 
@@ -688,20 +951,28 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     compNodesRef.current = null;
     paintComposite();
   };
-  // The tape moved: re-price the open position off the new mark, and re-measure
-  // how far the market still has to come to fill what's working.
+  // The tape moved: re-price the open position off the new mark, re-measure
+  // how far the market still has to come to fill what's working — and ask the
+  // price lines whether one was just crossed, since this is the one funnel
+  // every path that moves the price goes through (playback, a step, a seek).
   const mark = (v: number) => {
     if (!Number.isFinite(v) || v === lastPriceRef.current) return;
+    const prev = lastPriceRef.current;
     lastPriceRef.current = v;
+    checkAlertsRef.current(prev, v);
     ordPrimRef.current?.setMark(v);
     if (!posRef.current) return;
     posRef.current = { ...posRef.current, last: v };
     pushPos();
   };
+  // Through a ref: `mark` is declared with the playback plumbing, well before
+  // the tools section that owns the lines.
+  const checkAlertsRef = useRef<(prev: number, v: number) => void>(() => {});
 
   // Hide/show per indicator, sharing the journal charts' sticky preference: a
-  // band hidden on a strategy chart comes up hidden here, and vice versa.
-  const [vis, setVis] = useState<IndicatorVisibility>(loadIndicatorVisibility);
+  // band hidden on a strategy chart comes up hidden here, and vice versa. A pane
+  // given `prefsPane` keeps its own copy instead — see chartPrefs.paneKey.
+  const [vis, setVis] = useState<IndicatorVisibility>(() => loadIndicatorVisibility(prefsPane));
   const visRef = useRef(vis);
   visRef.current = vis;
   const applyRef = useRef<((v: IndicatorVisibility) => void) | null>(null);
@@ -710,7 +981,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       const next = { ...prev, [key]: !prev[key] };
       visRef.current = next;
       applyRef.current?.(next);
-      saveIndicatorVisibility(next);
+      saveIndicatorVisibility(next, prefsPane);
       return next;
     });
   // Force a layer on. Hide/show is a sticky global preference, so a layer hidden
@@ -721,18 +992,40 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     const next = { ...visRef.current, [key]: true };
     visRef.current = next;
     applyRef.current?.(next);
-    saveIndicatorVisibility(next);
+    saveIndicatorVisibility(next, prefsPane);
     setVis(next);
   };
   const revealRef = useRef(reveal);
   revealRef.current = reveal;
+
+  // The chart's colours, sharing the journal charts' preference the same way the
+  // toggles above do. Applied through applyOptions (the effect after the build
+  // effect), never a rebuild — a replay rebuilt mid-session would lose the range
+  // you are watching. The ref is what the build effect reads, so a chart rebuilt
+  // for some other reason comes back in the colours you last chose.
+  const [appearance, setAppearance] = useState<ChartAppearance>(loadChartAppearance);
+  const appearanceRef = useRef(appearance);
+  appearanceRef.current = appearance;
+  const changeAppearance = (next: ChartAppearance) => {
+    setAppearance(next);
+    saveChartAppearance(next);
+  };
 
   // Which layers have actually printed at the current clock — the Globex band is
   // absent on a day with no overnight tape, the NY band doesn't exist until the
   // bell, and the IB doesn't exist before it either. Tracked in a ref alongside
   // the state so the per-frame path only re-renders on the step where one comes
   // to life. A toggle for a line that can't draw is a lie.
-  const emptyPresent = { bars: false, g: false, n: false, wk: false, gp: false, np: false, ib: false };
+  const emptyPresent = {
+    bars: false,
+    g: false,
+    n: false,
+    wk: false,
+    gp: false,
+    np: false,
+    ib: false,
+    cvd: false,
+  };
   const presentRef = useRef(emptyPresent);
   const [present, setPresent] = useState(emptyPresent);
   const syncPresent = (next: typeof emptyPresent) => {
@@ -741,6 +1034,364 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     presentRef.current = next;
     setPresent(next);
   };
+
+  // --- CVD ------------------------------------------------------------------
+  // Cumulative volume delta: the running sum of signed aggressor volume (lifts
+  // minus hits) as of each bar's close, read straight off the tape's `side`. The
+  // same quantity api/session_chart._cvd_series ships to the journal charts, and
+  // signed the same way — so a CVD read here reads the same as it does there.
+  //
+  // Anchored at the session's *own* first bar, not at the first drawn one. This
+  // workspace glues whole prior days in front of the day being traded (Live loads
+  // five by default), and accumulating across them would give the line a
+  // multi-day drift that swamps the session's read, which is the thing you are
+  // actually watching. So the context days get no CVD and the line starts at the
+  // Globex open — which is where the server's anchor lands too.
+  const CVD_PANE = 1;
+  const cvdSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const cvdPtsRef = useRef<{ time: number; value: number }[]>([]);
+  // Cumulative through the last *closed* bar, with the forming bar's own sum
+  // (`cur`) carried on top and extended over new ticks only. A step restates the
+  // bar still forming, so rescanning its whole span every frame is exactly the
+  // cost this accumulator exists to avoid — the same shape as `reprofile`'s.
+  const cvdBaseRef = useRef(0);
+  const cvdCurRef = useRef(0);
+  const cvdScanRef = useRef(0);
+  // Whether the tape ever carried an aggressor tag. An older cache — or a symbol
+  // the vendor never tagged — prints every tick 'N', and there is nothing to
+  // accumulate: the pane and its legend row then don't appear at all, rather than
+  // drawing a flat zero line that reads as perfect balance.
+  const cvdAnyRef = useRef(false);
+
+  const resetCvd = () => {
+    cvdPtsRef.current = [];
+    cvdBaseRef.current = 0;
+    cvdCurRef.current = 0;
+    cvdScanRef.current = 0;
+    cvdAnyRef.current = false;
+  };
+
+  /** Fold one bar — new, or the forming one restated — into the running series,
+   *  and return its cumulative value. Does not touch the series itself: a
+   *  rebuild walks hundreds of bars through here before there is one to write. */
+  const stepCvd = (b: Bar): number => {
+    const tape = tapeRef.current;
+    const pts = cvdPtsRef.current;
+    const last = pts.length ? pts[pts.length - 1] : null;
+    if (!last || last.time !== b.time) {
+      // The bar that was forming has closed at whatever it reached, and becomes
+      // the base the next one accumulates from.
+      cvdBaseRef.current = last ? last.value : 0;
+      cvdCurRef.current = 0;
+      cvdScanRef.current = b.i0;
+    }
+    let sum = cvdCurRef.current;
+    if (tape) {
+      const end = Math.min(b.i1, tape.n - 1);
+      for (let i = cvdScanRef.current; i <= end; i++) {
+        const sd = tape.side[i];
+        if (sd === SIDE_BUY) {
+          sum += tape.size[i];
+          cvdAnyRef.current = true;
+        } else if (sd === SIDE_SELL) {
+          sum -= tape.size[i];
+          cvdAnyRef.current = true;
+        }
+      }
+      // Never walks backwards: a frame that added no ticks leaves the mark where
+      // it was rather than re-counting the bar's tail into the sum twice.
+      cvdScanRef.current = Math.max(cvdScanRef.current, end + 1);
+    }
+    cvdCurRef.current = sum;
+    const value = cvdBaseRef.current + sum;
+    if (last && last.time === b.time) last.value = value;
+    else pts.push({ time: b.time, value });
+    return value;
+  };
+
+  const mountCvd = () => {
+    const chart = chartRef.current;
+    if (!chart || cvdSeriesRef.current) return;
+    const s = chart.addSeries(
+      LineSeries,
+      {
+        color: palette.blue,
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: true,
+        priceFormat: { type: "volume" },
+      },
+      CVD_PANE,
+    );
+    s.setData(cvdPtsRef.current.map((p) => ({ time: p.time as Time, value: p.value })));
+    // A zero reference: CVD crosses sign, and which side of zero it sits on is
+    // the whole read — net lifting vs net hitting since the anchor.
+    s.createPriceLine({
+      price: 0,
+      color: palette.grid,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: false,
+    });
+    cvdSeriesRef.current = s;
+    // The default is an even share per pane, so both factors are set explicitly:
+    // 5:1 ≈ 83% price / 17% CVD, the same split the journal charts give theirs.
+    const panes = chart.panes();
+    if (panes.length > CVD_PANE) {
+      panes[0].setStretchFactor(1000);
+      panes[CVD_PANE].setStretchFactor(200);
+    }
+  };
+
+  const unmountCvd = () => {
+    const chart = chartRef.current;
+    const s = cvdSeriesRef.current;
+    if (!chart || !s) return;
+    cvdSeriesRef.current = null;
+    chart.removeSeries(s);
+  };
+
+  /** The pane exists only when CVD is both switched on and has something true to
+   *  draw. Created and removed rather than hidden: hiding the only series in a
+   *  pane leaves the empty pane — and its share of the chart's height — behind,
+   *  which on a workspace that is meant to be all chart is the whole cost. */
+  const syncCvdMount = () => {
+    const want = visRef.current.cvd && cvdAnyRef.current;
+    if (want === !!cvdSeriesRef.current) return;
+    // CVD owns pane 1 by number, and the vol ruler mounts at whatever the last
+    // pane is — so when CVD comes or goes with the ruler up, the ruler is
+    // remounted around the change to keep both claims true.
+    const vrWas = !!vrDevRef.current;
+    if (vrWas) unmountVr();
+    if (want) mountCvd();
+    else unmountCvd();
+    if (vrWas) mountVr();
+  };
+
+  /** Rebuild from a snapshot's bars. A seek can move backwards, so the
+   *  accumulator is thrown away and re-walked rather than patched. Session bars
+   *  only — `history` is the context days, which the anchor sits after. */
+  const rebuildCvd = (drawn: Bar[], histCount: number) => {
+    resetCvd();
+    for (let i = histCount; i < drawn.length; i++) stepCvd(drawn[i]);
+    // Mount first, so a tape that turned out to carry no aggressor tags drops the
+    // pane before anything is written to it.
+    syncCvdMount();
+    cvdSeriesRef.current?.setData(
+      cvdPtsRef.current.map((p) => ({ time: p.time as Time, value: p.value })),
+    );
+  };
+
+  // --- Vol ruler --------------------------------------------------------------
+  // The bar-range volatility pane (see lib/volRuler for what the three lines
+  // are and why the median exists next to the ATR). Unlike CVD it has no
+  // per-tick accumulator: every value is a fact about a *closed* bar, so it is
+  // recomputed whole on snapshot and on bar close — a sort over a session of
+  // ranges, sub-millisecond against a cadence of once a bar.
+  const vrAtrRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const vrDevRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const vrYdayLineRef = useRef<IPriceLine | null>(null);
+
+  const mountVr = () => {
+    const chart = chartRef.current;
+    if (!chart || vrDevRef.current) return;
+    // Always the last pane — after CVD's when that one is up (see syncCvdMount
+    // for how the two claims are kept true together).
+    const paneIdx = chart.panes().length;
+    const fmt = {
+      type: "custom" as const,
+      formatter: (v: number) => `${Math.round(v)}t`,
+      minMove: 1,
+    };
+    const atrS = chart.addSeries(
+      LineSeries,
+      {
+        color: palette.violet,
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        priceFormat: fmt,
+        // The pane keeps the 50t rule in view however hot the tape gets — the
+        // distance between the lines and that rule is the whole read, and on a
+        // 2026 day autoscale would otherwise leave it below the frame.
+        autoscaleInfoProvider: (orig: () => AutoscaleInfo | null) => {
+          const r = orig();
+          if (r?.priceRange)
+            r.priceRange.minValue = Math.min(r.priceRange.minValue, VR_STOP_TICKS - 10);
+          return r;
+        },
+      },
+      paneIdx,
+    );
+    const devS = chart.addSeries(
+      LineSeries,
+      {
+        color: palette.gold,
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: true,
+        priceFormat: fmt,
+      },
+      paneIdx,
+    );
+    devS.createPriceLine({
+      price: VR_STOP_TICKS,
+      color: palette.muted,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dotted,
+      title: `${VR_STOP_TICKS}t stop`,
+    });
+    vrAtrRef.current = atrS;
+    vrDevRef.current = devS;
+    const panes = chart.panes();
+    panes[0]?.setStretchFactor(1000);
+    panes[paneIdx]?.setStretchFactor(200);
+  };
+
+  const unmountVr = () => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    // The yday line dies with its series; the ref just has to agree.
+    vrYdayLineRef.current = null;
+    if (vrAtrRef.current) {
+      chart.removeSeries(vrAtrRef.current);
+      vrAtrRef.current = null;
+    }
+    if (vrDevRef.current) {
+      chart.removeSeries(vrDevRef.current);
+      vrDevRef.current = null;
+    }
+  };
+
+  const syncVrMount = () => {
+    if (visRef.current.volRuler && barsRef.current.length > histCountRef.current) mountVr();
+    else unmountVr();
+  };
+
+  /** Recompute and redraw the whole pane from the drawn bars as they stand. */
+  const refreshVr = () => {
+    syncVrMount();
+    const devS = vrDevRef.current;
+    const atrS = vrAtrRef.current;
+    if (!devS || !atrS) return;
+    const d = computeVolRuler(
+      barsRef.current,
+      histCountRef.current,
+      tapeRef.current?.tickSize ?? 0.25,
+    );
+    atrS.setData(d.atr.map((p) => ({ time: p.time as Time, value: p.value })));
+    devS.setData(d.dev.map((p) => ({ time: p.time as Time, value: p.value })));
+    if (d.yday != null) {
+      const opts = { price: d.yday, title: `yday ${Math.round(d.yday)}t` };
+      if (vrYdayLineRef.current) vrYdayLineRef.current.applyOptions(opts);
+      else
+        vrYdayLineRef.current = devS.createPriceLine({
+          ...opts,
+          color: palette.green,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+        });
+    } else if (vrYdayLineRef.current) {
+      devS.removePriceLine(vrYdayLineRef.current);
+      vrYdayLineRef.current = null;
+    }
+  };
+
+  // --- Modern VWAP ------------------------------------------------------------
+  // Same cadence and the same reason as the vol ruler: every value here is a
+  // fact about a *closed* bar (KER, the trailing medians, a confirmed pivot, a
+  // close back inside the envelope), so it is recomputed whole on snapshot and
+  // on bar close rather than stepped per tick. One pass is O(bars) plus a
+  // rolling median that keeps its window sorted — a couple of milliseconds over
+  // a session with three context days behind it, against a cadence of once a
+  // bar. Doing it per tick would be the one layer on this chart that made the
+  // tape stutter, for numbers that cannot change between closes.
+  const mvLinesRef = useRef<Record<MvKey, ISeriesApi<"Line">> | null>(null);
+  const mvPrimRef = useRef<ModernVwapPrimitive | null>(null);
+  if (!mvPrimRef.current) mvPrimRef.current = new ModernVwapPrimitive();
+  // Null when the page doesn't offer the layer. Read through the ref rather than
+  // off the prop everywhere below: the build effect captures one `refreshMv` for
+  // the life of the chart, so a prop read inside it would be frozen at mount.
+  const mvRef = useRef<ModernVwapParams | null>(mvParams ?? null);
+  mvRef.current = mvParams ?? null;
+  /** What the legend rows quote — the gate's own shares, and how many triggers
+   *  it let through at the current settings. */
+  const [mvRead, setMvRead] = useState({ trendPct: 0, undefPct: 0, signals: 0, anchors: 0 });
+
+  const refreshMv = () => {
+    const lines = mvLinesRef.current;
+    const prim = mvPrimRef.current;
+    if (!lines || !prim) return;
+    const p = mvRef.current;
+    const on = visRef.current.modernVwap || visRef.current.modernVwapSignals;
+    // Nothing computed while both rows are off. This is the one layer on the
+    // chart whose cost is worth avoiding when it isn't being looked at, and it
+    // is off by default — so for most sessions this branch is the whole story.
+    if (!on || !p || barsRef.current.length === 0) {
+      for (const k of MV_KEYS) lines[k].setData([]);
+      prim.setData([], [], new Map());
+      return;
+    }
+    const d = computeModernVwap(barsRef.current, histCountRef.current, p);
+
+    // Per-point colour rather than a series colour: the regime read is the only
+    // thing on this indicator that changes bar to bar, and the band it tints is
+    // where it belongs (his own choice, and the reason the mid line gives up its
+    // hue to stay legible under it).
+    const tint = (pt: MvPoint, alpha: number): string | undefined => {
+      if (!p.regimeColor) return undefined;
+      const r = modernVwapPalette.regime;
+      const rgb = pt.regime < 0 ? r.undefined : pt.regime >= 2 ? r.trending : r.ranging;
+      return `rgba(${rgb}, ${alpha})`;
+    };
+    // A ring above the chosen envelope draws nothing at all — the series is kept
+    // (creating and destroying series on a knob turn is how a chart leaks) and
+    // simply handed an empty array.
+    const ring: Record<MvKey, number> = { mid: 0, u1: 1, l1: 1, u2: 2, l2: 2, u3: 3, l3: 3 };
+    const alpha: Record<number, number> = { 1: 0.45, 2: 0.8, 3: 0.3 };
+    for (const k of MV_KEYS) {
+      if (ring[k] > p.bands) {
+        lines[k].setData([]);
+        continue;
+      }
+      lines[k].setData(
+        d.points.map((pt) => {
+          const v = pt[k];
+          // A gap, not a joined line: before the accumulator has any volume
+          // there is no value, and drawing across it would invent one.
+          if (!Number.isFinite(v)) return { time: pt.time as Time };
+          return k === "mid"
+            ? { time: pt.time as Time, value: v }
+            : { time: pt.time as Time, value: v, color: tint(pt, alpha[ring[k]]) };
+        }),
+      );
+    }
+    const byTime = new Map(barsRef.current.map((b) => [b.time, b]));
+    prim.setData(d.signals, d.anchors, byTime);
+    setMvRead((prev) =>
+      prev.trendPct === d.trendPct &&
+      prev.undefPct === d.undefPct &&
+      prev.signals === d.signals.length &&
+      prev.anchors === d.anchors.length
+        ? prev
+        : {
+            trendPct: d.trendPct,
+            undefPct: d.undefPct,
+            signals: d.signals.length,
+            anchors: d.anchors.length,
+          },
+    );
+  };
+  // Through a ref: the knob-change effect below is declared before the build
+  // effect that gives `refreshMv` anything to draw into.
+  const refreshMvRef = useRef(refreshMv);
+  refreshMvRef.current = refreshMv;
+
+  // A knob turned re-derives everything — the anchors, the regime and the
+  // triggers all move together, and there is no partial version of that.
+  useEffect(() => {
+    refreshMvRef.current();
+  }, [mvParams]);
 
   // --- hand-drawn tools -----------------------------------------------------
   // Everything below is mirrored into refs so the mouse handlers inside the build
@@ -776,6 +1427,47 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   const [avwapAnchor, setAvwapAnchor] = useState<number | null>(null);
   const avwapArmedRef = useRef(false);
   const avwapApplyRef = useRef<((a: boolean) => void) | null>(null);
+  // Mirrored so `persistDrawings` (called from pointer handlers, which never
+  // see fresh state) reads the anchor as it stands, not as it rendered.
+  const avwapAnchorRef = useRef<number | null>(null);
+
+  // Horizontal price lines — the ━ tool. Drawn as native price lines (an axis
+  // label and a full-pane rule for free); the ref array is the truth and the
+  // primitive map inside the build effect is its rendering. Same ref/state
+  // split as the fixed ranges, for the same reason: a drag repaints without a
+  // React render, the toolbar only re-renders when a drag settles.
+  const [hlineArmed, setHlineArmed] = useState(false);
+  const hlineArmedRef = useRef(false);
+  const hlineApplyRef = useRef<((a: boolean) => void) | null>(null);
+  const [hlines, setHlines] = useState<HLine[]>([]);
+  const hlinesRef = useRef<HLine[]>([]);
+  const [selectedHline, setSelectedHline] = useState<number | null>(null);
+  const selectedHlineRef = useRef<number | null>(null);
+  const nextHlineIdRef = useRef(1);
+  const paintHlinesRef = useRef<(() => void) | null>(null);
+  // A line the tape just crossed, flashed over the chart while the cue plays.
+  const [alertFlash, setAlertFlash] = useState<{ price: number; key: number } | null>(null);
+  useEffect(() => {
+    if (!alertFlash) return;
+    const t = window.setTimeout(() => setAlertFlash(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [alertFlash]);
+
+  // Which session the drawings above belong to, for the store. Mirrored for
+  // the imperative handle, which is where a restore happens.
+  const drawingsKeyRef = useRef(drawingsKey);
+  drawingsKeyRef.current = drawingsKey;
+  const persistDrawings = () => {
+    const key = drawingsKeyRef.current;
+    if (!key) return;
+    saveDrawings(key, {
+      ranges: rangesRef.current.map((r) => ({ from: r.from, to: r.to })),
+      anchor: avwapAnchorRef.current,
+      hlines: hlinesRef.current.map((l) => ({ price: l.price, armed: l.armed })),
+    });
+  };
+  const persistRef = useRef(persistDrawings);
+  persistRef.current = persistDrawings;
 
   // Order placement is a held modifier rather than a tool: hold Space and click
   // a price. Nothing to arm and nothing to leave, which is what you want when
@@ -822,11 +1514,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // One drag/click tool owns the pointer at a time.
   const armRulerRef = useRef<(v: boolean) => void>(() => {});
   const armAvwapRef = useRef<(v: boolean) => void>(() => {});
+  const armHlineRef = useRef<(v: boolean) => void>(() => {});
   const armOrderRef = useRef<(v: boolean) => void>(() => {});
   const arm = (v: boolean) => {
     if (v) {
       armRulerRef.current(false);
       armAvwapRef.current(false);
+      armHlineRef.current(false);
       armOrderRef.current(false);
     }
     armedRef.current = v;
@@ -837,6 +1531,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     if (v) {
       if (armedRef.current) arm(false);
       armAvwapRef.current(false);
+      armHlineRef.current(false);
       armOrderRef.current(false);
     }
     rulerArmedRef.current = v;
@@ -848,6 +1543,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     if (v) {
       if (armedRef.current) arm(false);
       armRulerRef.current(false);
+      armHlineRef.current(false);
       armOrderRef.current(false);
     }
     avwapArmedRef.current = v;
@@ -855,12 +1551,25 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     avwapApplyRef.current?.(v);
   };
   armAvwapRef.current = armAvwap;
+  const armHline = (v: boolean) => {
+    if (v) {
+      if (armedRef.current) arm(false);
+      armRulerRef.current(false);
+      armAvwapRef.current(false);
+      armOrderRef.current(false);
+    }
+    hlineArmedRef.current = v;
+    setHlineArmed(v);
+    hlineApplyRef.current?.(v);
+  };
+  armHlineRef.current = armHline;
   const armOrder = (v: boolean) => {
     if (v) {
       if (!canOrderRef.current) return;
       if (armedRef.current) arm(false);
       armRulerRef.current(false);
       armAvwapRef.current(false);
+      armHlineRef.current(false);
     }
     orderArmedRef.current = v;
     setOrderArmed(v);
@@ -869,8 +1578,54 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   armOrderRef.current = armOrder;
   const clearAvwap = () => {
     setAvwapAnchor(null);
+    avwapAnchorRef.current = null;
     onAnchorRef.current?.(null);
+    persistRef.current();
   };
+
+  // Push whatever the hline refs now hold into both the chart and the toolbar,
+  // and remember it — the mirror of `syncRanges` below.
+  const syncHlines = () => {
+    setHlines([...hlinesRef.current]);
+    setSelectedHline(selectedHlineRef.current);
+    paintHlinesRef.current?.();
+    persistRef.current();
+  };
+  const syncHlinesRef = useRef(syncHlines);
+  syncHlinesRef.current = syncHlines;
+  const deleteSelectedHline = () => {
+    if (selectedHlineRef.current == null) return;
+    hlinesRef.current = hlinesRef.current.filter((l) => l.id !== selectedHlineRef.current);
+    selectedHlineRef.current = null;
+    syncHlines();
+  };
+  const clearHlines = () => {
+    hlinesRef.current = [];
+    selectedHlineRef.current = null;
+    syncHlines();
+  };
+
+  // The alert half of a price line: the tape moved from one side of it to the
+  // other since the last mark. One chime per arming — the line then dims and
+  // stays, and dragging it is what re-arms it. The first mark of a session has
+  // no "other side" yet, so it arms silently.
+  const checkAlerts = (prev: number, v: number) => {
+    if (!Number.isFinite(prev)) return;
+    let hit: HLine | null = null;
+    for (const l of hlinesRef.current) {
+      if (!l.armed) continue;
+      if ((prev < l.price && v >= l.price) || (prev > l.price && v <= l.price)) {
+        l.armed = false;
+        hit = l;
+      }
+    }
+    if (hit) {
+      playCue("alert");
+      setAlertFlash({ price: hit.price, key: hit.id + Math.random() });
+      syncHlinesRef.current();
+    }
+  };
+  checkAlertsRef.current = checkAlerts;
 
   // Push whatever the refs now hold into both the chart and the toolbar. Called
   // once a drag settles, never mid-drag.
@@ -878,6 +1633,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     setRanges([...rangesRef.current]);
     setSelected(selectedRef.current);
     paintRef.current?.();
+    persistRef.current();
   };
   const clearRanges = () => {
     rangesRef.current = [];
@@ -896,6 +1652,11 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   syncRef.current = syncRanges;
 
   useEffect(() => {
+    mountChart(paneId);
+    return () => unmountChart(paneId);
+  }, [paneId]);
+
+  useEffect(() => {
     // Whether a key belongs to whatever the user is typing into rather than to
     // the chart.
     const busy = () => {
@@ -907,15 +1668,21 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       );
     };
     const onKey = (e: KeyboardEvent) => {
+      // Not this pane's keypress. With one chart on the page this is never true
+      // (a lone pane holds the keyboard from mount), so nothing about the
+      // single-chart behaviour is conditional on the pointer being anywhere.
+      if (!hasChartFocus(paneId)) return;
       if (e.key === "Escape") {
         const armed =
           armedRef.current ||
           rulerArmedRef.current ||
           avwapArmedRef.current ||
+          hlineArmedRef.current ||
           orderArmedRef.current;
         if (armedRef.current) arm(false);
         if (rulerArmedRef.current) armRulerRef.current(false);
         if (avwapArmedRef.current) armAvwapRef.current(false);
+        if (hlineArmedRef.current) armHlineRef.current(false);
         if (orderArmedRef.current) armOrderRef.current(false);
         const dismissed = rulerClearRef.current(); // Esc also dismisses a finished measurement
         const hadPlus = plusRef.current != null;
@@ -933,13 +1700,16 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         setSpaceRef.current(true);
       }
       // Don't hijack Delete while the user is typing somewhere on the page.
-      if (
-        (e.key === "Delete" || e.key === "Backspace") &&
-        !busy() &&
-        selectedRef.current != null
-      ) {
-        e.preventDefault();
-        deleteSelected();
+      // Whichever kind of object is selected goes — the two selections are
+      // mutually exclusive (selecting one clears the other on the way in).
+      if ((e.key === "Delete" || e.key === "Backspace") && !busy()) {
+        if (selectedRef.current != null) {
+          e.preventDefault();
+          deleteSelected();
+        } else if (selectedHlineRef.current != null) {
+          e.preventDefault();
+          deleteSelectedHline();
+        }
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -1024,6 +1794,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
 
   useEffect(() => {
     if (!elRef.current) return;
+    // Read, not subscribed to: appearance is applied live by its own effect
+    // below, and a rebuild here would throw away the range being watched.
+    const surf = chartSurfaces[appearanceRef.current.surface];
+    const sch = candleSchemes[appearanceRef.current.candles];
     const chart = createChart(elRef.current, {
       // The library watches the container itself. Hand-rolling that watch is the
       // obvious thing and it does not work: resizing the chart re-lays-out the
@@ -1033,17 +1807,17 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // only the fallback the library uses if it can't observe at all.
       autoSize: true,
       width: elRef.current.clientWidth,
-      height: height ?? elRef.current.clientHeight,
+      height: elRef.current.clientHeight,
       layout: {
-        background: { type: ColorType.Solid, color: palette.bg },
-        textColor: palette.text,
+        background: { type: ColorType.Solid, color: surf.bg },
+        textColor: surf.text,
         fontFamily: "Inter, sans-serif",
         fontSize: 9,
       },
-      grid: { vertLines: { color: palette.grid }, horzLines: { color: palette.grid } },
-      rightPriceScale: { borderColor: palette.grid },
+      grid: { vertLines: { color: surf.grid }, horzLines: { color: surf.grid } },
+      rightPriceScale: { borderColor: surf.grid },
       timeScale: {
-        borderColor: palette.grid,
+        borderColor: surf.grid,
         timeVisible: true,
         secondsVisible: false,
         // The default, set explicitly because the replay's follow behaviour now
@@ -1057,10 +1831,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     chartRef.current = chart;
 
     const candle = chart.addSeries(CandlestickSeries, {
-      upColor: palette.green,
-      downColor: palette.red,
-      wickUpColor: palette.green,
-      wickDownColor: palette.red,
+      upColor: sch.up,
+      downColor: sch.down,
+      wickUpColor: sch.up,
+      wickDownColor: sch.down,
       borderVisible: false,
     });
     candleRef.current = candle;
@@ -1106,6 +1880,28 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // The ⚓ band is built empty and stays empty until the user anchors — no
     // create/destroy dance, the streaming path just starts finding points in it.
     aRef.current = mkBand(vwapPalette.anchored);
+
+    // Modern VWAP: seven lines and no wash. The other four anchors shade their
+    // ±1σ→±2σ region, but this one's bands carry the regime colour, and a fill
+    // under a tinted envelope would be two colour channels arguing over the same
+    // pixels. Built empty; refreshMv fills them or leaves them empty.
+    mvLinesRef.current = Object.fromEntries(
+      MV_KEYS.map((k) => [
+        k,
+        chart.addSeries(LineSeries, {
+          color: k === "mid" ? modernVwapPalette.middle : modernVwapPalette.band,
+          lineWidth: k === "mid" ? 2 : 1,
+          lineStyle: k === "mid" ? LineStyle.Solid : LineStyle.Dashed,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+          // The envelope is drawn, not fitted. A 3σ ring on a fresh swing anchor
+          // is a long way from price, and letting it into the autoscale spends a
+          // third of the pane on empty air — the same call the demo page makes.
+          ...(k === "mid" ? {} : { autoscaleInfoProvider: () => null }),
+        }),
+      ]),
+    ) as Record<MvKey, ISeriesApi<"Line">>;
 
     // Developing value areas, one per anchor: VAH and VAL solid (they are the
     // levels the rules actually test against), POC dashed between them, each in
@@ -1277,7 +2073,54 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       vp.setProfile(p);
       syncProfileLines(p);
     };
-    chart.timeScale().subscribeVisibleLogicalRangeChange(() => reprofile());
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+      reprofile();
+      // Has the ◎ got something to bring you back to? Setting the same boolean
+      // is a no-op render, so this can ride a pan.
+      syncOffTape();
+    });
+
+    // The price axis' width, republished for anything positioned against the
+    // tape's right edge (the ◎ button). It changes with the digits in the scale,
+    // not just with layout — and the time scale's own width is what moves when
+    // it does, which is why this rides that event.
+    const syncAxisW = () => {
+      rootRef.current?.style.setProperty("--axis-w", `${chart.priceScale("right").width()}px`);
+    };
+    chart.timeScale().subscribeSizeChange(syncAxisW);
+    syncAxisW();
+
+    // --- crosshair readout: O H L C, the bar's change, and its volume --------
+    // Written straight at the DOM, the way every per-frame path here is — a
+    // React render per crosshair move would be a render per pixel. The values
+    // come off `barsRef` by logical index rather than off `param.seriesData`,
+    // because the volume isn't in the candle series and the forming bar's
+    // numbers should be the engine's own.
+    chart.subscribeCrosshairMove((param) => {
+      const el = ohlcRef.current;
+      if (!el) return;
+      const bars = barsRef.current;
+      const i = param.logical == null ? -1 : Math.round(param.logical);
+      // Hidden while a placement banner owns the same corner — two rows of
+      // chips in one spot would cover each other exactly when the price under
+      // the pointer matters most.
+      if (!param.point || i < 0 || i >= bars.length || spaceRef.current || orderArmedRef.current) {
+        el.style.display = "none";
+        return;
+      }
+      const b = bars[i];
+      const chg = b.close - b.open;
+      const cls = chg >= 0 ? "up" : "down";
+      const f = (v: number) => v.toFixed(2);
+      el.innerHTML =
+        `<span>O <b class="${cls}">${f(b.open)}</b></span>` +
+        `<span>H <b class="${cls}">${f(b.high)}</b></span>` +
+        `<span>L <b class="${cls}">${f(b.low)}</b></span>` +
+        `<span>C <b class="${cls}">${f(b.close)}</b></span>` +
+        `<span class="${cls}">${chg >= 0 ? "+" : "−"}${f(Math.abs(chg))}</span>` +
+        `<span>V <b>${b.volume.toLocaleString()}</b></span>`;
+      el.style.display = "flex";
+    });
 
     // --- The composite over the context days, and the events on the tape -----
     // Attached before the fixed-range tool so a profile you drew sits over them:
@@ -1310,6 +2153,12 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     candle.attachPrimitive(tradesPrim as any);
     tradesPrim.setTrades(tradesRef.current, tapeRef.current?.tickSize);
 
+    // --- Modern VWAP triggers: MR triangles, TC rings, anchor ticks ----------
+    // Above the tape's own marks and below the position: a study layer is
+    // context, and it is never what you are currently doing.
+    const mvPrim = mvPrimRef.current!;
+    candle.attachPrimitive(mvPrim as any);
+
     // --- Open position: entry / stop / target, zones, chips, axis labels ---
     // Drawn above everything else, and the only overlay whose lines can be
     // dragged (the mechanics are down in the pointer handlers).
@@ -1320,7 +2169,60 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // --- Working orders: the resting limits, under the position overlay ------
     const ordPrim = ordPrimRef.current!;
     candle.attachPrimitive(ordPrim as any);
-    ordPrim.setOrders(workingRef.current, tapeRef.current?.tickSize);
+    ordPrim.setOrders(
+      workingRef.current,
+      tapeRef.current?.tickSize,
+      tapeRef.current?.pointValue,
+    );
+
+    // --- Horizontal price lines: the ━ tool's rendering -----------------------
+    // Native price lines rather than a primitive: the axis label and the
+    // full-pane rule are exactly what the library's own lines are, and there is
+    // nothing bar-shaped about a level. The map is reconciled against the ref
+    // array — lines removed, moved, re-armed or selected all land here.
+    const hlineObjs = new Map<number, IPriceLine>();
+    const paintHlines = () => {
+      const list = hlinesRef.current;
+      const sel = selectedHlineRef.current;
+      for (const [id, line] of hlineObjs) {
+        if (!list.some((l) => l.id === id)) {
+          candle.removePriceLine(line);
+          hlineObjs.delete(id);
+        }
+      }
+      for (const l of list) {
+        const opts = {
+          price: l.price,
+          color: l.armed ? HLINE_COLOR : HLINE_DIM,
+          lineWidth: (l.id === sel ? 2 : 1) as 1 | 2,
+          lineStyle: l.armed ? LineStyle.Solid : LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: "",
+        };
+        const existing = hlineObjs.get(l.id);
+        if (existing) existing.applyOptions(opts);
+        else hlineObjs.set(l.id, candle.createPriceLine(opts));
+      }
+    };
+    paintHlinesRef.current = paintHlines;
+    paintHlines();
+
+    /** The line under the pointer, nearest first — the same hit-slop the other
+     *  draggable levels use. */
+    const hitHline = (y: number): number | null => {
+      let best: number | null = null;
+      let bestD = HANDLE_PX + 1;
+      for (const l of hlinesRef.current) {
+        const ly = candle.priceToCoordinate(l.price);
+        if (ly == null) continue;
+        const d = Math.abs(y - ly);
+        if (d <= HANDLE_PX && d < bestD) {
+          best = l.id;
+          bestD = d;
+        }
+      }
+      return best;
+    };
 
     // --- Ruler: drag between two points to measure the move between them ---
     // Recreated when the tape changes, because the tick size and $/point it
@@ -1456,6 +2358,16 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // Ruler corners snap to the tick grid — a measurement in fractional ticks is
     // never what anyone wants.
     const priceAtY = (y: number): number | null => {
+      // `yOf` measures against the whole chart element, but the candles own only
+      // the first pane — below it sit the CVD pane and the time axis, and
+      // `coordinateToPrice` extrapolates into both perfectly happily rather than
+      // returning null. On a chart where a press places a working order (Space +
+      // click, or the armed order tool) an extrapolated price is the worst answer
+      // available, so a press that lands under the price pane is simply not a
+      // price. Costs nothing when there is no second pane: the axis was already
+      // the only thing down there.
+      const priceH = chart.panes()[0]?.getHeight();
+      if (priceH != null && y > priceH) return null;
       const p = candle.coordinateToPrice(y);
       if (p == null) return null;
       const tick = tapeRef.current?.tickSize;
@@ -1512,6 +2424,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       armedRef.current ||
       rulerArmedRef.current ||
       avwapArmedRef.current ||
+      hlineArmedRef.current ||
       orderArmedRef.current ||
       spaceRef.current;
     const setCursor = (a: boolean) => {
@@ -1570,6 +2483,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // a no-move click, so both TV gestures work: press-drag-release and
     // click-move-click.
     let rulerDrag: { i1: number; p1: number } | null = null;
+    // Which price line is being dragged, if any.
+    let hlineDrag: number | null = null;
     // Which bracket leg is being dragged, if any.
     let posDrag: "stop" | "target" | null = null;
     // A held entry chip, waiting for the pull that decides which leg it becomes.
@@ -1629,6 +2544,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // Before anything else, and whatever this press turns out to be: from here
       // until it ends, the platform's own press-and-hold menu is not welcome.
       guardCtx(true);
+      // A press is the firmest claim on the keyboard there is. `onEnter` has
+      // usually made it already, but not on a touchscreen — a finger arrives at
+      // pointerdown with no enter before it.
+      focusChart(paneId);
       const x = xOf(e);
       const idx = idxAtX(x);
       if (idx == null) return;
@@ -1675,8 +2594,27 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         revealRef.current("vwapAnchored");
         const t = barsRef.current[idx].time;
         setAvwapAnchor(t);
+        avwapAnchorRef.current = t;
         onAnchorRef.current?.(t);
         armAvwapRef.current(false);
+        persistRef.current();
+        e.preventDefault();
+        return;
+      }
+
+      if (hlineArmedRef.current) {
+        // Drop a line on the clicked price and put the tool away — like the ⚓,
+        // one click is the whole gesture.
+        const p = priceAtY(downY);
+        if (p != null) {
+          const id = nextHlineIdRef.current++;
+          hlinesRef.current = [...hlinesRef.current, { id, price: p, armed: true }];
+          selectedHlineRef.current = id;
+          selectedRef.current = null;
+          syncHlinesRef.current();
+          syncRef.current();
+        }
+        armHlineRef.current(false);
         e.preventDefault();
         return;
       }
@@ -1768,12 +2706,32 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         return;
       }
 
+      // A price line, grabbed. After the position and the orders (their levels
+      // outrank a drawing), before the range profiles (a line is a thinner
+      // target, so it wins where they overlap).
+      const lh = hitHline(downY);
+      if (lh != null) {
+        selectedHlineRef.current = lh;
+        selectedRef.current = null;
+        hlineDrag = lh;
+        setScroll(true);
+        host.style.cursor = "ns-resize";
+        syncHlinesRef.current();
+        syncRef.current();
+        e.preventDefault();
+        return;
+      }
+
       const hit = hitTest(x);
       if (!hit) {
         // Clicking bare chart deselects — but let the chart pan as usual.
         if (selectedRef.current != null) {
           selectedRef.current = null;
           syncRef.current();
+        }
+        if (selectedHlineRef.current != null) {
+          selectedHlineRef.current = null;
+          syncHlinesRef.current();
         }
         // Nothing else wanted this press, so it is a candidate for the order
         // gesture. Started rather than acted on, and without preventDefault or
@@ -1796,6 +2754,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       }
       const r = rangesRef.current.find((v) => v.id === hit.id)!;
       selectedRef.current = hit.id;
+      if (selectedHlineRef.current != null) {
+        selectedHlineRef.current = null;
+        syncHlinesRef.current();
+      }
       drag = { mode: hit.mode, id: hit.id, anchorIdx: idx, from: nearestIdx(r.from), to: nearestIdx(r.to) };
       e.preventDefault();
       if (hit.mode === "move") host.style.cursor = "grabbing";
@@ -1863,6 +2825,18 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         pushOrders();
         return;
       }
+      if (hlineDrag != null) {
+        // Live, primitive-only, like every other level drag. Moving a line
+        // re-arms its alert: a level you just placed somewhere new is a level
+        // the tape hasn't answered.
+        const price = priceAtY(yOf(e));
+        const l = hlinesRef.current.find((v) => v.id === hlineDrag);
+        if (!l || price == null) return;
+        l.price = price;
+        l.armed = true;
+        paintHlines();
+        return;
+      }
       if (rulerDrag) {
         const idx = idxAtX(x);
         const p = priceAtY(yOf(e));
@@ -1886,6 +2860,11 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         if (ph || oh) {
           setScroll(true);
           host.style.cursor = ph ? cursorFor(ph) : ordCursorFor(oh!);
+          return;
+        }
+        if (hitHline(yOf(e)) != null) {
+          setScroll(true);
+          host.style.cursor = "ns-resize";
           return;
         }
         const hit = hitTest(x);
@@ -1956,6 +2935,14 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         }
         return;
       }
+      if (hlineDrag != null) {
+        hlineDrag = null;
+        setScroll(false);
+        host.style.cursor = "";
+        // The settle is what persists it and re-renders the toolbar.
+        syncHlinesRef.current();
+        return;
+      }
       if (rulerDrag) {
         // A real drag ends the measurement here; a stationary click leaves the
         // anchor live so the pointer keeps stretching it (click-move-click).
@@ -2006,6 +2993,11 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       setScroll(anyArmed());
       setCursor(a);
     };
+    // Same again for the ━ tool: the click has to land on a price.
+    hlineApplyRef.current = (a: boolean) => {
+      setScroll(anyArmed());
+      setCursor(a);
+    };
     // Holding Space takes the left button away from panning (the click has to
     // land on a price, not drag the chart out from under it) and puts the
     // crosshair up so the price under the pointer is readable before you commit.
@@ -2040,6 +3032,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // down — so only entry and exit are tracked, not the modifier itself.
     const onEnter = () => {
       overRef.current = true;
+      // Reaching a pane with the pointer is enough to make its keyboard yours —
+      // the same standard the Space modifier already held itself to.
+      focusChart(paneId);
     };
     const onLeave = () => {
       overRef.current = false;
@@ -2109,11 +3104,28 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // The two event layers hide by dropping out of the filtered list, so that
       // the bands and the marginals can never show different sets.
       pushEvents();
+      // CVD is the one layer that isn't hidden but built and torn down — it owns
+      // a pane, and an empty pane keeps its height. The vol ruler is the same
+      // kind of layer; the refresh mounts or drops it and fills it when it came up.
+      syncCvdMount();
+      refreshVr();
+      // The line's seven series hide as a unit and the marks have their own eye.
+      // Both go through the refresh rather than a `visible` flip, because when
+      // both are off the layer isn't drawn *or computed* — see refreshMv.
+      for (const k of MV_KEYS) mvLinesRef.current?.[k].applyOptions({ visible: v.modernVwap });
+      mvPrimRef.current?.setVisible(v.modernVwapSignals);
+      refreshMv();
     };
     applyRef.current(visRef.current);
 
     // Everything the imperative handle needs that lives inside this effect.
     hooksRef.current = { reprofile, paint, syncIb, remakeRuler, clearRuler: rulerClearRef.current };
+
+    // The surface is live and every hook it needs is in place: whoever owns the
+    // data can hand it over now. Through a ref so that supplying the callback
+    // never re-runs this effect — rebuilding the chart is the one thing a page
+    // re-rendering must not cause.
+    onReadyRef.current?.();
 
     // Sizing is autoSize's job (see createChart) — it covers the window resize
     // and the cases there is no window resize for: the page's controls wrapping,
@@ -2126,10 +3138,12 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       rulerApplyRef.current = null;
       rulerClearRef.current = () => false;
       avwapApplyRef.current = null;
+      hlineApplyRef.current = null;
       spaceApplyRef.current = null;
       orderApplyRef.current = null;
       paintRef.current = null;
       paintDevRef.current = null;
+      paintHlinesRef.current = null;
       clearPress();
       if (ctxTimer != null) window.clearTimeout(ctxTimer);
       host.removeEventListener("pointerdown", onDown);
@@ -2142,9 +3156,33 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       window.removeEventListener("pointercancel", onUp);
       chart.remove();
       chartRef.current = null;
+      candleRef.current = null;
+      // Went with the chart; the points survive, so a remount redraws them.
+      cvdSeriesRef.current = null;
+      // The extra panes' series went with it too, and their refs have to say so.
+      // A ref still holding a series belonging to a chart that no longer exists
+      // is not merely stale: `syncCvdMount` reads `vrDevRef` to decide whether
+      // the ruler needs remounting around a CVD change, so on the next mount it
+      // would call `removeSeries` on the *new* chart with the *old* chart's
+      // series, and lightweight-charts throws "Value is undefined" from inside
+      // ensureDefined. That is a crash on remount, and remounting is exactly
+      // what a second pane appearing does — see lib/chartFocus for the other
+      // thing that turned out to assume this component only ever exists once.
+      vrAtrRef.current = null;
+      vrDevRef.current = null;
+      vrYdayLineRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Recolour in place. Declared after the build effect so that on mount it runs
+  // with the refs already set — and on a colour change it is the only effect
+  // that runs at all, which is the whole point: the replay keeps its range and
+  // its clock.
+  useEffect(() => {
+    applyAppearance(chartRef.current, candleRef.current, appearance);
+    recolorVolume(candleRef.current, volRef.current, appearance);
+  }, [appearance]);
 
   // How the two time labels read: the calendar on or off, and whether the clock
   // runs to seconds. Bar times are the ET wall clock carried on the UTC epoch
@@ -2192,12 +3230,15 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     bigPrimRef.current?.setMinLots(bigLots);
   }, [bigLots]);
 
-  // The event floor is a filter over marks the engine has already published, so
-  // unlike the big-trade threshold it needs no rebuild at all.
+  // The style is a repaint and the marginal switch is a re-push — neither needs
+  // the engine. The *tuning* is not handled here at all: the page rebuilds the
+  // snapshot for that, the same path a timeframe change takes, and the new
+  // events arrive through setSnapshot like any other rebuild.
   useEffect(() => {
+    if (eventOverlay) evPrimRef.current?.setStyle(eventOverlay.style);
     pushEvents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventStrength]);
+  }, [eventOverlay?.style.labelSt, eventOverlay?.style.fill, eventOverlay?.marginal, !eventOverlay]);
 
   // A new rule is a new composite; a new prominence is the same composite read
   // again. Both leave the replay exactly where it stands — nothing here can
@@ -2215,23 +3256,29 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeProm]);
 
-  // The one place the event filter lives: the strength floor and the two
-  // per-kind toggles are applied here, and the same list then feeds the bands on
-  // the candles, the marginal over each profile, and the legend's counts. Three
-  // copies of one filter would be three places for them to disagree.
+  // The one place the event filter lives: whether the page offers the layer at
+  // all and the two per-kind toggles are applied here, and the same list then
+  // feeds the bands on the candles, the marginal over each profile, and the
+  // legend's counts. Three copies of one filter would be three places for them
+  // to disagree.
+  //
+  // What is *not* here is any threshold: those live in the engine now, because a
+  // burst is a cluster and an absorption is scored against a median, and neither
+  // can be recovered by filtering the events a different setting published.
   const pushEvents = () => {
-    const minSt = eventStrengthRef.current;
+    const ov = eventOvRef.current;
     const v = visRef.current;
-    const list =
-      minSt <= 0
-        ? []
-        : eventsRef.current.filter(
-            (e) => e.st >= minSt && (e.kind === "sweep" ? v.sweepBursts : v.absorption),
-          );
+    const list = !ov
+      ? []
+      : eventsRef.current.filter((e) => (e.kind === "sweep" ? v.sweepBursts : v.absorption));
     evPrimRef.current?.setEvents(list);
-    compPrimRef.current?.setEvents(list);
-    vpRef.current?.setEvents(list);
-    devPrimRef.current?.setEvents(list);
+    // The marginal is the same list read against price instead of time, and it
+    // has its own switch — so the gutters get an empty list rather than a
+    // different one.
+    const marginal = ov?.marginal ? list : [];
+    compPrimRef.current?.setEvents(marginal);
+    vpRef.current?.setEvents(marginal);
+    devPrimRef.current?.setEvents(marginal);
     const next = countEvents(list);
     setEvCount((c) => (c.sweep === next.sweep && c.absorb === next.absorb ? c : next));
   };
@@ -2307,6 +3354,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       eventsRef.current = [];
       evPosRef.current = new Map();
       pushEvents();
+      // A new tape is a new anchor. The pane goes with it until the snapshot that
+      // follows re-walks it — a stale CVD over fresh candles is worse than none.
+      resetCvd();
+      syncCvdMount();
+      // Same for the vol ruler: its bars are the old tape's until the snapshot
+      // that follows, so it comes down rather than briefly lying.
+      unmountVr();
       // The days in front of the session are what the composite *is*, so a new
       // tape is always a new composite — including the one that is only a
       // context change, which is precisely when it has to be rebuilt.
@@ -2319,14 +3373,47 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       if (!opts?.keepTools) {
         rangesRef.current = [];
         selectedRef.current = null;
-        setRanges([]);
-        setSelected(null);
+        hlinesRef.current = [];
+        selectedHlineRef.current = null;
         setAvwapAnchor(null);
+        avwapAnchorRef.current = null;
         hooksRef.current?.clearRuler();
+        // …unless this same session was drawn on before: the store keyed by
+        // `drawingsKey` gives the profiles, the lines and the ⚓ back. Ranges
+        // and lines restore inline (the repaints below draw them); the anchor
+        // has to go back through the page — the engine develops the band — and
+        // is deferred a microtask, because setTape is called from inside the
+        // page's own session build and the anchor path re-snapshots through it.
+        const saved = tape && drawingsKeyRef.current ? loadDrawings(drawingsKeyRef.current) : null;
+        if (saved) {
+          rangesRef.current = saved.ranges.map((r) => ({
+            id: nextIdRef.current++,
+            from: r.from,
+            to: r.to,
+          }));
+          hlinesRef.current = saved.hlines.map((l) => ({
+            id: nextHlineIdRef.current++,
+            price: l.price,
+            armed: l.armed,
+          }));
+          if (saved.anchor != null) {
+            const t = saved.anchor;
+            setAvwapAnchor(t);
+            avwapAnchorRef.current = t;
+            queueMicrotask(() => {
+              if (avwapAnchorRef.current === t) onAnchorRef.current?.(t);
+            });
+          }
+        }
+        setRanges([...rangesRef.current]);
+        setSelected(null);
+        setHlines([...hlinesRef.current]);
+        setSelectedHline(null);
       }
       hooksRef.current?.remakeRuler(tape);
       hooksRef.current?.paint();
       paintDevRef.current?.();
+      paintHlinesRef.current?.();
     },
     setContextRanges(ranges: TapeRange[]) {
       // Identity, not contents: the page memoises them, so the same object is
@@ -2370,9 +3457,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       candle.setData(
         drawn.map((b) => ({ time: b.time as Time, open: b.open, high: b.high, low: b.low, close: b.close })),
       );
+      const volc = volumeColors(appearanceRef.current);
       vol.setData(
-        drawn.map((b) => ({ time: b.time as Time, value: b.volume, color: b.close >= b.open ? VOL_UP : VOL_DOWN })),
+        drawn.map((b) => ({ time: b.time as Time, value: b.volume, color: b.close >= b.open ? volc.up : volc.down })),
       );
+      rebuildCvd(drawn, s.history.length);
+      refreshVr();
+      refreshMv();
       const anchors: [Anchor, BandPt[]][] = [
         [gRef.current, s.gBand],
         [nRef.current, s.nBand],
@@ -2428,16 +3519,15 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         gp: s.gProfile.length > 0,
         np: s.nProfile.length > 0,
         ib: s.ib != null,
+        cvd: cvdAnyRef.current,
       });
       // Frame the tail of the loaded history so the replay opens zoomed-in, not
       // fit to the whole (possibly overnight-spanning) session. Skipped when the
       // snapshot is a side effect of something else (a re-anchor) rather than a
       // move through time — the user's zoom is theirs.
       //
-      // Framed in bar indices rather than in times, so it means the same thing on
-      // every timeframe: the last 90 bars, plus a dozen bars of room on the right
-      // to place an order into. A time-based range would be 90 minutes of 30s
-      // bars or 90 hours of hourly ones.
+      // Framed in bar indices rather than in times (see FRAME_BARS), so it means
+      // the same thing on every timeframe.
       //
       // A seek follows instead (`"follow"`): the clock moved, so the view moves
       // with it — but at the bar spacing the user chose, not back to 90 bars.
@@ -2456,8 +3546,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       } else if (!keepZoom && frame !== "hold") {
         // Counted off the drawn array, so the context days stay off to the left
         // where they belong: the replay opens on the session, not on Tuesday.
-        if (s.bars.length)
-          chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, last - 90), to: last + 12 });
+        if (s.bars.length) frameTail(chart, last);
       } else if (keepZoom && held) {
         // The room past the newest bar is the user's too — an order gets placed
         // into it — so it is carried across rather than re-imposed. Capped at
@@ -2480,20 +3569,43 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           chart.timeScale().setVisibleLogicalRange({ from: held.from + shift, to: held.to + shift });
       }
       hooksRef.current?.reprofile();
+      // A seek can land the playhead anywhere, including off a scale the user
+      // set by hand.
+      syncOffTape();
     },
     applyStep(r: StepResult) {
       const candle = candleRef.current;
       const vol = volRef.current;
       if (!candle || !vol || !gRef.current || !nRef.current || !aRef.current || !wkRef.current)
         return;
+      const volc = volumeColors(appearanceRef.current);
+      let vrClosed = false;
       for (const b of r.barsTail) {
         candle.update({ time: b.time as Time, open: b.open, high: b.high, low: b.low, close: b.close });
-        vol.update({ time: b.time as Time, value: b.volume, color: b.close >= b.open ? VOL_UP : VOL_DOWN });
+        vol.update({ time: b.time as Time, value: b.volume, color: b.close >= b.open ? volc.up : volc.down });
         // Same overwrite-or-append the series do with update(): a tail starts at
         // the still-forming bar, which is already the last one we hold.
         const bars = barsRef.current;
         if (bars.length && bars[bars.length - 1].time === b.time) bars[bars.length - 1] = b;
-        else bars.push(b);
+        else {
+          bars.push(b);
+          // A new bar means the one before it closed — which is the vol ruler's
+          // whole cadence (its values are facts about closed bars only).
+          vrClosed = true;
+        }
+        // The tail is the session's own bars, which is what CVD is anchored to,
+        // so every one of them counts. `update()` is a no-op while the pane is
+        // down (off, or nothing tagged yet); the points still accrue, so the
+        // series draws the whole session the moment it comes up.
+        const v = stepCvd(b);
+        cvdSeriesRef.current?.update({ time: b.time as Time, value: v });
+      }
+      // The first tagged tick of the session is what brings the pane to life.
+      if (cvdAnyRef.current && !cvdSeriesRef.current) syncCvdMount();
+      if (vrClosed) {
+        refreshVr();
+        // Same cadence: the indicator's every value is a fact about a closed bar.
+        refreshMv();
       }
       const anchors: [Anchor, BandPt[]][] = [
         [gRef.current, r.gTail],
@@ -2550,7 +3662,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         gp: presentRef.current.gp || r.gProfTail.length > 0,
         np: presentRef.current.np || r.nProfTail.length > 0,
         ib: r.ib != null,
+        cvd: cvdAnyRef.current,
       });
+      // Once a bar, not once a frame: on a hand-set price scale the tape can
+      // walk out of the window without the time scale ever moving, and this is
+      // the only thing that would notice. A bar close is soon enough for a
+      // hint, and cheap enough to be free.
+      if (r.newBar) syncOffTape();
       // Deliberately no scrollToRealTime() here. That call is unconditional — it
       // drags the view back to the right edge (at the default offset) on every
       // bar close, discarding whatever you had panned or zoomed to. The time
@@ -2564,8 +3682,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         ? {
             ...p,
             last: lastPriceRef.current,
-            tickSize: tape?.tickSize ?? 0.25,
-            pointValue: tape?.pointValue ?? 20,
+            // The line's own contract wins over the tape's — see `PositionLine`.
+            tickSize: p.tickSize ?? tape?.tickSize ?? 0.25,
+            pointValue: p.pointValue ?? tape?.pointValue ?? 20,
           }
         : null;
       pushPos();
@@ -2590,6 +3709,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // anyway, so there is nothing here for state to buy.
   const tickSize = tapeRef.current?.tickSize ?? 0.25;
   const tkt: TicketDraft = ticket ?? { size: 1, stopTicks: 0, targetTicks: 0 };
+  // The routed contract's money if the page named one, else the tape's, else
+  // none — and none means the ticket shows ticks alone. See `pointValue`.
+  const tickUsd = tickSize * (pointValueProp ?? tapeRef.current?.pointValue ?? 0);
 
   const legendItems: LegendItem[] = [];
   if (present.g)
@@ -2600,6 +3722,42 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     legendItems.push({ key: "vwapWeekly", label: "VWAP · Weekly ±1σ ±2σ", color: vwapPalette.weekly.middle });
   if (avwapAnchor != null)
     legendItems.push({ key: "vwapAnchored", label: "VWAP · Anchored ±1σ ±2σ", color: vwapPalette.anchored.middle });
+  // Modern VWAP, offered only where the page holds its parameters. Two rows: the
+  // line, and the triggers read off it. Each label quotes what its own row is
+  // actually showing at the current settings — an anchor count is how hard the
+  // swing rule is working, and a gate that is undefined half the session is a
+  // fact about warm-up, not about the market.
+  if (mvParams) {
+    const swing = mvParams.anchor === "swing";
+    // Nothing is computed while both rows are off (see refreshMv), so neither
+    // label quotes a number it doesn't have — "0 through the gate" would read as
+    // a measurement when it only means nobody has asked yet.
+    const live = vis.modernVwap || vis.modernVwapSignals;
+    legendItems.push({
+      key: "modernVwap",
+      label:
+        `Modern VWAP · ${swing ? `swing ${mvParams.pivot}` : mvParams.anchor} ±${mvParams.bands}σ` +
+        (mvParams.adaptive ? " · KER-adaptive" : "") +
+        (live
+          ? ` · ${Math.round(mvRead.trendPct)}% trending${mvRead.undefPct >= 1 ? `, ${Math.round(mvRead.undefPct)}% undefined` : ""}`
+          : ""),
+      color: modernVwapPalette.middle,
+    });
+    legendItems.push({
+      key: "modernVwapSignals",
+      label:
+        mvParams.signals === "none"
+          ? "Modern VWAP signals · off"
+          : "Modern VWAP signals · MR/TC" +
+            (live
+              ? ` · ${mvRead.signals}${mvParams.signals === "gated" ? " through the gate" : " raw"}`
+              : ""),
+      color: modernVwapPalette.middle,
+      // The row stays when its own knob switched it off — that knob is the only
+      // way back on, and it lives behind this row's "…".
+      dim: mvParams.signals === "none",
+    });
+  }
   if (present.gp)
     legendItems.push({
       key: "developingProfileGlobex",
@@ -2656,6 +3814,24 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       label: `Big trades · >${bigLots} lots · ${bigCount}`,
       color: palette.blue,
     });
+  // Only once the tape has actually tagged an aggressor — `present.cvd` is that
+  // and not "there are bars". The label names the anchor, because a CVD that
+  // reset somewhere you didn't expect is a different indicator, and this one
+  // starts at the session open rather than at the first context day drawn.
+  if (present.cvd)
+    legendItems.push({
+      key: "cvd",
+      label: "CVD · cumulative delta from the session open",
+      color: palette.blue,
+    });
+  // The bar-range vol pane. The label names the read, because "ATR" alone is
+  // exactly the graph-without-a-number this pane exists to replace.
+  if (present.bars)
+    legendItems.push({
+      key: "volRuler",
+      label: `Vol ruler · median bar range vs the ${VR_STOP_TICKS}t stop`,
+      color: palette.gold,
+    });
   // The composite gets a row once there are days to build it from — the rule
   // itself sits on the row. How many days went in is a reading under the balance
   // rule (this is how long the auction has been running), so the label says it.
@@ -2683,28 +3859,21 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         dim: nodeProm === 0,
       });
   }
-  // Same again for the events: the floor lives on these rows, so they are here
-  // from the first bar, dimmed until it is raised off zero. The count is quoted
-  // with the floor it was counted at — one without the other would be a
-  // different number from what is on the chart.
-  if (present.bars) {
+  // Same again for the events: the ten knobs hang off these two rows, so they are
+  // here from the first bar. Each count is quoted with the threshold it was
+  // counted at — one without the other is a number that means nothing, since a
+  // strength is only ever in units of what selected it.
+  if (present.bars && eventOverlay) {
+    const t = eventOverlay.tuning;
     legendItems.push({
       key: "sweepBursts",
-      label:
-        eventStrength > 0
-          ? `Sweep bursts · ≥${150 * eventStrength} lots · ${evCount.sweep}`
-          : "Sweep bursts · off",
+      label: `Sweep bursts · ≥${t.burstLots} lots · ${evCount.sweep}`,
       color: palette.orange,
-      dim: eventStrength === 0,
     });
     legendItems.push({
       key: "absorption",
-      label:
-        eventStrength > 0
-          ? `Absorption · ≥${3 * eventStrength}× the session's own · ${evCount.absorb}`
-          : "Absorption · off",
+      label: `Absorption · ≥${t.absorbMult}× ${t.absorbBaseline > 0 ? `the last ${t.absorbBaseline}` : "the session's own"} · ${evCount.absorb}`,
       color: palette.blue,
-      dim: eventStrength === 0,
     });
   }
   // Only once something has been traded — a row for an empty session would be a
@@ -2735,6 +3904,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         price={plusPrice}
         mark={markProp}
         tick={tickSize}
+        tickUsd={tickUsd}
         ticket={tkt}
         docked={DOCK_MENU}
         onTicket={(t) => onTicketChange?.(t)}
@@ -2750,7 +3920,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     );
 
   return (
-    <div style={{ position: "relative", width: "100%", height: height ?? "100%", minHeight: 0 }}>
+    <div ref={rootRef} style={{ position: "relative", width: "100%", height: "100%", minHeight: 0 }}>
       {/* What the two buttons mean while Space is down. The mapping flips across
           the market, so this is worth saying on screen rather than in a tooltip
           you can't read with a modifier held. */}
@@ -2759,7 +3929,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           style={{
             position: "absolute",
             top: 8,
-            left: 12,
+            // Beside the tool rail, which owns this corner now.
+            left: "calc(14px + var(--chart-rail, 36px))",
             zIndex: 3,
             display: "flex",
             gap: 8,
@@ -2802,6 +3973,17 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
             stop
           </button>
           <span style={{ color: palette.muted }}>— now tap a price</span>
+        </div>
+      )}
+      {/* The crosshair readout — filled in imperatively, see the
+          subscribeCrosshairMove block. Same corner as the placement banners,
+          which is why those hide it while they are up. */}
+      <div ref={ohlcRef} className="chart-ohlc" />
+      {/* A price line was just crossed. Centred rather than cornered: it is the
+          one transient here that can fire while you are looking anywhere. */}
+      {alertFlash && (
+        <div key={alertFlash.key} className="chart-alert-flash">
+          🔔 {alertFlash.price.toFixed(2)} crossed
         </div>
       )}
       <div className="chart-tools">
@@ -2857,9 +4039,27 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
               : "Anchored VWAP — click any bar to draw a VWAP + ±1σ/±2σ bands from that point forward. Keeps developing as the replay runs; σ is tick-derived, like the session anchors. Click again to re-anchor."
           }
         />
+        <ChartToolButton
+          icon="━"
+          label={hlineArmed ? "Click a price…" : "Price line"}
+          on={hlineArmed}
+          onClick={() => armHline(!hlineArmed)}
+          title={
+            hlineArmed
+              ? "Click a price to put a line there (Esc to cancel)"
+              : "Horizontal line — click a price to mark it. The tape crossing it chimes once and the line dims; drag it to move and re-arm it, Del to remove."
+          }
+        />
+        {/* Below the hairline: the tools that take things away. They come and go
+            with what is on the chart, so they live at the foot of the rail where
+            appearing doesn't move anything above them. */}
+        {(avwapAnchor != null ||
+          selected != null ||
+          selectedHline != null ||
+          ranges.length + hlines.length > 1) && <ChartToolSep />}
         {avwapAnchor != null && (
           <ChartToolButton
-            icon="⚓✕"
+            icon={<span className="chart-tool-pair">⚓✕</span>}
             label="Clear VWAP"
             onClick={clearAvwap}
             title="Remove the anchored VWAP"
@@ -2873,15 +4073,40 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
             title="Remove this profile (Del)"
           />
         )}
-        {ranges.length > 1 && (
+        {selectedHline != null && (
+          <ChartToolButton
+            icon="🗑"
+            label="Delete"
+            onClick={deleteSelectedHline}
+            title="Remove this price line (Del)"
+          />
+        )}
+        {ranges.length + hlines.length > 1 && (
           <ChartToolButton
             icon="🧹"
             label="Clear all"
-            onClick={clearRanges}
-            title="Remove every fixed-range profile"
+            onClick={() => {
+              clearRanges();
+              clearHlines();
+            }}
+            title="Remove every fixed-range profile and price line"
           />
         )}
       </div>
+      {/* Back to the price. The opposite corner from the tool rail and just
+          inside the price axis, because that is the corner the newest bar is in
+          — the button is where you are already looking when you notice the tape
+          has gone. Lit while it has. */}
+      <button
+        type="button"
+        className={`chart-jump${offTape ? " on" : ""}`}
+        onClick={jumpToPrice}
+        disabled={!present.bars}
+        data-tip="Back to the price — frame the newest bars and zoom the scale to them (double-click the axis for autoscale)"
+        aria-label="Back to the price"
+      >
+        ◎
+      </button>
       <div ref={elRef} style={{ width: "100%", height: "100%", minHeight: 0 }} />
       {/* The long-press ＋, riding the price axis at the price it was summoned
           at, with the ticket hanging off its left. Deliberately a sibling of the
@@ -2929,7 +4154,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           )}
         </>
       )}
-      <IndicatorLegend items={legendItems} visibility={vis} onToggle={toggle} />
+      <IndicatorLegend
+        items={legendItems}
+        visibility={vis}
+        onToggle={toggle}
+        appearance={appearanceSettings(appearance, changeAppearance)}
+        prefsPane={prefsPane}
+      />
     </div>
   );
 });

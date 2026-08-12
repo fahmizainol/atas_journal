@@ -31,6 +31,11 @@ export interface LiveStatus {
   unrecorded_rows?: number;
   /** False for the simulated feed, which records nothing by design. */
   can_record?: boolean;
+  /** This session's connection opened Rithmic's ORDER plant. Decided at connect
+   *  and never afterwards — false for every session started without it, which is
+   *  all of them by default. The routing rail is offered only when it is true.
+   *  See `lib/routingTypes` for what the panel then talks to. */
+  routing?: boolean;
   feed_status?: RithmicStatus | null;
 }
 
@@ -188,6 +193,7 @@ export interface LiveHeader {
   session_start_ms: number | null;
   rth_open_ms: number;
   rth_close_ms: number;
+  globex_open_ms: number;
   globex_anchor_ms: number | null;
   weekly_seed: number[] | null;
   has_overnight: boolean;
@@ -278,10 +284,12 @@ export function sessionPayloadFor(h: LiveHeader, startMs: number): SessionPayloa
     rth_open_ms: h.rth_open_ms,
     rth_close_ms: h.rth_close_ms,
     default_start_ms: startMs,
+    globex_open_ms: h.globex_open_ms,
     globex_anchor_ms: h.globex_anchor_ms,
     weekly_seed: h.weekly_seed,
     has_overnight: h.has_overnight,
     has_post: false,
+    source: "live",
     context: h.context,
   };
 }

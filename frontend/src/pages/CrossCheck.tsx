@@ -43,26 +43,28 @@ export function CrossCheck() {
         <>
           <div className="panel">
             <div className="section-cap">ATAS Statistics (as exported)</div>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Metric</th>
-                  {data.pivot.scopes.map((s) => (
-                    <th key={s}>{s}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {data.pivot.rows.map((r, i) => (
-                  <tr key={i}>
-                    <td>{r.metric}</td>
+            <div className="table-scroll-x">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Metric</th>
                     {data.pivot.scopes.map((s) => (
-                      <td key={s}>{r[s] ?? "—"}</td>
+                      <th key={s}>{s}</th>
                     ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.pivot.rows.map((r, i) => (
+                    <tr key={i}>
+                      <td>{r.metric}</td>
+                      {data.pivot.scopes.map((s) => (
+                        <td key={s}>{r[s] ?? "—"}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="panel">
