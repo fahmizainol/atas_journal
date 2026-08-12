@@ -500,6 +500,24 @@ const checks = {
     const afterPress = await geom();
     const flat = (await page.locator(".sim-quick-btn.flat").count()) === 0;
 
+    // Minimise: the window becomes a badge, gives the floor back, and the market
+    // buttons are gone rather than merely hidden — a collapsed pad that still
+    // parked itself at the foot of the chart would have given nothing back.
+    await page.locator(".sim-quick-min").click();
+    await page.waitForTimeout(300);
+    const mini = {
+      badge: await page.locator(".sim-quick-badge").count(),
+      buttons: await page.locator(".sim-quick-btn").count(),
+      floor: await page.evaluate(() =>
+        parseFloat(
+          getComputedStyle(document.querySelector(".sim-pane")).getPropertyValue("--chart-floor"),
+        ) || 0,
+      ),
+    };
+    await page.locator(".sim-quick-badge").click();
+    await page.waitForTimeout(300);
+    const restored = await page.locator(".sim-quick-btn").count();
+
     // Double-click the chrome and it goes back to the foot of the tape — which
     // is also how this check leaves the app as it found it.
     await page.locator(".sim-quick-grip").dblclick();
@@ -523,6 +541,9 @@ const checks = {
       [`a press on BUY doesn't drag the window (${afterPress.x},${afterPress.y})`,
         afterPress.x === before.x && afterPress.y === before.y],
       ["...and sends no order", flat],
+      [`minimises to a badge (${mini.buttons} buttons, floor ${mini.floor}px)`,
+        mini.badge === 1 && mini.buttons === 0 && mini.floor === 0],
+      [`...and the badge brings it back (${restored} buttons)`, restored > 0],
       [`double-click puts it back (moved=${reset.moved}, saved=${reset.saved})`,
         !reset.moved && reset.saved === null],
       [`no console errors${errors.length ? `: ${errors[0]}` : ""}`, errors.length === 0],

@@ -744,6 +744,80 @@ button:disabled {
   color: var(--orange);
   font-weight: 500;
 }
+/* The bar size, as a control. It was already printed here, so making it the
+   picker costs no chart pixels — and it aims at its own pane by construction, so
+   re-bucketing a pane you are not working in is one gesture instead of
+   focus-then-pick. (The bar's control acts on the focused pane and stays the one
+   you reach for while reading.) */
+.chart-legend-tfwrap {
+  position: relative;
+  display: inline-flex;
+}
+.chart-legend-tf {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: inherit;
+  padding: 0 4px;
+  margin: 0 -4px;
+  cursor: pointer;
+}
+.chart-legend-tf:hover,
+.chart-legend-tf.open {
+  background: rgba(26, 29, 39, 0.72);
+  color: var(--text);
+}
+.chart-legend-tf .car {
+  font-size: 8px;
+  opacity: 0.7;
+}
+/* Every bucketing, in one column. No ⋯ overflow here — that exists on the 36px
+   bar because a row has an end, and a popup does not. */
+.chart-legend-tfpop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: -4px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  box-shadow: 0 10px 34px #000a;
+  /* The legend is a text overlay and carries a shadow for legibility over
+     candles; inside a solid panel that shadow just smears the labels. */
+  text-shadow: none;
+}
+.chart-legend-tfpop button {
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  text-align: left;
+  padding: 5px 12px 5px 9px;
+  cursor: pointer;
+}
+.chart-legend-tfpop button:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+.chart-legend-tfpop button.on {
+  background: var(--bg-2);
+  color: var(--text);
+}
 .chart-legend-row {
   display: inline-flex;
   align-items: center;
@@ -2418,6 +2492,8 @@ button:disabled {
   flex: 1;
   min-height: 0;
   display: flex;
+  /* The positioning context an unpinned rail floats against. */
+  position: relative;
 }
 .sim-chart {
   flex: 1;
@@ -2452,6 +2528,63 @@ button:disabled {
 .chart-rail .chart-tool-sep {
   width: 22px;
   margin: 3px 0;
+}
+/* Pushes the pin to the foot. */
+.chart-rail-gap {
+  flex: 1;
+  min-height: 8px;
+}
+/* Unpinned: out of flow and over the tape, so the charts get the 38px back —
+   which is the whole point of asking for it. Height is content, not full-bleed:
+   a 38px stripe down a chart you can see through is still a stripe.
+
+   Deliberately barely there. A solid panel over the candles is the thing the
+   pinned rail already avoids, so an unpinned one that merely *moved* the panel
+   would be the worse of both — you would have given up the column and still be
+   covering the tape. So: no fill, no border, and the legibility comes from a
+   blur behind the glyphs rather than from a surface on top of the price action.
+   The buttons take their own backing only under the pointer, which is when they
+   are a control rather than a thing you are looking past. */
+.chart-rail.floating {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 6;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  backdrop-filter: blur(3px);
+  padding: 3px 0;
+}
+.chart-rail.floating .chart-tool {
+  /* Enough to read a glyph against candles, not enough to hide them. */
+  color: color-mix(in srgb, var(--text) 82%, transparent);
+  text-shadow: 0 1px 3px var(--bg), 0 0 6px var(--bg);
+}
+.chart-rail.floating .chart-tool:hover:not(:disabled) {
+  background: rgba(26, 29, 39, 0.85);
+  color: var(--text);
+}
+.chart-rail.floating .chart-tool.on {
+  /* The armed one still has to be unmistakable — it is the answer to "what is
+     this click about to do", and a translucent accent is a guess. */
+  background: var(--accent);
+  color: #fff;
+  text-shadow: none;
+}
+.chart-rail.floating .chart-tool-sep {
+  background: color-mix(in srgb, var(--card-border) 70%, transparent);
+}
+/* A chart whose tools live on a page rail gets its own left edge back. */
+.chart-no-rail {
+  --chart-rail: 0px;
+}
+/* …until the rail floats back over that corner, when the top-left pane's legend
+   has to clear it again the way it did with the in-canvas rail. Only that pane:
+   `place[0]` starts at grid line 1/1 in every layout, so pane 0 is the one the
+   rail is over, and indenting the others would be indenting them past nothing. */
+.sim-chart-wrap:has(.chart-rail.floating) .sim-pane[data-pane="0"] .chart-no-rail {
+  --chart-rail: 40px;
 }
 /* The layout picker, sitting in the top bar beside the timeframe control and
    styled to match it. The button wears the layout it is on, so the bar says
@@ -3482,6 +3615,66 @@ button:disabled {
   touch-action: none;
   user-select: none;
 }
+/* Minimised. A pill in the pane's bottom-right, just inside the price axis.
+   NOT vertically centred on the right edge, which is where it went first: that
+   band is where every price-anchored label lives — VAH/POC/VAL, the HVN/LVN
+   reads, the order and position chips — and they cluster around the current
+   price, which is the middle of the pane by definition. The bottom corner is the
+   one part of the frame nothing else claims, and it is beside the foot of the
+   tape where the window itself parks, so restoring happens where you asked for
+   it. Deliberately fixed rather than draggable: the thing behind it is the pair
+   of buttons you can least afford to go looking for. */
+.sim-quick-badge {
+  position: absolute;
+  right: calc(var(--axis-w, 60px) + 8px);
+  bottom: 8px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(14, 17, 23, 0.86);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--card-border);
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+}
+.sim-quick-badge:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+/* The window's one title-bar control. Sits at the right end of the grip, and the
+   grip's centred pill stays centred because this is absolutely positioned out of
+   its flow. */
+.sim-quick-min {
+  position: absolute;
+  right: 2px;
+  top: 0;
+  height: 16px;
+  width: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+.sim-quick-min:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+}
 /* Dragged off the foot: the page pins it by left/top instead, so the centring
    transform and the bottom anchor both have to go. */
 .sim-quick.moved {
@@ -3501,6 +3694,7 @@ button:disabled {
    The pill inside is the one the order ticket is grabbed by, so the two things
    on this page you can drag say so the same way. */
 .sim-quick-grip {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;

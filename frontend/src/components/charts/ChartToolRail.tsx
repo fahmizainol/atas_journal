@@ -23,6 +23,8 @@ import { CHART_TOOLS, type ChartToolId, type ChartToolState } from "../../lib/ch
 export function ChartToolRail({
   state,
   paneLabel,
+  pinned,
+  onPinnedChange,
   onArm,
   onClearAvwap,
   onDeleteSelected,
@@ -34,6 +36,13 @@ export function ChartToolRail({
    *  screen — where there is nothing to disambiguate and the label would be a
    *  permanent answer to a question nobody asked. */
   paneLabel?: string;
+  /** Whether the rail reserves a column or floats over the tape. Pinned is the
+   *  default and the honest one for four panes — 38px off 1920 to stop covering
+   *  four charts' worth of candles. Floating is the old in-canvas behaviour back
+   *  as a choice: on one pane the column is a straight loss, and some people
+   *  would rather see the tape under the buttons. */
+  pinned: boolean;
+  onPinnedChange: (v: boolean) => void;
   onArm: (id: ChartToolId | null) => void;
   onClearAvwap: () => void;
   onDeleteSelected: () => void;
@@ -42,7 +51,7 @@ export function ChartToolRail({
   const at = paneLabel ? ` — pane ${paneLabel}` : "";
   const hasSel = state.hasRangeSel || state.hasHlineSel;
   return (
-    <div className="chart-rail" role="toolbar" aria-label="Chart tools">
+    <div className={`chart-rail${pinned ? "" : " floating"}`} role="toolbar" aria-label="Chart tools">
       {/* Disarm. The keyboard has had Esc for this all along, but Esc is not
           discoverable and a rail with no way back to "just pointing" reads as a
           rail you can get stuck in. Lit when nothing is armed, so the rail
@@ -99,6 +108,21 @@ export function ChartToolRail({
           title={`Remove every fixed-range profile and price line${at}`}
         />
       )}
+      {/* The pin, at the foot and pushed there by a spacer — it is a property of
+          the rail itself rather than one of the tools, so it sits apart from them
+          and stays put as the "take it away" group above comes and goes. */}
+      <div className="chart-rail-gap" />
+      <ChartToolButton
+        icon="📌"
+        label={pinned ? "Unpin the rail" : "Pin the rail"}
+        on={pinned}
+        onClick={() => onPinnedChange(!pinned)}
+        title={
+          pinned
+            ? "Pinned — the rail keeps its own column beside the charts. Unpin to float it over the tape."
+            : "Floating — the rail lays over the tape and you can see the chart behind it. Pin to give it a column."
+        }
+      />
     </div>
   );
 }

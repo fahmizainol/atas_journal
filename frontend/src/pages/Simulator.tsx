@@ -58,7 +58,7 @@ import {
   type Tape,
 } from "../lib/replayEngine";
 import { replaySource, type TapeSource } from "../lib/tapeSource";
-import { showsSeconds, timeframeById, TIMEFRAMES } from "../lib/timeframes";
+import { showsSeconds, timeframeById, TIMEFRAMES, TF_OPTIONS } from "../lib/timeframes";
 import {
   newLog,
   newSim,
@@ -523,6 +523,7 @@ export function Simulator() {
   const [splitPct, setSplitPct] = useState(prefs.splitPct);
   const [splitPctY, setSplitPctY] = useState(prefs.splitPctY);
   const [linkOn, setLinkOn] = useState(prefs.linkOn);
+  const [toolsPinned, setToolsPinned] = useState(prefs.toolsPinned);
   const [paneLinked, setPaneLinked] = useState(prefs.paneLinked);
   const paneCount = LAYOUTS[layout].panes;
   /** Which pane the chrome acts on. Claimed by the pointer arriving (the same
@@ -646,6 +647,7 @@ export function Simulator() {
       splitPctY,
       linkOn,
       paneLinked,
+      toolsPinned,
     });
   }, [
     root,
@@ -679,6 +681,7 @@ export function Simulator() {
     splitPctY,
     linkOn,
     paneLinked,
+    toolsPinned,
   ]);
 
   // The global switch, into the module the chart handlers read at event time.
@@ -2560,6 +2563,8 @@ export function Simulator() {
           <ChartToolRail
             state={toolStates[focusedPane] ?? EMPTY_TOOL_STATE}
             paneLabel={paneCount > 1 ? String(focusedPane + 1) : undefined}
+            pinned={toolsPinned}
+            onPinnedChange={setToolsPinned}
             onArm={(id: ChartToolId | null) => paneChart(focusedPane)?.armTool(id)}
             onClearAvwap={() => paneChart(focusedPane)?.clearAvwap()}
             onDeleteSelected={() => paneChart(focusedPane)?.deleteSelected()}
@@ -2591,6 +2596,11 @@ export function Simulator() {
               // instrument — you are told what you are trading, never when.
               symbol={sel ? (hidden ? root : sel.symbol) : root}
               tfLabel={tf.label}
+              // The label is the picker. Every bucketing, not the bar's short
+              // list — there is no width to run out of in a popup, and the ⋯ on
+              // the bar exists only because a 36px row has an end.
+              tfOptions={TF_OPTIONS}
+              onTfChange={(id) => changePaneTimeframe(0, id)}
               onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
               onFlatten={closeManual}
@@ -2756,6 +2766,8 @@ export function Simulator() {
                     onToolsChange={(s) => reportTools(i, s)}
                     symbol={sel ? (hidden ? root : sel.symbol) : root}
                     tfLabel={paneTfsRef.current[i].label}
+                    tfOptions={TF_OPTIONS}
+                    onTfChange={(id) => changePaneTimeframe(i, id)}
                     onAnchorChange={(t) => setPaneAnchor(i, t)}
                     onBracketChange={moveBracket}
                     onFlatten={closeManual}

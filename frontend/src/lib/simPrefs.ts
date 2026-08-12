@@ -191,6 +191,11 @@ export interface SimPrefs {
    *  2-col -> 2x2 -> 2-col lands on the dividers you left. */
   splitPct: number;
   splitPctY: number;
+  /** Whether the tool rail reserves a column beside the charts or floats over
+   *  the tape. Pinned by default — 38px off the width beats covering candles on
+   *  four panes — but on one pane the column is a straight loss, so it is a
+   *  choice and it sticks. */
+  toolsPinned: boolean;
   /** Whether the panes share one crosshair and one right edge (lib/paneLink).
    *  A reading choice like the layout itself — it moves viewports, never a
    *  fill. */
@@ -268,6 +273,7 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   // With one pane it does nothing at all, so the single-chart page is unmoved.
   linkOn: true,
   paneLinked: [true, true, true, true],
+  toolsPinned: true,
 };
 
 const ORDER_TYPES: OrderType[] = ["market", "limit", "stop"];
@@ -359,6 +365,7 @@ export function loadSimPrefs(): SimPrefs {
       splitPctY: clampRatio(s.splitPctY, d.splitPctY),
       linkOn: typeof s.linkOn === "boolean" ? s.linkOn : d.linkOn,
       paneLinked: paneFlags(s.paneLinked, d.paneLinked),
+      toolsPinned: typeof s.toolsPinned === "boolean" ? s.toolsPinned : d.toolsPinned,
     };
   } catch {
     return { ...d, modernVwap: { ...d.modernVwap } };
@@ -454,6 +461,10 @@ export interface LiveChartKnobs {
   splitPctY: number;
   linkOn: boolean;
   paneLinked: boolean[];
+  /** The tool rail's pin — see `SimPrefs.toolsPinned`. Its own copy, like the
+   *  rest of the grid: how you want the chrome on a live session is not
+   *  automatically how you want it on a replay. */
+  toolsPinned: boolean;
 }
 
 const LIVE_KNOBS_KEY = "live.chartKnobs";
@@ -485,6 +496,7 @@ export const DEFAULT_LIVE_CHART_KNOBS: LiveChartKnobs = {
   splitPctY: 55,
   linkOn: true,
   paneLinked: [true, true, true, true],
+  toolsPinned: true,
 };
 
 export function loadLiveChartKnobs(): LiveChartKnobs {
@@ -515,6 +527,7 @@ export function loadLiveChartKnobs(): LiveChartKnobs {
       splitPctY: clampRatio(s.splitPctY, d.splitPctY),
       linkOn: typeof s.linkOn === "boolean" ? s.linkOn : d.linkOn,
       paneLinked: paneFlags(s.paneLinked, d.paneLinked),
+      toolsPinned: typeof s.toolsPinned === "boolean" ? s.toolsPinned : d.toolsPinned,
     };
   } catch {
     return { ...d, eventTuning: { ...d.eventTuning }, modernVwap: { ...d.modernVwap } };
@@ -609,5 +622,38 @@ export function saveLiveTicket(t: LiveTicket): void {
     localStorage.setItem(LIVE_TICKET_KEY, JSON.stringify(t));
   } catch {
     // Private mode / quota — the ticket still works, it just won't stick.
+  }
+}
+
+const LIVE_CONTRACT_KEY = "live.contract";
+
+/** The front month when this was written, and only ever a starting point: the
+ *  first successful connect stores what it connected to, so the quarterly roll
+ *  is something you type once rather than a code edit. */
+export const DEFAULT_LIVE_CONTRACT = "NQU6";
+
+/**
+ * The raw contract Live connects to, uppercase.
+ *
+ * Validated on the way out rather than trusted, because the Live page now
+ * *autostarts* off this value: a stored root ("NQ") or a hand-edited blank would
+ * turn every visit into a 422 with nothing on screen saying which stale string
+ * caused it. The shape checked is the one the connect button's own guard uses —
+ * four or more alphanumerics — and the API rejects roots regardless.
+ */
+export function loadLiveContract(): string {
+  try {
+    const raw = (localStorage.getItem(LIVE_CONTRACT_KEY) ?? "").trim().toUpperCase();
+    return /^[A-Z0-9]{4,}$/.test(raw) ? raw : DEFAULT_LIVE_CONTRACT;
+  } catch {
+    return DEFAULT_LIVE_CONTRACT;
+  }
+}
+
+export function saveLiveContract(symbol: string): void {
+  try {
+    localStorage.setItem(LIVE_CONTRACT_KEY, symbol.trim().toUpperCase());
+  } catch {
+    // Private mode / quota — the autostart falls back to the default next visit.
   }
 }

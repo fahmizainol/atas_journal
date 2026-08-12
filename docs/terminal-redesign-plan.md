@@ -33,6 +33,7 @@ all of them.
 | 6b | Ticket knobs, the dock's opener, the <1100px fold | **Built** — `60e837d` |
 | 7 | Live gets the same layouts | **Built, unverified** |
 | 8 | The design pass — identity block, bar controls, focus, dock | **Built** |
+| 9 | Follow-ups — legend bucketing picker, readout flicker, order-pad minimise, rail pin | **Built** |
 
 Branch: `feat/terminal-redesign`, **not pushed**. Master is at `ea97845`.
 
@@ -447,6 +448,73 @@ segmented strip; `RoutingPanel`'s 1,409 lines of account tagging, single-use tok
 and broker reconciliation were not opened. *Not* done, and deliberately: the
 sections were not re-ordered to the prototype's, because the order you reach for
 things by muscle memory is worth more than matching a sketch.
+
+---
+
+## Phase 9 — the follow-ups
+
+**The bucketing label is the picker.** Each pane's legend prints which bar it
+draws; that label now opens a list. This is *not* the per-pane picker phase 5
+deleted — that was a second whole `TimeframeControl` parked in the pane's corner,
+competing with the bar's for the same job. This is no resident chrome at all, and
+it aims at its own pane by construction: re-bucketing a pane you are not working
+in is one gesture instead of focus-then-pick. Every bucketing, not the bar's
+short list — the `⋯` exists because a 36px row has an end, and a popup does not.
+
+> Two things it had to get right. The outside-press guard has to match *this*
+> legend's wrapper, not `[data-legend-tf]` — matching the selector meant pressing
+> pane 2's picker did not close pane 1's, and two panes sat there with their lists
+> open. And the popup's own listeners are capture-phase, or Escape reaches the tape
+> before the popup hears about its own dismissal.
+
+**The readout stopped flickering.** Reported: expanding the indicators and hovering
+the rows made the candle info blink. It was a consequence of consolidating the
+block — hovering a legend row takes the pointer *off the canvas*, the crosshair
+reports nothing, and the readout blanked. Being inside the legend now, a blank
+readout is a missing **row**, so everything below it jumped a line as you moved
+down the list.
+
+Fixed the way the prototype has it: the readout always draws, falling back to the
+newest bar when nothing is under the pointer. That needs `paintOhlc` called from
+two more places — `applyStep` (the idle readout has to keep up with the forming
+bar, or it freezes the moment you stop pointing) and `setSnapshot` (or a session
+opens with the whole block missing until the pointer first crosses the chart).
+
+**The order pad minimises.** A `−` on its title bar collapses the BUY/SELL window
+to an "Order Pad" badge; the badge brings it back. Deliberately *not* the same box
+with its body hidden — the point is to give the tape its corner back, so a
+minimised pad releases `--chart-floor` and renders nothing else. The badge is
+fixed rather than draggable: what is behind it is the pair of buttons you can
+least afford to go looking for.
+
+> It went mid-right edge first, which is wrong: that band is where every
+> price-anchored label lives — VAH/POC/VAL, HVN/LVN, the order and position chips
+> — and they cluster around the current price, which *is* the middle of the pane.
+> Bottom-right is the corner nothing claims, and it is beside the foot of the tape
+> where the window itself parks.
+
+Minimised state is its own key (`chart.quickDockMin`), not a field on the saved
+position: minimising must not forget where the window was, and putting the window
+back at the foot of the tape must not un-minimise it.
+
+**The tool rail pins and unpins.** Phase 6 decided the page rail is always on and
+noted the cost: 38px of 1920, a straight loss on a single pane. That is now the
+choice it should have been. Unpinned, the rail goes out of flow and the grid gets
+the width back — which is the assertion `panecheck` makes, since "you can see the
+chart behind it" is a fact about *width*, not about opacity.
+
+And it is barely there rather than a floating panel. A solid box over the candles
+is exactly what pinning already avoids, so an unpinned rail that merely *moved*
+the box would be the worse of both — column given up, tape still covered. No fill,
+no border; legibility comes from a blur behind the glyphs and a per-button backing
+that appears only under the pointer. The armed tool keeps its solid accent, because
+"what is this click about to do" is the one thing here that must not be a guess.
+
+> `--chart-rail` had to stop being an inline style for this. `ReplayChart` set it
+> to `0px` inline when the page drew a rail; an unpinned rail floats back over that
+> corner and the page has to be able to say so, which an inline value outranks. It
+> is a class now (`.chart-no-rail`), and only pane 0 is indented — `place[0]` starts
+> at grid line 1/1 in every layout, so it is the only pane the rail is ever over.
 
 ---
 

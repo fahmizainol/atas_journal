@@ -16,7 +16,13 @@
 // because only this component knows which of the two it is.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { loadDockPos, saveDockPos, type DockPos } from "../../lib/chartPrefs";
+import {
+  loadDockMin,
+  loadDockPos,
+  saveDockMin,
+  saveDockPos,
+  type DockPos,
+} from "../../lib/chartPrefs";
 
 interface QuickDockProps {
   children: ReactNode;
@@ -43,6 +49,7 @@ function clampToParent(el: HTMLElement, pos: DockPos): DockPos {
 export function QuickDock({ children, onFloorChange }: QuickDockProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<DockPos | null>(() => loadDockPos());
+  const [min, setMin] = useState(() => loadDockMin());
   const [dragging, setDragging] = useState(false);
   // The grab offset within the box, so the window doesn't jump its own corner to
   // the pointer on the first move, plus the chart's rect at grab time to convert
@@ -53,11 +60,14 @@ export function QuickDock({ children, onFloorChange }: QuickDockProps) {
 
   const floorCb = useRef(onFloorChange);
   floorCb.current = onFloorChange;
+  // Read inside the ResizeObserver callback, which is installed once.
+  const minRef = useRef(min);
+  minRef.current = min;
 
   // Both observers below key off *whether* the window floats, never off where it
   // is: a drag moves it every frame, and re-attaching two ResizeObservers per
   // frame is work for nothing. Position is read through the ref instead.
-  const floating = pos != null;
+  const floating = pos != null || min;
 
   // Height of the parked window, republished whenever it changes — the row is one
   // line or two depending on whether a position is open and how far its buttons
@@ -65,7 +75,8 @@ export function QuickDock({ children, onFloorChange }: QuickDockProps) {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const read = () => floorCb.current?.(posRef.current ? 0 : el.getBoundingClientRect().height);
+    const read = () =>
+      floorCb.current?.(posRef.current || minRef.current ? 0 : el.getBoundingClientRect().height);
     const ro = new ResizeObserver(read);
     ro.observe(el);
     read();
@@ -140,6 +151,31 @@ export function QuickDock({ children, onFloorChange }: QuickDockProps) {
     saveDockPos(null);
   }, []);
 
+  const setMinPersist = (v: boolean) => {
+    setMin(v);
+    saveDockMin(v);
+  };
+
+  // Minimised: a badge on the chart's edge and nothing else. Deliberately NOT
+  // the same box with its body hidden — the point is to give the tape back the
+  // corner, and a collapsed window that still parks itself at the foot of the
+  // chart has given nothing back. It keeps its saved position for when it
+  // returns, and it does not float or drag: one target, one job, always in the
+  // same place, because the thing you are un-hiding is the pair of buttons you
+  // can least afford to go looking for.
+  if (min) {
+    return (
+      <button
+        type="button"
+        className="sim-quick-badge"
+        onClick={() => setMinPersist(false)}
+        title="Show the order pad"
+      >
+        <span aria-hidden>🧾</span> Order Pad
+      </button>
+    );
+  }
+
   return (
     <div
       ref={ref}
@@ -161,6 +197,20 @@ export function QuickDock({ children, onFloorChange }: QuickDockProps) {
         title="Drag to move these buttons anywhere on the chart · double-click to put them back"
       >
         <span aria-hidden />
+        {/* The one control on the title bar, at the end of it, where a window's
+            controls live. `onPointerDown` stops the press reaching the drag
+            handler underneath — the grip is the drag surface, and a press that
+            was aimed at this button must not also start moving the window. */}
+        <button
+          type="button"
+          className="sim-quick-min"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => setMinPersist(true)}
+          title="Minimise to a badge — the market buttons go away until you ask for them"
+          aria-label="Minimise the order pad"
+        >
+          −
+        </button>
       </div>
       <div className="sim-quick-body">{children}</div>
     </div>

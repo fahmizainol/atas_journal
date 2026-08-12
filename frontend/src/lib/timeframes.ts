@@ -34,6 +34,14 @@ export const TIMEFRAMES: readonly Timeframe[] = [
 
 export const DEFAULT_TIMEFRAME_ID = "1m";
 
+/** The same list as `{key, label}` — what every picker in the app takes. Here
+ *  rather than re-mapped at each call site, because three pages building the
+ *  same array three times is three places for it to drift. */
+export const TF_OPTIONS: readonly { key: string; label: string }[] = TIMEFRAMES.map((t) => ({
+  key: t.id,
+  label: t.label,
+}));
+
 export function timeframeById(id: string): Timeframe {
   return (
     TIMEFRAMES.find((t) => t.id === id) ??

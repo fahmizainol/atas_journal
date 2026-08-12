@@ -313,6 +313,31 @@ export function saveDockPos(pos: DockPos | null): void {
   }
 }
 
+const QUICK_DOCK_MIN_KEY = "chart.quickDockMin";
+
+/** Whether the market-order window is minimised to its badge.
+ *
+ *  Its own key rather than a field on the position, because the two are
+ *  independent: minimising must not forget where the window was, and putting it
+ *  back at the foot of the tape must not un-minimise it. Shared by both charts,
+ *  like the position — it is the same instrument on Replay and Live. */
+export function loadDockMin(): boolean {
+  try {
+    return localStorage.getItem(QUICK_DOCK_MIN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveDockMin(v: boolean): void {
+  try {
+    if (v) localStorage.setItem(QUICK_DOCK_MIN_KEY, "1");
+    else localStorage.removeItem(QUICK_DOCK_MIN_KEY);
+  } catch {
+    // As above.
+  }
+}
+
 const DRAWINGS_KEY = "chart.drawings";
 
 /** What a session's hand-drawn tools boil down to, for coming back to the same

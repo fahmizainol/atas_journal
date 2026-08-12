@@ -208,6 +208,28 @@ try {
     `showing ${back?.trim()}, bar says "${(await focusNote())?.trim()}"`,
   );
 
+  // The legend's own bucketing picker: the label that says which bar this pane
+  // draws, made into the control. It aims at its own pane by construction, which
+  // is the point — re-bucketing a pane is one gesture, not focus-then-pick.
+  const legendTf = page.locator(".chart-legend-tf");
+  check("each pane's legend carries a bucketing picker", (await legendTf.count()) === 2,
+    `${await legendTf.count()} pickers: ${(await legendTf.allTextContents()).join(", ")}`);
+  await legendTf.nth(1).click();
+  await page.waitForTimeout(400);
+  await page.locator('.chart-legend-tfpop button:text-is("1h")').click();
+  await page.waitForTimeout(1800);
+  const tfLabels = await legendTf.allTextContents();
+  check(
+    "it re-buckets its own pane and no other",
+    tfLabels[0].startsWith("1m") && tfLabels[1].startsWith("1h"),
+    tfLabels.join(" / "),
+  );
+  // Put it back, so the reload check below still expects 15m.
+  await legendTf.nth(1).click();
+  await page.waitForTimeout(400);
+  await page.locator('.chart-legend-tfpop button:text-is("15m")').click();
+  await page.waitForTimeout(1800);
+
   // The divider.
   const div = await page.locator(".sim-pane-divider").boundingBox();
   const box = await page.locator(".sim-chart").boundingBox();
@@ -379,9 +401,14 @@ try {
     page.locator(".chart-rail .chart-tool").evaluateAll((els) =>
       els.map((e) => e.getAttribute("aria-label")),
     );
+  /** Which *tool* is lit. The pin at the foot is lit whenever the rail is pinned
+   *  — that is its state, not an armed tool — so it is excluded by name rather
+   *  than by counting everything with `.on`. */
   const railArmed = () =>
     page.locator(".chart-rail .chart-tool.on").evaluateAll((els) =>
-      els.map((e) => e.getAttribute("aria-label")),
+      els
+        .map((e) => e.getAttribute("aria-label"))
+        .filter((l) => l !== "Pin the rail" && l !== "Unpin the rail"),
     );
   check(
     "one rail on the page, none left inside a canvas",
@@ -411,6 +438,24 @@ try {
     (await railArmed()).join() === "Cursor",
     `lit on pane 1: ${(await railArmed()).join()}`,
   );
+  // The pin. Unpinned the rail floats over the tape and the grid gets its 38px
+  // back — which is the only assertion that matters here, since "you can see the
+  // chart behind it" is a fact about width, not about opacity.
+  const gridW = () =>
+    page.evaluate(() => Math.round(document.querySelector(".sim-chart").getBoundingClientRect().width));
+  const wPinned = await gridW();
+  await page.locator('.chart-rail .chart-tool[aria-label="Unpin the rail"]').click();
+  await page.waitForTimeout(600);
+  const wFloat = await gridW();
+  check(
+    "unpinning the rail gives its column back to the charts",
+    wFloat > wPinned && (await page.locator(".chart-rail.floating").count()) === 1,
+    `${wPinned}px → ${wFloat}px`,
+  );
+  await page.locator('.chart-rail .chart-tool[aria-label="Pin the rail"]').click();
+  await page.waitForTimeout(600);
+  check("…and pinning takes it back", (await gridW()) === wPinned, `${await gridW()}px`);
+
   await focusPane(2);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(400);

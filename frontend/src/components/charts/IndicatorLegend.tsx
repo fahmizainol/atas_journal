@@ -1,4 +1,4 @@
-import { useEffect, useState, type Ref } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
 import { loadLegendOpen, saveLegendOpen } from "../../lib/chartPrefs";
 import { IndicatorSettings, type IndicatorSettingsSpec } from "./IndicatorSettings";
 
@@ -175,6 +175,8 @@ export function IndicatorLegend({
   tfLabel,
   routedTo,
   ohlcRef,
+  tfOptions,
+  onTfChange,
 }: {
   items: LegendItem[];
   visibility: Record<IndicatorKey, boolean>;
@@ -193,6 +195,19 @@ export function IndicatorLegend({
    *  imperatively on every crosshair move (a React render per pixel is not a
    *  thing to do), and only *positioned* here. */
   ohlcRef?: Ref<HTMLDivElement>;
+  /** The bucketings this pane can be switched to, and how. Offered, `tfLabel`
+   *  stops being a caption and becomes the control — which is the whole point:
+   *  the pane already prints which bar it is drawing, and the cheapest picker is
+   *  the one where the answer already is.
+   *
+   *  This is NOT the per-pane picker phase 5 deleted. That was a second copy of
+   *  the whole `TimeframeControl` parked in the pane's corner, competing with
+   *  the bar's for the same job. This is a label that opens a list: no resident
+   *  chrome, and it aims at its own pane by construction — so re-bucketing a
+   *  pane you are not working in is one gesture rather than focus-then-pick.
+   *  (Pressing it also focuses that pane, as any press in a pane does.) */
+  tfOptions?: readonly { key: string; label: string }[];
+  onTfChange?: (id: string) => void;
   /** The chart's own colours, hung off the list's header rather than off a row —
    *  it is the one setting here that belongs to the whole chart instead of to a
    *  layer. Optional: a chart that doesn't own its surface omits it and the
@@ -206,6 +221,40 @@ export function IndicatorLegend({
    *  a time: they overlay the rows below them, so two open panels would mostly be
    *  one panel hiding another. */
   const [settingsFor, setSettingsFor] = useState<PanelKey | null>(null);
+  /** Whether the bucketing list is out, and the wrapper a press has to land
+   *  inside of to count as "still in this picker". */
+  const [tfOpen, setTfOpen] = useState(false);
+  const tfWrapRef = useRef<HTMLSpanElement>(null);
+
+  // Same convention as the settings panels below and as TimeframeControl:
+  // capture-phase, so a listener registered when the popup opened still runs
+  // before the chart's own key and pointer handlers, which were registered when
+  // the chart was built. Otherwise Escape reaches the tape first and the popup
+  // is the last thing to hear about its own dismissal.
+  useEffect(() => {
+    if (!tfOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setTfOpen(false);
+    };
+    const onDown = (e: PointerEvent) => {
+      const el = e.target as HTMLElement | null;
+      // *This* legend's picker, not any legend's. Matching the selector alone
+      // meant a press on pane 2's picker did not close pane 1's, because the
+      // press was inside "a" picker — and two panes would sit there with their
+      // lists open at once.
+      if (tfWrapRef.current && el && tfWrapRef.current.contains(el)) return;
+      setTfOpen(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("pointerdown", onDown, true);
+    };
+  }, [tfOpen]);
 
   // Esc closes the panel, and does so *before* anything else on the page sees
   // the key. The convention elsewhere is a bubble-phase listener that marks the
@@ -257,7 +306,43 @@ export function IndicatorLegend({
       {symbol && (
         <div className="chart-legend-id">
           <span className="sym">{symbol}</span>
-          {tfLabel && <span className="tf">{tfLabel}</span>}
+          {tfLabel &&
+            (tfOptions && onTfChange ? (
+              <span className="chart-legend-tfwrap" ref={tfWrapRef}>
+                <button
+                  type="button"
+                  className={`tf chart-legend-tf${tfOpen ? " open" : ""}`}
+                  onClick={() => setTfOpen((v) => !v)}
+                  aria-expanded={tfOpen}
+                  aria-haspopup="menu"
+                  title="Change this pane's bar size"
+                >
+                  {tfLabel}
+                  <span className="car" aria-hidden>
+                    ▾
+                  </span>
+                </button>
+                {tfOpen && (
+                  <div className="chart-legend-tfpop" role="menu">
+                    {tfOptions.map((o) => (
+                      <button
+                        key={o.key}
+                        type="button"
+                        className={o.label === tfLabel ? "on" : ""}
+                        onClick={() => {
+                          onTfChange(o.key);
+                          setTfOpen(false);
+                        }}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </span>
+            ) : (
+              <span className="tf">{tfLabel}</span>
+            ))}
           {routedTo && (
             <span className="route" title={`Orders from this chart route to ${routedTo}`}>
               → {routedTo}

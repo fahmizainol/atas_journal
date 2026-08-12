@@ -115,8 +115,10 @@ import type { CompositeRule } from "../lib/compositeProfile";
 import type { LiveTicket } from "../lib/simPrefs";
 import {
   loadLiveChartKnobs,
+  loadLiveContract,
   loadLiveTicket,
   saveLiveChartKnobs,
+  saveLiveContract,
   saveLiveTicket,
 } from "../lib/simPrefs";
 import type { GrowableTape } from "../lib/growableTape";
@@ -130,7 +132,7 @@ import {
 import { ReplayEngine, type EventTuning, type IbBox, type RangeBox, type Tape } from "../lib/replayEngine";
 import { loadFillModel, type FillCfg } from "../lib/fillModel";
 import { liveSource } from "../lib/tapeSource";
-import { showsSeconds, timeframeById, TIMEFRAMES } from "../lib/timeframes";
+import { showsSeconds, timeframeById, TIMEFRAMES, TF_OPTIONS } from "../lib/timeframes";
 import {
   newLog,
   newSim,
@@ -354,9 +356,81 @@ export function LiveChart() {
   // paper blotter or reaches the exchange. So the status is read here and the
   // panel shares the query (react-query dedupes on the key), rather than the
   // page having to ask a panel that may not be mounted.
-  const routingQ = useRoutingStatus(!!status?.routing);
+  // Asked before there is a session too, and for a different reason: the
+  // autostart below has to know whether this deployment permits routing *before*
+  // it connects, because the order plant is chosen at connect and can never be
+  // added to a session afterwards. Same query key as the startup screen's own
+  // copy, so react-query asks once either way.
+  const routingQ = useRoutingStatus(!!status?.routing || status?.running === false);
   const brokerState = routingQ.data?.broker ?? null;
   const intent = useOrderIntent(brokerState, () => void routingQ.refetch());
+
+  // --- opening the page opens the session -----------------------------------
+  // There is no landing screen any more. Arriving at /charts/live with nothing
+  // running connects the Rithmic ticker plant *with the order plant open*, on the
+  // contract last connected to, recording, shelf off. The screen below still
+  // exists and is still the only way to the simulated feed or another contract —
+  // it is the fallback now rather than the front door.
+  //
+  // ONCE PER MOUNT, NEVER AS A RETRY. `firedRef` latches before the POST rather
+  // than after it, so a connect that throws lands on the startup screen carrying
+  // its error instead of hammering the plant, and StrictMode's double-invoke
+  // sends one order-plant login rather than two. It also means a session stopped
+  // from the banner stays stopped: a page that reconnected what you just stopped
+  // would be one you cannot get out of.
+  //
+  // AND IT WAITS FOR `/live/routing`. Connecting before that answers would give
+  // a session that either cannot trade or cannot say why. When routing is not
+  // permitted at all — or the endpoint is unreachable — this declines to connect
+  // and hands over to the startup screen rather than quietly opening a data-only
+  // session that looks like it worked and has no path to order entry.
+  const [autoPhase, setAutoPhase] = useState<"waiting" | "connecting" | "manual">("waiting");
+  const [autoErr, setAutoErr] = useState<string | null>(null);
+  const [autoSymbol] = useState(loadLiveContract);
+  const firedRef = useRef(false);
+  const statusOk = statusQ.isSuccess;
+  const refetchStatus = statusQ.refetch;
+  const rs = routingQ.data;
+  const rsFailed = routingQ.isError;
+  useEffect(() => {
+    if (firedRef.current || !statusOk) return;
+    // Attached to a session that was already going. Latched all the same, and
+    // that is the point: without it, stopping the feed from the banner would
+    // drop `running` and this effect would immediately reconnect the thing you
+    // just stopped.
+    if (status?.running) {
+      firedRef.current = true;
+      setAutoPhase("manual");
+      return;
+    }
+    if (!rs && !rsFailed) return;                       // routing not answered yet
+    firedRef.current = true;
+    if (rsFailed || !rs?.enabled || rs.refusal) {
+      setAutoPhase("manual");
+      return;
+    }
+    setAutoPhase("connecting");
+    void (async () => {
+      try {
+        // The shelf stays off (it is a study surface, and this page is opened to
+        // trade), the recording stays on — see `RithmicStart` for why that one is
+        // not a taste. Both can be thrown while the session runs; routing cannot,
+        // which is the whole reason this is here.
+        await startRithmicFeed({
+          symbol: autoSymbol,
+          record: true,
+          signals: false,
+          routing: true,
+        });
+        saveLiveContract(autoSymbol);
+        await refetchStatus();
+      } catch (e) {
+        setAutoErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setAutoPhase("manual");
+      }
+    })();
+  }, [autoSymbol, refetchStatus, rs, rsFailed, status?.running, statusOk]);
 
   const [tfId, setTfId] = useState(knobs.timeframe);
   const tf = useMemo(() => timeframeById(tfId), [tfId]);
@@ -525,6 +599,7 @@ export function LiveChart() {
   const [splitPct, setSplitPct] = useState(knobs.splitPct);
   const [splitPctY, setSplitPctY] = useState(knobs.splitPctY);
   const [linkOn, setLinkOn] = useState(knobs.linkOn);
+  const [toolsPinned, setToolsPinned] = useState(knobs.toolsPinned);
   const [paneLinked, setPaneLinked] = useState(knobs.paneLinked);
   const paneCount = LAYOUTS[layout].panes;
   const paneCountRef = useRef(paneCount);
@@ -560,8 +635,9 @@ export function LiveChart() {
       splitPctY,
       linkOn,
       paneLinked,
+      toolsPinned,
     });
-  }, [bigLots, nodeProm, compositeRule, compositeSpan, evTuning, evLabelSt, evFill, evMarginal, mvParams, tfId, indicators, railPinned, layout, paneTfIds, splitPct, splitPctY, linkOn, paneLinked]);
+  }, [bigLots, nodeProm, compositeRule, compositeSpan, evTuning, evLabelSt, evFill, evMarginal, mvParams, tfId, indicators, railPinned, layout, paneTfIds, splitPct, splitPctY, linkOn, paneLinked, toolsPinned]);
   // THE ticket — one object, and the page owns it. Size and the bracket that
   // every origination point on this page measures its order with: the setup
   // drawer below, the chart's own long-press ticket, and the routing panel's
@@ -1614,7 +1690,13 @@ export function LiveChart() {
       : null;
 
   if (!status?.running) {
-    return <NoSession onStarted={() => void statusQ.refetch()} />;
+    // Still deciding, or connecting: the autostart owns the screen until it is
+    // done, so a visit that is about to become a live session does not flash the
+    // startup form on its way there.
+    if (autoPhase !== "manual") {
+      return <Connecting symbol={autoSymbol} onManual={() => setAutoPhase("manual")} />;
+    }
+    return <NoSession onStarted={() => void statusQ.refetch()} autoError={autoErr} />;
   }
 
   return (
@@ -1926,6 +2008,8 @@ export function LiveChart() {
           <ChartToolRail
             state={toolStates[focusedPane] ?? EMPTY_TOOL_STATE}
             paneLabel={paneCount > 1 ? String(focusedPane + 1) : undefined}
+            pinned={toolsPinned}
+            onPinnedChange={setToolsPinned}
             onArm={(id: ChartToolId | null) => paneChart(focusedPane)?.armTool(id)}
             onClearAvwap={() => paneChart(focusedPane)?.clearAvwap()}
             onDeleteSelected={() => paneChart(focusedPane)?.deleteSelected()}
@@ -1950,6 +2034,8 @@ export function LiveChart() {
               routedTo={routedSymbol}
               symbol={header?.symbol ?? status.symbol ?? undefined}
               tfLabel={tf.label}
+              tfOptions={TF_OPTIONS}
+              onTfChange={setTfId}
               onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
               onFlatten={closeAll}
@@ -2106,6 +2192,10 @@ export function LiveChart() {
                     routedTo={routedSymbol}
                     symbol={header?.symbol ?? status.symbol ?? undefined}
                     tfLabel={paneTfsRef.current[i].label}
+                    tfOptions={TF_OPTIONS}
+                    onTfChange={(id) =>
+                      setPaneTfIds((prev) => prev.map((t, j) => (j === i ? id : t)))
+                    }
                     onAnchorChange={(t) => setPaneAnchor(i, t)}
                     onBracketChange={moveBracket}
                     onFlatten={closeAll}
@@ -2800,12 +2890,58 @@ function StrategyRow({ s }: { s: ShadowStrategy }) {
 }
 
 /**
+ * The autostart, while it is happening.
+ *
+ * Its own screen rather than a spinner on the form below, because the two say
+ * opposite things: one is "choose how to open this", the other is "this is
+ * already opening, with the order plant, on this contract". Showing the form
+ * with a disabled button would invite a second connect on a page that is one
+ * request away from a live session.
+ */
+function Connecting({ symbol, onManual }: { symbol: string; onManual: () => void }) {
+  return (
+    <div className="page">
+      <div className="panel" style={{ maxWidth: 720 }}>
+        <h2 style={{ marginTop: 0 }}>Connecting {symbol}</h2>
+        <p className="muted">
+          The ticker plant with the order plant alongside it, recording, shelf
+          off. The session so far is replayed from its 18:00 ET open behind the
+          live stream, so the night the Globex gates read is there whatever time
+          you arrive.
+        </p>
+        {/* The one way out of a connect that hangs. Not an invitation — the POST
+            returns as soon as the feed is *started*, well before the backfill
+            lands — but a page whose only state is "connecting…" is a page you
+            would have to reload to leave. */}
+        <button type="button" onClick={onManual} style={{ marginTop: 4 }}>
+          Set it up by hand instead
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
  * No session running — start one, and say plainly what it is.
+ *
+ * NOT THE FRONT DOOR ANY MORE. The page autostarts a routed Rithmic session on
+ * arrival; this is where that lands when it declines to fire (routing not
+ * permitted here, `/live/routing` unreachable) or when it threw, and where an
+ * explicit stop from the banner returns you. It is also still the only way to
+ * the simulated feed and to a contract other than the stored one.
  *
  * The day list is the Simulator's: a fake feed's source is a cached Databento
  * session, so anything replayable is something the feed can present as today.
  */
-function NoSession({ onStarted }: { onStarted: () => void }) {
+function NoSession({
+  onStarted,
+  autoError,
+}: {
+  onStarted: () => void;
+  /** What the autostart threw, if it got as far as throwing. Shown here because
+   *  this screen is the only evidence the user gets that it tried at all. */
+  autoError?: string | null;
+}) {
   const daysQ = useSimulatorDays("NQ");
   const days = daysQ.data?.days ?? [];
   const [pick, setPick] = useState("");
@@ -2824,6 +2960,12 @@ function NoSession({ onStarted }: { onStarted: () => void }) {
           backtest reports for that stretch — that is the property the whole
           surface rests on, and it holds for either feed below.
         </p>
+
+        {autoError && (
+          <p style={{ color: palette.red, fontSize: 12 }}>
+            ⚠ Connecting on arrival failed: {autoError}
+          </p>
+        )}
 
         <RithmicStart onStarted={onStarted} />
 
@@ -2929,7 +3071,10 @@ function NoSession({ onStarted }: { onStarted: () => void }) {
  * recoverable after that.
  */
 function RithmicStart({ onStarted }: { onStarted: () => void }) {
-  const [symbol, setSymbol] = useState("NQU6");
+  // The contract last connected to, which is also what the autostart used. Typed
+  // once per roll rather than edited in the source — and typed *here*, since
+  // reaching this screen at all is now the deliberate act.
+  const [symbol, setSymbol] = useState(loadLiveContract);
   // The shelf off, the recording on, and the asymmetry is about what each one
   // costs rather than about which is more useful. The shelf is a study surface:
   // this page is opened to trade far more often than to watch thirteen
@@ -2946,10 +3091,17 @@ function RithmicStart({ onStarted }: { onStarted: () => void }) {
   // disk — the one hole `RithmicFeed._backfill` documents it cannot repair.
   const [record, setRecord] = useState(true);
   const [signals, setSignals] = useState(false);
-  // Off, always, whatever was chosen last time. There is no persistence of this
-  // choice anywhere and there should not be: a connection that could trade
-  // because of something you clicked on a previous visit is the accident.
-  const [routing, setRouting] = useState(false);
+  // On, and it used to be off-always with a note under it saying that a
+  // connection able to trade because of something you clicked on a previous
+  // visit is the accident. What changed is the page above: it now opens a routed
+  // session on arrival without asking, so this checkbox is no longer what stands
+  // between a visit and the order plant, and leaving it off here would only mean
+  // the fallback screen opens a session *less* capable than the front door's —
+  // and one that cannot be upgraded without stopping and reconnecting.
+  //
+  // Still not persisted, because it is no longer a choice worth remembering: it
+  // is the default, and unchecking it is a thing you do for this connect only.
+  const [routing, setRouting] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // Whether this deployment permits routing at all, and which kind of account it
@@ -2969,12 +3121,20 @@ function RithmicStart({ onStarted }: { onStarted: () => void }) {
     if (!on) setSignals(false);
   };
 
+  // What the connect will actually ask for. The switch above defaults on and is
+  // *hidden* where the deployment forbids routing, so sending the raw state
+  // there would be asking for a plant this build refuses — a 422 on a screen
+  // that never showed a checkbox to explain it.
+  const willRoute = routing && !!rs?.enabled && !rs.refusal;
+
   return (
     <div style={{ marginBottom: 28 }}>
       <h3 style={{ marginBottom: 4 }}>Rithmic feed</h3>
       <p className="muted" style={{ marginTop: 0 }}>
-        Market data by default — the ticker plant, and the order plant only if
-        you ask for it below. Recorded, every print goes to <code>data/live/</code>,
+        The ticker plant, and the order plant alongside it unless you uncheck it
+        below — the same pair the page opens on arrival, which is how you got
+        here only if that declined or failed.
+        Recorded, every print goes to <code>data/live/</code>,
         including the backfilled night: that is what the Globex gates and the
         weekly seed read off disk, and it is what a reconnect resumes from
         instead of re-fetching sixteen hours off the history plant. The shelf
@@ -3070,7 +3230,12 @@ function RithmicStart({ onStarted }: { onStarted: () => void }) {
             setBusy(true);
             setErr(null);
             try {
-              await startRithmicFeed({ symbol: symbol.trim(), record, signals, routing });
+              const raw = symbol.trim();
+              await startRithmicFeed({ symbol: raw, record, signals, routing: willRoute });
+              // What the next visit autostarts on. Written after the connect
+              // rather than as you type: a contract the plant accepted is the
+              // only one worth arriving on by itself.
+              saveLiveContract(raw);
               onStarted();
             } catch (e) {
               setErr(e instanceof Error ? e.message : String(e));
@@ -3081,7 +3246,7 @@ function RithmicStart({ onStarted }: { onStarted: () => void }) {
         >
           {busy
             ? "Connecting…"
-            : routing
+            : willRoute
               ? "Connect with order entry"
               : record
                 ? "Connect & record"

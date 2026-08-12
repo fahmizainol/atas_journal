@@ -354,6 +354,11 @@ interface Props {
   /** Which bar this pane is drawing ("5m"), for the same line. The chart is
    *  handed its bars already bucketed and has no other way to know. */
   tfLabel?: string;
+  /** Offered, that label becomes a picker for this pane's bucketing. The chart
+   *  passes both straight to the legend and never reads either — re-bucketing is
+   *  an engine re-derivation and belongs to the page. */
+  tfOptions?: readonly { key: string; label: string }[];
+  onTfChange?: (id: string) => void;
   /** What this pane's hand-tools are doing, whenever it changes — what a
    *  page-level rail lights up from. Offered, the chart takes its own in-canvas
    *  rail down: the two would be the same buttons twice, and only one of them
@@ -693,6 +698,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     routedTo,
     symbol,
     tfLabel,
+    tfOptions,
+    onTfChange,
     onToolsChange,
     onFocus,
     onReady,
@@ -703,6 +710,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   /** The crosshair readout's element — written imperatively, see the
    *  subscribeCrosshairMove block. */
   const ohlcRef = useRef<HTMLDivElement>(null);
+  /** Which bar the readout is currently showing, or -1 for "the newest one".
+   *  Read by the playback, which has to keep an idle readout current as the bar
+   *  under it forms. */
+  const hoverIdxRef = useRef(-1);
+  /** The readout painter, published out of the build effect so `applyStep` can
+   *  reach it — see `paintOhlc`. */
+  const paintOhlcRef = useRef<((i: number) => void) | null>(null);
   // This pane's identity, for the keyboard election in lib/chartFocus. Assigned
   // once per mounted instance — `useRef(nextChartId())` would burn a fresh id on
   // every render, since the argument is evaluated whether or not it is used.
@@ -2214,26 +2228,34 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // come off `barsRef` by logical index rather than off `param.seriesData`,
     // because the volume isn't in the candle series and the forming bar's
     // numbers should be the engine's own.
-    /** Print one bar's numbers, or take the readout down (`i < 0`).
+    /** Print one bar's numbers. `i < 0` (or out of range) means "nothing under
+     *  the pointer", and falls back to the newest bar rather than blanking.
      *
-     *  A function rather than the body of the subscription because the *link*
-     *  needs it too: `setCrosshairPosition` deliberately skips the crosshair-move
-     *  event (it passes `skipEvent` all the way down), so a pane told to follow
-     *  would otherwise move a crosshair with no numbers beside it — which is
-     *  precisely the readout you turned the link on for. */
+     *  THE FALLBACK IS NOT COSMETIC. This readout lives inside the legend now, so
+     *  a hidden one is a missing *row* — and hovering a legend row takes the
+     *  pointer off the canvas, which is exactly when the crosshair reports
+     *  nothing. Blanking made the rows below jump up and down as you moved along
+     *  them. Always drawing something also happens to be the better reading: the
+     *  bar you are on is what you want when you are not pointing at another one.
+     *
+     *  A function rather than the body of the subscription because two other
+     *  callers need it: the *link* (`setCrosshairPosition` deliberately skips the
+     *  crosshair-move event — it passes `skipEvent` all the way down — so a pane
+     *  told to follow would move a crosshair with no numbers beside it), and the
+     *  playback, which has to keep the idle readout current as the forming bar
+     *  moves under it. */
     const paintOhlc = (i: number) => {
       const el = ohlcRef.current;
       if (!el) return;
       const bars = barsRef.current;
-      // It used to hide while a placement banner was up, because the two shared
-      // the top-left corner. They no longer do (the banner is centred, this is
-      // in the legend), and the bar under the pointer is exactly what you want
-      // to read while choosing a price — so it stays.
-      if (i < 0 || i >= bars.length) {
+      const at = i >= 0 && i < bars.length ? i : bars.length - 1;
+      // The only blank state: no bars at all. Nothing has been laid out yet
+      // either, so there is no row to shift.
+      if (at < 0) {
         el.style.display = "none";
         return;
       }
-      const b = bars[i];
+      const b = bars[at];
       const chg = b.close - b.open;
       const cls = chg >= 0 ? "up" : "down";
       const f = (v: number) => v.toFixed(2);
@@ -2248,6 +2270,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     };
     chart.subscribeCrosshairMove((param) => {
       const i = param.logical == null ? -1 : Math.round(param.logical);
+      // Remembered so the playback can keep repainting the *right* bar: idle, it
+      // is the newest one, and it has to keep up as that one forms.
+      hoverIdxRef.current = i;
       // Every crosshair that reaches here has a pointer behind it, so every one
       // of them is this pane's to publish (the synthetic ones never fire this).
       if (param.point) {
@@ -2271,6 +2296,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       crosshair(time, price) {
         if (time == null) {
           chart.clearCrosshairPosition();
+          hoverIdxRef.current = -1;
           paintOhlc(-1);
           return;
         }
@@ -2279,7 +2305,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         chart.setCrosshairPosition(price, time as Time, candle);
         // The source pane's time, snapped onto whichever of this pane's bars
         // holds that moment — which is the whole reading the link is for.
-        paintOhlc(idxOfTime(barsRef.current, time));
+        hoverIdxRef.current = idxOfTime(barsRef.current, time);
+        paintOhlc(hoverIdxRef.current);
       },
       rightEdge(to) {
         const cur = chart.timeScale().getVisibleRange();
@@ -2294,6 +2321,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     chart.timeScale().subscribeVisibleTimeRangeChange((r) => {
       if (r) publishRightEdge(paneId, r.to as number);
     });
+    paintOhlcRef.current = paintOhlc;
 
     // --- The composite over the context days, and the events on the tape -----
     // Attached before the fixed-range tool so a profile you drew sits over them:
@@ -3759,6 +3787,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // A seek can land the playhead anywhere, including off a scale the user
       // set by hand.
       syncOffTape();
+      // And the legend's readout, which otherwise has nothing to draw until the
+      // pointer first crosses the chart — a session opens with a whole block of
+      // numbers missing, and the rows under them sitting one line too high.
+      paintOhlcRef.current?.(hoverIdxRef.current);
     },
     applyStep(r: StepResult) {
       const candle = candleRef.current;
@@ -3789,6 +3821,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       }
       // The first tagged tick of the session is what brings the pane to life.
       if (cvdAnyRef.current && !cvdSeriesRef.current) syncCvdMount();
+      // Keep the legend's readout on the bar it is meant to be on. Idle that is
+      // the newest one, which is precisely the one this step just moved — a
+      // readout that froze the moment you stopped pointing at something would be
+      // worse than none. Straight at the DOM, like everything else in this
+      // method; when the pointer *is* on a bar the index doesn't change and this
+      // rewrites the same numbers.
+      paintOhlcRef.current?.(hoverIdxRef.current);
       if (vrClosed) {
         refreshVr();
         // Same cadence: the indicator's every value is a fact about a closed bar.
@@ -4118,22 +4157,19 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   return (
     <div
       ref={rootRef}
+      // With the tools out on a page rail, the legend and the placement banners
+      // get the left edge back — they were only ever clearing a rail that is no
+      // longer inside the canvas. A class rather than an inline custom property,
+      // because an *unpinned* page rail floats back over this corner and the
+      // page has to be able to say so; an inline value would outrank it.
+      className={onToolsChange ? "chart-no-rail" : undefined}
       // A press anywhere in the pane claims the page's focus — the canvas, the
       // legend, a badge, the ◎. On the root rather than on the canvas because
       // the overlays are siblings of it, and "I clicked this pane" should not
       // depend on which part of it you happened to hit. Capture phase, so a
       // control that stops propagation still hands focus over first.
       onPointerDownCapture={() => onFocusRef.current?.()}
-      style={{
-        position: "relative",
-        width: "100%",
-        height: "100%",
-        minHeight: 0,
-        // With the tools out on a page rail, the legend and the placement
-        // banners get the left edge back — they were only ever clearing a rail
-        // that is no longer inside the canvas.
-        ...(onToolsChange ? ({ "--chart-rail": "0px" } as React.CSSProperties) : null),
-      }}
+      style={{ position: "relative", width: "100%", height: "100%", minHeight: 0 }}
     >
       {/* What the two buttons mean while Space is down. The mapping flips across
           the market, so this is worth saying on screen rather than in a tooltip
@@ -4417,6 +4453,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         prefsPane={prefsPane}
         symbol={symbol}
         tfLabel={tfLabel}
+        tfOptions={tfOptions}
+        onTfChange={onTfChange}
         routedTo={routedTo}
         ohlcRef={ohlcRef}
       />
