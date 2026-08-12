@@ -1948,6 +1948,8 @@ export function LiveChart() {
               onFocus={() => setFocus(0)}
               onToolsChange={(s) => reportTools(0, s)}
               routedTo={routedSymbol}
+              symbol={header?.symbol ?? status.symbol ?? undefined}
+              tfLabel={tf.label}
               onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
               onFlatten={closeAll}
@@ -2102,6 +2104,8 @@ export function LiveChart() {
                     onFocus={() => setFocus(i)}
                     onToolsChange={(s) => reportTools(i, s)}
                     routedTo={routedSymbol}
+                    symbol={header?.symbol ?? status.symbol ?? undefined}
+                    tfLabel={paneTfsRef.current[i].label}
                     onAnchorChange={(t) => setPaneAnchor(i, t)}
                     onBracketChange={moveBracket}
                     onFlatten={closeAll}

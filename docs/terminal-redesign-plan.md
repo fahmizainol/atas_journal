@@ -32,6 +32,7 @@ all of them.
 | 6 | The left tool rail | **Built** — `1799b81` |
 | 6b | Ticket knobs, the dock's opener, the <1100px fold | **Built** — `60e837d` |
 | 7 | Live gets the same layouts | **Built, unverified** |
+| 8 | The design pass — identity block, bar controls, focus, dock | **Built** |
 
 Branch: `feat/terminal-redesign`, **not pushed**. Master is at `ea97845`.
 
@@ -395,6 +396,60 @@ move, not a build — except where noted.
 
 ---
 
+## Phase 8 — the design pass
+
+*After looking at the built thing beside the prototype, four corrections. All four
+are visual/behavioural; none change what an order carries.*
+
+**The pane's identity block.** What the chart is, which bar it draws, where its
+orders route and the bar under the pointer were **three overlays in three
+corners** — the legend top-left, the OHLC readout centred at the top, the routed
+contract nowhere at all. Centred was defensible with one chart; on a four-pane
+grid it put four readouts down the middle of the screen, none of them beside the
+chart it described. They are one block now, top-left, in the order you read it:
+`NQU6 5m → MNQU6` · `O H L C` · `ƒ 9/13` · rows. Drawn as text over the tape with
+a shadow rather than a stack of chips — a chip per row is a second rectangle
+competing with the candles, and with a dozen layers on it is a wall of them.
+
+**The timeframe control.** The Lab's `.radio-group` is a bordered strip with a
+filled accent selection, which is right for a *form* — it reads as one field with
+one answer. On a 36px chart bar it reads as a **button**: a solid violet block
+next to the layout picker and the link toggle, all of which are chrome, and the
+eye goes to it before the tape. On the bar it now loses its box and its fill and
+states the selection the way every other bar control does. Same component, scoped
+with `.chart-topbar`.
+
+**No autofocus.** Focus is claimed by a **press**. Chrome that re-aims itself at
+whatever the pointer brushed past on its way somewhere else is chrome you stop
+trusting — and with a tool rail acting on the focused pane, a hover-claim means
+arming whichever chart your cursor last crossed.
+
+> The seam this opened, and the fix. Focus is really *two* elections: which pane
+> the chrome acts on, and which pane answers keys (`lib/chartFocus`). Making only
+> the first press-only left Escape following the pointer while the rail followed
+> the press — so the rail could arm pane 0 and no Escape would ever reach it.
+> Both are press-only now, and the key handler additionally answers **while the
+> pointer is over the pane**. That is what keeps Space+click working on a pane you
+> have only pointed at, without letting a pass-over move anything.
+
+**The dock's grammar.** The panel had the right controls in the right order; what
+it lacked was a grammar. Flat rows of 12px muted labels on one flat card read as a
+settings form — fine when it was summoned, wrong now it is a column you sit beside
+all session. So the prototype's two levels: the dock is `--card`, and every group
+inside it is a **bordered section on `--bg` with a 10px uppercase title**. The
+depth runs the other way from a normal card — container lighter than contents —
+which is what makes a section read as a well you look into rather than a tile
+stacked on the page.
+
+**Deliberately restyle-only.** Every control and behaviour is untouched. Two class
+names were added (`.sim-sec-t`, `.sim-kinds`) and one inline-styled row became a
+segmented strip; `RoutingPanel`'s 1,409 lines of account tagging, single-use tokens
+and broker reconciliation were not opened. *Not* done, and deliberately: the
+sections were not re-ordered to the prototype's, because the order you reach for
+things by muscle memory is worth more than matching a sketch.
+
+---
+
 ## Open items, not phases
 
 - **The guardrails currently refuse every entry on NQ.** This instance's configured
@@ -417,6 +472,12 @@ move, not a build — except where noted.
   but with the rail also lit there are now two places saying "measuring". That reads fine
   today; if it starts to feel like noise, the banner is the one to drop.
 - **`/charts/live` is unverified.** See phase 7 — three specific things to test by hand.
+  Phase 8 changed what you will *see* there too (the identity block and the dock), so
+  the look wants a glance as well as the behaviour.
+- **The legend restyle reaches the Journal and Lab charts.** `IndicatorLegend` is shared
+  with `CandlestickChart`, so its rows lost their chips everywhere, not only on Charts.
+  Judged right — one legend, one look, and those charts float it over candles for the
+  same reason — but it was not asked for, and `.ws-charts` would fence it if wanted.
 - **A structural guarantee was traded away.** The context pane used to be un-tradable
   *by construction*. Now the discipline layer is the only thing between a gesture on
   pane 3 and a fill. That was a deliberate call; it is worth re-confirming after real use.
@@ -457,6 +518,15 @@ as well:
 - **Programmatic crosshairs fire no event.** `setCrosshairPosition` passes `skipEvent`,
   so nothing hung off `subscribeCrosshairMove` will run for one. Assert on what the page
   *paints*, not on the subscription firing.
+- **`smoke.mjs`'s "visible range survives the recolour" is flaky.** It compares an
+  ink *silhouette* across two different background baselines (charcoal vs black),
+  so a pixel sitting inside the `isBg` tolerance on one and outside it on the
+  other flips a column. Seen failing once in four runs with no code between the
+  passes and the failure. Re-run before believing it; a real regression there
+  would also fail the round-trip assertion beside it, which shares the probe.
+- **Never run two browser checks at once.** They drive the same dev server and
+  the same `localStorage`, and the second one's setup lands in the middle of the
+  first one's assertions. (And never stash a file a running check is reading.)
 - **A hidden duplicate is still in the DOM.** The in-canvas rail is not rendered when a
   page rail exists precisely because `display: none` left a second
   `button[data-tip^="…"]` and broke a strict-mode locator in `smoke.mjs`.

@@ -150,25 +150,41 @@ try {
   // now, and a second copy of the control on every canvas was chart pixels spent
   // on a second place for the same answer to live.
   const topTf = page.locator(".chart-topbar .radio-group");
-  /** Put the pointer on a pane and leave it there — this is the whole focus
-   *  gesture, and it is what the bar's "pane N" note reads.
+  /** Press a pane. Focus is claimed by a **press**, not by the pointer arriving:
+   *  chrome that re-aims itself at whatever the pointer brushed past on its way
+   *  somewhere else is chrome you stop trusting. (Hovering still lets a pane
+   *  answer keys — that is a separate election, see lib/chartFocus.)
    *
-   *  Right of centre for the same reason spaceClick is: the indicator legend is
-   *  a DOM overlay at the top-LEFT and starts open on pane 0, so on a narrow
-   *  pane a point at 0.5 lands on the legend. Focus still works from there (the
-   *  legend is inside the pane), but the *crosshair* does not move — which made
+   *  Right of centre for the same reason spaceClick is: the legend is a DOM
+   *  overlay at the top-LEFT and starts open on pane 0, so on a narrow pane a
+   *  point at 0.5 lands on it — and the *crosshair* then never moves, which made
    *  the link look broken when it was the aim that was wrong. Two moves, again
    *  because a move to where the pointer already is fires nothing. */
   const focusPane = async (i, fx = 0.78, fy = 0.35) => {
     const box = await page.locator(`.sim-pane[data-pane="${i}"]`).boundingBox();
-    await page.mouse.move(box.x + box.width * fx, box.y + box.height * fy - 30);
-    await page.mouse.move(box.x + box.width * fx, box.y + box.height * fy);
-    await page.waitForTimeout(250);
+    const x = box.x + box.width * fx;
+    const y = box.y + box.height * fy;
+    await page.mouse.move(x, y - 30);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.waitForTimeout(300);
   };
   const focusNote = () => page.locator(".chart-focus-note").textContent();
 
+  // Hovering must NOT focus — that is the behaviour that was taken out.
+  const hoverBox = await page.locator('.sim-pane[data-pane="1"]').boundingBox();
+  await page.mouse.move(hoverBox.x + hoverBox.width * 0.78, hoverBox.y + hoverBox.height * 0.3);
+  await page.mouse.move(hoverBox.x + hoverBox.width * 0.78, hoverBox.y + hoverBox.height * 0.35);
+  await page.waitForTimeout(400);
+  check(
+    "hovering a pane does not focus it",
+    (await page.locator(".chart-focus-note").textContent())?.includes("1"),
+    `bar says "${(await page.locator(".chart-focus-note").textContent())?.trim()}"`,
+  );
+
   await focusPane(1);
-  check("pointing at a pane focuses it", (await focusNote())?.includes("2"), `bar says "${(await focusNote())?.trim()}"`);
+  check("pressing a pane focuses it", (await focusNote())?.includes("2"), `bar says "${(await focusNote())?.trim()}"`);
   check(
     "the focus ring is on that pane and no other",
     (await page.locator(".sim-pane.focused").count()) === 1 &&

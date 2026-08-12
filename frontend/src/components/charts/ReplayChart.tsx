@@ -347,6 +347,13 @@ interface Props {
    *  is not the contract the tape is on (NQ tape, MNQ orders). Drawn as a badge,
    *  because "where would a click on this chart send" must never be a guess. */
   routedTo?: string;
+  /** What to call this chart on its legend. The *page* decides — blind replay
+   *  hands over a masked name on purpose — so the chart never reads it off the
+   *  tape itself. */
+  symbol?: string;
+  /** Which bar this pane is drawing ("5m"), for the same line. The chart is
+   *  handed its bars already bucketed and has no other way to know. */
+  tfLabel?: string;
   /** What this pane's hand-tools are doing, whenever it changes — what a
    *  page-level rail lights up from. Offered, the chart takes its own in-canvas
    *  rail down: the two would be the same buttons twice, and only one of them
@@ -684,6 +691,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     linked = true,
     onLinkedChange,
     routedTo,
+    symbol,
+    tfLabel,
     onToolsChange,
     onFocus,
     onReady,
@@ -1771,10 +1780,15 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       );
     };
     const onKey = (e: KeyboardEvent) => {
-      // Not this pane's keypress. With one chart on the page this is never true
-      // (a lone pane holds the keyboard from mount), so nothing about the
-      // single-chart behaviour is conditional on the pointer being anywhere.
-      if (!hasChartFocus(paneId)) return;
+      // Not this pane's keypress. Two ways it can be: this pane holds the
+      // keyboard (it was the last one pressed), or the pointer is on it right
+      // now. The second clause is what makes Space+click work on a pane you have
+      // only hovered — and, more importantly, what keeps Escape honest: the rail
+      // arms the *pressed* pane, so an Escape that only ever reached the hovered
+      // one would leave a tool armed with nothing on screen able to cancel it.
+      // With one chart on the page both are always true, so nothing about the
+      // single-chart behaviour changed.
+      if (!hasChartFocus(paneId) && !overRef.current) return;
       if (e.key === "Escape") {
         const armed =
           armedRef.current ||
@@ -2211,10 +2225,11 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       const el = ohlcRef.current;
       if (!el) return;
       const bars = barsRef.current;
-      // Hidden while a placement banner owns the same corner — two rows of
-      // chips in one spot would cover each other exactly when the price under
-      // the pointer matters most.
-      if (i < 0 || i >= bars.length || spaceRef.current || orderArmedRef.current) {
+      // It used to hide while a placement banner was up, because the two shared
+      // the top-left corner. They no longer do (the banner is centred, this is
+      // in the legend), and the bar under the pointer is exactly what you want
+      // to read while choosing a price — so it stays.
+      if (i < 0 || i >= bars.length) {
         el.style.display = "none";
         return;
       }
@@ -2704,9 +2719,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       guardCtx(true);
       // A press is the firmest claim on the keyboard there is. `onEnter` has
       // usually made it already, but not on a touchscreen — a finger arrives at
-      // pointerdown with no enter before it.
+      // pointerdown with no enter before it. The page's focus is claimed by the
+      // root's own handler, which covers the overlays this one never sees.
       focusChart(paneId);
-      onFocusRef.current?.();
       const x = xOf(e);
       const idx = idxAtX(x);
       if (idx == null) return;
@@ -3191,10 +3206,14 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // down — so only entry and exit are tracked, not the modifier itself.
     const onEnter = () => {
       overRef.current = true;
-      // Reaching a pane with the pointer is enough to make its keyboard yours —
-      // the same standard the Space modifier already held itself to.
-      focusChart(paneId);
-      onFocusRef.current?.();
+      // Deliberately no focus claim of any kind. Focus — the ring, the rail, the
+      // timeframe control, and which pane owns the keyboard — is claimed by a
+      // *press*: chrome that re-aims itself at whatever the pointer brushed past
+      // on its way somewhere else is chrome you stop trusting.
+      //
+      // Hovering still lets a pane answer keys (see the key handler's `over`
+      // clause). That is what keeps Space+click working on a pane you have only
+      // pointed at, without letting a pass-over move anything.
     };
     const onLeave = () => {
       overRef.current = false;
@@ -4099,6 +4118,12 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   return (
     <div
       ref={rootRef}
+      // A press anywhere in the pane claims the page's focus — the canvas, the
+      // legend, a badge, the ◎. On the root rather than on the canvas because
+      // the overlays are siblings of it, and "I clicked this pane" should not
+      // depend on which part of it you happened to hit. Capture phase, so a
+      // control that stops propagation still hands focus over first.
+      onPointerDownCapture={() => onFocusRef.current?.()}
       style={{
         position: "relative",
         width: "100%",
@@ -4118,8 +4143,12 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           style={{
             position: "absolute",
             top: 8,
-            // Beside the tool rail, which owns this corner now.
-            left: "calc(14px + var(--chart-rail, 36px))",
+            // Top-centre — the spot the OHLC readout vacated when it moved into
+            // the legend. The top-left corner is the pane's identity block now,
+            // and a transient must not cover the thing that says which chart
+            // you are about to place an order on.
+            left: "50%",
+            transform: "translateX(-50%)",
             zIndex: 3,
             display: "flex",
             gap: 8,
@@ -4164,10 +4193,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           <span style={{ color: palette.muted }}>— now tap a price</span>
         </div>
       )}
-      {/* The crosshair readout — filled in imperatively, see the
-          subscribeCrosshairMove block. Same corner as the placement banners,
-          which is why those hide it while they are up. */}
-      <div ref={ohlcRef} className="chart-ohlc" />
+      {/* The crosshair readout lives inside the legend now (one identity block,
+          top-left) — see IndicatorLegend and the `ohlcRef` handed to it. */}
       {/* A price line was just crossed. Centred rather than cornered: it is the
           one transient here that can fire while you are looking anywhere. */}
       {alertFlash && (
@@ -4388,6 +4415,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         onToggle={toggle}
         appearance={appearanceSettings(appearance, changeAppearance)}
         prefsPane={prefsPane}
+        symbol={symbol}
+        tfLabel={tfLabel}
+        routedTo={routedTo}
+        ohlcRef={ohlcRef}
       />
     </div>
   );

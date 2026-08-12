@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type Ref } from "react";
 import { loadLegendOpen, saveLegendOpen } from "../../lib/chartPrefs";
 import { IndicatorSettings, type IndicatorSettingsSpec } from "./IndicatorSettings";
 
@@ -158,16 +158,41 @@ type PanelKey = IndicatorKey | typeof APPEARANCE;
 // and a "…" on the rows that have something to tune. The whole list collapses
 // behind its header so it can get out of the chart's way — handy on a phone,
 // where the expanded list can cover much of the frame.
+//
+// It is also the pane's whole identity block. What the chart is, which bar it is
+// drawing, where its orders route and the bar under the pointer used to be three
+// separate overlays in three corners — the readout was centred at the top, which
+// on a four-pane grid meant four readouts down the middle of the screen and none
+// of them next to the chart they described. One block, top-left, in the order you
+// read it: what · when · how deep.
 export function IndicatorLegend({
   items,
   visibility,
   onToggle,
   appearance,
   prefsPane,
+  symbol,
+  tfLabel,
+  routedTo,
+  ohlcRef,
 }: {
   items: LegendItem[];
   visibility: Record<IndicatorKey, boolean>;
   onToggle: (key: IndicatorKey) => void;
+  /** What this chart is. The *page* decides what to call it — blind replay hands
+   *  over a masked name on purpose — so this is a string, not a session. */
+  symbol?: string;
+  /** Which bar it is drawing ("5m"). */
+  tfLabel?: string;
+  /** The contract this pane's orders would route to, when that is not the one on
+   *  the tape. Repeated from the top-right badge deliberately: this line is what
+   *  you read to answer "what am I looking at", and where an order would go is
+   *  part of that answer. */
+  routedTo?: string;
+  /** The crosshair readout's element. Owned by the chart, which writes it
+   *  imperatively on every crosshair move (a React render per pixel is not a
+   *  thing to do), and only *positioned* here. */
+  ohlcRef?: Ref<HTMLDivElement>;
   /** The chart's own colours, hung off the list's header rather than off a row —
    *  it is the one setting here that belongs to the whole chart instead of to a
    *  layer. Optional: a chart that doesn't own its surface omits it and the
@@ -214,7 +239,7 @@ export function IndicatorLegend({
     };
   }, [settingsFor]);
 
-  if (items.length === 0 && !appearance) return null;
+  if (items.length === 0 && !appearance && !symbol) return null;
   // A row switched off by its own setting doesn't count as shown, whatever its
   // eye says: the count is "how much of this is on the chart".
   const shown = items.filter((it) => visibility[it.key] && !it.dim).length;
@@ -229,6 +254,19 @@ export function IndicatorLegend({
   const appearanceOpen = settingsFor === APPEARANCE;
   return (
     <div className={`chart-legend${settingsFor ? " settings-open" : ""}`}>
+      {symbol && (
+        <div className="chart-legend-id">
+          <span className="sym">{symbol}</span>
+          {tfLabel && <span className="tf">{tfLabel}</span>}
+          {routedTo && (
+            <span className="route" title={`Orders from this chart route to ${routedTo}`}>
+              → {routedTo}
+            </span>
+          )}
+        </div>
+      )}
+      {/* Written imperatively by the chart — see its subscribeCrosshairMove. */}
+      <div ref={ohlcRef} className="chart-ohlc" />
       <div className="chart-legend-item" data-ind-item={APPEARANCE}>
         <button
           className={`chart-legend-row chart-legend-head${appearance ? " has-dots" : ""}`}
@@ -236,12 +274,11 @@ export function IndicatorLegend({
           aria-expanded={open}
           title={open ? "Hide the indicator list" : "Show the indicator list"}
         >
-          <LayersIcon />
-          <span>Indicators</span>
-          <span className="chart-legend-count">
-            {shown}/{items.length}
-          </span>
           <Chevron open={open} />
+          <LayersIcon />
+          <span className="chart-legend-count">
+            <b>{shown}</b>/{items.length}
+          </span>
         </button>
         {appearance && (
           <button

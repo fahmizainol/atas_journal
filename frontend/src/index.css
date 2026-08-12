@@ -613,6 +613,46 @@ button:disabled {
   background: var(--bg);
   color: var(--text);
 }
+/* ---- the chart bar's copy of the same control ----
+   The Lab's radio groups are a bordered strip with a filled accent selection,
+   which is right for a form: it reads as one field with one answer. On a 36px
+   chart bar it reads as a *button* — a solid violet block sitting next to the
+   layout picker and the link toggle, all of which are chrome — and the eye goes
+   to it before the tape. So on the bar the group loses its box and its fill, and
+   the selection is stated the way every other bar control states itself: a
+   quiet inset chip. Same markup, same component; scoped to `.chart-topbar` so
+   nothing else in the app moves. */
+.chart-topbar .radio-group {
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  gap: 2px;
+}
+.chart-topbar .radio-group button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  padding: 4px 9px;
+  font-size: 12px;
+  line-height: 18px;
+}
+.chart-topbar .radio-group button:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+.chart-topbar .radio-group button.active {
+  background: var(--bg-2);
+  color: var(--text);
+  border-color: var(--card-border);
+}
+/* The ⋯ is a disclosure, not a choice, so it never takes the selected chip —
+   only the "this is open" tint. */
+.chart-topbar .radio-group button.tf-more.active {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
 .tf-wrap {
   position: relative;
   display: inline-flex;
@@ -652,51 +692,94 @@ button:disabled {
    is empty space that was still hit-testing as the legend. On a narrow chart it
    reaches across the tool buttons and swallows their clicks. Only the chips are
    clickable; the column they sit in is just a layout box. */
+/* ---- the pane's identity block ----
+   Everything that answers "what am I looking at": the contract, the bar size,
+   where an order here would route, the bar under the pointer, and the layers
+   that are on. One block in one corner.
+
+   It used to be three overlays in three places — the legend top-left, the OHLC
+   readout centred at the top, the routed contract nowhere at all. Centred was
+   defensible with one chart; on a four-pane grid it put four readouts down the
+   middle of the screen, none of them beside the chart it described.
+
+   Drawn as text over the tape rather than as a stack of chips. A chip per row is
+   a second rectangle competing with the candles, and with a dozen layers on it
+   is a wall of them — so the rows carry a text-shadow for legibility and take a
+   background only under the pointer, which is when they are a control rather
+   than a reading. */
 .chart-legend {
   position: absolute;
-  top: 8px;
+  top: 7px;
   /* Beside the tool rail, not under it: both live on this edge and the rail is
-     the one anchored to it. 8px gutter, rail, 6px gutter. */
-  left: calc(14px + var(--chart-rail, 36px));
+     the one anchored to it. With the rail out on the page (--chart-rail: 0) this
+     is simply the pane's own gutter. */
+  left: calc(9px + var(--chart-rail, 36px));
   z-index: 3;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
+  gap: 1px;
   pointer-events: none;
+  text-shadow: 0 1px 3px var(--bg), 0 0 6px var(--bg);
 }
 .chart-legend > * {
   pointer-events: auto;
+}
+/* Line one: what this is. */
+.chart-legend-id {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: nowrap;
+}
+.chart-legend-id .tf {
+  color: var(--muted);
+  font-weight: 500;
+}
+.chart-legend-id .route {
+  color: var(--orange);
+  font-weight: 500;
 }
 .chart-legend-row {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   border: none;
-  border-radius: 6px;
-  background: rgba(14, 17, 23, 0.72);
-  color: var(--text);
-  font-size: 11px;
+  border-radius: 4px;
+  background: transparent;
+  color: #b6bcc9;
+  font-size: 11.5px;
   font-weight: 500;
-  line-height: 1;
-  padding: 4px 8px;
+  line-height: 1.5;
+  padding: 0 4px;
 }
 .chart-legend-row:hover:not(:disabled) {
   border: none;
-  background: rgba(26, 29, 39, 0.95);
+  background: rgba(26, 29, 39, 0.6);
+  color: var(--text);
 }
 .chart-legend-row svg {
   opacity: 0.55;
 }
-/* The collapse toggle at the top of the list: a touch bolder than the rows it
-   controls, with the visible/total count sitting between label and chevron. */
+/* The fold. Deliberately quiet and deliberately small: it is a disclosure, and
+   what you read when the rows are away is the count. */
 .chart-legend-head {
-  font-weight: 600;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
 }
 .chart-legend-count {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
+}
+.chart-legend-count b {
+  color: #b6bcc9;
+  font-weight: 600;
 }
 .chart-legend-row.off {
   color: var(--muted);
@@ -728,23 +811,29 @@ button:disabled {
   z-index: 5;
 }
 .chart-legend-row.has-dots {
-  border-radius: 6px 0 0 6px;
+  border-radius: 4px;
+  padding-right: 2px;
 }
+/* The "…" beside a row. It used to be the right half of a two-part chip; with the
+   rows drawn as plain text there is no chip to be half of, so it is a quiet glyph
+   that lights on hover like the row does. Its own hairline would be a border
+   around nothing. */
 .chart-legend-dots {
   display: inline-flex;
   align-items: center;
   border: none;
-  border-radius: 0 6px 6px 0;
-  background: rgba(14, 17, 23, 0.72);
-  color: var(--text);
-  padding: 4px 6px;
-  /* The hairline that makes one chip read as two targets. */
-  box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 3px;
+  opacity: 0.7;
 }
 .chart-legend-dots:hover:not(:disabled),
 .chart-legend-dots[aria-expanded="true"] {
   border: none;
-  background: rgba(26, 29, 39, 0.95);
+  background: rgba(26, 29, 39, 0.6);
+  color: var(--text);
+  opacity: 1;
 }
 .chart-legend-dots svg {
   opacity: 0.55;
@@ -1054,27 +1143,24 @@ button:disabled {
    until the
    crosshair is over a bar (display is driven imperatively), and
    pointer-events: none throughout: it is a reading, never a target. */
+/* Line two: the bar under the pointer. Inside the legend now, so it sits under
+   the identity line instead of in the middle of the top edge. `display:none` is
+   the resting state — the chart turns it on from its crosshair handler. */
 .chart-ohlc {
-  position: absolute;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
   z-index: 3;
   display: none;
-  gap: 8px;
-  padding: 5px 9px;
-  border-radius: 6px;
-  background: rgba(14, 17, 23, 0.86);
-  border: 1px solid var(--card-border);
-  font-size: 11px;
-  line-height: 1;
-  font-family: monospace;
+  gap: 7px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
   color: var(--muted);
+  white-space: nowrap;
   pointer-events: none;
   white-space: nowrap;
 }
 .chart-ohlc b {
-  font-weight: 600;
+  color: #b6bcc9;
+  font-weight: 500;
 }
 .chart-ohlc .up {
   color: #21c07a;
@@ -3650,6 +3736,116 @@ button:disabled {
     box-shadow: -8px -8px 30px rgba(0, 0, 0, 0.45);
   }
 }
+/* ---- the dock's own visual language ------------------------------------
+   The panel holds the right controls in the right order already; what it did not
+   have was a *grammar*. Flat rows of 12px muted labels on one flat card read as
+   a settings form — fine when it was a thing you summoned, wrong now that it is
+   a column you sit beside all session.
+
+   So the prototype's: the dock is `--card`, and every group inside it is a
+   bordered section on `--bg` with a 10px uppercase title. Two levels, and the
+   depth runs the other way from a normal card — the container is lighter than
+   its contents — which is what makes a section read as a *well* you look into
+   rather than a tile stacked on the page.
+
+   Deliberately CSS-only apart from two class names (`.sim-sec-t`, `.sim-kinds`).
+   RoutingPanel is 1,409 lines of account tagging, single-use tokens and broker
+   reconciliation; nothing in here may change what an order carries. */
+.sim-panel {
+  /* Sections need air between them or the borders read as one long ruled list.
+     Zero at the top, because the grab bar is full-bleed and sticky. */
+  padding: 0 9px 10px;
+  gap: 9px;
+}
+.sim-grab {
+  /* Full-bleed again now that the panel has side padding. */
+  margin: 0 -9px;
+}
+.sim-panel .sim-card,
+.sim-panel .panel {
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  padding: 8px 9px;
+  margin: 0;
+}
+/* A section title. 10px uppercase with letter-spacing, so it labels without
+   competing — the numbers under it are the thing being read. */
+.sim-sec-t {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+/* The part of a title that is a reading rather than a name — a count, a total —
+   keeps its case and sits at the right end. */
+.sim-sec-t .r {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  font-weight: 500;
+}
+.sim-panel .panel h3 {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+/* Fields sit *inside* a section, so they take the container's colour — the
+   inverse of the usual arrangement, and what keeps a boxed input from reading as
+   a third level of nesting. */
+.sim-panel input,
+.sim-panel select {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  padding: 3px 7px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.sim-panel input[type="checkbox"] {
+  padding: 0;
+}
+/* A segmented picker: order type on Replay, and the same on Live's pad. One
+   inset strip rather than three filled buttons — the accent fill made "Market"
+   the loudest thing in the dock, and which order type you are on is not the
+   question the dock exists to answer. */
+.sim-kinds {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 7px;
+}
+.sim-kinds button {
+  flex: 1;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: capitalize;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.sim-kinds button:hover {
+  color: var(--text);
+}
+.sim-kinds button.on {
+  background: var(--bg-2);
+  color: var(--text);
+}
+
 /* While a finger is on the grab bar the sheet tracks it exactly; the snap-back
    after letting go is what the transition is for. */
 .sim-panel.dragging {

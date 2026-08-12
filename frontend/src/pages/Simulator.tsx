@@ -2587,6 +2587,10 @@ export function Simulator() {
               }
               onFocus={() => setFocus(0)}
               onToolsChange={(s) => reportTools(0, s)}
+              // The legend's identity line. Blind replay masks the date, not the
+              // instrument — you are told what you are trading, never when.
+              symbol={sel ? (hidden ? root : sel.symbol) : root}
+              tfLabel={tf.label}
               onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
               onFlatten={closeManual}
@@ -2750,6 +2754,8 @@ export function Simulator() {
                     }
                     onFocus={() => setFocus(i)}
                     onToolsChange={(s) => reportTools(i, s)}
+                    symbol={sel ? (hidden ? root : sel.symbol) : root}
+                    tfLabel={paneTfsRef.current[i].label}
                     onAnchorChange={(t) => setPaneAnchor(i, t)}
                     onBracketChange={moveBracket}
                     onFlatten={closeManual}
@@ -3021,20 +3027,14 @@ export function Simulator() {
                 </div>
               )}
             </div>
-            <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+            <div className="sim-kinds" style={{ marginTop: 10 }}>
               {(["market", "limit", "stop"] as OrderType[]).map((t) => (
                 <button
                   key={t}
                   type="button"
                   onClick={() => chooseType(t)}
-                  style={{
-                    ...btn(orderType === t ? palette.accent : palette.bg2),
-                    flex: 1,
-                    padding: "6px 0",
-                    fontSize: 12,
-                    textTransform: "capitalize",
-                    color: orderType === t ? "#fff" : palette.muted,
-                  }}
+                  className={orderType === t ? "on" : ""}
+                  aria-pressed={orderType === t}
                 >
                   {t}
                 </button>
@@ -3193,17 +3193,20 @@ export function Simulator() {
               on every flat session would just be furniture. */}
           {working.length > 0 && (
             <div className="sim-card">
-              <div style={{ color: palette.muted, fontSize: 12, marginBottom: 6 }}>
-                Working · {working.length}
-                {working.length > 1 && (
-                  <span
-                    style={{ opacity: 0.7 }}
-                    title="Orders placed while flat are one OCO set. Orders placed while a position is open stand on their own — they scale in, scale out or flip."
-                  >
-                    {" "}
-                    · placed flat, they cancel each other
-                  </span>
-                )}
+              <div className="sim-sec-t">
+                Working
+                <span className="r">
+                  {working.length}
+                  {working.length > 1 && (
+                    <span
+                      style={{ opacity: 0.7 }}
+                      title="Orders placed while flat are one OCO set. Orders placed while a position is open stand on their own — they scale in, scale out or flip."
+                    >
+                      {" "}
+                      · one OCO set
+                    </span>
+                  )}
+                </span>
               </div>
               {working.map((o) => (
                 <div
@@ -3345,9 +3348,10 @@ export function Simulator() {
           )}
 
           <div className="sim-card sim-blotter">
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, flex: "none", gap: 6, alignItems: "center" }}>
-              <span style={{ color: palette.muted, fontSize: 12 }}>
-                Blotter · {trades.length} trades · {wins}W
+            <div className="sim-sec-t" style={{ flex: "none" }}>
+              Blotter
+              <span className="r">
+                {trades.length} trades · {wins}W
               </span>
               {/* Only once there is something to end. Ending is explicit here
                   and automatic at the end of the tape — both close the sitting
