@@ -21,7 +21,7 @@
 // simulation, not here.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { ReplayChart, type ReplayChartHandle } from "../components/charts/ReplayChart";
 import type { IndicatorSettingsMap } from "../components/charts/IndicatorLegend";
 import { buildChartKnobs } from "../components/charts/indicatorKnobs";
@@ -47,8 +47,10 @@ import {
 import { useReplayAttempt } from "../hooks/useReplayAttempt";
 import { useReplayAccount } from "../hooks/useReplayAccount";
 import { AccountChip, AccountNotice, AccountRecap } from "../components/charts/ReplayAccount";
-import { useReplayAttemptDetail, type AttemptDetail } from "../hooks/useReplays";
+import { useFileReview, useReplayAttemptDetail, type AttemptDetail } from "../hooks/useReplays";
 import { clearResume, loadResume, saveResume, type ResumePoint } from "../lib/replayResume";
+import { clearReview, loadReview } from "../lib/replayReview";
+import { ReviewPanel } from "../components/charts/ReviewPanel";
 import {
   concatTapes,
   ReplayEngine,
@@ -64,6 +66,7 @@ import { showsSeconds, timeframeById, TIMEFRAMES, TF_OPTIONS } from "../lib/time
 import {
   newLog,
   newSim,
+  rebaseLog,
   runSim,
   shiftLog,
   stepSim,
@@ -121,7 +124,7 @@ import {
   isReducing,
   shapeRefusal,
 } from "../lib/guardRules";
-import { fmtWait, remainingMs } from "../lib/replayAccount";
+import { fmtWait, remainingMs, type ReviewItem } from "../lib/replayAccount";
 import { useGuardLevels } from "../hooks/useRouting";
 import type { GuardLevels } from "../lib/routingTypes";
 import { palette } from "../theme";
@@ -224,6 +227,61 @@ export function Simulator() {
   const resumeSettled = !pending?.attemptId || resumeQ.isSuccess || resumeQ.isError;
   const resumeDetailRef = useRef<AttemptDetail | null>(null);
   resumeDetailRef.current = resumeQ.data ?? null;
+
+  // --- review mode ----------------------------------------------------------
+  // The page opened to *look at* a sitting rather than to trade one: the tape,
+  // the log and every level that was on the chart at the time, with the recorder
+  // off and the order paths refusing. Entered from the history page, which
+  // leaves a marker (lib/replayReview) beside the ordinary resume point.
+  //
+  // The marker is not trusted on its own. Review mode holds only while the
+  // attempt it names still *owes* one and the session on screen is the session
+  // it happened on — so a stale marker, a sitting reviewed in another tab, or a
+  // day picked by hand all drop the page back to an ordinary replay rather than
+  // leaving it inertly read-only.
+  const [reviewMark, setReviewMark] = useState(loadReview);
+  // Same query key as the resume fetch above when they name the same attempt,
+  // so this is one request, not two.
+  const reviewQ = useReplayAttemptDetail(reviewMark?.attemptId ?? null);
+  const reviewDetail = reviewQ.data ?? null;
+  const reviewFlags = reviewDetail?.flags ?? [];
+  const reviewing =
+    !!reviewMark &&
+    reviewDetail?.status === "finished" &&
+    reviewFlags.length > 0 &&
+    sel?.symbol === reviewDetail.symbol &&
+    sel?.date === reviewDetail.date;
+  // Read inside the tape build and inside `placeOrder`, both of which run
+  // outside the render that decided it.
+  const reviewingRef = useRef(reviewing);
+  reviewingRef.current = reviewing;
+
+  const navigate = useNavigate();
+  const fileReview = useFileReview();
+  /** File the verdicts and leave.
+   *
+   *  Leaving is not tidiness. The reviewed sitting is `reviewed` now, and
+   *  resuming into it would put it back to `active` — which withdraws the review
+   *  that was just filed (see `journal.replays.save`). So the bookmark goes with
+   *  the marker, and the way on from here is a new sitting. */
+  const submitReview = useCallback(
+    (items: ReviewItem[]) => {
+      const id = reviewMark?.attemptId;
+      if (!id) return;
+      fileReview.mutate(
+        { id, items },
+        {
+          onSuccess: () => {
+            clearReview();
+            setReviewMark(null);
+            clearResume();
+            navigate("/charts/replay/history");
+          },
+        },
+      );
+    },
+    [fileReview, navigate, reviewMark],
+  );
 
   /** Start somewhere else on purpose — 🎲, or a day picked by hand. The
    *  bookmark is a record of where you were, so a decision to be elsewhere
@@ -1650,7 +1708,17 @@ export function Simulator() {
           // a different number of context days has to re-base every cursor in
           // the log — the same correction the `shift` branch below makes when
           // the day count changes mid-replay.
-          log: usable ? shiftLog(d.log, ctxTicks - bookmark.contextTicks) : newLog(),
+          // Reviewing: rebase every cursor off its own timestamp instead.
+          // Nothing recorded how many context days were glued in front of the
+          // log when it was written, and the history page — which is where a
+          // review is started from — has no way to know. `ms` is the primary
+          // record and `idx` is an index into a reading choice, so the search
+          // is exact where the arithmetic would be a guess.
+          log: !usable
+            ? newLog()
+            : reviewingRef.current
+              ? rebaseLog(d.log, tape)
+              : shiftLog(d.log, ctxTicks - bookmark.contextTicks),
           detail: usable ? d : null,
         };
       }
@@ -1711,7 +1779,12 @@ export function Simulator() {
       // is what tells the recorder. Until this call the recorder is still aimed
       // at the session before this one, and a resumed log arriving there would
       // be written against the wrong day.
-      armAttempt({
+      // Never in review mode. Not "armed but refusing" — unarmed, so the
+      // recorder's own flush returns early on a missing context and there is no
+      // path at all from this page to a write. A read-only mode whose safety
+      // depends on every caller remembering is one write away from overwriting
+      // the sitting it was opened to examine.
+      if (!reviewingRef.current) armAttempt({
         symbol: data.symbol,
         root: data.root,
         date: data.date,
@@ -1729,7 +1802,7 @@ export function Simulator() {
       // a second one on the same day — which the history page would read,
       // correctly by its own rules and wrongly in fact, as a re-run of a session
       // you had already seen the end of.
-      const d = resumed?.detail;
+      const d = reviewingRef.current ? null : resumed?.detail;
       if (d) {
         adoptAttempt(d, {
           log: logRef.current,
@@ -1837,6 +1910,17 @@ export function Simulator() {
       // would teach the one habit nobody wants. Skipped wholesale when
       // `REPLAY_GUARDRAILS` is off — the strip still says what the rules would
       // have said, it just does not stand in the way.
+      // Review mode. First, above even the account: this sitting already
+      // happened, and the one thing a review must not be able to do is change
+      // what it is reviewing.
+      if (reviewingRef.current) {
+        setRefused(
+          "this is a review, not a sitting — the trades below already happened and nothing " +
+            "here can add to them. File the verdicts and the next sitting opens.",
+        );
+        playCue("canceled");
+        return;
+      }
       const reducing = isReducing(openRef.current, side, size);
       // The account comes first, and it comes *outside* `guardsOn`: the
       // guardrails are rules under test and the switch is what makes them
@@ -3138,7 +3222,10 @@ export function Simulator() {
             beside it is what opens and pins it. The collapsed "Last / Ticket ▴"
             face it used to carry on a phone is gone: the rail button is the
             opener now, and the market buttons already quote the last price. */}
-        <div ref={panelRef} className={`sim-panel${sheetOpen ? " open" : ""}`}>
+        {/* Open by force while reviewing — the panel *is* the review, and a
+            page that opened to make you look at something should not open with
+            it hidden behind a button. */}
+        <div ref={panelRef} className={`sim-panel${sheetOpen || reviewing ? " open" : ""}`}>
           {/* Sticky, so it stays grabbable however far the ticket below it has
               been scrolled. Hidden when pinned — a column in normal flow has
               nowhere to be dragged to. */}
@@ -3160,6 +3247,31 @@ export function Simulator() {
           >
             <span />
           </div>
+          {/* The forced review, in the panel the ticket would be in — the point of
+              reviewing here rather than on a page of its own is that it happens
+              *against the tape*, with the chart on the moment in question and
+              every level that was on it at the time. */}
+          {reviewing && reviewMark && (
+            <ReviewPanel
+              attemptId={reviewMark.attemptId}
+              flags={reviewFlags}
+              onSeek={(ms) => {
+                // 1x, because the sixty seconds in front of a flagged decision
+                // are the whole content of looking at it again. At 30x they are
+                // two seconds and there is nothing to see.
+                setSpeed(1);
+                seekTo(ms);
+              }}
+              onFile={submitReview}
+              filing={fileReview.isPending}
+              error={fileReview.error instanceof Error ? fileReview.error.message : null}
+            />
+          )}
+
+          {/* The ticket goes away entirely while reviewing. A BUY/SELL pad that
+              refuses every press is the shape of a broken page, and the refusal
+              on the order paths is a backstop rather than the explanation. */}
+          {!reviewing && (
           <div className="sim-card sim-ticket">
             {/* Which contract these gestures are sent to, at the head of the
                 ticket — the row Live carries in the same place, laid out the
@@ -3480,7 +3592,7 @@ export function Simulator() {
                 </button>
               </div>
             )}
-          </div>
+          </div>)}
 
           {/* Working orders. Only there when something is resting — an empty box
               on every flat session would just be furniture. */}

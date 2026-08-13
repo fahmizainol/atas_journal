@@ -279,7 +279,9 @@ export function useReplayAttempt() {
     dirtyRef.current = false;
     sigRef.current = sig(st.log, st.trades);
     setAttempt(rec);
-    setStatus(rec.status === "finished" ? "finished" : "active");
+    // `reviewed` is a finished sitting with its flags answered — see
+    // journal.replay_account. The recorder only cares that it is over.
+    setStatus(rec.status === "finished" || rec.status === "reviewed" ? "finished" : "active");
     setSummary(
       summarize(st.trades, st.log, {
         rewinds: st.rewinds,

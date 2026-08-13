@@ -17,7 +17,7 @@
 // only" toggle is the honest cut, one click away.
 
 import { Fragment, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { KpiGrid } from "../components/KpiGrid";
 import {
   useDeleteReplayAttempt,
@@ -26,6 +26,8 @@ import {
   type AttemptRow,
 } from "../hooks/useReplays";
 import { MIN_SAMPLE, pool } from "../lib/replayStats";
+import { saveResume } from "../lib/replayResume";
+import { saveReview } from "../lib/replayReview";
 import { palette, toneOf } from "../theme";
 
 const fmtUsd = (v: number | null | undefined) =>
@@ -137,6 +139,7 @@ function AttemptTrades({ id }: { id: string }) {
 export function ReplayHistory() {
   const q = useReplayAttempts();
   const del = useDeleteReplayAttempt();
+  const navigate = useNavigate();
   const [cleanOnly, setCleanOnly] = useState(false);
   const [includeUnfinished, setIncludeUnfinished] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
@@ -146,7 +149,10 @@ export function ReplayHistory() {
   const sample = useMemo(
     () =>
       all.filter((a) => {
-        if (!includeUnfinished && a.status !== "finished") return false;
+        // `reviewed` is a finished sitting that has also been answered for —
+        // dropping it here would empty the sample of exactly the sittings that
+        // went through the account's own process.
+        if (!includeUnfinished && a.status !== "finished" && a.status !== "reviewed") return false;
         if (cleanOnly && !isClean(a)) return false;
         // An attempt with no trades in it says nothing about anything.
         return (a.summary?.trades ?? 0) > 0;
@@ -296,10 +302,20 @@ export function ReplayHistory() {
                         {a.date} · {a.symbol}
                       </td>
                       <td style={{ whiteSpace: "nowrap", fontSize: 11 }}>
-                        {a.status !== "finished" && (
-                          <span style={{ color: palette.muted }} title="Never ended — the tail is missing">
-                            {a.status}{" "}
+                        {a.status === "finished" && (a.flags?.length ?? 0) > 0 ? (
+                          <span
+                            style={{ color: palette.orange }}
+                            title={`${a.flags!.length} flag(s) still to answer. The account will not open another sitting until they are.`}
+                          >
+                            review owed{" "}
                           </span>
+                        ) : (
+                          a.status !== "finished" &&
+                          a.status !== "reviewed" && (
+                            <span style={{ color: palette.muted }} title="Never ended — the tail is missing">
+                              {a.status}{" "}
+                            </span>
+                          )
                         )}
                         {!isClean(a) && (
                           <span
@@ -332,7 +348,40 @@ export function ReplayHistory() {
                       <td style={{ color: palette.muted, fontSize: 12, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {a.note}
                       </td>
-                      <td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        {/* The way into the forced review. It hands the
+                            Simulator a bookmark and a marker (lib/replayReview)
+                            and gets out of the way — the review itself happens
+                            against the tape, which is the only place the levels
+                            that were on the chart at the time still exist. */}
+                        {a.status === "finished" && (a.flags?.length ?? 0) > 0 && (
+                          <button
+                            type="button"
+                            data-review-open={a.id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              saveResume({
+                                symbol: a.symbol,
+                                date: a.date,
+                                // From the top of the sitting. The panel seeks to
+                                // each flag from there; arriving at one with no
+                                // idea what led to it is the review this replaces.
+                                clockMs: a.started_ms,
+                                attemptId: a.id,
+                                // Unknown, and unused: review mode rebases every
+                                // cursor off its own timestamp instead (see
+                                // replaySim.rebaseLog).
+                                contextTicks: 0,
+                              });
+                              saveReview({ attemptId: a.id });
+                              navigate("/charts/replay");
+                            }}
+                            title={`Review this sitting — ${a.flags!.length} flag(s) to answer`}
+                            style={{ fontSize: 11, marginRight: 6, cursor: "pointer" }}
+                          >
+                            review
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={(e) => {

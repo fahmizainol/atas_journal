@@ -1022,6 +1022,25 @@ export function shiftLog(log: Log, delta: number): Log {
   return { ...log, orders: log.orders.map((o) => ({ ...o, idx: o.idx + delta })) };
 }
 
+/**
+ * Recompute every order's cursor from its timestamp, against this tape.
+ *
+ * `shiftLog` is the cheap correction and needs to know how far the tape moved.
+ * This is the one that doesn't: it is the "fall back to replaying by timestamp"
+ * the `journal.replays` docstring promises, for the case where the offset is not
+ * knowable — reopening a stored attempt from the history page, where nothing
+ * recorded how many context days were glued in front of it when the log was
+ * written.
+ *
+ * Safe because `ms` is the primary record and `idx` is an index into a tape that
+ * is a client-side reading choice. A binary search per order, over a few hundred
+ * orders at the very most.
+ */
+export function rebaseLog(log: Log, tape: Tape): Log {
+  if (!log.orders.length) return log;
+  return { ...log, orders: log.orders.map((o) => ({ ...o, idx: upperBound(tape, o.ms) })) };
+}
+
 /** Drop from the log everything that hadn't happened yet at `clock`. */
 export function truncateLog(log: Log, clock: number): Log {
   return {

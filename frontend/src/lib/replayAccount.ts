@@ -27,6 +27,17 @@ export interface ReplayFlag {
   reasons: string[];
 }
 
+/** The only two answers that change anything afterwards. Not a grading scale:
+ *  a flag you can neither defend nor call a mistake is one you have not looked
+ *  at, and there is no third button for that. */
+export type Verdict = "leak" | "justified";
+
+export interface ReviewItem {
+  flag_idx: number;
+  verdict: Verdict;
+  note: string;
+}
+
 export type AccountStatus = "live" | "blown" | "cooldown" | "can_reset";
 
 export interface AccountView {
