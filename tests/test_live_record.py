@@ -625,6 +625,79 @@ def test_missing_credentials_name_the_variable_that_is_actually_missing(monkeypa
     assert "RITHMIC_URL" not in str(e.value)
 
 
+# --- aggregated quotes ------------------------------------------------------
+
+
+_CREDS = dict(user="u", password="p", system_name="Rithmic Test",
+              url="host:443", app_name="a", app_version="0.1")
+
+
+def _login_request(client, plant: str):
+    """The RequestLogin that plant would send, built without a socket."""
+    from async_rithmic.enums import SysInfraType
+
+    return client.plants[plant]._build_request(
+        template_id=10, template_version="3.9", user="u", password="p",
+        system_name="Rithmic Test", app_name="a", app_version="0.1",
+        infra_type=getattr(SysInfraType, f"{plant.upper()}_PLANT"))
+
+
+def test_the_login_asks_for_prints_unless_the_variable_is_set(monkeypatch):
+    """Off is the default, and it is the default that matters.
+
+    Everything downstream reads the tape as prints — big-lot detection, the fill
+    model's queue estimate, any size distribution off a recorded session. An
+    aggregated row is one row standing for several trades, so a connection that
+    quietly turned this on would not fail; it would just answer differently.
+    """
+    from journal import config as cfgmod
+    from journal.live import rithmic as rith
+
+    monkeypatch.setattr(cfgmod, "load_env", lambda: None)
+    monkeypatch.delenv(rith._AGG_ENV, raising=False)
+
+    assert rith.aggregated_quotes() is False
+    assert _login_request(rith.new_client(_CREDS), "ticker").aggregated_quotes is False
+
+
+def test_the_variable_sets_the_field_on_the_market_data_logins(monkeypatch):
+    """`async_rithmic` never sets this field, so there is no kwarg to reach it.
+
+    Guards the seam rather than the wrapper: what matters is that the bytes the
+    ticker and history plants would send carry the flag, and that the ORDER
+    plant's login is untouched — a routing connection must not be refused for a
+    reason that was never about orders.
+    """
+    from journal import config as cfgmod
+    from journal.live import rithmic as rith
+
+    monkeypatch.setattr(cfgmod, "load_env", lambda: None)
+    monkeypatch.setenv(rith._AGG_ENV, "1")
+
+    assert rith.aggregated_quotes() is True
+    client = rith.new_client(_CREDS)
+    assert _login_request(client, "ticker").aggregated_quotes is True
+    assert _login_request(client, "history").aggregated_quotes is True
+    assert _login_request(client, "order").aggregated_quotes is False
+
+
+def test_an_explicit_choice_beats_the_environment(monkeypatch):
+    """The feed settles the question at construction and passes it on.
+
+    Reading the variable again at each connect would let an edited ``.env``
+    change the shape of the tape under a reconnect, leaving one session's
+    parquet holding both prints and aggregates.
+    """
+    from journal import config as cfgmod
+    from journal.live import rithmic as rith
+
+    monkeypatch.setattr(cfgmod, "load_env", lambda: None)
+    monkeypatch.setenv(rith._AGG_ENV, "1")
+
+    off = rith.new_client(_CREDS, aggregated=False)
+    assert _login_request(off, "ticker").aggregated_quotes is False
+
+
 # --- the feed's tick decoding ----------------------------------------------
 
 

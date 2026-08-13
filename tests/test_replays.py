@@ -243,7 +243,10 @@ def test_router_round_trip():
     # the same wrinkle tests/helpers.py works around for resolve_scope.
     listing = dict(limit=500, status=None, symbol=None, date=None)
     listed = router.list_replays(**listing)["attempts"]
-    assert len(listed) == 1 and listed[0]["status"] == "finished"
+    # `reviewed`, not `finished`: the trade above breaks no rule, and a clean
+    # sitting passes the account's review gate without a ceremony. See
+    # tests/test_replay_account.py for the gate itself.
+    assert len(listed) == 1 and listed[0]["status"] == "reviewed"
     assert router.get_replay(created["id"])["summary"]["net_usd"] == 200.0
     router.delete_replay(created["id"])
     assert router.list_replays(**listing)["attempts"] == []

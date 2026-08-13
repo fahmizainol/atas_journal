@@ -220,6 +220,36 @@ def test_one_attempts_trades_do_not_disturb_another(conn):
     assert [t["net_pnl"] for t in _rows()] == [400.0]
 
 
+# --- which contract it was traded in -----------------------------------------
+
+
+def test_a_micro_trade_is_labelled_with_the_micro(conn):
+    """The replay reads NQ ticks and can send its orders to MNQ, so the tape's
+    symbol is not the trade's. `pnl` arrives already priced either way — what a
+    mini's label costs is everything that re-derives from the instrument, which
+    would read these ten points as $200 instead of $20."""
+    _save(_attempt(), [_trade(micro=True, pnl=40.0)])
+    (t,) = _rows()
+    assert t["instrument"] == "MNQU6@CME"
+    assert t["net_pnl"] == 40.0
+
+
+def test_one_sitting_can_hold_both_contracts(conn):
+    """The contract can be changed between positions, so it is a fact about the
+    trade rather than about the attempt."""
+    _save(_attempt(), [_trade(micro=True, pnl=40.0),
+                       _trade(id=2, micro=False, pnl=400.0)])
+    assert sorted(t["instrument"] for t in _rows()) == ["MNQU6@CME", "NQU6@CME"]
+
+
+def test_a_trade_with_no_contract_stamp_books_as_the_mini(conn):
+    """Every attempt saved before the switch existed. Absent is the mini, which
+    is what those sittings were."""
+    _save(_attempt(), [_trade()])
+    (t,) = _rows()
+    assert t["instrument"] == "NQU6@CME"
+
+
 # --- staying out of the real-money numbers -----------------------------------
 
 

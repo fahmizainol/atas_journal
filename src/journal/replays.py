@@ -22,7 +22,10 @@ withdraws the lot. "Delete the folder and it is gone" still holds — the folder
 is simply no longer the only place it goes.
 
     data/replays/<session_date>/<attempt_id>/
-        attempt.json     # identity, tape fingerprint, ticket, status, note, rewinds
+        attempt.json     # identity, tape fingerprint, ticket, status, note,
+                         # rewinds — and, once it finishes, the flags the
+                         # account raised over it and the review answering them
+                         # (see journal.replay_account)
         log.json         # primary — the order log the browser recorded
         trades.json      # frozen — the trades that log produced
         discarded.json   # trades a rewind erased (written only when there were any)
@@ -72,7 +75,12 @@ REPLAYS_DIR = DATA_DIR / "replays"
 # matching this doubles as the path-traversal guard.
 ATTEMPT_ID_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_([A-Z0-9]+)_(\d{8}T\d{6}Z)(?:_(\d+))?$")
 
-STATUSES = ("active", "finished", "abandoned")
+# ``reviewed`` is ``finished`` plus the answer: a sitting whose flags have each
+# been called a leak or justified (see ``journal.replay_account``). It is a
+# separate status rather than a field on ``finished`` because it is what the
+# next sitting's gate reads, and a gate should turn on a status rather than on
+# the shape of another record.
+STATUSES = ("active", "finished", "abandoned", "reviewed")
 
 # A sitting is a few hundred orders at the very most. The bound is here so a
 # runaway client can't write an unbounded file, not because anyone is expected
@@ -242,13 +250,22 @@ def save(
         # keeps the moment it first ran out of tape.
         if status == "finished" and not attempt.get("finished_at"):
             attempt["finished_at"] = _iso(now)
+        # Trading on after a review withdraws the review. The trades it was
+        # written about are no longer the trades in the file, so keeping the
+        # verdicts would let a reviewed sitting be traded further under the
+        # protection of an answer given about a different sitting. Flags are
+        # recomputed the next time it finishes.
+        if status == "active":
+            attempt.pop("review", None)
+            attempt.pop("flags", None)
     _write_json(d / "attempt.json", attempt)
     return attempt
 
 
 def patch(attempt_id: str, **fields: Any) -> dict:
     """Change the things that are yours to change after the fact — the note, the
-    model it was practising, the status. Never the trades."""
+    model it was practising, the status, the flags raised over it and the review
+    answering them. Never the trades."""
     d = _require(attempt_id)
     attempt = _read_json(d / "attempt.json", {})
     now = _utc_now()
@@ -256,6 +273,12 @@ def patch(attempt_id: str, **fields: Any) -> dict:
         attempt["note"] = str(fields["note"])
     if "model_id" in fields:
         attempt["model_id"] = fields["model_id"]
+    if fields.get("flags") is not None:
+        attempt["flags"] = list(fields["flags"])
+    if fields.get("review") is not None:
+        review = dict(fields["review"])
+        review.setdefault("reviewed_at", _iso(now))
+        attempt["review"] = review
     status = fields.get("status")
     if status is not None:
         if status not in STATUSES:

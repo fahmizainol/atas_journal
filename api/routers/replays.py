@@ -86,10 +86,24 @@ class SaveIn(BaseModel):
     status: str | None = None
 
 
+class ReviewItem(BaseModel):
+    flag_idx: int
+    #: `leak` or `justified` — validated in `journal.replay_account`, which owns
+    #: the rule about what counts as an answer.
+    verdict: str
+    note: str = ""
+
+
+class ReviewIn(BaseModel):
+    items: list[ReviewItem] = Field(default_factory=list)
+    reviewed_at: str | None = None
+
+
 class PatchIn(BaseModel):
     note: str | None = None
     model_id: int | None = None
     status: str | None = None
+    review: ReviewIn | None = None
 
 
 @router.post("/replays")
@@ -202,6 +216,8 @@ def save_replay(attempt_id: str, body: SaveIn) -> dict:
             clock_ms=body.clock_ms,
             status=body.status,
         )
+        if body.status == "finished":
+            attempt = _raise_flags(attempt, body.trades)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     except FileNotFoundError as e:
@@ -209,13 +225,54 @@ def save_replay(attempt_id: str, body: SaveIn) -> dict:
     return {**attempt, "journaled": _mirror(attempt, body.trades)}
 
 
+def _raise_flags(attempt: dict, trades: list) -> dict:
+    """Ask the account what this sitting has to answer for, and store the answer-list.
+
+    Server-side because the browser is the thing being reviewed: a flag the page
+    could decline to send is not a gate. It is still not a second fill engine —
+    ``flags_for`` reads the trades the browser just stored and never re-derives
+    one.
+
+    **A clean sitting passes straight through.** Zero flags auto-patches to
+    ``reviewed``, because a review ceremony you always have to click through is
+    one you stop reading, and the next sitting should not wait on a formality
+    over a session with nothing wrong with it.
+    """
+    flags = replay_account.flags_for(attempt, trades)
+    # Through `patch`, not a second `save`: the trades have just been written
+    # and must not be written again — `save` takes `discarded` as an argument
+    # and would drop the rewind record on a call that omitted it.
+    return replays.patch(
+        attempt["id"],
+        flags=flags,
+        **({} if flags else {"status": "reviewed"}),
+    )
+
+
 @router.patch("/replays/{attempt_id}")
 def patch_replay(attempt_id: str, body: PatchIn) -> dict:
+    fields = body.model_dump(exclude_unset=True)
+
+    # The review gate. `reviewed` is what the next sitting's create checks, so
+    # it is only accepted when every flag this sitting raised has been called a
+    # leak or justified — otherwise a partial review would be a gate you clear
+    # by scrolling. The flags are read off the stored attempt rather than taken
+    # from the request for the same reason they are computed server-side: the
+    # page being reviewed does not get to say how much reviewing it needs.
+    if fields.get("status") == "reviewed":
+        try:
+            stored = replays.read(attempt_id)
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(404, f"No attempt {attempt_id}") from e
+        review = fields.get("review") or stored.get("review")
+        if not replay_account.review_is_complete(stored.get("flags") or [], review):
+            raise HTTPException(
+                409,
+                "every flag needs a verdict before this sitting counts as reviewed",
+            )
+
     try:
-        attempt = replays.patch(
-            attempt_id,
-            **body.model_dump(exclude_unset=True),
-        )
+        attempt = replays.patch(attempt_id, **fields)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     except FileNotFoundError as e:
@@ -225,7 +282,6 @@ def patch_replay(attempt_id: str, body: PatchIn) -> dict:
     # records. Pushed across so the Trades page shows what the history page
     # shows; the session row may not exist yet (an attempt can be annotated
     # before it has journalled a trade), and update_session is a no-op then.
-    fields = body.model_dump(exclude_unset=True)
     if "note" in fields or "model_id" in fields:
         try:
             conn = deps.get_conn()

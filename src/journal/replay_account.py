@@ -88,6 +88,19 @@ ACCOUNT_FILE = "account.json"
 SETTLED = ("finished", "abandoned", "reviewed")
 
 
+#: A trade that resolved inside this many milliseconds of **tape** time.
+#:
+#: The one habit the behavioural audit found actually costs money — about half
+#: of all entries, winning 26% of the time — and an entry problem rather than an
+#: exit one, which is why it is flagged for review and never refused.
+#:
+#: **Cross-referenced with ``FAST_TRADE_MS`` in ``frontend/src/lib/guardRules.ts``
+#: and it must stay equal to it.** The strip that reports the count and the flag
+#: that forces the review would otherwise disagree about the same trade, which is
+#: the most confusing possible way for a threshold to drift.
+FAST_TRADE_MS = 30_000
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -361,9 +374,7 @@ def derive(*, now: datetime | None = None, state: dict | None = None) -> dict:
         "next_sitting_at": next_sitting_at,
         "cooldown_until": cooldown_until,
         "can_reset": status == "can_reset",
-        # Filled in by the review commit; the field is here from the start so
-        # the client shape does not change under it.
-        "review_block": None,
+        "review_block": review_block(w.counted),
         "epoch": {
             "index": index,
             "started_at": epoch.get("started_at") or since,
@@ -373,6 +384,125 @@ def derive(*, now: datetime | None = None, state: dict | None = None) -> dict:
         "last_death": last_death(state, now=now),
         "caps": {"minis": MAX_MINIS, "micros": MAX_MICROS},
     }
+
+
+# --- flags ------------------------------------------------------------------
+
+
+def _usd(v: float) -> str:
+    return f"${abs(v):,.0f}"
+
+
+def flags_for(attempt: dict, trades: list, *, guards: Any = None) -> list[dict]:
+    """What in this sitting has to be answered for before the next one opens.
+
+    Computed here rather than in the browser for one reason: the browser is the
+    thing being reviewed. A flag the page could decline to send is not a gate.
+
+    It is still not a *second engine* — nothing below re-derives a fill. It reads
+    the trades the browser already booked and stored, and asks four questions of
+    them, each one a finding rather than a guess:
+
+      - **fast** — resolved inside 30 seconds (see ``FAST_TRADE_MS``);
+      - **hole** — opened while the day was already past the slow-down level, the
+        third of the three behavioural numbers the operating plan says to log;
+      - **oversized** — lost more than a single entry is allowed to risk, which
+        means either the ceiling was evaded or the stop did not hold;
+      - **rewind** — a seek that un-happened booked trades. Still a real attempt,
+        but one whose win rate was written with the answer in hand.
+
+    One flag per offending *trade*, carrying every reason it earned, so a fast
+    trade taken in the hole is one thing to answer for and not two. Worst first
+    — if a review is going to be abandoned halfway it should be abandoned from
+    the cheap end.
+
+    Times are tape wall clocks (``entryMs``), never account time. See the module
+    header on the two families.
+    """
+    # Local import, and an injectable override: the account does not otherwise
+    # need the broker module, and `routing.settings()` opens journal.db — which
+    # would make a flag depend on this instance's configured levels rather than
+    # on the trade in front of it, in a test as much as in a review.
+    if guards is None:
+        from .live import routing
+
+        guards = routing.settings().guards
+    g = guards
+
+    booked = [t for t in trades if isinstance(t, dict)]
+    by_exit = sorted(booked, key=lambda t: float(t.get("exitMs") or 0))
+
+    def realized_before(open_ms: float) -> float:
+        return sum(float(t.get("pnl") or 0) for t in by_exit if float(t.get("exitMs") or 0) <= open_ms)
+
+    flags: list[dict] = []
+    for t in booked:
+        entry = float(t.get("entryMs") or 0)
+        exit_ms = float(t.get("exitMs") or 0)
+        pnl = float(t.get("pnl") or 0)
+        reasons: list[str] = []
+        if exit_ms and entry and exit_ms - entry < FAST_TRADE_MS:
+            reasons.append(f"resolved in {round((exit_ms - entry) / 1000)}s")
+        if g.slow_down_at and realized_before(entry) <= -g.slow_down_at:
+            reasons.append(f"opened with the day already {_usd(realized_before(entry))} down")
+        if g.max_risk_usd and pnl < -g.max_risk_usd:
+            reasons.append(f"lost {_usd(pnl)} against a {_usd(g.max_risk_usd)} ceiling")
+        if reasons:
+            flags.append({
+                "kind": "trade",
+                "trade_id": t.get("id"),
+                "ms": entry,
+                "pnl": round(pnl, 2),
+                "label": f"{str(t.get('side') or '').upper()} {t.get('size')} — {_usd(pnl)} {'up' if pnl >= 0 else 'down'}",
+                "reasons": reasons,
+            })
+    flags.sort(key=lambda f: f.get("pnl", 0.0))
+
+    for i, r in enumerate(attempt.get("rewinds") or []):
+        if not isinstance(r, dict):
+            continue
+        dropped = int(r.get("dropped") or 0)
+        flags.append({
+            "kind": "rewind",
+            "trade_id": None,
+            "ms": float(r.get("from_ms") or 0),
+            "pnl": 0.0,
+            "label": f"rewind #{i + 1}" + (f" — {dropped} trade{'s' if dropped != 1 else ''} un-happened" if dropped else ""),
+            "reasons": ["a seek back over your own fills — the result was known when the next one was taken"],
+        })
+    return flags
+
+
+def review_is_complete(flags: list, review: dict | None) -> bool:
+    """Has every flag been answered? The condition for accepting ``reviewed``.
+
+    Deliberately not "did they type something": a verdict per flag is the whole
+    ask, and a partial review that unlocked the next sitting would be a gate you
+    clear by scrolling.
+    """
+    if not flags:
+        return True
+    items = (review or {}).get("items") or []
+    answered = {
+        int(i["flag_idx"])
+        for i in items
+        if isinstance(i, dict)
+        and isinstance(i.get("flag_idx"), (int, float))
+        and i.get("verdict") in ("leak", "justified")
+    }
+    return answered >= set(range(len(flags)))
+
+
+def review_block(view_rows: list[dict]) -> dict | None:
+    """The oldest sitting still owing a review, or None.
+
+    Oldest rather than newest: the queue is answered in the order it happened,
+    which is also the order the tape reads in.
+    """
+    for row in view_rows:
+        if row.get("status") == "finished" and (row.get("flags") or []):
+            return {"attempt_id": row.get("id"), "flags": row.get("flags") or []}
+    return None
 
 
 def last_death(state: dict, *, now: datetime) -> dict | None:

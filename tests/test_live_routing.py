@@ -607,6 +607,116 @@ def test_how_an_order_went_out_is_on_disk(wired):
     assert any(x["event"] == "submitted" and x["how"] == "one_click" for x in lines)
 
 
+# --- how long the press took -------------------------------------------------
+
+
+def _latencies(b) -> list[dict]:
+    return [json.loads(x) for x in b.journal.path.read_text().splitlines()
+            if json.loads(x)["event"] == "latency"]
+
+
+def test_a_send_is_timed_either_side_of_the_wire(wired):
+    """The split is the point. "The order was slow" is two different bugs — our
+    own gates being slow is fixable here, the plant being slow is not — and a
+    single end-to-end number cannot tell them apart."""
+    b, _, _ = wired
+    r = b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=0, target_ticks=0)
+    sent = b.send(r["token"])
+    lat = sent["latency"]
+    assert lat["tag"] == sent["tag"] and lat["basket_id"] == sent["basket_id"]
+    assert lat["gate_ms"] >= 0 and lat["plant_ms"] >= 0
+    assert lat["how"] == "review"
+    # On disk as well as in the reply: the reply is gone the moment the page
+    # redraws, and the question "why was that one slow" is always asked later.
+    assert _latencies(b)[-1]["tag"] == sent["tag"]
+
+
+def test_the_exchanges_first_word_is_timed_and_only_the_first(wired):
+    """`plant_ms` is Rithmic taking the request; the exchange saying the order
+    is working comes later and on its own schedule, which is the honest end of
+    "placed". The notifications after it are the order's life — fills, modifies,
+    the cancel — and timing those as placement would be nonsense."""
+    b, c, loop = wired
+    rt.set_one_click(SYS, "DEMO1", True)
+    sent = b.send_now(side="buy", qty=1, type="market", price=None,
+                      stop_ticks=0, target_ticks=0)
+    tag = sent["tag"]
+    assert sent["latency"].get("exch_ms") is None   # it has not spoken yet
+
+    (handler,) = c.on_exchange_order_notification.handlers
+    loop.run(handler(_order("B1", user_tag=tag, status="working")))
+    first = b.latency_of(tag)
+    assert first["exch_ms"] >= 0 and first["exch_status"] == "working"
+
+    loop.run(handler(_order("B1", user_tag=tag, notify_type=5, status="filled",
+                            total_fill_size=1, total_unfilled_size=0)))
+    assert b.latency_of(tag)["exch_ms"] == first["exch_ms"]
+
+
+def test_the_browsers_own_measurement_is_folded_into_the_same_record(wired):
+    """Reported after the fact, on a request of its own — measuring an order
+    must not cost the order anything.
+
+    `net_ms` is a duration minus a duration, never an instant minus an instant:
+    the browser clock and this one are on different machines, and subtracting
+    them would report the skew between them as latency.
+    """
+    b, _, _ = wired
+    rt.set_one_click(SYS, "DEMO1", True)
+    tag = b.send_now(side="buy", qty=1, type="market", price=None,
+                     stop_ticks=0, target_ticks=0)["tag"]
+    b.note_api_ms(tag, 12.0)
+    got = b.record_press(tag, 40.0, "dock")
+    assert got["client_ms"] == 40.0 and got["api_ms"] == 12.0
+    assert got["net_ms"] == 28.0 and got["gesture"] == "dock"
+    # Still carries what was already known — a reader takes the last line for a
+    # tag and has the whole timeline.
+    assert got["plant_ms"] >= 0 and _latencies(b)[-1]["net_ms"] == 28.0
+
+
+def test_a_press_reported_for_an_order_nobody_remembers_is_not_an_error(wired):
+    """What a report arriving after a restart looks like. Nothing about the
+    order depends on it, and the one thing it must never do is put an error in
+    front of somebody who has just sent an order."""
+    b, _, _ = wired
+    assert b.record_press("aj-gone-1", 40.0, "dock") is None
+
+
+def test_the_send_that_wedged_is_the_one_worth_timing():
+    """A record that only times the sends that worked hides the twenty seconds
+    a dead plant costs — which is the number that would explain the afternoon."""
+    with _Loop() as loop:
+        b = _broker()
+        c = FakeClient()
+        c.hang = True
+        loop.run(b.attach(c))
+        rt.set_tag(SYS, "DEMO1", "demo")
+        b.use_account("DEMO1")
+        p = b.preview(side="buy", qty=1, type="market", price=None,
+                      stop_ticks=0, target_ticks=0)
+        brokermod.CALL_TIMEOUT_S = 0.2
+        try:
+            with pytest.raises(TimeoutError):
+                b.send(p["token"])
+        finally:
+            brokermod.CALL_TIMEOUT_S = 20.0
+        assert b.last_latency["plant_ms"] >= 200
+        assert "TimeoutError" in b.last_latency["failed"]
+
+
+def test_only_the_last_few_orders_timings_are_held_in_memory(wired):
+    """The journal is the record; this is a place for the exchange's late answer
+    to land, and a dictionary that grew all session would be a leak."""
+    b, _, _ = wired
+    rt.set_one_click(SYS, "DEMO1", True)
+    tags = [b.send_now(side="buy", qty=1, type="market", price=None,
+                       stop_ticks=0, target_ticks=0)["tag"]
+            for _ in range(brokermod.TIMING_MAX + 3)]
+    assert len(b._timing) == brokermod.TIMING_MAX
+    assert b.latency_of(tags[0]) is None and b.latency_of(tags[-1]) is not None
+
+
 def test_switching_account_invalidates_an_order_already_staged(wired):
     """The sentence named an account. Carried across a switch it would describe
     an order on a balance nobody reviewed."""
@@ -1500,6 +1610,33 @@ def test_the_guardrails_are_on_unless_they_are_explicitly_switched_off(monkeypat
     for off in ("0", "false", "no", "OFF"):
         monkeypatch.setenv("LIVE_GUARDRAILS", off)
         assert rt.policy().guardrails is False, off
+
+
+def test_the_replay_switch_is_its_own_switch(monkeypatch):
+    """``REPLAY_GUARDRAILS`` is the same polarity and a different flag.
+
+    Neither implies the other, and the separation is the design: the live layer
+    protects an account, the replay's mirror protects a habit — and the replay
+    is also where a rule gets *tested*, which is why switching the rules off for
+    a practice session must not require disarming the funded account's layer.
+    """
+    from journal import config as cfgmod
+
+    monkeypatch.setattr(cfgmod, "load_env", lambda: None)
+    monkeypatch.delenv("LIVE_GUARDRAILS", raising=False)
+    monkeypatch.delenv("REPLAY_GUARDRAILS", raising=False)
+    assert rt.policy().replay_guardrails is True
+
+    for off in ("0", "false", "no", "OFF"):
+        monkeypatch.setenv("REPLAY_GUARDRAILS", off)
+        assert rt.policy().replay_guardrails is False, off
+        # ...and the live layer is untouched by it, in both directions.
+        assert rt.policy().guardrails is True
+
+    monkeypatch.setenv("LIVE_GUARDRAILS", "0")
+    monkeypatch.delenv("REPLAY_GUARDRAILS", raising=False)
+    assert rt.policy().guardrails is False
+    assert rt.policy().replay_guardrails is True
 
 
 def test_switching_the_layer_off_leaves_the_typo_catchers_alone():

@@ -308,6 +308,212 @@ def test_attempts_from_before_the_first_epoch_are_never_counted():
     assert acct.derive(now=now)["equity"] == 50_000.0
 
 
+# --- the flags --------------------------------------------------------------
+# Levels are passed in rather than read: `routing.settings()` opens journal.db,
+# and a flag that depended on this instance's configured numbers would pass or
+# fail on whoever ran it.
+
+GUARDS = None  # filled in below, once routing is importable
+
+
+def _guards():
+    from journal.live.routing import Guards
+
+    return Guards()
+
+
+def _paced(pnl: float, tid: int, *, at_s: int, held_s: int = 300) -> dict:
+    """A trade that is fine — slow enough, small enough, on time."""
+    t = _trade(pnl, tid)
+    t["entryMs"] = TAPE["rth_open_ms"] + at_s * 1000
+    t["exitMs"] = t["entryMs"] + held_s * 1000
+    return t
+
+
+@_tmp
+def test_a_fast_trade_is_flagged_and_a_paced_one_is_not():
+    flags = acct.flags_for(
+        {}, [_paced(-100, 1, at_s=0, held_s=12), _paced(-100, 2, at_s=3600)], guards=_guards()
+    )
+    assert len(flags) == 1
+    assert flags[0]["trade_id"] == 1
+    assert flags[0]["reasons"] == ["resolved in 12s"]
+    assert flags[0]["ms"] == TAPE["rth_open_ms"]
+
+
+@_tmp
+def test_trading_in_the_hole_is_flagged_at_the_trade_that_did_it():
+    g = _guards()  # slow_down_at 300
+    # Two ordinary losses that dig the hole, then one taken while standing in it.
+    trades = [_paced(-160, 1, at_s=0), _paced(-160, 2, at_s=600), _paced(-40, 3, at_s=3600)]
+    flags = acct.flags_for({}, trades, guards=g)
+    # Neither of the first two is flagged: what is asked is what was known when
+    # the decision was made, and the day was inside the level both times.
+    assert [f["trade_id"] for f in flags] == [3]
+    assert "already $320 down" in flags[0]["reasons"][0]
+
+
+@_tmp
+def test_a_loss_over_the_risk_ceiling_is_flagged():
+    g = _guards()  # max_risk_usd 250
+    flags = acct.flags_for({}, [_paced(-400, 1, at_s=0)], guards=g)
+    assert flags[0]["reasons"] == ["lost $400 against a $250 ceiling"]
+    # A win of the same size is not a flag: the ceiling is on what a stop is
+    # allowed to cost, and a target that ran is not a rule being broken.
+    assert acct.flags_for({}, [_paced(400, 1, at_s=0)], guards=g) == []
+
+
+@_tmp
+def test_one_trade_earns_one_flag_however_many_reasons_it_has():
+    g = _guards()
+    trades = [
+        _paced(-160, 1, at_s=0),
+        _paced(-160, 2, at_s=600),
+        # Fast, in the hole, and over the ceiling — one thing to answer for.
+        _paced(-400, 3, at_s=3600, held_s=8),
+    ]
+    flags = acct.flags_for({}, trades, guards=g)
+    assert [f["trade_id"] for f in flags] == [3]
+    assert len(flags[0]["reasons"]) == 3
+
+
+@_tmp
+def test_rewinds_are_flagged_from_the_attempt_record():
+    flags = acct.flags_for(
+        {"rewinds": [{"from_ms": 1_770_020_000_000, "to_ms": 1_770_015_000_000, "dropped": 2}]},
+        [],
+        guards=_guards(),
+    )
+    assert len(flags) == 1
+    assert flags[0]["kind"] == "rewind"
+    assert flags[0]["ms"] == 1_770_020_000_000
+    assert "2 trades un-happened" in flags[0]["label"]
+
+
+@_tmp
+def test_flags_are_worst_first():
+    g = _guards()
+    trades = [_paced(-300, 1, at_s=0, held_s=5), _paced(-900, 2, at_s=3600, held_s=5)]
+    assert [f["trade_id"] for f in acct.flags_for({}, trades, guards=g)] == [2, 1]
+
+
+@_tmp
+def test_a_review_is_only_complete_when_every_flag_has_a_verdict():
+    flags = [{"kind": "trade"}, {"kind": "trade"}]
+    assert acct.review_is_complete([], None) is True
+    assert acct.review_is_complete(flags, None) is False
+    assert acct.review_is_complete(flags, {"items": [{"flag_idx": 0, "verdict": "leak"}]}) is False
+    assert acct.review_is_complete(
+        flags,
+        {"items": [{"flag_idx": 0, "verdict": "leak"}, {"flag_idx": 1, "verdict": "justified"}]},
+    ) is True
+    # An item with no verdict is not an answer.
+    assert acct.review_is_complete(
+        flags,
+        {"items": [{"flag_idx": 0, "verdict": "leak"}, {"flag_idx": 1, "note": "hmm"}]},
+    ) is False
+
+
+# --- the lifecycle, through the router --------------------------------------
+
+
+def _finish(trades: list, rewinds: list | None = None) -> dict:
+    """Open a sitting through the router and run it out of tape."""
+    from api.routers import replays as router
+
+    created = router.create_replay(
+        router.CreateIn(
+            symbol="NQH5", root="NQ", date="2026-02-03", tz="New York",
+            engine_version=1, tape=TAPE, prefs=PREFS, started_ms=TAPE["rth_open_ms"],
+        )
+    )
+    return router.save_replay(
+        created["id"],
+        router.SaveIn(
+            log=LOG,
+            trades=trades,
+            summary={"net_usd": sum(t["pnl"] for t in trades)},
+            rewinds=rewinds,
+            status="finished",
+        ),
+    )
+
+
+@_tmp
+def test_a_clean_sitting_passes_straight_through_to_reviewed():
+    done = _finish([_paced(120, 1, at_s=0)])
+    assert done["flags"] == []
+    # No ceremony over a session with nothing wrong with it — the next sitting
+    # should not wait on a formality.
+    assert done["status"] == "reviewed"
+
+
+@_tmp
+def test_a_flagged_sitting_stops_at_finished_and_blocks_until_answered():
+    from fastapi import HTTPException
+
+    from api.routers import replays as router
+
+    _epoch("2026-01-01T00:00:00Z")
+    done = _finish([_paced(-400, 1, at_s=0, held_s=6)])
+    assert done["status"] == "finished"
+    assert len(done["flags"]) == 1
+
+    blocked = acct.derive()
+    assert blocked["review_block"]["attempt_id"] == done["id"]
+    assert len(blocked["review_block"]["flags"]) == 1
+
+    # A verdict short is not a review.
+    try:
+        router.patch_replay(done["id"], router.PatchIn(status="reviewed"))
+    except HTTPException as e:
+        assert e.status_code == 409
+    else:
+        raise AssertionError("an unanswered sitting was accepted as reviewed")
+
+    filed = router.patch_replay(
+        done["id"],
+        router.PatchIn(
+            status="reviewed",
+            review=router.ReviewIn(
+                items=[router.ReviewItem(flag_idx=0, verdict="leak", note="chased it back")]
+            ),
+        ),
+    )
+    assert filed["status"] == "reviewed"
+    assert filed["review"]["items"][0]["note"] == "chased it back"
+    # Stamped for us if the client did not.
+    assert filed["review"]["reviewed_at"].endswith("Z")
+    assert acct.derive()["review_block"] is None
+
+
+@_tmp
+def test_trading_on_after_a_review_withdraws_it():
+    from api.routers import replays as router
+
+    done = _finish([_paced(-400, 1, at_s=0, held_s=6)])
+    router.patch_replay(
+        done["id"],
+        router.PatchIn(
+            status="reviewed",
+            review=router.ReviewIn(items=[router.ReviewItem(flag_idx=0, verdict="justified")]),
+        ),
+    )
+    # Rewound and traded on: the verdicts were given about trades that are no
+    # longer the trades in the file.
+    router.save_replay(done["id"], router.SaveIn(log=LOG, trades=[], summary={}, status="active"))
+    reopened = replays.read(done["id"])
+    assert "review" not in reopened and "flags" not in reopened
+
+    again = router.save_replay(
+        done["id"],
+        router.SaveIn(
+            log=LOG, trades=[_paced(-400, 1, at_s=0, held_s=6)], summary={}, status="finished"
+        ),
+    )
+    assert again["status"] == "finished" and len(again["flags"]) == 1
+
+
 # --- the route --------------------------------------------------------------
 
 
