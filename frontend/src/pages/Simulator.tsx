@@ -45,11 +45,17 @@ import {
   type SimDay,
 } from "../hooks/useSimulator";
 import { useReplayAttempt } from "../hooks/useReplayAttempt";
-import { useReplayAccount } from "../hooks/useReplayAccount";
+import { useReplayAccount, useWriteCause } from "../hooks/useReplayAccount";
 import { AccountChip, AccountNotice, AccountRecap } from "../components/charts/ReplayAccount";
-import { useFileReview, useReplayAttemptDetail, type AttemptDetail } from "../hooks/useReplays";
+import { AutopsyCard } from "../components/charts/AutopsyCard";
+import {
+  useFileReview,
+  useReplayAttemptDetail,
+  useReplayAttempts,
+  type AttemptDetail,
+} from "../hooks/useReplays";
 import { clearResume, loadResume, saveResume, type ResumePoint } from "../lib/replayResume";
-import { clearReview, loadReview } from "../lib/replayReview";
+import { clearReview, loadReview, saveReview } from "../lib/replayReview";
 import { ReviewPanel } from "../components/charts/ReviewPanel";
 import {
   concatTapes,
@@ -977,6 +983,40 @@ export function Simulator() {
   const accountQ = useReplayAccount();
   const account = accountQ.data;
   const accountAt = accountQ.dataUpdatedAt;
+
+  // --- the blown flow -------------------------------------------------------
+  // Only fetched when there is something to autopsy. The card is composed
+  // entirely from these rows — the epoch's equity curve is a cumulative sum over
+  // them and its totals are `replayStats.pool` — so nothing new is stored and
+  // the server is not asked to re-derive what the history page already draws.
+  const dead = !!account && account.status !== "live";
+  const attemptsQ = useReplayAttempts({ enabled: dead });
+  const writeCause = useWriteCause();
+
+  /** Open the death sitting in review mode.
+   *
+   *  Through a reload rather than by swapping `sel`, and for a reason that is
+   *  not laziness: entering review mode has to leave the recorder *unarmed*, and
+   *  it is armed right now for whatever session is on screen. A fresh mount is
+   *  the only way to guarantee that without threading a disarm through the tape
+   *  build. The marks are already on disk when the page comes back. */
+  const openReview = useCallback(
+    (attemptId: string) => {
+      const a = attemptsQ.data?.attempts.find((r) => r.id === attemptId);
+      if (!a) return;
+      saveResume({
+        symbol: a.symbol,
+        date: a.date,
+        clockMs: a.started_ms,
+        attemptId: a.id,
+        // Unused in review mode — every cursor is rebased off its own timestamp.
+        contextTicks: 0,
+      });
+      saveReview({ attemptId: a.id });
+      navigate(0);
+    },
+    [attemptsQ.data, navigate],
+  );
   const tickUsd = tickSize * pointValue;
   // Everything the rules and the behaviour strip need, re-derived whenever the
   // simulation is. Cheap: a couple of passes over a day's trades.
@@ -3225,7 +3265,7 @@ export function Simulator() {
         {/* Open by force while reviewing — the panel *is* the review, and a
             page that opened to make you look at something should not open with
             it hidden behind a button. */}
-        <div ref={panelRef} className={`sim-panel${sheetOpen || reviewing ? " open" : ""}`}>
+        <div ref={panelRef} className={`sim-panel${sheetOpen || reviewing || dead ? " open" : ""}`}>
           {/* Sticky, so it stays grabbable however far the ticket below it has
               been scrolled. Hidden when pinned — a column in normal flow has
               nowhere to be dragged to. */}
@@ -3247,6 +3287,20 @@ export function Simulator() {
           >
             <span />
           </div>
+          {/* The autopsy. Ahead of everything else in the panel, because while it
+              is up there is nothing else on this page worth reading. */}
+          {dead && account && (
+            <AutopsyCard
+              view={account}
+              receivedAt={accountAt}
+              rows={attemptsQ.data?.attempts ?? []}
+              onWriteCause={(t) => writeCause.mutate(t)}
+              writing={writeCause.isPending}
+              error={writeCause.error instanceof Error ? writeCause.error.message : null}
+              onReview={openReview}
+            />
+          )}
+
           {/* The forced review, in the panel the ticket would be in — the point of
               reviewing here rather than on a page of its own is that it happens
               *against the tape*, with the chart on the moment in question and
@@ -3271,7 +3325,7 @@ export function Simulator() {
           {/* The ticket goes away entirely while reviewing. A BUY/SELL pad that
               refuses every press is the shape of a broken page, and the refusal
               on the order paths is a backstop rather than the explanation. */}
-          {!reviewing && (
+          {!reviewing && !dead && (
           <div className="sim-card sim-ticket">
             {/* Which contract these gestures are sent to, at the head of the
                 ticket — the row Live carries in the same place, laid out the

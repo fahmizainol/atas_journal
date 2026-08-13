@@ -43,10 +43,15 @@ export interface AttemptDetail extends AttemptRow {
   discarded: Trade[];
 }
 
-export function useReplayAttempts() {
+/** `enabled` is for the pages that only want this under one condition — the
+ *  Simulator draws the autopsy off it and only when the account is dead, and
+ *  fetching every attempt on every replay visit to answer a question nobody
+ *  asked is a request per page load for nothing. */
+export function useReplayAttempts(opts?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["replays", "list"],
     queryFn: () => apiGet<{ attempts: AttemptRow[] }>("/replays"),
+    enabled: opts?.enabled ?? true,
   });
 }
 

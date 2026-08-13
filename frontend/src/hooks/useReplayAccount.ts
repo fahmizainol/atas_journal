@@ -2,8 +2,8 @@
 // live in `lib/replayAccount` — `guardRules` reads them too, and a rule module
 // has no business importing a hook.
 
-import { useQuery } from "@tanstack/react-query";
-import { apiGet } from "../lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiGet, apiSend } from "../lib/api";
 import type { AccountView } from "../lib/replayAccount";
 
 export type { AccountView, ReplayFlag } from "../lib/replayAccount";
@@ -20,5 +20,20 @@ export function useReplayAccount() {
   return useQuery({
     queryKey: ["replays", "account"],
     queryFn: () => apiGet<AccountView>("/replays/account"),
+  });
+}
+
+/** Record what killed the account. The one write in this feature whose content
+ *  comes from a person rather than from the trades — which is why the blown
+ *  state waits on it and why the server refuses it when nothing has died. */
+export function useWriteCause() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (cause_of_death: string) =>
+      apiSend<AccountView>("POST", "/replays/account/cause", { cause_of_death }),
+    onSuccess: (view) => {
+      qc.setQueryData(["replays", "account"], view);
+      qc.invalidateQueries({ queryKey: ["replays"] });
+    },
   });
 }
