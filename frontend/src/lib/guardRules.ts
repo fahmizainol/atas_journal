@@ -17,10 +17,32 @@
 // honest thing a compressed clock can do with that is *measure* it. Hence
 // `DayState.medianGapS` and `fastShare`, which are reported and never enforced.
 //
+// The stop *floor* — `stop_ticks_min` — is **not enforced here either**, and
+// that one is a deliberate reversal rather than a clock problem. The floor
+// exists because a 40-tick stop was getting noise-stopped in the flat half of
+// the sample, which is a finding about where the stop should sit, not a rule
+// the replay should be unable to test. Refusing a 50-tick stop in practice
+// means the one place cheap enough to re-measure the finding is the one place
+// that will not run it. The ceiling stays, the target floor stays, and the
+// dollar-risk ceiling stays: those bound what an account survives, and none of
+// them stop a question from being asked. Live is unchanged — `routing.py`
+// still refuses a stop under the floor, and this file no longer mirrors it.
+//
 // The other thing that does not cross: nothing here is enforcement in the sense
 // the server's is. This is the browser refusing itself, on a page where the
 // money is imaginary. It exists to build the habit, not to hold the line.
+//
+// THE SWITCH. `REPLAY_GUARDRAILS=0` in `.env` turns the layer off for `/replay`
+// — read off `/live/routing` like the levels are, and applied by the caller
+// (`pages/Simulator`) rather than in here: these functions answer "what do the
+// rules say", which stays a worthwhile question with the layer off, and the
+// replay goes on asking it so the strip can report what it would have refused.
+// It is a separate flag from `LIVE_GUARDRAILS` and neither implies the other.
+// The reason to have it at all is the one in the paragraph above about the stop
+// floor, generalised: the replay is where a rule gets *tested*, and a rule that
+// forbids its own test can only ever be confirmed.
 
+import type { AccountView } from "./replayAccount";
 import type { GuardLevels } from "./routingTypes";
 import type { Position, Side, Trade } from "./replaySim";
 
@@ -65,14 +87,14 @@ export interface OrderShape {
  */
 export function shapeRefusal(g: GuardLevels, o: OrderShape): string | null {
   if (g.require_bracket && !(o.stopTicks && o.targetTicks)) {
-    return `every entry goes out bracketed — ${g.stop_ticks_min}–${g.stop_ticks_max} tick stop, ${g.min_target_ticks}+ tick target`;
+    const stopBound = g.stop_ticks_max ? `a stop no wider than ${g.stop_ticks_max} ticks` : "a stop";
+    return `every entry goes out bracketed — ${stopBound}, ${g.min_target_ticks}+ tick target`;
   }
   if (g.min_target_ticks && o.targetTicks && o.targetTicks < g.min_target_ticks) {
     return `a ${o.targetTicks}-tick target is under the ${g.min_target_ticks}-tick floor — every target at or under 80 ticks is net-negative on your own book, at every stop width tried`;
   }
-  if (g.stop_ticks_min && o.stopTicks && o.stopTicks < g.stop_ticks_min) {
-    return `a ${o.stopTicks}-tick stop is tighter than the ${g.stop_ticks_min}-tick floor — a 40-tick stop was getting noise-stopped in the flat half of the sample`;
-  }
+  // No stop floor. See the header: the replay is where a tighter stop gets
+  // tested, so `stop_ticks_min` is read for display and never refused on.
   if (g.stop_ticks_max && o.stopTicks && o.stopTicks > g.stop_ticks_max) {
     return `a ${o.stopTicks}-tick stop is wider than the ${g.stop_ticks_max}-tick ceiling — take fewer contracts instead, the drawdown that ends an account is fixed in dollars`;
   }
@@ -204,6 +226,100 @@ export function equityStop(
   const equity = day.realized + openPnl;
   if (equity > -g.daily_loss_stop) return null;
   return `the daily stop of $${Math.round(g.daily_loss_stop).toLocaleString()} was reached on equity ($${Math.round(equity).toLocaleString()} with the open position) — closed automatically`;
+}
+
+// --- the account ------------------------------------------------------------
+// Everything above is a rule about *this session*: a shape, a day, a running
+// total that resets tomorrow. The two below are the only rules here that
+// remember last week, and they are the only ones that are **always on**.
+//
+// `REPLAY_GUARDRAILS` exists because a rule under test has to be testable — the
+// stop floor is the worked example in this file's header. The account is not a
+// rule under test. It is the stakes, and stakes you can switch off are not
+// stakes, so neither function below consults `guardsOn` and neither caller may.
+
+/**
+ * Has the account hit its trailing floor, counting the open position? The
+ * reason to flatten, or null.
+ *
+ * The equity join happens here rather than on the server for the reason the
+ * floor is end-of-day trailing: the floor does not move during a sitting, so
+ * there is exactly one moving part, and it is the one the browser already
+ * holds. `view.equity` is settled attempts only — the sitting in progress is
+ * still `active` and so is not in it — which is why the two live terms are
+ * added rather than replacing anything.
+ *
+ * Lands a beat late for the same reason `equityStop` does: `openPnl` arrives on
+ * the HUD's throttled tick. Fine to rehearse against, not a number to quote.
+ */
+export function accountStop(
+  view: AccountView | undefined,
+  day: DayState,
+  openPnl: number,
+  hasPosition: boolean,
+): string | null {
+  if (!view || !hasPosition) return null;
+  const equity = view.equity + day.realized + openPnl;
+  if (equity > view.floor) return null;
+  return (
+    `the account has reached its trailing floor — $${Math.round(equity).toLocaleString()} ` +
+    `against a $${Math.round(view.floor).toLocaleString()} floor, with the open position. ` +
+    `Closed automatically, and the sitting is over. This is what a blown account is; ` +
+    `there is no version of it you trade back from in the same session.`
+  );
+}
+
+/** Why the account will not open a **new** sitting, or null.
+ *
+ *  Ordered by what it would be absurd to be told instead. "Wait 20 minutes" is
+ *  the wrong sentence to read at a dead account, so the terminal states come
+ *  first and the hour gate last.
+ *
+ *  Null while a sitting is already open, and that is deliberate: resuming what
+ *  you are in the middle of is free. The gate is on *starting*, because
+ *  starting again immediately is the behaviour it exists to price. */
+export function accountRefusal(
+  view: AccountView | undefined,
+  sittingOpen: boolean,
+): { code: string; message: string; until: string | null } | null {
+  if (!view || sittingOpen) return null;
+  if (view.status === "blown") {
+    return {
+      code: "blown",
+      message:
+        "the account is blown — write what killed it before anything else. " +
+        "The timeout runs from the death either way, so this costs you nothing but is not skippable.",
+      until: null,
+    };
+  }
+  if (view.status === "cooldown") {
+    return {
+      code: "cooldown",
+      message:
+        "the account is blown and the day's timeout has not run out. " +
+        "A day is what a blown account costs; that is the whole point of it costing something.",
+      until: view.cooldown_until,
+    };
+  }
+  if (view.review_block) {
+    return {
+      code: "review",
+      message:
+        "the last sitting has not been reviewed. Every flag on it needs a verdict — " +
+        "a leak or justified — before another one starts.",
+      until: null,
+    };
+  }
+  if (view.next_sitting_at) {
+    return {
+      code: "hour",
+      message:
+        "an hour between sittings. Back-to-back replays are how one bad session becomes six, " +
+        "and the hour is the only part of a rep that a compressed clock cannot compress.",
+      until: view.next_sitting_at,
+    };
+  }
+  return null;
 }
 
 /** Does this order take size off rather than put it on? A flip is not a reduce:

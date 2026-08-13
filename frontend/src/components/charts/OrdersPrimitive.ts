@@ -15,7 +15,7 @@
 // against the boxes the last paint actually drew.
 
 import type { ISeriesApi, ISeriesPrimitiveAxisView } from "lightweight-charts";
-import { palette } from "../../theme";
+import { ink, palette } from "../../theme";
 import { byPointer } from "../../lib/pointer";
 
 /** One order as the page knows it, with its levels resolved to prices. */
@@ -54,7 +54,7 @@ const STOP_LINE = palette.orange;
 const lineOf = (type: "limit" | "stop") => (type === "stop" ? STOP_LINE : LIMIT_LINE);
 const SL_LINE = "rgba(245, 69, 95, 0.55)";
 const TP_LINE = "rgba(33, 192, 122, 0.55)";
-const CHIP_BG = "rgba(14, 17, 23, 0.92)";
+
 
 const CHIP_H = 18;
 const PAD = 6;
@@ -150,7 +150,7 @@ class Renderer {
         const textW = segs.reduce((a, s) => a + ctx.measureText(s.text).width, 0);
         const w = textW + PAD * 2 + (segs.length - 1) * PAD + (closeFor ? CLOSE_W : 0);
         const r: Rect = { x: W - MARGIN - w, y: y - CHIP_H / 2, w, h: CHIP_H };
-        ctx.fillStyle = CHIP_BG;
+        ctx.fillStyle = ink().chip.strong;
         ctx.strokeStyle = border;
         ctx.lineWidth = 1;
         ctx.beginPath();

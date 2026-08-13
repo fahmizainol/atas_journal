@@ -4,7 +4,7 @@
 // the drag mechanics live in CandlestickChart, this only draws.
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
-import { palette } from "../../theme";
+import { ink, palette } from "../../theme";
 
 export interface RulerData {
   /** Bar times (snapped onto the bar grid) of the two corners. */
@@ -152,7 +152,7 @@ class Renderer {
       let by = up ? y1 - h - 8 : y2 + 8;
       by = Math.min(scope.mediaSize.height - h - 4, Math.max(4, by));
 
-      ctx.fillStyle = "rgba(14, 17, 23, 0.92)";
+      ctx.fillStyle = ink().chip.strong;
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -182,6 +182,9 @@ export class RulerPrimitive {
   private views: View[] = [];
   private requestUpdate?: () => void;
   private _data: RulerData | null = null;
+  /** Kept from `attached` so the contract can be changed without detaching —
+   *  see `setContract`. */
+  private ctx?: Ctx;
 
   constructor(
     private tickSize?: number,
@@ -198,6 +201,23 @@ export class RulerPrimitive {
     return this._data;
   }
 
+  /**
+   * Re-price the readout without rebuilding the primitive.
+   *
+   * A measurement is in ticks *and* in dollars, and the dollars belong to the
+   * contract the page's orders are routed to — which can be switched while a
+   * chart is up (the Simulator's mini/micro choice) with no new tape to hang a
+   * fresh primitive off. The renderer reads both numbers at construction, so
+   * the view is rebuilt rather than mutated; it holds no state of its own, and
+   * the measurement lives in `_data`.
+   */
+  setContract(tickSize?: number, pointValue?: number) {
+    this.tickSize = tickSize;
+    this.pointValue = pointValue;
+    if (this.ctx) this.views = [new View(new Renderer(this.ctx, tickSize, pointValue))];
+    this.requestUpdate?.();
+  }
+
   attached(param: any) {
     this.requestUpdate = param.requestUpdate;
     const ctx: Ctx = {
@@ -205,6 +225,7 @@ export class RulerPrimitive {
       series: param.series,
       data: () => this._data,
     };
+    this.ctx = ctx;
     this.views = [new View(new Renderer(ctx, this.tickSize, this.pointValue))];
     this.requestUpdate?.();
   }

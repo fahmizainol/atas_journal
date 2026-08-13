@@ -113,12 +113,15 @@ import { FillCues, playCue, simMark } from "../lib/orderSound";
 import { dayRead, VERDICT_LINE, type DayRead, type DayVerdict } from "../lib/dayRead";
 import {
   DEFAULT_GUARDS,
+  accountRefusal,
+  accountStop,
   dayRefusal,
   dayState,
   equityStop,
   isReducing,
   shapeRefusal,
 } from "../lib/guardRules";
+import { fmtWait, remainingMs } from "../lib/replayAccount";
 import { useGuardLevels } from "../hooks/useRouting";
 import type { GuardLevels } from "../lib/routingTypes";
 import { palette } from "../theme";
@@ -1032,6 +1035,19 @@ export function Simulator() {
     return () => window.clearTimeout(t);
   }, [refused]);
 
+  // The server refusing to open the sitting, said in the same place the client's
+  // own refusals are said. The client gate above fires first and this should
+  // never be reached — but "should never be reached" is exactly the condition
+  // under which a silent failure costs a session: the fills would go on
+  // happening on a page that had quietly stopped recording them.
+  const { refusal: attemptRefusal, clearRefusal } = attemptRec;
+  useEffect(() => {
+    if (!attemptRefusal) return;
+    setRefused(attemptRefusal);
+    playCue("canceled");
+    clearRefusal();
+  }, [attemptRefusal, clearRefusal]);
+
   const openPnl = useCallback(
     (lastPrice: number): number => {
       const o = openRef.current;
@@ -1822,6 +1838,23 @@ export function Simulator() {
       // `REPLAY_GUARDRAILS` is off — the strip still says what the rules would
       // have said, it just does not stand in the way.
       const reducing = isReducing(openRef.current, side, size);
+      // The account comes first, and it comes *outside* `guardsOn`: the
+      // guardrails are rules under test and the switch is what makes them
+      // testable, but the account is the stakes. It only speaks when there is
+      // no sitting open yet — resuming one you are in the middle of is free,
+      // and the thing being priced is starting another.
+      if (!reducing) {
+        const no = accountRefusal(account, attemptIdOf() != null);
+        if (no) {
+          setRefused(
+            no.until
+              ? `${no.message} (${fmtWait(remainingMs(account, no.until, accountAt))} to go)`
+              : no.message,
+          );
+          playCue("canceled");
+          return;
+        }
+      }
       if (!reducing && guardsOn) {
         const why =
           dayRefusal(day, false) ??
@@ -1873,8 +1906,9 @@ export function Simulator() {
       const log = logRef.current;
       append({ ...log, orders: [...log.orders, rec] });
     },
-    [append, day, guards, guardsOn, onMicro, size, stopTicks, targetTicks, tickSize,
-     tickUsd, trailTicks, trailStepTicks, trailBeTicks, trailBeOnly],
+    [account, accountAt, append, attemptIdOf, day, guards, guardsOn, onMicro, size,
+     stopTicks, targetTicks, tickSize, tickUsd, trailTicks, trailStepTicks,
+     trailBeTicks, trailBeOnly],
   );
 
   const placeMarket = useCallback(
@@ -2001,35 +2035,6 @@ export function Simulator() {
     pushHud(markPrice(), clockRef.current, true);
   }, [append, markPrice, pushHud]);
 
-  // The daily stop, acting rather than refusing.
-  //
-  // Watches equity — realised plus what the open position is currently down —
-  // because the account's drawdown does not wait for a loss to be booked. It
-  // closes the position the way `closeManual` does, by appending to the log, so
-  // a rewind un-does it like any other action and the sim stays a pure fold over
-  // what happened.
-  //
-  // Fires once per crossing: `openRef` going null is the reset, so a position
-  // re-opened after the stop can be closed again if it also breaches. Nothing
-  // stops that entry being placed, because the day lock already refuses it.
-  //
-  // It lands a beat late. `hud.openPnl` arrives on the throttled ~80ms tick,
-  // which at speed 30 is a couple of seconds of market time — fine to rehearse
-  // against, not a number to quote.
-  const autoClosedRef = useRef(false);
-  useEffect(() => {
-    if (!openRef.current) {
-      autoClosedRef.current = false;
-      return;
-    }
-    if (autoClosedRef.current || !guardsOn) return;
-    const why = equityStop(guards, day, hud.openPnl, true);
-    if (!why) return;
-    autoClosedRef.current = true;
-    setRefused(why);
-    playCue("canceled");
-    closeManual();
-  }, [closeManual, day, guards, guardsOn, hud.openPnl]);
 
   /**
    * Everything off: the position at the last print, and every order still
@@ -2070,6 +2075,49 @@ export function Simulator() {
     if (openRef.current) closeManual();
     void finishAttempt();
   }, [closeManual, finishAttempt]);
+
+  // The daily stop, acting rather than refusing.
+  //
+  // Watches equity — realised plus what the open position is currently down —
+  // because the account's drawdown does not wait for a loss to be booked. It
+  // closes the position the way `closeManual` does, by appending to the log, so
+  // a rewind un-does it like any other action and the sim stays a pure fold over
+  // what happened.
+  //
+  // Fires once per crossing: `openRef` going null is the reset, so a position
+  // re-opened after the stop can be closed again if it also breaches. Nothing
+  // stops that entry being placed, because the day lock already refuses it.
+  //
+  // It lands a beat late. `hud.openPnl` arrives on the throttled ~80ms tick,
+  // which at speed 30 is a couple of seconds of market time — fine to rehearse
+  // against, not a number to quote.
+  const autoClosedRef = useRef(false);
+  useEffect(() => {
+    if (!openRef.current) {
+      autoClosedRef.current = false;
+      return;
+    }
+    if (autoClosedRef.current) return;
+    // The account's floor first, and always — it is not under the `guardsOn`
+    // switch, and unlike the daily stop it does not lift tomorrow. Hitting it
+    // does not just close the position: the sitting is over, because an account
+    // that has reached its floor has no next trade to take.
+    const dead = accountStop(account, day, hud.openPnl, true);
+    if (dead) {
+      autoClosedRef.current = true;
+      setRefused(dead);
+      playCue("canceled");
+      endAttempt();
+      return;
+    }
+    if (!guardsOn) return;
+    const why = equityStop(guards, day, hud.openPnl, true);
+    if (!why) return;
+    autoClosedRef.current = true;
+    setRefused(why);
+    playCue("canceled");
+    closeManual();
+  }, [account, closeManual, day, endAttempt, guards, guardsOn, hud.openPnl]);
 
   // Running out of tape ends the replay, and the answer comes with it. Keyed on
   // the clock rather than wired into the playback loop so it holds however the

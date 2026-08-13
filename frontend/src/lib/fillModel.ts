@@ -18,22 +18,30 @@
 //     front of you. Modelled as the tape having to trade past the level before
 //     the order is considered done.
 //
-// Everything else a real fill suffers — latency in *time*, partial fills, a book
-// that thins out under you — is deliberately not here. The tape is trades, not
-// quotes: there is no book to model a queue position against and no way to know
-// what the offer was between two prints. What the tape *can* say is where price
-// actually was when a level was crossed, and the engine reads the fill off that
-// print rather than off the level, so a stop that was jumped through books what
-// it was jumped through at. That is where the rest of the slippage comes from,
-// and it costs nothing to be honest about.
+// And a fourth, which is not a charge but a delay: the gesture does not reach
+// the market at the instant you made it. On the replay page the price you click
+// is the price at that millisecond; live, it is neither — the print on your
+// screen already travelled to you, and your order has to travel back. Modelled
+// as one lag applied to every gesture, so an order fills off the print that was
+// current when it *landed* rather than the one you were looking at.
+//
+// Everything else a real fill suffers — partial fills, a book that thins out
+// under you — is deliberately not here. The tape is trades, not quotes: there is
+// no book to model a queue position against and no way to know what the offer
+// was between two prints. What the tape *can* say is where price actually was
+// when a level was crossed, and the engine reads the fill off that print rather
+// than off the level, so a stop that was jumped through books what it was jumped
+// through at. That is where the rest of the slippage comes from, and it costs
+// nothing to be honest about.
 //
 // The model is a setting rather than a constant because none of it is a fact
-// about the code: commission is what your firm charges, and the two tick knobs
-// are what your instrument's book looks like. Set them all to zero and the
-// replay fills exactly as it did before any of this existed, which is the right
-// thing for reading the tape and the wrong thing for reading your equity curve.
+// about the code: commission is what your firm charges, the two tick knobs are
+// what your instrument's book looks like, and the lag is how far you sit from
+// the exchange. Set them all to zero and the replay fills exactly as it did
+// before any of this existed, which is the right thing for reading the tape and
+// the wrong thing for reading your equity curve.
 
-/** The three costs, in the units they are quoted in. */
+/** The four costs, in the units they are quoted in. */
 export interface FillModel {
   /** Dollars per contract, per side. A round turn on one contract is twice this,
    *  and it is charged at the exit — the whole trip is booked when the portion
@@ -48,6 +56,23 @@ export interface FillModel {
    *  and it is the reading that stops a replay from filling every wick that
    *  kissed a target and turned around. */
   queueTicks: number;
+  /**
+   * Milliseconds between a gesture and the market acting on it. Charged on
+   * everything you do by hand — an order, a drag, a cancel, a flatten — and on
+   * nothing the exchange does for you: a bracket's stop and target are resting
+   * there already, and the trail that moves them is the plant's, so those
+   * trigger on the print that reached them and pay nothing.
+   *
+   * **It is the round trip, not the one-way hop, and that is not a mistake.**
+   * Two delays sit between the price you react to and the price you get, and
+   * the replay has neither: the print on your screen left the exchange one hop
+   * ago, and your order takes another hop to get back. The distance from the
+   * print you clicked to the print that fills you is therefore both hops — the
+   * whole round trip — even though the order itself only travels one of them.
+   *
+   * See docs/research/order-latency.md for the measurement this is set from.
+   */
+  latencyMs: number;
 }
 
 /** The model plus what the instrument is worth — everything a fill needs to be
@@ -65,19 +90,30 @@ export interface FillCfg extends FillModel {
  *  is worth knowing: a stop still books the print that crossed it rather than
  *  the level it was set at. That gap is not a cost model, it is the tape saying
  *  where price actually was — waiving it would be inventing a fill at a price
- *  the market leapt over. What zeroes here are the three charges. */
-export const PERFECT_FILLS: FillModel = { commission: 0, slipTicks: 0, queueTicks: 0 };
+ *  the market leapt over. What zeroes here are the four charges. */
+export const PERFECT_FILLS: FillModel = {
+  commission: 0, slipTicks: 0, queueTicks: 0, latencyMs: 0,
+};
 
 /** What a funded-evaluation NQ account actually charges: $3.50 a side ($7 the
  *  round turn — verified against the archived prop-firm executions, four of
  *  five firms to the cent; see docs/research/fill-model-verification.md), one
- *  tick to cross a one-tick-wide book, one tick of queue. */
-export const DEFAULT_FILL_MODEL: FillModel = { commission: 3.5, slipTicks: 1, queueTicks: 1 };
+ *  tick to cross a one-tick-wide book, one tick of queue.
+ *
+ *  And a quarter of a second to reach Chicago and back, measured off this
+ *  account's own sends rather than assumed: 24 live orders put the wire round
+ *  trip at 239 ms median and the browser's own outbound leg at ~10 ms more
+ *  (docs/research/order-latency.md). It is the one number here that is a fact
+ *  about *this desk* rather than about the instrument or the firm — trade from
+ *  a different connection and it is a different number. */
+export const DEFAULT_FILL_MODEL: FillModel = {
+  commission: 3.5, slipTicks: 1, queueTicks: 1, latencyMs: 250,
+};
 
 /** Is this the free ride? Worth saying out loud in the UI — a summary written
  *  under perfect fills is not comparable with one that paid. */
 export const isPerfect = (m: FillModel): boolean =>
-  m.commission === 0 && m.slipTicks === 0 && m.queueTicks === 0;
+  m.commission === 0 && m.slipTicks === 0 && m.queueTicks === 0 && m.latencyMs === 0;
 
 /** The whole round trip, in dollars, for `size` contracts. */
 export const roundTurn = (m: FillModel, size: number): number => 2 * m.commission * size;
@@ -118,11 +154,26 @@ export function loadFillModel(): FillModel {
     // before the prop-firm journal proved $7 was the round turn, not the side
     // (docs/research/fill-model-verification.md) — not a number anyone chose.
     const commission = num(s.commission, 0, d.commission);
+    // A model saved before the lag existed has no opinion about it, so it takes
+    // the measured default — with one exception, which is the whole reason this
+    // is not just a `num` call. A stored *perfect* model was a deliberate choice
+    // to take the account out of it, and silently handing it a quarter-second of
+    // lag would leave the button reading "Charge fills" over a model that had
+    // just started charging one. Missing plus perfect means perfect.
+    const latencyMs =
+      s.latencyMs === undefined &&
+      num(s.commission, 0, 1) === 0 &&
+      num(s.slipTicks, 0, 1) === 0 &&
+      num(s.queueTicks, 0, 1) === 0
+        ? 0
+        : num(s.latencyMs, 0, d.latencyMs);
     return {
       commission: commission === 7 ? d.commission : commission,
       // Ticks are counted, so a fractional one would put a fill off the grid.
       slipTicks: Math.floor(num(s.slipTicks, 0, d.slipTicks)),
       queueTicks: Math.floor(num(s.queueTicks, 0, d.queueTicks)),
+      // Milliseconds, and whole ones — the tape's own stamps are integers.
+      latencyMs: Math.round(latencyMs),
     };
   } catch {
     return { ...d };

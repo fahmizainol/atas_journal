@@ -116,9 +116,9 @@ export function QuickDock({ children, onFloorChange }: QuickDockProps) {
     const parent = el.offsetParent as HTMLElement | null;
     if (!parent) return;
     const pr = parent.getBoundingClientRect();
-    // Read the box where it actually is — parked it is centred by a transform,
+    // Read the box where it actually is — parked it is centred by auto margins,
     // and measuring the rendered rect is what makes the first drag frame
-    // continuous instead of a jump to wherever the untransformed corner was.
+    // continuous instead of a jump to wherever the un-centred corner was.
     const er = el.getBoundingClientRect();
     grab.current = { dx: e.clientX - er.left, dy: e.clientY - er.top, left: pr.left, top: pr.top };
     el.setPointerCapture(e.pointerId);

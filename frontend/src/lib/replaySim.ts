@@ -32,7 +32,16 @@
 //     resting limit does not fill until the tape has traded past it, because a
 //     print at your price belonged to the queue in front of you; every round
 //     turn pays commission per contract per side. Set the model to zero
-//     (`PERFECT_FILLS`) and all three charges go away;
+//     (`PERFECT_FILLS`) and all four charges go away;
+//   - nothing you do reaches the market at the instant you did it. Every gesture
+//     — an order, a drag, a cancel, a flatten — lands `latencyMs` later and is
+//     resolved against the tape as it stood *then*, so a market order fills off
+//     the print that was current when it arrived rather than the one you were
+//     looking at when you clicked. The exchange's own work is exempt: a bracket
+//     leg and the trail that moves it are already sitting at the plant, so they
+//     trigger on the print that reached them and pay no lag at all. That
+//     asymmetry is the point of modelling it — your entry and your manual
+//     flatten get worse, your stop does not;
 //   - a stop books what it was jumped through at, not what it was set at. The
 //     trigger is the level; the fill is the print that crossed it, plus the
 //     spread. In a fast market those are not the same number, and the difference
@@ -74,6 +83,20 @@
 
 import type { Tape } from "./replayEngine";
 import { cross, queueGap, roundTurn, type FillCfg } from "./fillModel";
+import { asMicro } from "./contracts";
+
+/**
+ * The fill model as it applies to one position's contract.
+ *
+ * `cfg` describes the tape's contract, because the tape is what it was built
+ * from. A position in the micro is worth a tenth of that and is billed at the
+ * micro's rate, and *which* contract is a fact carried on the position rather
+ * than a setting read at pricing time — that is the whole point of stamping it.
+ *
+ * Prices are untouched, so nothing about where a fill lands goes through here:
+ * this is only ever asked what a resolved fill was worth.
+ */
+const money = (cfg: FillCfg, micro: boolean): FillCfg => (micro ? asMicro(cfg) : cfg);
 
 export type Side = "long" | "short";
 /** How a portion of a position came off: by hand, on its bracket, or because an
@@ -146,6 +169,16 @@ export interface OrderRec {
   edits: OrderEdit[];
   /** When it was cancelled, or null while it stands. */
   cancelMs: number | null;
+  /** This order went to the micro of the tape's contract — MNQ on an NQ tape
+   *  (see lib/contracts). Stamped at placement for the same reason the trail is:
+   *  what an order was *sent as* is a fact about that order, not a setting to be
+   *  re-read later. Switch the ticket to the mini afterwards and this one is
+   *  still a micro — it filled as one, it is worth what a micro is worth, and a
+   *  page that re-priced it would be rewriting what you did.
+   *
+   *  Optional, and absent means the mini: a log written before the choice
+   *  existed (a resumed sitting) is a log of mini orders. */
+  micro?: boolean;
 }
 
 export interface OrderState {
@@ -196,6 +229,16 @@ export interface Position {
   /** How the position was opened. Kept for the blotter, which says what kind of
    *  order got you in. */
   openType: OrderType;
+  /** Which contract this position is in, inherited from the order that opened it
+   *  — like `trail`, and like the bracket.
+   *
+   *  Every fill that lands on it is in the same contract, so there is nothing
+   *  here to arbitrate: the pages refuse to change the routed contract while
+   *  anything is held or working, exactly as the live panel does. That refusal
+   *  is what makes a netted position honest — MNQ and NQ are two instruments and
+   *  do not net against each other, so a sim that let a mini scale into a micro
+   *  would be teaching a position that cannot exist. */
+  micro: boolean;
   /** Whether more than one fill built it — i.e. whether `entryPrice` is an
    *  average rather than a price you actually traded at. Worth saying out loud
    *  in the readouts: it is the number every other one is measured from. */
@@ -257,6 +300,10 @@ export interface Trade {
   /** Commission on this portion: `size` contracts, both sides. Kept apart from
    *  `pnl` so a summary can say how much of a flat month was the broker. */
   fees: number;
+  /** Traded as the micro (see `OrderRec.micro`). Carried onto the trade so a
+   *  sitting that changed contract between positions can be read: two rows of
+   *  `×1` for very different money is a blotter that owes you the reason. */
+  micro: boolean;
   /** Excursion R: points moved ÷ points risked at open. Size-blind — it asks
    *  whether the *read* was good, i.e. whether price travelled further than the
    *  distance you'd allowed against you. Null when the position carried no risk
@@ -288,6 +335,11 @@ export function newLog(): Log {
 interface Working {
   o: OrderRec;
   oco: boolean;
+  /** The first tick that may fill it: the order's own cursor under a zero lag,
+   *  and the tape's position when it *landed* under any other. Resolved once, as
+   *  it is admitted, rather than per tick — this is read on every print for as
+   *  long as the order rests. */
+  idx: number;
 }
 
 export interface SimState {
@@ -340,6 +392,7 @@ function openPosition(
   // written at: the spread you paid getting in is money already at risk, and a
   // stop 40 ticks under the level you clicked is 41 ticks under the fill.
   const riskPts = legs.stop != null ? Math.abs(price - legs.stop) : null;
+  const micro = !!o.micro;
   return {
     side: o.side,
     size,
@@ -347,6 +400,7 @@ function openPosition(
     fillMs: ms,
     fillIdx: idx,
     openType: o.type,
+    micro,
     scaled: false,
     stop: legs.stop,
     target: legs.target,
@@ -355,7 +409,7 @@ function openPosition(
     ladder: null,
     trailArmed: false,
     riskPts,
-    riskCash: riskPts != null ? riskPts * cfg.pointValue * size : null,
+    riskCash: riskPts != null ? riskPts * money(cfg, micro).pointValue * size : null,
   };
 }
 
@@ -412,12 +466,16 @@ function reduce(
   const p = st.open!;
   const dir = p.side === "long" ? 1 : -1;
   const pts = (price - p.entryPrice) * dir;
+  // Priced in the contract the *position* is in, not the one the ticket is
+  // pointed at now. Both numbers below move with it, and a micro round turn is
+  // not billed at the mini's rate.
+  const m = money(cfg, p.micro);
   // The whole round turn is charged here rather than half at the entry, because
   // a portion is where the two sides finally belong to the same number of
   // contracts: scale in twice and out three times and the fees still total two
   // sides per contract, without the position having to carry a running tab.
-  const fees = roundTurn(cfg, size);
-  const pnl = pts * cfg.pointValue * size - fees;
+  const fees = roundTurn(m, size);
+  const pnl = pts * m.pointValue * size - fees;
   // Both R's measure against the risk frozen at open, never the stop as it
   // stands now. Reading the live stop makes every stop exit book exactly ±1.00R
   // by construction — the exit price *is* the stop, so the numerator and the
@@ -439,6 +497,7 @@ function reduce(
     pts,
     pnl,
     fees,
+    micro: p.micro,
     // Excursion R stays gross — it asks how far price travelled against what you
     // allowed, and commission is not a distance. Stake R divides the *net*
     // dollars by the dollars staked, so it is the one that says a 1R winner that
@@ -552,14 +611,28 @@ export function stepSim(
 ): void {
   const { orders, closes, brackets } = log;
   const gap = queueGap(cfg);
+  // How long a gesture spends in flight. Everything below reads the log through
+  // it — see the house rule; the exchange's own work does not go through here.
+  const lag = cfg.latencyMs;
+  /** The tape as it stood when a gesture stamped `ms` arrived: the instant, and
+   *  the first tick that may act on it. Under a zero lag the order's own cursor
+   *  is already that answer and is used verbatim, which is what makes the whole
+   *  feature inert rather than merely equivalent when it is switched off. */
+  const landed = (ms: number, idx: number): [number, number] =>
+    lag > 0 ? [ms + lag, upperBound(tape, ms + lag)] : [ms, idx];
 
   // Everything that happens *between* prints: orders coming on, cancels taking
   // effect, a bracket drag landing, a manual close. Run before each tick against
   // that tick's stamp, and once more at the clock so an action taken since the
   // last print still counts.
   const admin = (ms: number) => {
-    while (st.oi < orders.length && orders[st.oi].ms <= ms) {
+    // Which gestures have *reached the market* by now: the ones made at or
+    // before `at`. One subtraction here rather than an addition at four
+    // comparisons, and with no lag it is the clock itself.
+    const at = ms - lag;
+    while (st.oi < orders.length && orders[st.oi].ms <= at) {
       const o = orders[st.oi++];
+      const [ms0, idx0] = landed(o.ms, o.idx);
       // Whether an order keeps company with the others is decided here, as it
       // comes on, rather than recorded when it was placed: the walk is
       // deterministic, so the state it is admitted into is the state it was
@@ -567,17 +640,19 @@ export function stepSim(
       if (o.type === "market") {
         // A market order is its own fill, at the last print before it — plus the
         // spread, because the last print is where someone else traded and the
-        // offer is where you will.
+        // offer is where you will. "Before it" means before it *arrived*: under
+        // a lag those are two different prints, and the one that counts is what
+        // the market was matching against by the time the order got there.
         const oco = st.open == null;
-        applyFill(st, o, o, o.ms, o.idx, cross(priceAtMs(tape, o.ms), o.side === "long", cfg), cfg);
+        applyFill(st, o, o, ms0, idx0, cross(priceAtMs(tape, ms0), o.side === "long", cfg), cfg);
         retire(st, null, oco);
-      } else st.working.push({ o, oco: st.open == null });
+      } else st.working.push({ o, oco: st.open == null, idx: idx0 });
     }
     if (st.working.length) {
-      const live = st.working.filter((w) => w.o.cancelMs == null || w.o.cancelMs > ms);
+      const live = st.working.filter((w) => w.o.cancelMs == null || w.o.cancelMs > at);
       if (live.length !== st.working.length) st.working = live;
     }
-    while (st.bi < brackets.length && brackets[st.bi].ms <= ms) {
+    while (st.bi < brackets.length && brackets[st.bi].ms <= at) {
       const b = brackets[st.bi++];
       // A drag recorded against a position that no longer exists at this point
       // in the walk has nothing to move — which is what a rewind past the trade
@@ -590,7 +665,7 @@ export function stepSim(
         // by hand: see `riskPts`.
         if (p.riskPts == null && s != null) {
           p.riskPts = Math.abs(p.entryPrice - s);
-          p.riskCash = p.riskPts * cfg.pointValue * p.size;
+          p.riskCash = p.riskPts * money(cfg, p.micro).pointValue * p.size;
         }
         p.stop = s;
         p.target = b.target;
@@ -618,16 +693,18 @@ export function stepSim(
         }
       }
     }
-    while (st.ci < closes.length && closes[st.ci].ms <= ms) {
+    while (st.ci < closes.length && closes[st.ci].ms <= at) {
       const c = closes[st.ci++];
       // Flattening by hand is a market order like any other, and pays for the
-      // spread like any other — a long comes off on the bid.
+      // spread — and the lag — like any other. A long comes off on the bid, at
+      // wherever the bid had got to by the time the flatten landed.
+      const [ms0] = landed(c.ms, 0);
       if (st.open)
         reduce(
           st,
           st.open.size,
-          c.ms,
-          cross(priceAtMs(tape, c.ms), st.open.side === "short", cfg),
+          ms0,
+          cross(priceAtMs(tape, ms0), st.open.side === "short", cfg),
           "manual",
           cfg,
         );
@@ -672,8 +749,11 @@ export function stepSim(
       // Over a snapshot: a fill can take orders out of the set (its own OCO
       // company), and more than one order can be reached by the same print.
       for (const w of [...st.working]) {
-        if (i < w.o.idx || !st.working.includes(w)) continue;
-        const s = orderStateAt(w.o, ms);
+        if (i < w.idx || !st.working.includes(w)) continue;
+        // The levels as they had reached the market, not as they had reached the
+        // screen: a drag is a modify on the wire, so the old level is the one
+        // standing until the new one lands.
+        const s = orderStateAt(w.o, ms - lag);
         if (s.price == null) continue;
         // A limit is reached from the passive side, a stop from the active one —
         // the same comparison, mirrored.
@@ -834,13 +914,13 @@ export class SimLadder {
   }
 
   run(tape: Tape, log: Log, clock: number, cfg: FillCfg): SimState {
-    const key = `${cfg.tickSize}|${cfg.pointValue}|${cfg.commission}|${cfg.slipTicks}|${cfg.queueTicks}`;
+    const key = `${cfg.tickSize}|${cfg.pointValue}|${cfg.commission}|${cfg.slipTicks}|${cfg.queueTicks}|${cfg.latencyMs}`;
     if (tape !== this.tape || key !== this.cfgKey) {
       this.tape = tape;
       this.cfgKey = key;
       this.cps = [];
     }
-    const base = this.pick(tape, log, clock);
+    const base = this.pick(tape, log, clock, cfg.latencyMs);
     const st = base ? cloneSim(base.st) : newSim();
     // Without a checkpoint this is `runSim`'s own start: nothing can happen
     // before the first order was placed.
@@ -869,10 +949,10 @@ export class SimLadder {
   }
 
   /** The newest snapshot still sound for this tape, log and clock. */
-  private pick(tape: Tape, log: Log, clock: number): Checkpoint | null {
+  private pick(tape: Tape, log: Log, clock: number, lag: number): Checkpoint | null {
     for (let k = this.cps.length - 1; k >= 0; k--) {
       const cp = this.cps[k];
-      if (!this.sound(tape, log, cp)) {
+      if (!this.sound(tape, log, cp, lag)) {
         // Every later snapshot folded a superset of this history, so they are
         // gone with it.
         this.cps.length = k;
@@ -886,7 +966,7 @@ export class SimLadder {
     return null;
   }
 
-  private sound(tape: Tape, log: Log, cp: Checkpoint): boolean {
+  private sound(tape: Tape, log: Log, cp: Checkpoint, lag: number): boolean {
     if (cp.i > tape.n || tape.t[cp.i - 1] !== cp.ms) return false;
     if (!samePrefix(log.orders, cp.orders)) return false;
     if (!samePrefix(log.closes, cp.closes)) return false;
@@ -895,10 +975,18 @@ export class SimLadder {
     // unconsumed entry is the earliest one — if it is not past the snapshot, an
     // action has been recorded behind the clock this state was folded to, and
     // resuming would apply it a tick late.
+    //
+    // Past the snapshot means past the moment the snapshot could have *acted*
+    // on it, which the lag moves back: a gesture made 200 ms before this clock
+    // had not landed by it, so leaving it unconsumed is right rather than
+    // suspicious. Comparing against the bare clock would still be safe — it can
+    // only throw away snapshots that were fine — but it would throw them away
+    // on the live page, which is the one place this ladder exists to serve.
+    const at = cp.ms - lag;
     return (
-      after(log.orders[cp.st.oi], cp.ms) &&
-      after(log.closes[cp.st.ci], cp.ms) &&
-      after(log.brackets[cp.st.bi], cp.ms)
+      after(log.orders[cp.st.oi], at) &&
+      after(log.closes[cp.st.ci], at) &&
+      after(log.brackets[cp.st.bi], at)
     );
   }
 

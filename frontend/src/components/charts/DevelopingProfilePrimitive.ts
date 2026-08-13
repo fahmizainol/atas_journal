@@ -27,7 +27,7 @@
 // everywhere, and the two are told apart by where they start as much as by hue.)
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
-import { palette } from "../../theme";
+import { ink } from "../../theme";
 import type { ProfileNodes, VolumeProfile } from "../../lib/volumeProfile";
 import { drawEventMarginal } from "../../lib/eventMarginal";
 import type { TapeEvent } from "../../lib/replayEngine";
@@ -43,18 +43,15 @@ const GAP = 1; // px between rows, so they read as a histogram not a block
 
 // Violet, the demo page's own profile colour — and distinct from both marginal
 // hues (orange sweeps, fuchsia absorption) that get drawn on top of it, and from
-// the viewport profile's blue and gold beside it.
-const FILL_VA = "rgba(139, 92, 246, 0.46)";
-const FILL_OUT = "rgba(139, 92, 246, 0.16)";
-const FILL_POC = "rgba(196, 181, 253, 0.80)";
-
-// The nodes stay inside that violet family — they are this histogram's reading,
-// not a fourth layer — and split warm/cool the way the composite's do: the pale
-// violet is a price the session kept coming back to, the indigo one it passed
-// through.
-const NODE_HVN = "#c4b5fd";
-const NODE_LVN = "#818cf8";
-const CHIP = "rgba(14, 17, 23, 0.82)";
+// the viewport profile's blue and gold beside it. The nodes stay inside that
+// violet family — they are this histogram's reading, not a fourth layer — and
+// split warm/cool the way the composite's do: one is a price the session kept
+// coming back to, the other one it passed through.
+//
+// Both the washes and the node hues come off the active ink at draw time, since
+// the light surfaces re-cut them (theme.ts): on paper the pale violet POC is the
+// paper, and the warm/cool split has to be re-made below the midpoint instead of
+// above it.
 /** Vertical room a label needs to itself, in px. */
 const LABEL_H = 13;
 /** Most node labels drawn before the reading becomes a wall of text. Every node
@@ -115,6 +112,7 @@ class Renderer {
       const width = paneW * WIDTH_FRAC;
       if (base - width < 0) return; // pane too narrow to hold both gutters
 
+      const dp = ink().developingProfile;
       const va = this.c.data()?.va ?? null;
       const heaviest = profile.rows.reduce((a, b) => (b.volume > a.volume ? b : a));
       for (let i = 0; i < profile.rows.length; i++) {
@@ -131,13 +129,13 @@ class Renderer {
           ? va.poc >= row.low && va.poc < row.high
           : row === heaviest;
         const inVa = va ? row.high > va.val && row.low < va.vah : profile.valueArea.has(i);
-        ctx.fillStyle = isPoc ? FILL_POC : inVa ? FILL_VA : FILL_OUT;
+        ctx.fillStyle = isPoc ? dp.poc : inVa ? dp.va : dp.out;
         ctx.fillRect(base - w, yHigh, w, Math.max(1, yLow - yHigh - GAP));
       }
 
       // The baseline the rows hang off, so the gutter reads as a panel rather
       // than as bars floating in the middle of the chart.
-      ctx.fillStyle = palette.grid;
+      ctx.fillStyle = ink().viewportProfile.axis;
       ctx.fillRect(base, 0, 1, scope.mediaSize.height);
 
       // The events, against the same axis and the same width — which is the
@@ -180,6 +178,8 @@ class NodeRenderer {
       const from = x0 == null ? 0 : Math.max(0, x0);
       if (w - from < 4) return;
 
+      const dp = ink().developingProfile;
+      const chip = ink().chip.bg;
       ctx.font = "500 10px Inter, sans-serif";
       ctx.textBaseline = "middle";
       const taken: number[] = [];
@@ -208,7 +208,7 @@ class NodeRenderer {
         const bx = Math.max(from + 6, LEFT_KEEPOUT);
         const tw = ctx.measureText(text).width;
         if (bx + tw + 6 > w) return;
-        ctx.fillStyle = CHIP;
+        ctx.fillStyle = chip;
         ctx.fillRect(bx - 3, y - 7, tw + 6, 14);
         ctx.fillStyle = color;
         ctx.fillText(text, bx, y);
@@ -219,13 +219,13 @@ class NodeRenderer {
       // the pane runs out of room.
       for (const n of hvn) {
         const named = labels < MAX_NODE_LABELS;
-        line(n.price, NODE_HVN, named ? `NY HVN ${n.price.toFixed(2)}` : null, 0.45 + 0.45 * n.height);
+        line(n.price, dp.hvn, named ? `NY HVN ${n.price.toFixed(2)}` : null, 0.45 + 0.45 * n.height);
         if (named) labels++;
       }
       for (const n of lvn) {
         const named = labels < MAX_NODE_LABELS;
         // The thinner the trough, the more it is worth seeing.
-        line(n.price, NODE_LVN, named ? `NY LVN ${n.price.toFixed(2)}` : null, 0.9 - 0.4 * n.depth);
+        line(n.price, dp.lvn, named ? `NY LVN ${n.price.toFixed(2)}` : null, 0.9 - 0.4 * n.depth);
         if (named) labels++;
       }
     });

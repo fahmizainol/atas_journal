@@ -6,8 +6,15 @@
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 import type { VwapPoint } from "../../lib/chartTypes";
+import { ink } from "../../theme";
 
-const FILL_ALPHA = 0.3; // 70% transparent
+/** One resolved column of a ribbon: where it sits and what colour it is in. */
+interface Col {
+  x: number;
+  inner: number;
+  outer: number;
+  rgb: string;
+}
 
 class BandRenderer {
   constructor(
@@ -16,7 +23,15 @@ class BandRenderer {
     // so the renderer must always draw the current points, not the ones that
     // existed when the primitive was attached.
     private points: () => VwapPoint[],
-    private rgb: string,
+    // An accessor for the same reason the points are one: the wash is re-cut
+    // when the chart crosses between a light and a dark surface, and the
+    // primitive is attached once for the life of the chart.
+    private rgb: () => string,
+    // Per-bar override of the above, when the anchor has something to say that
+    // changes within a session (the Modern VWAP's regime read is the only one
+    // today). Null for the four session anchors, whose wash is one colour.
+    private tint: () => ((i: number) => string | undefined) | null,
+    private alphaScale: number,
     private chart: IChartApi,
     private series: ISeriesApi<"Candlestick">,
     private visible: () => boolean,
@@ -32,8 +47,12 @@ class BandRenderer {
       // Resolve every point once; a null coordinate (off-screen time or a price
       // outside the visible scale) breaks the ribbon into a separate polygon
       // rather than closing across the gap.
-      const cols: { x: number; inner: number; outer: number }[][] = [[], []];
-      for (const p of points) {
+      const base = this.rgb();
+      const tint = this.tint();
+      const cols: Col[][] = [[], []];
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        const rgb = tint?.(i) ?? base;
         // A non-finite point is a session-boundary break (see Interactions.tsx) —
         // split the ribbon here so the fill stops at the anchor's end rather than
         // washing across the gap to the next session.
@@ -53,15 +72,16 @@ class BandRenderer {
         const yU2 = this.series.priceToCoordinate(p.upper2);
         const yL1 = this.series.priceToCoordinate(p.lower1);
         const yL2 = this.series.priceToCoordinate(p.lower2);
-        cols[0].push(yU1 == null || yU2 == null ? (null as any) : { x, inner: yU1, outer: yU2 });
-        cols[1].push(yL1 == null || yL2 == null ? (null as any) : { x, inner: yL1, outer: yL2 });
+        cols[0].push(yU1 == null || yU2 == null ? (null as any) : { x, inner: yU1, outer: yU2, rgb });
+        cols[1].push(yL1 == null || yL2 == null ? (null as any) : { x, inner: yL1, outer: yL2, rgb });
       }
 
-      ctx.fillStyle = `rgba(${this.rgb}, ${FILL_ALPHA})`;
+      const alpha = ink().bandAlpha * this.alphaScale;
       for (const ribbon of cols) {
-        let run: { x: number; inner: number; outer: number }[] = [];
+        let run: Col[] = [];
         const flush = () => {
           if (run.length >= 2) {
+            ctx.fillStyle = `rgba(${run[0].rgb}, ${alpha})`;
             ctx.beginPath();
             ctx.moveTo(run[0].x, run[0].inner);
             for (let i = 1; i < run.length; i++) ctx.lineTo(run[i].x, run[i].inner);
@@ -72,8 +92,20 @@ class BandRenderer {
           run = [];
         };
         for (const c of ribbon) {
-          if (c) run.push(c);
-          else flush();
+          if (!c) {
+            flush();
+            continue;
+          }
+          // A colour change closes the polygon and opens the next one *on the
+          // same column*, so the two abut on a shared edge: start it at `c`
+          // instead and the quad between the two columns would go unfilled — a
+          // one-bar hole in the wash at every regime change.
+          const prev = run[run.length - 1];
+          if (prev && prev.rgb !== c.rgb) {
+            flush();
+            run.push(prev);
+          }
+          run.push(c);
         }
         flush();
       }
@@ -85,12 +117,14 @@ class BandPaneView {
   private _renderer: BandRenderer;
   constructor(
     points: () => VwapPoint[],
-    rgb: string,
+    rgb: () => string,
+    tint: () => ((i: number) => string | undefined) | null,
+    alphaScale: number,
     chart: IChartApi,
     series: ISeriesApi<"Candlestick">,
     visible: () => boolean,
   ) {
-    this._renderer = new BandRenderer(points, rgb, chart, series, visible);
+    this._renderer = new BandRenderer(points, rgb, tint, alphaScale, chart, series, visible);
   }
   update() {}
   renderer() {
@@ -108,10 +142,18 @@ export class VwapBandPrimitive {
   private views: BandPaneView[] = [];
   private requestUpdate?: () => void;
   private visible = true;
+  private tint: ((i: number) => string | undefined) | null = null;
 
   constructor(
     private points: VwapPoint[],
     private rgb: string,
+    /** Scales the surface's `bandAlpha`. 1 for the session anchors, whose ±1σ→±2σ
+     *  region is a few dozen pixels tall. The Modern VWAP's is not: a swing
+     *  anchor's σ runs several times a session anchor's, so the same alpha lays
+     *  the same wash over a slab several times the area and the candles inside it
+     *  stop being the thing you are looking at. Quieter per pixel, so the layer
+     *  weighs about what the others do overall. */
+    private alphaScale = 1,
   ) {}
 
   // Driven by the legend toggle alongside the anchor's line series. A primitive
@@ -129,12 +171,37 @@ export class VwapBandPrimitive {
     this.requestUpdate?.();
   }
 
+  /** Re-cut the wash — the light surfaces carry their own triplet per anchor
+   *  (theme.ts). Paired with the anchor's line series being re-coloured, so the
+   *  envelope and the fill under it never disagree about which cut is in force. */
+  setRgb(rgb: string) {
+    this.rgb = rgb;
+    this.requestUpdate?.();
+  }
+
+  /** Colour the wash per bar, by index into the points last handed to
+   *  `setPoints`. Set alongside those points, never on its own — an index into a
+   *  stale array is a wash in the wrong colour. Null goes back to the flat
+   *  `rgb`, which is what the four session anchors always use. */
+  setTint(tint: ((i: number) => string | undefined) | null) {
+    this.tint = tint;
+    this.requestUpdate?.();
+  }
+
   attached(param: any) {
     this.chart = param.chart;
     this.series = param.series;
     this.requestUpdate = param.requestUpdate;
     this.views = [
-      new BandPaneView(() => this.points, this.rgb, this.chart, this.series, () => this.visible),
+      new BandPaneView(
+        () => this.points,
+        () => this.rgb,
+        () => this.tint,
+        this.alphaScale,
+        this.chart,
+        this.series,
+        () => this.visible,
+      ),
     ];
     this.requestUpdate?.();
   }

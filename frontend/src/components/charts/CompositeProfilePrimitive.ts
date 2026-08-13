@@ -23,7 +23,7 @@
 // what happens next.
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
-import { compositePalette } from "../../theme";
+import { ink } from "../../theme";
 import type { ProfileNodes, VolumeProfile } from "../../lib/volumeProfile";
 import { drawEventMarginal } from "../../lib/eventMarginal";
 import type { TapeEvent } from "../../lib/replayEngine";
@@ -39,12 +39,24 @@ export interface CompositeData {
   days: number;
 }
 
-const { poc: POC, edge: EDGE, fill: FILL, hvn: HVN, lvn: LVN } = compositePalette;
-const ROW_VA = `rgba(${FILL}, 0.42)`;
-const ROW_OUT = `rgba(${FILL}, 0.16)`;
-const ROW_POC = `rgba(${FILL}, 0.85)`;
-const SHADE = `rgba(${FILL}, 0.05)`;
-const CHIP = "rgba(14, 17, 23, 0.82)";
+/** The rose family, at the four weights this primitive draws it in, plus the
+ *  chip plate under its labels. Derived per frame rather than fixed at module
+ *  load: the light surfaces re-cut the family (theme.ts), and a `const` computed
+ *  at import time would hold the dark one for the life of the tab. */
+function hues() {
+  const { composite: c, chip } = ink();
+  return {
+    poc: c.poc,
+    edge: c.edge,
+    hvn: c.hvn,
+    lvn: c.lvn,
+    rowVa: `rgba(${c.fill}, 0.42)`,
+    rowOut: `rgba(${c.fill}, 0.16)`,
+    rowPoc: `rgba(${c.fill}, 0.85)`,
+    shade: `rgba(${c.fill}, 0.05)`,
+    chip: chip.bg,
+  };
+}
 const GAP = 1;
 /** Fraction of the context stretch the widest (POC) row spans — the same rule
  *  the fixed-range tool follows, since this is that tool with the range set for
@@ -92,12 +104,13 @@ class FillRenderer {
     target.useMediaCoordinateSpace((scope: any) => {
       const ctx: CanvasRenderingContext2D = scope.context;
       const { x1, x2 } = s;
+      const h = hues();
       // The shade marks the days the composite was measured over, so it covers
       // the whole stretch; the histogram over it is the narrower thing, because
       // several days of context bars is a very wide box to run a POC row across.
       const width = x2 - x1;
       const histW = width * ROW_SPAN;
-      ctx.fillStyle = SHADE;
+      ctx.fillStyle = h.shade;
       ctx.fillRect(x1, 0, width, scope.mediaSize.height);
 
       // Rows grow rightward from the left edge of the context stretch — the
@@ -113,7 +126,7 @@ class FillRenderer {
         const yHigh = this.c.series.priceToCoordinate(row.high);
         const yLow = this.c.series.priceToCoordinate(row.low);
         if (yHigh == null || yLow == null) continue;
-        ctx.fillStyle = i === pocIdx ? ROW_POC : p.valueArea.has(i) ? ROW_VA : ROW_OUT;
+        ctx.fillStyle = i === pocIdx ? h.rowPoc : p.valueArea.has(i) ? h.rowVa : h.rowOut;
         ctx.fillRect(x1, yHigh, (row.volume / p.maxVolume) * histW, Math.max(1, yLow - yHigh - GAP));
       }
 
@@ -151,6 +164,7 @@ class OverlayRenderer {
     target.useMediaCoordinateSpace((scope: any) => {
       const ctx: CanvasRenderingContext2D = scope.context;
       const w = scope.mediaSize.width;
+      const h = hues();
       ctx.font = "500 10px Inter, sans-serif";
       ctx.textBaseline = "middle";
 
@@ -185,7 +199,7 @@ class OverlayRenderer {
         // Value levels label on the left, nodes on the right: they are read
         // together and would otherwise stack on the same few pixels.
         const bx = right ? w - tw - 12 : 10;
-        ctx.fillStyle = CHIP;
+        ctx.fillStyle = h.chip;
         ctx.fillRect(bx - 3, y - 7, tw + 6, 14);
         ctx.fillStyle = color;
         ctx.fillText(text, bx, y);
@@ -194,9 +208,9 @@ class OverlayRenderer {
       if (profileOn) {
         const p = d.profile;
         const dn = `${d.days}d`;
-        line(p.poc, POC, null, `C-POC ${p.poc.toFixed(2)} · ${dn}`);
-        line(p.vah, EDGE, [4, 3], `C-VAH ${p.vah.toFixed(2)}`);
-        line(p.val, EDGE, [4, 3], `C-VAL ${p.val.toFixed(2)}`);
+        line(p.poc, h.poc, null, `C-POC ${p.poc.toFixed(2)} · ${dn}`);
+        line(p.vah, h.edge, [4, 3], `C-VAH ${p.vah.toFixed(2)}`);
+        line(p.val, h.edge, [4, 3], `C-VAL ${p.val.toFixed(2)}`);
       }
       if (nodesOn && d.nodes) {
         let labels = 0;
@@ -206,7 +220,7 @@ class OverlayRenderer {
           const named = labels < MAX_NODE_LABELS;
           line(
             n.price,
-            HVN,
+            h.hvn,
             [1, 2],
             named ? `HVN ${n.price.toFixed(2)}` : null,
             0.45 + 0.45 * n.height,
@@ -218,7 +232,7 @@ class OverlayRenderer {
           const named = labels < MAX_NODE_LABELS;
           line(
             n.price,
-            LVN,
+            h.lvn,
             [1, 2],
             named ? `LVN ${n.price.toFixed(2)}` : null,
             // The thinner the trough, the more it is worth seeing.

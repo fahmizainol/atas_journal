@@ -106,6 +106,12 @@ export interface SimPrefs {
   startTime: string;
   speed: number;
   size: number;
+  /** Trade the root's micro instead of the mini — MNQ against the NQ tape (see
+   *  lib/contracts). Not a reading choice: it re-prices every fill, so the P&L,
+   *  the risk chips and what the guardrails refuse all move with it. Remembered
+   *  because which contract you practise is an account decision, not something
+   *  to re-pick each sitting. */
+  micro: boolean;
   /** Bracket distance in ticks. Zero means the leg is off: both the stop and the
    *  target are optional, and an order placed without either is managed by hand
    *  (a manual close, or a level dragged on afterwards). */
@@ -172,6 +178,18 @@ export interface SimPrefs {
    *  rail away, and that preference outlives the session. Like the other reading
    *  choices here it cannot touch a fill. */
   railPinned: boolean;
+  /** Whether the transport row is in flow at the foot of the page.
+   *
+   *  On by default and worth its ~34px: it is the instrument a replay is driven
+   *  with, not chrome you occasionally want. But the keys reach all of it — k
+   *  play/pause, `,` and `.` step, the speed is a setting you land on once — so
+   *  a session spent reading rather than scrubbing can have the pixels back, and
+   *  on a laptop that row is a real fraction of the tape. Sticky for the same
+   *  reason `railPinned` is: it is a statement about how you work.
+   *
+   *  The toggle is on the top bar rather than the transport itself — a hide
+   *  button that goes away with the thing it hid leaves nothing to press. */
+  transportOpen: boolean;
   /** How the panes are arranged. `one` is the page as it always was; the rest
    *  put two, three or four charts on the same tape, each with its own engine on
    *  its own bucketing (measured: a pane that repaints per frame costs a quarter
@@ -213,6 +231,9 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   startTime: "09:30",
   speed: 30,
   size: 1,
+  // The mini, because that is what the tape is and what the funded account is
+  // sized in. The micro is a deliberate choice, never a default.
+  micro: false,
   // The bracket the operating plan trades and the guardrails accept — a 40-60
   // tick stop and a 100+ tick target (lib/guardRules). Practice defaults to what
   // the funded account will actually let you place: rehearsing an 80-tick target
@@ -259,6 +280,8 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   // (w/s) or a click on the chart. Live starts unpinned too, and remembers its
   // own answer (live.chartKnobs).
   railPinned: false,
+  // In flow, which is how the page has always opened.
+  transportOpen: true,
   // One pane, so nothing about the page changes until it is asked for.
   layout: "one",
   // Pane 0's slot is a placeholder (the page's own `timeframe` is pane 0's).
@@ -321,6 +344,7 @@ export function loadSimPrefs(): SimPrefs {
       // An unknown speed would leave the transport's <select> showing a blank.
       speed: SIM_SPEEDS.includes(s.speed as number) ? (s.speed as number) : d.speed,
       size: int(s.size, 1, d.size),
+      micro: typeof s.micro === "boolean" ? s.micro : d.micro,
       // Zero is a real value here — the leg is off — so the floor is 0, not 1.
       stopTicks: int(s.stopTicks, 0, d.stopTicks),
       targetTicks: int(s.targetTicks, 0, d.targetTicks),
@@ -357,6 +381,7 @@ export function loadSimPrefs(): SimPrefs {
       eventMarginal: typeof s.eventMarginal === "boolean" ? s.eventMarginal : d.eventMarginal,
       indicators: typeof s.indicators === "boolean" ? s.indicators : d.indicators,
       railPinned: typeof s.railPinned === "boolean" ? s.railPinned : d.railPinned,
+      transportOpen: typeof s.transportOpen === "boolean" ? s.transportOpen : d.transportOpen,
       // Only the layouts that exist — an unknown id from a later version would
       // otherwise render nothing at all.
       layout: isLayoutId(s.layout) ? s.layout : legacyLayout(s, d.layout),

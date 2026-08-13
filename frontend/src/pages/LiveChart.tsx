@@ -1405,14 +1405,14 @@ export function LiveChart() {
   );
 
   const placeMarket = useCallback(
-    (side: Side) => {
+    (side: Side, gesture = "key") => {
       if (!ready) return;
       const px = markPrice();
       if (!Number.isFinite(px)) return;
       // `submit` returns false only when the active account is paper — then,
       // and only then, the gesture falls through to the blotter. Which way it
       // went is never decided here.
-      if (intent.submit(draftFor(side, "market", null))) return;
+      if (intent.submit(draftFor(side, "market", null), gesture)) return;
       placeOrder("market", side, null, px);
     },
     [draftFor, intent, markPrice, placeOrder, ready],
@@ -1422,7 +1422,7 @@ export function LiveChart() {
    *  type belongs on — a marketable resting order would fill on the next print
    *  at a price better than the market, which the tape cannot do. */
   const placeResting = useCallback(
-    (price: number, side: Side, type: "limit" | "stop") => {
+    (price: number, side: Side, type: "limit" | "stop", gesture = "click") => {
       if (!ready) return;
       const mk = markPrice();
       if (!Number.isFinite(mk) || !Number.isFinite(price)) return;
@@ -1432,7 +1432,7 @@ export function LiveChart() {
       // The clamp applies to both paths: an order resting on the wrong side of
       // the market is a fill at a price the tape cannot give you on paper, and a
       // rejection at the exchange on a real account. Same gesture, same rule.
-      if (intent.submit(draftFor(side, type, rest))) return;
+      if (intent.submit(draftFor(side, type, rest), gesture)) return;
       placeOrder(type, side, rest, rest);
     },
     [draftFor, intent, markPrice, placeOrder, ready, tickSize],
@@ -1449,7 +1449,7 @@ export function LiveChart() {
       const below = price < mk;
       const passive = button === "left";
       const side: Side = passive === below ? "long" : "short";
-      placeResting(price, side, passive ? "limit" : "stop");
+      placeResting(price, side, passive ? "limit" : "stop", "click");
     },
     [markPrice, placeResting],
   );
@@ -2044,7 +2044,7 @@ export function LiveChart() {
               }
               onOrderCancel={cancelOrder}
               onPlaceOrder={placeAt}
-              onPlaceTyped={(o) => placeResting(o.price, o.side, o.type)}
+              onPlaceTyped={(o) => placeResting(o.price, o.side, o.type, "ticket")}
               ticket={{ size, stopTicks, targetTicks }}
               onTicketChange={(t) =>
                 setTicket((p) => ({
@@ -2122,7 +2122,7 @@ export function LiveChart() {
                   key={side}
                   type="button"
                   className={`sim-quick-btn ${side === "long" ? "buy" : "sell"}`}
-                  onClick={() => placeMarket(side)}
+                  onClick={() => placeMarket(side, "dock")}
                   disabled={!ready}
                   // The outline is the whole tell. These two buttons mean
                   // different things on different accounts and look otherwise
@@ -2204,7 +2204,7 @@ export function LiveChart() {
                     }
                     onOrderCancel={cancelOrder}
                     onPlaceOrder={placeAt}
-                    onPlaceTyped={(o) => placeResting(o.price, o.side, o.type)}
+                    onPlaceTyped={(o) => placeResting(o.price, o.side, o.type, "ticket")}
                     ticket={{ size, stopTicks, targetTicks }}
                     onTicketChange={(t) =>
                       setTicket((p) => ({

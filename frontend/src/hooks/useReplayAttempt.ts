@@ -27,7 +27,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { apiSend } from "../lib/api";
+import { ApiError, apiSend } from "../lib/api";
 import type { Log, Trade } from "../lib/replaySim";
 import {
   SIM_ENGINE_VERSION,
@@ -121,6 +121,13 @@ export function useReplayAttempt() {
   const [summary, setSummary] = useState<AttemptSummary | null>(null);
   const [status, setStatus] = useState<"idle" | "active" | "finished">("idle");
   const [error, setError] = useState<string | null>(null);
+  // Separate from `error`: this one is the account saying no, not the write
+  // going wrong, and the page shows the two in different places.
+  const [refusal, setRefusal] = useState<string | null>(null);
+
+  /** The page clears it once it has shown it — a refusal is a reply, not a
+   *  state (the same rule `Simulator`'s own `refused` follows). */
+  const clearRefusal = useCallback(() => setRefusal(null), []);
 
   const clearTimer = () => {
     if (timerRef.current != null) window.clearTimeout(timerRef.current);
@@ -200,7 +207,17 @@ export function useReplayAttempt() {
         setError(null);
         if (finishing) qc.invalidateQueries({ queryKey: ["replays"] });
       } catch (e) {
-        if (mine()) setError(e instanceof Error ? e.message : String(e));
+        if (!mine()) return;
+        setError(e instanceof Error ? e.message : String(e));
+        // A refused *create* is not an error, it is an answer — the account
+        // would not let this sitting open (see `replay_account.refusal`). It
+        // gets its own channel because the page has to say it loudly, in the
+        // same place a refused order is said, rather than as a small red note
+        // beside a blotter that will never fill.
+        if (e instanceof ApiError && e.status === 409) {
+          const d = e.detail as { message?: string } | null;
+          setRefusal(typeof d?.message === "string" ? d.message : e.message);
+        }
       }
     },
     [qc],
@@ -229,6 +246,7 @@ export function useReplayAttempt() {
       setSummary(null);
       setStatus("idle");
       setError(null);
+      setRefusal(null);
     },
     [flush],
   );
@@ -340,5 +358,8 @@ export function useReplayAttempt() {
     [flush],
   );
 
-  return { attempt, attemptId, summary, status, error, arm, adopt, record, noteRewind, finish, setNote };
+  return {
+    attempt, attemptId, summary, status, error, refusal, clearRefusal,
+    arm, adopt, record, noteRewind, finish, setNote,
+  };
 }

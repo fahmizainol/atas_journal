@@ -60,7 +60,9 @@ import {
   type BrokerState,
   type GuardLevels,
   type GuardState,
+  type OrderLatency,
   type OrderPreview,
+  type OrderSent,
   type RoutingStatus,
 } from "../lib/routingTypes";
 import { fmtPts, fmtUsd } from "../lib/simViews";
@@ -71,6 +73,15 @@ const TYPES = ["market", "limit", "stop"] as const;
 type OrderKind = (typeof TYPES)[number];
 
 const err = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/** The acknowledgement, with what the press cost — the browser's own
+ *  press-to-acknowledgement, which is the number the trader actually
+ *  experiences. The breakdown behind it is in `orders.jsonl`, and the exchange's
+ *  own answer lands there afterwards; `Latency` below draws it once it has. */
+function receipt(r: OrderSent): string {
+  const ms = r.latency?.client_ms;
+  return `sent${ms == null ? "" : ` · ${Math.round(ms)} ms`} · ${r.basket_id || r.tag}`;
+}
 
 /** Seconds as m:ss. The review's countdown, which is the only one left. */
 function mmss(s: number): string {
@@ -254,6 +265,7 @@ function Live({
           <Working broker={broker} onDone={onDone} />
           <Flatten broker={broker} onDone={onDone} />
           <Recent broker={broker} />
+          <Latency last={broker.last_latency} />
         </>
       )}
     </>
@@ -969,12 +981,13 @@ function Ticket({
             disabled={busy}
             style={{ borderColor: palette.orange, color: palette.orange }}
             onClick={async () => {
+              const at = performance.now();
               setBusy(true);
               setE(null);
               try {
-                const r = await sendOrder(staged.token);
+                const r = await sendOrder(staged.token, { at, gesture: "pad+confirm" });
                 setStaged(null);
-                setSent(`sent · ${r.basket_id || r.tag}`);
+                setSent(receipt(r));
                 onDone();
               } catch (x) {
                 setE(err(x));
@@ -1189,6 +1202,10 @@ function Ticket({
         disabled={busy || bad}
         style={broker.one_click ? { borderColor: palette.orange, color: palette.orange } : undefined}
         onClick={async () => {
+          // Stamped in the handler rather than at the fetch: the gap between
+          // them is React getting round to the work, and it is part of what the
+          // press cost. See `timed` in useRouting.
+          const at = performance.now();
           setBusy(true);
           setE(null);
           setSent(null);
@@ -1213,8 +1230,8 @@ function Ticket({
             // keyboard is allowed to skip, and stranger still to have two
             // answers to "does this account confirm".
             if (broker.one_click) {
-              const r = await sendOrderNow(draft);
-              setSent(`sent · ${r.basket_id || r.tag}`);
+              const r = await sendOrderNow(draft, { at, gesture: "pad" });
+              setSent(receipt(r));
               onDone();
             } else {
               setStaged({ ...(await previewOrder(draft)), at: Date.now() });
@@ -1405,5 +1422,63 @@ function Recent({ broker }: { broker: BrokerState }) {
         </div>
       ))}
     </details>
+  );
+}
+
+/** What the last order took, leg by leg.
+ *
+ *  THE THREE NUMBERS MEAN DIFFERENT THINGS AND ARE NOT A SUM. `press` is the
+ *  browser's, measured from the gesture handler to the response in hand.
+ *  `api`/`gate`/`plant` are this process's, measured on its own clock. `exch` is
+ *  the exchange's first word on the order, which arrives *after* the response —
+ *  so it is blank on the order you have just sent and fills in on the next poll.
+ *  Nothing here is a difference between two machines' wall clocks; every field
+ *  is a duration timed start-to-finish on one of them. See `OrderLatency`.
+ *
+ *  Here rather than on the chart because it is a diagnostic: the number worth
+ *  watching while trading is on the acknowledgement, and this is where you come
+ *  when that number was surprising.
+ */
+function Latency({ last }: { last: OrderLatency | null }) {
+  if (!last) return null;
+  const ms = (v?: number | null) => (v == null ? "—" : `${Math.round(v)} ms`);
+  const legs: [string, number | null | undefined, string][] = [
+    ["press", last.client_ms,
+      "The browser's own: the gesture handler to the response in hand. What you actually experienced."],
+    ["net", last.net_ms,
+      "press minus api — the fetch, the dev proxy, the JSON, and React getting round to the handler."],
+    ["api", last.api_ms,
+      "The whole request handler: finding the session, the checks, the wire, the reply."],
+    ["gate", last.gate_ms,
+      "This process's own work before the wire — the guardrails, the day's arithmetic, the journal write. A bad number here is a bug on this side."],
+    ["plant", last.plant_ms,
+      "The wire: our submit to Rithmic's order plant answering with a basket id."],
+    ["exch", last.exch_ms,
+      "Wire to the exchange's first word on the order. Lands after the response, so it appears a poll later — and it is the honest end of 'placed'."],
+  ];
+  return (
+    <div style={{ marginTop: 10, fontSize: 11, color: palette.muted }}>
+      <div style={{ letterSpacing: 0.4 }}>
+        LAST ORDER — WHAT IT TOOK{last.gesture ? ` · ${last.gesture}` : ""}
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
+        {legs.map(([name, v, title]) => (
+          <span key={name} title={title}>
+            {name}{" "}
+            <b style={{ color: v == null ? palette.muted : palette.text }}>{ms(v)}</b>
+          </span>
+        ))}
+      </div>
+      {last.exch_status && (
+        <div style={{ marginTop: 2 }}>exchange said “{last.exch_status}”</div>
+      )}
+      {last.failed && (
+        <div style={{ marginTop: 2, color: palette.red }}>⚠ {last.failed}</div>
+      )}
+      <div style={{ marginTop: 2 }}>
+        Every send is written to <code>orders.jsonl</code> as a{" "}
+        <code>latency</code> event — this is only the most recent one.
+      </div>
+    </div>
   );
 }

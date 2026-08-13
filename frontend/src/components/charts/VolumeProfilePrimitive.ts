@@ -9,7 +9,7 @@
 // chart (see CandlestickChart).
 
 import type { ISeriesApi } from "lightweight-charts";
-import { palette } from "../../theme";
+import { ink } from "../../theme";
 import type { VolumeProfile } from "../../lib/volumeProfile";
 import { drawEventMarginal } from "../../lib/eventMarginal";
 import type { TapeEvent } from "../../lib/replayEngine";
@@ -23,9 +23,10 @@ import type { TapeEvent } from "../../lib/replayEngine";
 const MAX_WIDTH_FRAC = 0.11;
 const GAP = 1; // px between rows, so they read as a histogram not a block
 
-const FILL_VA = "rgba(59, 130, 246, 0.42)"; // inside the value area
-const FILL_OUT = "rgba(138, 143, 156, 0.22)"; // the tails
-const FILL_POC = "rgba(224, 165, 42, 0.72)"; // point of control
+// Value area / tails / point of control. Read from the active ink at draw time
+// rather than fixed here: on a light surface these three washes are re-cut
+// (theme.ts), and a canvas that repaints every frame is the one place a
+// recolour costs nothing to pick up.
 
 class ProfileRenderer {
   constructor(
@@ -42,6 +43,7 @@ class ProfileRenderer {
       const series = this.series();
       const right = scope.mediaSize.width;
       const maxWidth = right * MAX_WIDTH_FRAC;
+      const vp = ink().viewportProfile;
 
       // The POC row is the one whose price the chart also draws a gold line at;
       // recomputing it here (rather than storing an index) keeps the renderer
@@ -58,14 +60,13 @@ class ProfileRenderer {
 
         const h = Math.max(1, yLow - yHigh - GAP);
         const w = (row.volume / profile.maxVolume) * maxWidth;
-        ctx.fillStyle =
-          row === pocRow ? FILL_POC : profile.valueArea.has(i) ? FILL_VA : FILL_OUT;
+        ctx.fillStyle = row === pocRow ? vp.poc : profile.valueArea.has(i) ? vp.va : vp.out;
         ctx.fillRect(right - w, yHigh, w, h);
       }
 
       // A hairline along the histogram's baseline separates it from the price
       // scale and gives the rows something to sit against.
-      ctx.fillStyle = palette.grid;
+      ctx.fillStyle = vp.axis;
       ctx.fillRect(right - 1, 0, 1, scope.mediaSize.height);
 
       // The event marginal, measured off this histogram's own baseline and

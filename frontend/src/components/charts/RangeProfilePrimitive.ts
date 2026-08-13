@@ -10,7 +10,7 @@
 // readable against a dense candle cluster.
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
-import { palette } from "../../theme";
+import { ink, palette } from "../../theme";
 import type { VolumeProfile } from "../../lib/volumeProfile";
 
 export interface RangeProfileItem {
@@ -22,13 +22,11 @@ export interface RangeProfileItem {
   profile: VolumeProfile | null;
 }
 
-const SHADE = "rgba(108, 92, 231, 0.10)";
-const SHADE_SEL = "rgba(108, 92, 231, 0.16)";
-const EDGE = "rgba(108, 92, 231, 0.55)";
-const EDGE_SEL = "rgba(147, 130, 255, 0.95)";
-const FILL_VA = "rgba(59, 130, 246, 0.45)";
-const FILL_OUT = "rgba(138, 143, 156, 0.26)";
-const FILL_POC = "rgba(224, 165, 42, 0.75)";
+// The box (indigo chrome around the selection) and the histogram inside it
+// (the same blue / grey / gold the viewport profile uses, a touch stronger since
+// this one is asked for rather than resident) both come off the active ink at
+// draw time — the light surfaces re-cut them, and this canvas repaints every
+// frame anyway. See theme.ts.
 const GAP = 1;
 /** Half-height of the grab handle drawn on a selected profile's edges. */
 const GRIP_H = 14;
@@ -64,12 +62,13 @@ class FillRenderer {
     target.useMediaCoordinateSpace((scope: any) => {
       const ctx: CanvasRenderingContext2D = scope.context;
       const sel = this.c.selected();
+      const { rangeBox: box, viewportProfile: vp } = ink();
       for (const d of this.c.items()) {
         const s = span(this.c, d);
         if (!s) continue;
         const { x1, x2 } = s;
 
-        ctx.fillStyle = d.id === sel ? SHADE_SEL : SHADE;
+        ctx.fillStyle = d.id === sel ? box.shadeSel : box.shade;
         ctx.fillRect(x1, 0, x2 - x1, scope.mediaSize.height);
 
         const p = d.profile;
@@ -86,7 +85,7 @@ class FillRenderer {
           const yHigh = this.c.series.priceToCoordinate(row.high);
           const yLow = this.c.series.priceToCoordinate(row.low);
           if (yHigh == null || yLow == null) continue;
-          ctx.fillStyle = row === pocRow ? FILL_POC : p.valueArea.has(i) ? FILL_VA : FILL_OUT;
+          ctx.fillStyle = row === pocRow ? vp.poc : p.valueArea.has(i) ? vp.va : vp.out;
           ctx.fillRect(
             x1,
             yHigh,
@@ -108,6 +107,7 @@ class OverlayRenderer {
     target.useMediaCoordinateSpace((scope: any) => {
       const ctx: CanvasRenderingContext2D = scope.context;
       const sel = this.c.selected();
+      const box = ink().rangeBox;
       ctx.font = "500 10px Inter, sans-serif";
       ctx.textBaseline = "middle";
 
@@ -118,7 +118,7 @@ class OverlayRenderer {
         const on = d.id === sel;
         const h = scope.mediaSize.height;
 
-        ctx.fillStyle = on ? EDGE_SEL : EDGE;
+        ctx.fillStyle = on ? box.edgeSel : box.edge;
         ctx.fillRect(x1, 0, on ? 2 : 1, h);
         ctx.fillRect(x2 - (on ? 2 : 1), 0, on ? 2 : 1, h);
 
@@ -159,7 +159,7 @@ class OverlayRenderer {
           const text = `${l.label} ${l.price.toFixed(2)}`;
           const w = ctx.measureText(text).width;
           const bx = x2 - w - 10;
-          ctx.fillStyle = "rgba(14, 17, 23, 0.82)";
+          ctx.fillStyle = ink().chip.bg;
           ctx.fillRect(bx - 3, y - 7, w + 6, 14);
           ctx.fillStyle = l.color;
           ctx.fillText(text, bx, y);

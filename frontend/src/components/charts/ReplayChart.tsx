@@ -40,17 +40,14 @@ import {
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
+import { chartInk, chartSurfaces, ink, palette, type BandHue } from "../../theme";
 import {
-  candleSchemes,
-  chartSurfaces,
-  compositePalette,
-  ibPalette,
-  modernVwapPalette,
-  palette,
-  profilePalette,
-  vwapPalette,
-} from "../../theme";
-import { applyAppearance, appearanceSettings, recolorVolume, volumeColors } from "./chartAppearance";
+  applyAppearance,
+  appearanceSettings,
+  candleColors,
+  recolorVolume,
+  volumeColors,
+} from "./chartAppearance";
 import type {
   BandPt,
   Bar,
@@ -393,6 +390,10 @@ const PROF_KEYS: ProfKey[] = ["vah", "val", "poc"];
  *  have to think about. */
 const MV_KEYS = ["mid", "u1", "l1", "u2", "l2", "u3", "l3"] as const;
 type MvKey = (typeof MV_KEYS)[number];
+/** Which σ ring each series is. 0 is the mid line. Module scope for the same
+ *  reason as the keys, and because both the builder (which sets the dash and the
+ *  weight from it) and the refresh (which sets the alpha) need the same answer. */
+const MV_RING: Record<MvKey, number> = { mid: 0, u1: 1, l1: 1, u2: 2, l2: 2, u3: 3, l3: 3 };
 
 /** The bar a time sits on (or the nearest one). Bars are strictly ascending, so
  *  it is a plain binary search — used to hold a viewport across a `setData` that
@@ -741,6 +742,19 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   const gProfRef = useRef<Record<ProfKey, ISeriesApi<"Line">> | null>(null);
   const nProfRef = useRef<Record<ProfKey, ISeriesApi<"Line">> | null>(null);
 
+  // What a point is worth on the overlays, which is the routed contract's money
+  // when the page named one and the tape's otherwise (see `pointValue`). In a
+  // ref because every one of them is fed from outside React — the handle, the
+  // playback, a drag — and none of those closures re-bind when a prop changes.
+  const pvRef = useRef<number | undefined>(pointValueProp);
+  pvRef.current = pointValueProp;
+  /** The routed contract's $/point, or the tape's. The single answer every chip
+   *  on this canvas is priced with. */
+  const chipPv = () => pvRef.current ?? tapeRef.current?.pointValue;
+  /** The ruler, which reports in the same money and is built inside the chart
+   *  effect — reachable from here only through this. */
+  const rulerRef = useRef<RulerPrimitive | null>(null);
+
   // The open position overlay. The primitive is created here rather than in the
   // build effect because the imperative handle (which lives outside it) is what
   // feeds it; attaching to the series still happens in there.
@@ -966,13 +980,44 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // frame of a bracket drag.
   const pushPos = () => posPrimRef.current?.setData(posRef.current);
   const pushOrders = () =>
-    ordPrimRef.current?.setOrders(
-      workingRef.current,
-      tapeRef.current?.tickSize,
-      tapeRef.current?.pointValue,
-    );
+    ordPrimRef.current?.setOrders(workingRef.current, tapeRef.current?.tickSize, chipPv());
   const pushTrades = () =>
     tradesPrimRef.current?.setTrades(tradesRef.current, tapeRef.current?.tickSize);
+
+  /** Resolve a position line against the contract it should be priced in, and
+   *  draw it. The line the page handed over is kept as it was given (`posSrcRef`)
+   *  so the resolution can be redone — the routed contract can change under a
+   *  position that hasn't moved, and re-reading it off the merged object would
+   *  lose which of the three answers the line itself had supplied. */
+  const posSrcRef = useRef<PositionLine | null>(null);
+  const applyPos = (p: PositionLine | null) => {
+    posSrcRef.current = p;
+    const tape = tapeRef.current;
+    posRef.current = p
+      ? {
+          ...p,
+          last: lastPriceRef.current,
+          // The line's own contract wins over the page's routed one, which wins
+          // over the tape's — see `PositionLine` and `pointValue`.
+          tickSize: p.tickSize ?? tape?.tickSize ?? 0.25,
+          pointValue: p.pointValue ?? chipPv() ?? 20,
+        }
+      : null;
+    pushPos();
+  };
+
+  // The page pointed its orders at another contract (the Simulator's mini/micro
+  // choice). Nothing on the chart moved and no tape changed — but every figure
+  // in money on it did, so the three overlays that quote dollars are re-priced
+  // where they stand rather than waiting for whatever would next have pushed
+  // them. Deps are the prop alone: the three helpers are re-made every render
+  // and read everything they need from refs, so listing them would re-run this
+  // on every push instead of on the only thing that changes the answer.
+  useEffect(() => {
+    rulerRef.current?.setContract(tapeRef.current?.tickSize, chipPv());
+    applyPos(posSrcRef.current);
+    pushOrders();
+  }, [pointValueProp]);
 
   // Hand the composite to its primitive, pinned to the context bars it was
   // measured over. Cheap — the profile is already built and the nodes are cached
@@ -1375,6 +1420,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // bar. Doing it per tick would be the one layer on this chart that made the
   // tape stutter, for numbers that cannot change between closes.
   const mvLinesRef = useRef<Record<MvKey, ISeriesApi<"Line">> | null>(null);
+  const mvBandRef = useRef<VwapBandPrimitive | null>(null);
   const mvPrimRef = useRef<ModernVwapPrimitive | null>(null);
   if (!mvPrimRef.current) mvPrimRef.current = new ModernVwapPrimitive();
   // Null when the page doesn't offer the layer. Read through the ref rather than
@@ -1397,6 +1443,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // is off by default — so for most sessions this branch is the whole story.
     if (!on || !p || barsRef.current.length === 0) {
       for (const k of MV_KEYS) lines[k].setData([]);
+      mvBandRef.current?.setPoints([]);
       prim.setData([], [], new Map());
       return;
     }
@@ -1406,17 +1453,25 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // thing on this indicator that changes bar to bar, and the band it tints is
     // where it belongs (his own choice, and the reason the mid line gives up its
     // hue to stay legible under it).
-    const tint = (pt: MvPoint, alpha: number): string | undefined => {
-      if (!p.regimeColor) return undefined;
-      const r = modernVwapPalette.regime;
-      const rgb = pt.regime < 0 ? r.undefined : pt.regime >= 2 ? r.trending : r.ranging;
-      return `rgba(${rgb}, ${alpha})`;
+    //
+    // Read per call, not captured: this runs on every refresh, so it picks up a
+    // surface change for free — unlike the series colours, which `relight` has
+    // to push (the regime tint rides on the *data*, and data is re-set).
+    const regimeRgb = (pt: MvPoint): string => {
+      const r = ink().modernVwap.regime;
+      return pt.regime < 0 ? r.undefined : pt.regime >= 2 ? r.trending : r.ranging;
     };
+    const tint = (pt: MvPoint, alpha: number): string | undefined =>
+      p.regimeColor ? `rgba(${regimeRgb(pt)}, ${alpha})` : undefined;
     // A ring above the chosen envelope draws nothing at all — the series is kept
     // (creating and destroying series on a knob turn is how a chart leaks) and
     // simply handed an empty array.
-    const ring: Record<MvKey, number> = { mid: 0, u1: 1, l1: 1, u2: 2, l2: 2, u3: 3, l3: 3 };
-    const alpha: Record<number, number> = { 1: 0.45, 2: 0.8, 3: 0.3 };
+    const ring = MV_RING;
+    // Alpha per ring, weighted toward the ±2σ envelope because that is the one
+    // the MR rule actually tests — the others are context. These sat a third
+    // lower and the outer rings read as smudges rather than levels; a band you
+    // have to hunt for is a band you end up reading off the mid line instead.
+    const alpha: Record<number, number> = { 1: 0.7, 2: 0.95, 3: 0.5 };
     for (const k of MV_KEYS) {
       if (ring[k] > p.bands) {
         lines[k].setData([]);
@@ -1433,6 +1488,25 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
             : { time: pt.time as Time, value: v, color: tint(pt, alpha[ring[k]]) };
         }),
       );
+    }
+    // The wash shades ±1σ→±2σ, so it needs both rings to exist: at `bands: 1`
+    // there is no outer edge to fill to and the region is simply not drawn.
+    // Tint and points are set together — the tint indexes into the array below.
+    const band = mvBandRef.current;
+    if (band) {
+      band.setPoints(
+        p.bands < 2
+          ? []
+          : d.points.map((pt) => ({
+              time: pt.time,
+              middle: pt.mid,
+              upper1: pt.u1,
+              lower1: pt.l1,
+              upper2: pt.u2,
+              lower2: pt.l2,
+            })),
+      );
+      band.setTint(p.regimeColor ? (i) => regimeRgb(d.points[i]) : null);
     }
     const byTime = new Map(barsRef.current.map((b) => [b.time, b]));
     prim.setData(d.signals, d.anchors, byTime);
@@ -1921,6 +1995,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     syncIb: () => void;
     remakeRuler: (tape: Tape | null) => void;
     clearRuler: () => void;
+    /** Push a new indicator ink onto every series built in there. The canvas
+     *  primitives need no such call — they read the active ink each frame — but
+     *  a lightweight-charts series carries its colour in its options, so the
+     *  light↔dark crossing has to be handed to them one applyOptions at a time.
+     *  Nothing here touches data or ranges: a recolour must not cost the replay
+     *  its position (which is also why this effect never re-runs). */
+    relight: () => void;
   } | null>(null);
 
   useEffect(() => {
@@ -1928,7 +2009,12 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // Read, not subscribed to: appearance is applied live by its own effect
     // below, and a rebuild here would throw away the range being watched.
     const surf = chartSurfaces[appearanceRef.current.surface];
-    const sch = candleSchemes[appearanceRef.current.candles];
+    const sch = candleColors(appearanceRef.current);
+    // Every indicator hue on this chart, in the cut this surface wants. Read
+    // once here and again in `relight` below — the series carry their colour in
+    // options, so unlike the canvas primitives they have to be told when it
+    // changes.
+    let hues = chartInk(appearanceRef.current.surface);
     const chart = createChart(elRef.current, {
       // The library watches the container itself. Hand-rolling that watch is the
       // obvious thing and it does not work: resizing the chart re-lays-out the
@@ -2001,28 +2087,34 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         pts: [],
       };
     };
-    gRef.current = mkBand(vwapPalette.globex);
-    nRef.current = mkBand(vwapPalette.ny);
+    gRef.current = mkBand(hues.vwap.globex);
+    nRef.current = mkBand(hues.vwap.ny);
     // The weekly anchor, in the same orange the strategy charts draw it in. It
     // is a *context* band here as it is there — nothing the replay does is
     // measured against it — and it only ever has points when the session shipped
     // a seed the week could be honestly built from.
-    wkRef.current = mkBand(vwapPalette.weekly);
+    wkRef.current = mkBand(hues.vwap.weekly);
     // The ⚓ band is built empty and stays empty until the user anchors — no
     // create/destroy dance, the streaming path just starts finding points in it.
-    aRef.current = mkBand(vwapPalette.anchored);
+    aRef.current = mkBand(hues.vwap.anchored);
 
-    // Modern VWAP: seven lines and no wash. The other four anchors shade their
-    // ±1σ→±2σ region, but this one's bands carry the regime colour, and a fill
-    // under a tinted envelope would be two colour channels arguing over the same
-    // pixels. Built empty; refreshMv fills them or leaves them empty.
+    // Modern VWAP: seven lines and the same ±1σ→±2σ wash the other four anchors
+    // draw. The wash was left off at first because this one's bands carry the
+    // regime colour and a flat fill under a tinted envelope is two colour
+    // channels arguing over the same pixels — so the fill takes the regime
+    // triplet too (see refreshMv), and they argue about nothing.
+    // Built empty; refreshMv fills them or leaves them empty.
     mvLinesRef.current = Object.fromEntries(
       MV_KEYS.map((k) => [
         k,
         chart.addSeries(LineSeries, {
-          color: k === "mid" ? modernVwapPalette.middle : modernVwapPalette.band,
-          lineWidth: k === "mid" ? 2 : 1,
-          lineStyle: k === "mid" ? LineStyle.Solid : LineStyle.Dashed,
+          color: k === "mid" ? hues.modernVwap.middle : hues.modernVwap.band,
+          // The mid and the ±2σ envelope are the two lines a rule is ever read
+          // off, so both are solid; ±1σ and ±3σ stay dashed. Weight still
+          // separates the mid from its envelope, so the ring you are looking at
+          // is legible without counting outward from the middle.
+          lineWidth: MV_RING[k] === 0 ? 2 : 1,
+          lineStyle: MV_RING[k] === 0 || MV_RING[k] === 2 ? LineStyle.Solid : LineStyle.Dashed,
           priceLineVisible: false,
           lastValueVisible: false,
           crosshairMarkerVisible: false,
@@ -2033,6 +2125,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         }),
       ]),
     ) as Record<MvKey, ISeriesApi<"Line">>;
+    mvBandRef.current = new VwapBandPrimitive([], hues.modernVwap.fill, 0.45);
+    candle.attachPrimitive(mvBandRef.current as any);
 
     // Developing value areas, one per anchor: VAH and VAL solid (they are the
     // levels the rules actually test against), POC dashed between them, each in
@@ -2055,8 +2149,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         poc: line(pal.poc, "poc"),
       } as Record<ProfKey, ISeriesApi<"Line">>;
     };
-    gProfRef.current = mkProfile(profilePalette.globex);
-    nProfRef.current = mkProfile(profilePalette.ny);
+    gProfRef.current = mkProfile(hues.profile.globex);
+    nProfRef.current = mkProfile(hues.profile.ny);
 
     // Initial Balance: high/low as flat segments from the bell to the live edge —
     // line series rather than price lines, because an IB doesn't exist over the
@@ -2074,10 +2168,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         crosshairMarkerVisible: false,
         ...(guide ? { autoscaleInfoProvider: () => null } : {}),
       });
-    const ibSeries = [ibSeg(ibPalette.line, false), ibSeg(ibPalette.line, false)];
+    const ibSeries = [ibSeg(hues.ib.line, false), ibSeg(hues.ib.line, false)];
     const ibExtSeries = [1, 1.5, 2].flatMap(() => [
-      ibSeg(ibPalette.ext, true),
-      ibSeg(ibPalette.ext, true),
+      ibSeg(hues.ib.ext, true),
+      ibSeg(hues.ib.ext, true),
     ]);
 
     // --- bar-grid helpers (the tools all speak bar times) --------------------
@@ -2370,11 +2464,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // --- Working orders: the resting limits, under the position overlay ------
     const ordPrim = ordPrimRef.current!;
     candle.attachPrimitive(ordPrim as any);
-    ordPrim.setOrders(
-      workingRef.current,
-      tapeRef.current?.tickSize,
-      tapeRef.current?.pointValue,
-    );
+    ordPrim.setOrders(workingRef.current, tapeRef.current?.tickSize, chipPv());
 
     // --- Horizontal price lines: the ━ tool's rendering -----------------------
     // Native price lines rather than a primitive: the axis label and the
@@ -2428,11 +2518,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // --- Ruler: drag between two points to measure the move between them ---
     // Recreated when the tape changes, because the tick size and $/point it
     // reports in are constructor arguments.
-    let ruler = new RulerPrimitive(tapeRef.current?.tickSize, tapeRef.current?.pointValue);
+    let ruler = new RulerPrimitive(tapeRef.current?.tickSize, chipPv());
+    rulerRef.current = ruler;
     candle.attachPrimitive(ruler as any);
     const remakeRuler = (tape: Tape | null) => {
       candle.detachPrimitive(ruler as any);
-      ruler = new RulerPrimitive(tape?.tickSize, tape?.pointValue);
+      ruler = new RulerPrimitive(tape?.tickSize, chipPv());
+      rulerRef.current = ruler;
       candle.attachPrimitive(ruler as any);
     };
 
@@ -3324,13 +3416,56 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // Both go through the refresh rather than a `visible` flip, because when
       // both are off the layer isn't drawn *or computed* — see refreshMv.
       for (const k of MV_KEYS) mvLinesRef.current?.[k].applyOptions({ visible: v.modernVwap });
+      // The wash belongs to the lines, not to the marks — a fill with no
+      // envelope over it is a stain, the same call `setBand` makes above.
+      mvBandRef.current?.setVisible(v.modernVwap);
       mvPrimRef.current?.setVisible(v.modernVwapSignals);
       refreshMv();
     };
     applyRef.current(visRef.current);
 
+    // Re-cut every series this effect built. `hues` is reassigned so that
+    // anything created later off it (there is nothing today, but the streaming
+    // path is where a new layer would go) builds in the cut now in force.
+    const relight = () => {
+      hues = chartInk(appearanceRef.current.surface);
+      const band = (a: Anchor | null, h: BandHue) => {
+        if (!a) return;
+        a.lines.mid.applyOptions({ color: h.middle });
+        a.lines.u1.applyOptions({ color: h.band1 });
+        a.lines.l1.applyOptions({ color: h.band1 });
+        a.lines.u2.applyOptions({ color: h.band2 });
+        a.lines.l2.applyOptions({ color: h.band2 });
+        a.band.setRgb(h.fill);
+      };
+      band(gRef.current, hues.vwap.globex);
+      band(nRef.current, hues.vwap.ny);
+      band(wkRef.current, hues.vwap.weekly);
+      band(aRef.current, hues.vwap.anchored);
+      for (const k of MV_KEYS) {
+        mvLinesRef.current?.[k].applyOptions({
+          color: k === "mid" ? hues.modernVwap.middle : hues.modernVwap.band,
+        });
+      }
+      mvBandRef.current?.setRgb(hues.modernVwap.fill);
+      const prof = (r: Record<ProfKey, ISeriesApi<"Line">> | null, pal: { edge: string; poc: string }) => {
+        if (!r) return;
+        r.vah.applyOptions({ color: pal.edge });
+        r.val.applyOptions({ color: pal.edge });
+        r.poc.applyOptions({ color: pal.poc });
+      };
+      prof(gProfRef.current, hues.profile.globex);
+      prof(nProfRef.current, hues.profile.ny);
+      for (const l of ibSeries) l.applyOptions({ color: hues.ib.line });
+      for (const l of ibExtSeries) l.applyOptions({ color: hues.ib.ext });
+      // The Modern VWAP's regime tint rides on per-point colours, so it comes
+      // back only when the data is re-set — and the primitives want a frame.
+      refreshMv();
+      paint();
+    };
+
     // Everything the imperative handle needs that lives inside this effect.
-    hooksRef.current = { reprofile, paint, syncIb, remakeRuler, clearRuler: rulerClearRef.current };
+    hooksRef.current = { reprofile, paint, syncIb, remakeRuler, clearRuler: rulerClearRef.current, relight };
 
     // The surface is live and every hook it needs is in place: whoever owns the
     // data can hand it over now. Through a ref so that supplying the callback
@@ -3397,6 +3532,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   useEffect(() => {
     applyAppearance(chartRef.current, candleRef.current, appearance);
     recolorVolume(candleRef.current, volRef.current, appearance);
+    // After applyAppearance, which sets the active ink the relight reads.
+    hooksRef.current?.relight();
   }, [appearance]);
 
   // How the two time labels read: the calendar on or off, and whether the clock
@@ -3903,17 +4040,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // is the behaviour we want: your view is yours.
     },
     setPosition(p: PositionLine | null) {
-      const tape = tapeRef.current;
-      posRef.current = p
-        ? {
-            ...p,
-            last: lastPriceRef.current,
-            // The line's own contract wins over the tape's — see `PositionLine`.
-            tickSize: p.tickSize ?? tape?.tickSize ?? 0.25,
-            pointValue: p.pointValue ?? tape?.pointValue ?? 20,
-          }
-        : null;
-      pushPos();
+      applyPos(p);
     },
     setOrders(orders: WorkingOrderView[]) {
       workingRef.current = orders;
@@ -3943,6 +4070,11 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // session lands, and the page re-renders this component on every HUD push
   // anyway, so there is nothing here for state to buy.
   const tickSize = tapeRef.current?.tickSize ?? 0.25;
+  // The legend's swatches have to be the colours actually on the canvas, so they
+  // come from the same ink the series were built (and relit) in rather than from
+  // the dark palettes directly — otherwise a light chart would list its levels
+  // in the hues of a chart it isn't.
+  const legendInk = chartInk(appearance.surface);
   const tkt: TicketDraft = ticket ?? { size: 1, stopTicks: 0, targetTicks: 0 };
   // The routed contract's money if the page named one, else the tape's, else
   // none — and none means the ticket shows ticks alone. See `pointValue`.
@@ -3950,13 +4082,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
 
   const legendItems: LegendItem[] = [];
   if (present.g)
-    legendItems.push({ key: "vwapGlobex", label: "VWAP · Globex ±1σ ±2σ", color: vwapPalette.globex.middle });
+    legendItems.push({ key: "vwapGlobex", label: "VWAP · Globex ±1σ ±2σ", color: legendInk.vwap.globex.middle });
   if (present.n)
-    legendItems.push({ key: "vwapNy", label: "VWAP · NY ±1σ ±2σ", color: vwapPalette.ny.middle });
+    legendItems.push({ key: "vwapNy", label: "VWAP · NY ±1σ ±2σ", color: legendInk.vwap.ny.middle });
   if (present.wk)
-    legendItems.push({ key: "vwapWeekly", label: "VWAP · Weekly ±1σ ±2σ", color: vwapPalette.weekly.middle });
+    legendItems.push({ key: "vwapWeekly", label: "VWAP · Weekly ±1σ ±2σ", color: legendInk.vwap.weekly.middle });
   if (avwapAnchor != null)
-    legendItems.push({ key: "vwapAnchored", label: "VWAP · Anchored ±1σ ±2σ", color: vwapPalette.anchored.middle });
+    legendItems.push({ key: "vwapAnchored", label: "VWAP · Anchored ±1σ ±2σ", color: legendInk.vwap.anchored.middle });
   // Modern VWAP, offered only where the page holds its parameters. Two rows: the
   // line, and the triggers read off it. Each label quotes what its own row is
   // actually showing at the current settings — an anchor count is how hard the
@@ -3976,7 +4108,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         (live
           ? ` · ${Math.round(mvRead.trendPct)}% trending${mvRead.undefPct >= 1 ? `, ${Math.round(mvRead.undefPct)}% undefined` : ""}`
           : ""),
-      color: modernVwapPalette.middle,
+      color: legendInk.modernVwap.middle,
     });
     legendItems.push({
       key: "modernVwapSignals",
@@ -3987,7 +4119,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
             (live
               ? ` · ${mvRead.signals}${mvParams.signals === "gated" ? " through the gate" : " raw"}`
               : ""),
-      color: modernVwapPalette.middle,
+      color: legendInk.modernVwap.middle,
       // The row stays when its own knob switched it off — that knob is the only
       // way back on, and it lives behind this row's "…".
       dim: mvParams.signals === "none",
@@ -3997,13 +4129,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     legendItems.push({
       key: "developingProfileGlobex",
       label: "Developing VA · Globex VAH/POC/VAL",
-      color: profilePalette.globex.edge,
+      color: legendInk.profile.globex.edge,
     });
   if (present.np) {
     legendItems.push({
       key: "developingProfileNy",
       label: "Developing VA · NY VAH/POC/VAL",
-      color: profilePalette.ny.edge,
+      color: legendInk.profile.ny.edge,
     });
     // The same distribution as a histogram, in its own gutter. Its own row
     // because the levels and the shape are separately useful — and because this
@@ -4027,8 +4159,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     });
   }
   if (present.ib) {
-    legendItems.push({ key: "initialBalance", label: "Initial Balance · first 60m H/L", color: ibPalette.line });
-    legendItems.push({ key: "ibExtensions", label: "IB extensions · 1×/1.5×/2×", color: ibPalette.ext });
+    legendItems.push({ key: "initialBalance", label: "Initial Balance · first 60m H/L", color: legendInk.ib.line });
+    legendItems.push({ key: "ibExtensions", label: "IB extensions · 1×/1.5×/2×", color: legendInk.ib.ext });
   }
   // "(tick)" and not "(est.)": the replay profiles the real tape, never a
   // reconstruction spread across bar ranges — so the POC print is a price that
@@ -4077,7 +4209,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         compDays > 0
           ? `Composite VP · ${compDays} prior session${compDays === 1 ? "" : "s"} · VAH/POC/VAL`
           : `Composite VP · off · ${ctxDays} prior day${ctxDays === 1 ? "" : "s"} loaded`,
-      color: compositePalette.poc,
+      color: legendInk.composite.poc,
       dim: compDays === 0,
     });
     // The nodes read off it — only once there is a composite for them to be read
@@ -4090,7 +4222,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           nodeProm > 0
             ? `Composite nodes · HVN/LVN at ${Math.round(nodeProm * 100)}% prominence`
             : "Composite nodes · off",
-        color: compositePalette.hvn,
+        color: legendInk.composite.hvn,
         dim: nodeProm === 0,
       });
   }

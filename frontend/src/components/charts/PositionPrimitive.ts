@@ -10,7 +10,7 @@
 // grabbable exactly where it looks grabbable, whatever the layout did to fit it.
 
 import type { IChartApi, ISeriesApi, ISeriesPrimitiveAxisView, Time } from "lightweight-charts";
-import { palette } from "../../theme";
+import { ink, palette } from "../../theme";
 import { byPointer } from "../../lib/pointer";
 
 /** What a pointer can grab: a bracket line/chip, the entry chip's ✕, or the entry
@@ -37,7 +37,7 @@ export interface PositionData {
 
 const ZONE_UP = "rgba(33, 192, 122, 0.10)";
 const ZONE_DOWN = "rgba(245, 69, 95, 0.10)";
-const CHIP_BG = "rgba(14, 17, 23, 0.92)";
+
 
 const CHIP_H = 18;
 const PAD = 6;
@@ -160,7 +160,7 @@ class Renderer {
         const textW = segs.reduce((a, s) => a + ctx.measureText(s.text).width, 0);
         const w = textW + PAD * 2 + (segs.length - 1) * PAD + (closeBtn ? CLOSE_W : 0);
         const r: Rect = { x: W - MARGIN - w, y: y - CHIP_H / 2, w, h: CHIP_H };
-        ctx.fillStyle = CHIP_BG;
+        ctx.fillStyle = ink().chip.strong;
         ctx.strokeStyle = border;
         ctx.lineWidth = hot ? 2 : 1;
         ctx.beginPath();

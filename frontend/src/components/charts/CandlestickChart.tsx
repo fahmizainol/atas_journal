@@ -11,17 +11,14 @@ import {
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
+import { chartInk, chartSurfaces, palette, regimePalette } from "../../theme";
 import {
-  candleSchemes,
-  chartSurfaces,
-  emaPalette,
-  ibPalette,
-  palette,
-  profilePalette,
-  regimePalette,
-  vwapPalette,
-} from "../../theme";
-import { applyAppearance, appearanceSettings, recolorVolume, volumeColors } from "./chartAppearance";
+  applyAppearance,
+  appearanceSettings,
+  candleColors,
+  recolorVolume,
+  volumeColors,
+} from "./chartAppearance";
 import { TradeRectanglePrimitive } from "./TradeRectanglePrimitive";
 import { RulerPrimitive } from "./RulerPrimitive";
 import { MarkerPrimitive } from "./MarkerPrimitive";
@@ -291,6 +288,11 @@ export function CandlestickChart({
   const [vis, setVis] = useState<Visibility>(loadIndicatorVisibility);
   const visRef = useRef(vis);
   const applyRef = useRef<((v: Visibility) => void) | null>(null);
+  // Push a new indicator ink onto the series the build effect made. A series
+  // carries its colour in its options, so unlike the canvas primitives (which
+  // read the active ink each frame) it has to be told when the chart crosses
+  // between a light and a dark surface.
+  const relightRef = useRef<(() => void) | null>(null);
   const toggle = (key: IndicatorKey) =>
     setVis((prev) => {
       const next = { ...prev, [key]: !prev[key] };
@@ -466,7 +468,11 @@ export function CandlestickChart({
     // Read, not subscribed to: appearance is applied live by its own effect
     // below, and a rebuild here would throw away zoom and scroll.
     const surf = chartSurfaces[appearanceRef.current.surface];
-    const sch = candleSchemes[appearanceRef.current.candles];
+    const sch = candleColors(appearanceRef.current);
+    // Every indicator hue, in the cut this surface wants (theme.ts). Reassigned
+    // by `relight` at the foot of this effect, so anything built later off it —
+    // the ⚓ anchor is drawn on demand — gets the cut now in force.
+    let hues = chartInk(appearanceRef.current.surface);
     const chart: IChartApi = createChart(ref.current, {
       width: ref.current.clientWidth,
       height,
@@ -796,10 +802,10 @@ export function CandlestickChart({
     };
 
     const globex =
-      vwapGlobex && vwapGlobex.length > 0 ? addVwap(vwapGlobex, vwapPalette.globex) : null;
-    const ny = vwapNy && vwapNy.length > 0 ? addVwap(vwapNy, vwapPalette.ny) : null;
+      vwapGlobex && vwapGlobex.length > 0 ? addVwap(vwapGlobex, hues.vwap.globex) : null;
+    const ny = vwapNy && vwapNy.length > 0 ? addVwap(vwapNy, hues.vwap.ny) : null;
     const weekly =
-      vwapWeekly && vwapWeekly.length > 0 ? addVwap(vwapWeekly, vwapPalette.weekly) : null;
+      vwapWeekly && vwapWeekly.length > 0 ? addVwap(vwapWeekly, hues.vwap.weekly) : null;
 
     // User-anchored VWAP (the ⚓ tool). Computed here from the bars in the browser
     // — running Σv, Σpv, Σp²v over each bar's typical price (H+L+C)/3 from the
@@ -855,7 +861,7 @@ export function CandlestickChart({
       }
       const pts = computeAvwap(nearestIdx(t));
       if (pts.length === 0) return;
-      avwap = addVwap(pts, vwapPalette.anchored);
+      avwap = addVwap(pts, hues.vwap.anchored);
       const on = visRef.current.vwapAnchored;
       for (const s of avwap.series) s.applyOptions({ visible: on });
       avwap.band.setVisible(on);
@@ -890,8 +896,8 @@ export function CandlestickChart({
         return s_;
       });
     };
-    const profileGlobexSeries = addProfile(profileGlobex, profilePalette.globex);
-    const profileNySeries = addProfile(profileNy, profilePalette.ny);
+    const profileGlobexSeries = addProfile(profileGlobex, hues.profile.globex);
+    const profileNySeries = addProfile(profileNy, hues.profile.ny);
 
     // 9/20 EMA (1-minute). The values arrive stamped on the minute they were
     // computed on, but the candles may be tick bars — and an off-grid time has no
@@ -923,10 +929,10 @@ export function CandlestickChart({
     // Each EMA carries its own toggle key so the four lines hide/show
     // independently (see the visibility pass below and the legend rows).
     const emaSpecs: { key: IndicatorKey; pts: EmaPoint[] | undefined; color: string }[] = [
-      { key: "ema9", pts: ema9, color: emaPalette.fast },
-      { key: "ema20", pts: ema20, color: emaPalette.slow },
-      { key: "ema50", pts: ema50, color: emaPalette.trend50 },
-      { key: "ema200", pts: ema200, color: emaPalette.trend200 },
+      { key: "ema9", pts: ema9, color: hues.ema.fast },
+      { key: "ema20", pts: ema20, color: hues.ema.slow },
+      { key: "ema50", pts: ema50, color: hues.ema.trend50 },
+      { key: "ema200", pts: ema200, color: hues.ema.trend200 },
     ];
     const emaSeries: { key: IndicatorKey; series: ISeriesApi<"Line"> }[] = [];
     for (const spec of emaSpecs) {
@@ -1007,12 +1013,12 @@ export function CandlestickChart({
         ]);
         into.push(s_);
       };
-      ibSeg(one.high, one.start, ibSeries, { color: ibPalette.line, style: 0 });
-      ibSeg(one.low, one.start, ibSeries, { color: ibPalette.line, style: 0 });
+      ibSeg(one.high, one.start, ibSeries, { color: hues.ib.line, style: 0 });
+      ibSeg(one.low, one.start, ibSeries, { color: hues.ib.line, style: 0 });
       const ibRange = one.high - one.low;
       for (const m of [1, 1.5, 2]) {
         for (const p of [one.high + m * ibRange, one.low - m * ibRange]) {
-          ibSeg(p, one.formed, ibExtSeries, { color: ibPalette.ext, style: 2, guide: true });
+          ibSeg(p, one.formed, ibExtSeries, { color: hues.ib.ext, style: 2, guide: true });
         }
       }
     }
@@ -1584,6 +1590,45 @@ export function CandlestickChart({
       chart.timeScale().fitContent();
     }
 
+    // Re-cut every series this effect built, without rebuilding it — a rebuild
+    // would throw away the zoom and scroll the appearance effect exists to
+    // preserve. The canvas primitives need no call: they read the active ink
+    // each frame. `avwap` is read through the closure rather than captured,
+    // since the ⚓ tool replaces it whenever the anchor moves.
+    relightRef.current = () => {
+      hues = chartInk(appearanceRef.current.surface);
+      const anchor = (
+        a: { series: ISeriesApi<"Line">[]; band: VwapBandPrimitive } | null,
+        h: { middle: string; band1: string; band2: string; fill: string },
+      ) => {
+        if (!a) return;
+        // addVwap pushes mid first, then the ±1σ pair, then the ±2σ pair.
+        const order = [h.middle, h.band1, h.band1, h.band2, h.band2];
+        a.series.forEach((ser, i) => ser.applyOptions({ color: order[i] ?? h.band2 }));
+        a.band.setRgb(h.fill);
+      };
+      anchor(globex, hues.vwap.globex);
+      anchor(ny, hues.vwap.ny);
+      anchor(weekly, hues.vwap.weekly);
+      anchor(avwap, hues.vwap.anchored);
+      // addProfile draws VAH, VAL, then the POC.
+      const prof = (list: ISeriesApi<"Line">[], pal: { edge: string; poc: string }) => {
+        list.forEach((ser, i) => ser.applyOptions({ color: i < 2 ? pal.edge : pal.poc }));
+      };
+      prof(profileGlobexSeries, hues.profile.globex);
+      prof(profileNySeries, hues.profile.ny);
+      const emaHue: Record<string, string> = {
+        ema9: hues.ema.fast,
+        ema20: hues.ema.slow,
+        ema50: hues.ema.trend50,
+        ema200: hues.ema.trend200,
+      };
+      for (const e of emaSeries) e.series.applyOptions({ color: emaHue[e.key] });
+      for (const l of ibSeries) l.applyOptions({ color: hues.ib.line });
+      for (const l of ibExtSeries) l.applyOptions({ color: hues.ib.ext });
+      paintRef.current?.();
+    };
+
     const ro = new ResizeObserver(() => {
       if (ref.current) chart.applyOptions({ width: ref.current.clientWidth });
     });
@@ -1595,6 +1640,7 @@ export function CandlestickChart({
       candleRef.current = null;
       volumeRef.current = null;
       applyRef.current = null;
+      relightRef.current = null;
       armApplyRef.current = null;
       rulerApplyRef.current = null;
       rulerClearRef.current = () => {};
@@ -1646,6 +1692,8 @@ export function CandlestickChart({
   useEffect(() => {
     applyAppearance(chartApiRef.current, candleRef.current, appearance);
     recolorVolume(candleRef.current, volumeRef.current, appearance);
+    // After applyAppearance, which sets the active ink the relight reads.
+    relightRef.current?.();
   }, [appearance]);
 
   // Re-frame on a new selected day without rebuilding: when the tape spans many
@@ -1663,49 +1711,55 @@ export function CandlestickChart({
     });
   }, [initialTimeRange, focusOnTrade]);
 
+  // The legend's swatches have to be the colours actually on the canvas, so they
+  // come from the same ink the series were built (and relit) in rather than from
+  // the dark palettes directly — otherwise a light chart would list its levels
+  // in the hues of a chart it isn't.
+  const legendInk = chartInk(appearance.surface);
+
   const legendItems: LegendItem[] = [];
   if (vwapGlobex && vwapGlobex.length > 0)
     legendItems.push({
       key: "vwapGlobex",
       label: "VWAP · Globex ±1σ ±2σ",
-      color: vwapPalette.globex.middle,
+      color: legendInk.vwap.globex.middle,
     });
   if (vwapNy && vwapNy.length > 0)
     legendItems.push({
       key: "vwapNy",
       label: "VWAP · NY ±1σ ±2σ",
-      color: vwapPalette.ny.middle,
+      color: legendInk.vwap.ny.middle,
     });
   if (vwapWeekly && vwapWeekly.length > 0)
     legendItems.push({
       key: "vwapWeekly",
       label: "VWAP · Weekly ±1σ ±2σ",
-      color: vwapPalette.weekly.middle,
+      color: legendInk.vwap.weekly.middle,
     });
   if (avwapAnchor != null)
     legendItems.push({
       key: "vwapAnchored",
       label: "VWAP · Anchored ±1σ ±2σ",
-      color: vwapPalette.anchored.middle,
+      color: legendInk.vwap.anchored.middle,
     });
   if (profileGlobex && profileGlobex.length > 0)
     legendItems.push({
       key: "developingProfileGlobex",
       label: "Developing VA · Globex VAH/POC/VAL",
-      color: profilePalette.globex.edge,
+      color: legendInk.profile.globex.edge,
     });
   if (profileNy && profileNy.length > 0)
     legendItems.push({
       key: "developingProfileNy",
       label: "Developing VA · NY VAH/POC/VAL",
-      color: profilePalette.ny.edge,
+      color: legendInk.profile.ny.edge,
     });
   // One legend row per EMA so each hides/shows on its own (see emaSeries above).
   const emaLegend: { key: IndicatorKey; pts?: EmaPoint[]; label: string; color: string }[] = [
-    { key: "ema9", pts: ema9, label: "EMA 9 · 1-minute", color: emaPalette.fast },
-    { key: "ema20", pts: ema20, label: "EMA 20 · 1-minute", color: emaPalette.slow },
-    { key: "ema50", pts: ema50, label: "EMA 50 · 1-minute", color: emaPalette.trend50 },
-    { key: "ema200", pts: ema200, label: "EMA 200 · 1-minute", color: emaPalette.trend200 },
+    { key: "ema9", pts: ema9, label: "EMA 9 · 1-minute", color: legendInk.ema.fast },
+    { key: "ema20", pts: ema20, label: "EMA 20 · 1-minute", color: legendInk.ema.slow },
+    { key: "ema50", pts: ema50, label: "EMA 50 · 1-minute", color: legendInk.ema.trend50 },
+    { key: "ema200", pts: ema200, label: "EMA 200 · 1-minute", color: legendInk.ema.trend200 },
   ];
   for (const e of emaLegend)
     if (e.pts && e.pts.length > 0)
@@ -1722,12 +1776,12 @@ export function CandlestickChart({
     legendItems.push({
       key: "initialBalance",
       label: "Initial Balance · first 60m H/L",
-      color: ibPalette.line,
+      color: legendInk.ib.line,
     });
     legendItems.push({
       key: "ibExtensions",
       label: "IB extensions · 1×/1.5×/2×",
-      color: ibPalette.ext,
+      color: legendInk.ib.ext,
     });
   }
   if (touches && touches.length > 0)

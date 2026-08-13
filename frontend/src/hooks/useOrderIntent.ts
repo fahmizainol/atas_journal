@@ -23,7 +23,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { previewOrder, sendOrder, sendOrderNow } from "./useRouting";
 import { playCue } from "../lib/orderSound";
-import type { BrokerState, OrderDraft } from "../lib/routingTypes";
+import type { BrokerState, OrderDraft, OrderSent } from "../lib/routingTypes";
 
 /** A reviewed order waiting for a yes. `at` is the client's stamp and only
  *  drives the countdown — the server holds the real deadline and refuses on its
@@ -34,6 +34,19 @@ export interface PendingOrder {
   sentence: string;
   expires_in_s: number;
   at: number;
+  /** Which gesture staged it, carried so the send that eventually happens is
+   *  logged under the button that started it rather than under "confirm". */
+  gesture: string;
+}
+
+/** The acknowledgement, with what it cost. The number is the browser's own
+ *  press-to-acknowledgement — the one the trader actually experiences, and the
+ *  only one measurable from a single clock. The breakdown behind it is in
+ *  `orders.jsonl`. */
+function receipt(draft: OrderDraft, r: OrderSent): string {
+  const ms = r.latency?.client_ms;
+  const took = ms == null ? "" : ` · ${Math.round(ms)} ms`;
+  return `${draft.side.toUpperCase()} ${draft.qty} sent${took} · ${r.basket_id || r.tag}`;
 }
 
 export interface OrderIntent {
@@ -57,8 +70,13 @@ export interface OrderIntent {
   /** Last thing that went out, for a brief on-screen acknowledgement. */
   flash: string | null;
   /** Send an order, or stage it for confirmation. Returns true if it took the
-   *  order — false means "not routing, do your paper thing". */
-  submit: (draft: OrderDraft) => boolean;
+   *  order — false means "not routing, do your paper thing".
+   *
+   *  `gesture` names the button for the latency log. It is worth passing: the
+   *  slow part of a press is rarely the wire, and "which button" is the axis
+   *  that separates a keyboard shortcut from a chart click that had to hit
+   *  test a canvas first. */
+  submit: (draft: OrderDraft, gesture?: string) => boolean;
   confirm: () => void;
   cancel: () => void;
   clearError: () => void;
@@ -101,7 +119,10 @@ export function useOrderIntent(
   const err = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
 
   const submit = useCallback(
-    (draft: OrderDraft): boolean => {
+    (draft: OrderDraft, gesture = "chart"): boolean => {
+      // Stamped first thing in the handler, before any of the checks: what is
+      // being measured is the press, and the checks are part of what it cost.
+      const at = performance.now();
       if (!real) return false;          // paper: the caller does its own thing
       if (!routes) {
         // A real account is selected and something about it still refuses —
@@ -120,18 +141,21 @@ export function useOrderIntent(
       void (async () => {
         try {
           if (oneClick) {
-            const r = await sendOrderNow(draft);
+            const r = await sendOrderNow(draft, { at, gesture });
             // Sounded on the acknowledgement, not on the gesture: on this side
             // "placed" means the broker took it. A tick that fired when you
             // pressed the key would be a sound for an order that might have been
             // refused — and the fill chime that follows comes from the poll, so
             // even a market order gets two distinct, well-separated noises.
             playCue("placed");
-            setFlash(`${draft.side.toUpperCase()} ${draft.qty} sent · ${r.basket_id || r.tag}`);
+            setFlash(receipt(draft, r));
             onDone();
           } else {
+            // The review's own round trip is not timed: nothing left the
+            // process, and the clock that matters on this path starts at the
+            // *confirm*, which is the press that sends.
             const p = await previewOrder(draft);
-            setPending({ draft, ...p, at: Date.now() });
+            setPending({ draft, ...p, at: Date.now(), gesture });
           }
         } catch (e) {
           err(e);
@@ -146,6 +170,7 @@ export function useOrderIntent(
 
   const confirm = useCallback(() => {
     const p = pendingRef.current;
+    const at = performance.now();
     if (!p || busyRef.current) return;
     setBusy(true);
     setError(null);
@@ -154,9 +179,13 @@ export function useOrderIntent(
     setPending(null);
     void (async () => {
       try {
-        const r = await sendOrder(p.token);
+        // Logged under the gesture that staged it, suffixed rather than
+        // replaced: "the ticket, confirmed" and "the ticket, one-click" are the
+        // same button with a dialog between the press and the wire, and the
+        // whole point of the number is what that dialog costs.
+        const r = await sendOrder(p.token, { at, gesture: `${p.gesture}+confirm` });
         playCue("placed");
-        setFlash(`${p.draft.side.toUpperCase()} ${p.draft.qty} sent · ${r.basket_id || r.tag}`);
+        setFlash(receipt(p.draft, r));
         onDone();
       } catch (e) {
         err(e);

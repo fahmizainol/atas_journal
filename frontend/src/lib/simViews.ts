@@ -12,6 +12,7 @@
 // bootstrap effect are the half that needs someone at a keyboard, and they are
 // deliberately not here.)
 
+import { MICRO_RATIO } from "./contracts";
 import type { PositionLine } from "../components/charts/ReplayChart";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
 import type { TradeMarkView } from "../components/charts/TradesPrimitive";
@@ -29,15 +30,30 @@ import {
  *  tick bars there is no grid to compute against at all. */
 export type BarAt = (ms: number) => number;
 
+/** What a position or order in the micro is worth a point, given the tape's own
+ *  figure. Undefined for anything in the tape's contract — which is what the
+ *  overlays read as "price this with the tape", and is the ordinary case.
+ *
+ *  Here rather than at the call sites because it is the same question `posLine`
+ *  and `orderView` both have to answer, and answering it twice is how the chips
+ *  on a position come to disagree with the chips on the order that opened it. */
+const chipPv = (micro: boolean, tapePv?: number): number | undefined =>
+  micro && tapePv != null ? tapePv / MICRO_RATIO : undefined;
+
 /** What the chart draws for an open position. The bracket is the position's own,
- *  so unlike a working order there is no log to resolve it through. */
-export const posLine = (p: Position, barAt: BarAt): PositionLine => ({
+ *  so unlike a working order there is no log to resolve it through.
+ *
+ *  `tapePointValue` is the tape contract's $/point. Needed only to price a
+ *  position held in something else — the micro of it (see lib/contracts) — and
+ *  omitting it simply leaves that to the chart, which knows the tape's. */
+export const posLine = (p: Position, barAt: BarAt, tapePointValue?: number): PositionLine => ({
   side: p.side,
   size: p.size,
   entry: p.entryPrice,
   entryTime: barAt(p.fillMs),
   stop: p.stop,
   target: p.target,
+  pointValue: chipPv(p.micro, tapePointValue),
 });
 
 /** A closed trade as the chart wants it: on the bar grid, prices only. Times are
@@ -71,6 +87,8 @@ export const orderView = (
   o: OrderRec,
   ms: number,
   open: Position | null,
+  /** The tape contract's $/point — see `posLine`. */
+  tapePointValue?: number,
 ): WorkingOrderView => {
   const s = orderStateAt(o, ms);
   return {
@@ -85,6 +103,7 @@ export const orderView = (
     // Flat, or big enough to run the position through and out the other side:
     // either way the fill opens a position, and these are its legs.
     inert: !!open && !(o.side !== open.side && o.size > open.size),
+    pointValue: chipPv(!!o.micro, tapePointValue),
   };
 };
 

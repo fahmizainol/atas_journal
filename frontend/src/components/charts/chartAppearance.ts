@@ -8,8 +8,18 @@
 // settings panel.
 import { ColorType, type IChartApi, type ISeriesApi } from "lightweight-charts";
 import type { ChartAppearance } from "../../lib/chartPrefs";
-import { candleSchemes, chartSurfaces } from "../../theme";
+import { candleSchemes, chartInk, chartSurfaces, setActiveInk } from "../../theme";
 import type { IndicatorSettingsSpec } from "./IndicatorSettings";
+
+/** The up/down pair for a scheme *on the surface it will be drawn on*.
+ *
+ *  Two of the six schemes are authored for a dark chart specifically — `mono` is
+ *  white-on-dark and would be paper-on-paper — so the light ink carries its own
+ *  cut of them (theme.ts). Every read of a candle colour goes through here so
+ *  the two charts can't disagree about which cut is in force. */
+export function candleColors(a: ChartAppearance): { up: string; down: string } {
+  return chartInk(a.surface).candles[a.candles] ?? candleSchemes[a.candles];
+}
 
 /** The volume histogram's up/down bars, which are the candles' own distinction
  *  restated underneath them — so they follow the candle scheme rather than
@@ -20,7 +30,7 @@ import type { IndicatorSettingsSpec } from "./IndicatorSettings";
  *  Half alpha because they sit in the price panel's own gutter and are context,
  *  not a series you read a value off. */
 export function volumeColors(a: ChartAppearance): { up: string; down: string } {
-  const sch = candleSchemes[a.candles];
+  const sch = candleColors(a);
   return { up: withAlpha(sch.up, 0.5), down: withAlpha(sch.down, 0.5) };
 }
 
@@ -35,15 +45,35 @@ function withAlpha(hex: string, alpha: number): string {
  *
  *  applyOptions rather than a rebuild, which matters more than it looks: both
  *  charts guard their build effect against re-running because a rebuild throws
- *  away the user's zoom and scroll position. Changing the background must not
- *  cost you the range you had spent a minute framing. */
+ *  away the user's zoom and scroll position — and on the Replay it would throw
+ *  away the replay. Changing the background must not cost you the range you had
+ *  spent a minute framing.
+ *
+ *  Sets the active ink first, before it touches a single option. Everything the
+ *  canvas primitives draw reads that on their next frame, so the order is what
+ *  makes a light↔dark switch land in one pass: ink, then the surface and candles
+ *  here, then the caller's own `relight` for the indicator *series* (which carry
+ *  their colour in options and have to be told). */
 export function applyAppearance(
   chart: IChartApi | null,
   candle: ISeriesApi<"Candlestick"> | null,
   a: ChartAppearance,
 ): void {
+  setActiveInk(chartInk(a.surface));
   const surf = chartSurfaces[a.surface];
-  const sch = candleSchemes[a.candles];
+  // The overlays drawn *over* the tape as plain text — the identity block, the
+  // crosshair readout, the indicator rows — are HTML, and they are light-on-dark
+  // by default. On a light surface they would be light-on-light, which is the
+  // one part of this that is unreadable rather than merely off-key. Marked on
+  // the document rather than on each chart's root: like the active ink, the
+  // appearance is one setting for the whole app, so there is no second answer a
+  // second chart could need. (Floating *chips* — the badges, the pills, the tool
+  // rail — stay dark on purpose: those are chrome laid over the chart, and a
+  // dark plate reads on either surface.)
+  if (typeof document !== "undefined") {
+    document.documentElement.toggleAttribute("data-chart-light", surf.light);
+  }
+  const sch = candleColors(a);
   chart?.applyOptions({
     layout: { background: { type: ColorType.Solid, color: surf.bg }, textColor: surf.text },
     grid: { vertLines: { color: surf.grid }, horzLines: { color: surf.grid } },
@@ -98,24 +128,74 @@ const CANDLE_OPTIONS = Object.entries(candleSchemes).map(([value, s]) => ({
 }));
 
 /**
+ * Named surface + candle pairs.
+ *
+ * The two knobs below are chosen together — a candle scheme is picked against
+ * the surface it will sit on — and the light half made that expensive: landing
+ * on a light chart meant setting the background, seeing white candles vanish
+ * into it, and then going back for the second knob. A preset is the pair, so
+ * the crossing costs one choice instead of two and a mistake in between.
+ *
+ * Deliberately not exhaustive. These are the pairings worth having a name for,
+ * not the 54 the two lists can make; the knobs underneath still reach every one
+ * of those, and doing so simply drops the preset to "Custom".
+ */
+const PRESETS = [
+  { value: "dark-classic", label: "Dark · green / red", surface: "charcoal", candles: "classic" },
+  { value: "dark-tv", label: "Dark · teal / red", surface: "slate", candles: "tv" },
+  { value: "dark-quiet", label: "Dark · quiet", surface: "gunmetal", candles: "muted" },
+  { value: "dark-cb", label: "Dark · blue / orange", surface: "midnight", candles: "cb" },
+  { value: "light-paper", label: "Light · paper", surface: "paper", candles: "tv" },
+  { value: "light-day", label: "Light · daylight", surface: "daylight", candles: "classic" },
+  { value: "light-quiet", label: "Light · quiet", surface: "overcast", candles: "muted" },
+  { value: "light-cb", label: "Light · blue / orange", surface: "daylight", candles: "cb" },
+] as const satisfies readonly {
+  value: string;
+  label: string;
+  surface: ChartAppearance["surface"];
+  candles: ChartAppearance["candles"];
+}[];
+
+/** "Custom" is an option so the select has something to show when the pair is
+ *  one no preset names — but it is not something you can *choose*: picking it
+ *  would have to mean "change nothing", and a knob that does nothing is worse
+ *  than one that isn't offered. Appended only when it is the current state. */
+const CUSTOM = { value: "custom", label: "Custom" };
+
+function presetOf(a: ChartAppearance): string {
+  return PRESETS.find((p) => p.surface === a.surface && p.candles === a.candles)?.value ?? CUSTOM.value;
+}
+
+/**
  * The appearance panel, in the legend's own settings shape.
  *
- * Two selects, matching the rest of that panel: these are shortlists picked to
+ * Selects only, matching the rest of that panel: these are shortlists picked to
  * work against the indicator hues rather than free colours, and a colour well
- * would invite the one change the palette can't absorb (see theme.ts on why
- * every surface here is dark).
+ * would invite the one change the palette can't absorb (see theme.ts).
  */
 export function appearanceSettings(
   a: ChartAppearance,
   onChange: (next: ChartAppearance) => void,
 ): IndicatorSettingsSpec {
+  const preset = presetOf(a);
   return {
     title: "Chart appearance",
     fields: [
       {
+        key: "preset",
+        label: "Preset",
+        help: "Background and candles together — the two are chosen against each other, so crossing between light and dark is one choice, not two.",
+        value: preset,
+        options: preset === CUSTOM.value ? [...PRESETS, CUSTOM] : PRESETS,
+        onChange: (v) => {
+          const p = PRESETS.find((x) => x.value === v);
+          if (p) onChange({ ...a, surface: p.surface, candles: p.candles });
+        },
+      },
+      {
         key: "surface",
         label: "Background",
-        help: "The surface under the chart. All dark — the indicator hues are picked against one (theme.ts).",
+        help: "The surface under the chart. The light ones swap in a second cut of every indicator hue — see theme.ts on why that is not a background swap.",
         value: a.surface,
         options: SURFACE_OPTIONS,
         onChange: (v) => onChange({ ...a, surface: v as ChartAppearance["surface"] }),

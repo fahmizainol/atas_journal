@@ -81,7 +81,48 @@ export interface BrokerState {
   /** The discipline layer's state for today. Always present — including when
    *  the layer is switched off, which is precisely when it has to be drawn. */
   guard: GuardState;
+  /** What the last order took. Read off the poll rather than only off the send's
+   *  own reply, because the exchange's word lands after that reply has gone. */
+  last_latency: OrderLatency | null;
   error: string | null;
+}
+
+/** How long one order took, leg by leg. Every field is a **duration** measured
+ *  start-to-finish on a single clock, and no two of them come from differencing
+ *  timestamps taken on different machines — the browser times its own press, the
+ *  API times its own wire call. A press stamp shipped to the server and
+ *  subtracted from its wall clock would report the browser/WSL skew as latency.
+ *
+ *  Milliseconds, one decimal. The full record is in `orders.jsonl` as `latency`
+ *  events, one line per answer, each carrying everything known so far. */
+export interface OrderLatency {
+  tag: string;
+  /** "review" or "one_click" — the two are not comparable, one has a dialog in
+   *  the middle of it. */
+  how: string;
+  basket_id?: string;
+  /** The API's own checks before the wire: the guards, the day's arithmetic,
+   *  the journal write. A bad number here is a bug on this side. */
+  gate_ms?: number;
+  /** The wire: our submit to Rithmic's order plant answering with a basket. */
+  plant_ms?: number;
+  /** The whole request handler, so `api_ms - gate_ms - plant_ms` is what the
+   *  session lookup and the parsing cost. */
+  api_ms?: number;
+  /** Wire to the exchange's *first* word on the order — working, or rejected.
+   *  Arrives after the response, so it is null on the send's own reply and
+   *  filled in by the time the panel next polls. The honest end of "placed". */
+  exch_ms?: number;
+  exch_status?: string | null;
+  /** The browser's own: gesture handler to response in hand. */
+  client_ms?: number;
+  /** `client_ms - api_ms` — fetch, proxy, JSON, and React getting round to it. */
+  net_ms?: number | null;
+  /** Which button it was. Only the browser knows. */
+  gesture?: string | null;
+  /** Set when the send threw; the timing is kept because a 20-second wedged
+   *  plant is the measurement most worth having. */
+  failed?: string;
 }
 
 /** The guardrail levels. **Zero disables that one rule**, everywhere.
@@ -225,6 +266,12 @@ export interface RoutingStatus {
   /** `LIVE_GUARDRAILS` is not switched off. Readable with no session running,
    *  like `enabled` — "are the rules on" is a property of the deployment. */
   guardrails: boolean;
+  /** `REPLAY_GUARDRAILS` is not switched off — whether `/replay` applies its
+   *  mirror of the rules (lib/guardRules). Same polarity as `guardrails` and a
+   *  separate switch: one protects the account, the other protects the habit,
+   *  and a session spent measuring a tighter stop should not have to disarm
+   *  the live layer to run. */
+  replay_guardrails: boolean;
   guards: GuardLevels;
   /** Why routing is unavailable, in words, or null if it is available. */
   refusal: string | null;
@@ -266,6 +313,9 @@ export interface OrderSent {
    *  about a fill they did not expect. */
   how: string;
   sentence: string;
+  /** What it took. `client_ms` is filled in on this side once the response is
+   *  in hand — the server cannot know it. */
+  latency?: OrderLatency | null;
 }
 
 /** An order as the page builds it, before it is either reviewed or fired. */

@@ -35,17 +35,28 @@ export function useRoutingStatus(enabled = true) {
   });
 }
 
-/** The guardrail levels alone, fetched rarely.
+/** The guardrail levels alone, plus whether the replay is to enforce them.
  *
  *  For pages that want the rules but not the broker — the replay applies the
  *  same bracket and daily stop, and has no order plant to watch. Polling every
  *  two seconds for a set of numbers that changes when somebody edits a form
  *  would be a request per second per open tab for nothing, so this one goes
- *  stale slowly and never refetches on its own. */
+ *  stale slowly and never refetches on its own.
+ *
+ *  `enforced` is `REPLAY_GUARDRAILS`, not `LIVE_GUARDRAILS`: switching the live
+ *  layer off does not switch practice off, or the other way about. A failed
+ *  request leaves the caller with no data at all, and every caller falls back to
+ *  enforcing — the rules surviving an offline API is the same reason the flag
+ *  defaults on server-side. */
 export function useGuardLevels() {
   return useQuery({
     queryKey: ["live", "routing", "guards"],
-    queryFn: async () => (await apiGet<RoutingStatus>("/live/routing")).guards,
+    queryFn: async () => {
+      const s = await apiGet<RoutingStatus>("/live/routing");
+      // `?? true` for an older API that has no such field: a missing answer
+      // means enforced, the same direction the server's own default fails.
+      return { guards: s.guards, enforced: s.replay_guardrails ?? true };
+    },
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     retry: false,
@@ -78,22 +89,65 @@ export function previewOrder(body: OrderDraft) {
   return apiSend<OrderPreview>("POST", "/live/routing/preview", body);
 }
 
+/** Where the gesture happened and which one it was.
+ *
+ *  `at` is a `performance.now()` reading taken **in the event handler**, not at
+ *  the fetch — the gap between the two is React getting round to the work, and
+ *  it is part of what the press cost even though no network is involved in it. */
+export interface Press {
+  at: number;
+  gesture: string;
+}
+
+/** Time an order's round trip and report it back afterwards.
+ *
+ *  ONE CLOCK. Both readings are `performance.now()` in this tab, so the number
+ *  is a duration and never a difference between two machines' wall clocks — the
+ *  browser is on Windows and the API is in WSL, and subtracting one from the
+ *  other would report the skew between them as latency, plausibly and silently.
+ *  The server measures its own legs the same way, and `net_ms` is the difference
+ *  of the two durations rather than of any two instants.
+ *
+ *  The report is a separate request, sent after the order is already gone and
+ *  awaited by nobody: measuring an order must not cost the order anything. A
+ *  failed report is swallowed for the same reason — there is nothing useful to
+ *  say to somebody who has just sent an order about a statistic that went
+ *  missing. */
+async function timed(
+  press: Press | undefined,
+  send: () => Promise<OrderSent>,
+): Promise<OrderSent> {
+  const t0 = press?.at ?? performance.now();
+  const r = await send();
+  const client_ms = Math.round((performance.now() - t0) * 10) / 10;
+  void apiSend("POST", "/live/routing/latency", {
+    tag: r.tag,
+    client_ms,
+    gesture: press?.gesture ?? "",
+  }).catch(() => {});
+  return { ...r, latency: { ...(r.latency ?? { tag: r.tag, how: r.how }), client_ms } };
+}
+
 /** Step two of the reviewed path: spend the token. There is no field on this
  *  request that describes an order, which is what makes the review impossible
  *  to skip on an account that confirms. */
-export function sendOrder(token: string) {
-  return apiSend<OrderSent>("POST", "/live/routing/orders", { token });
+export function sendOrder(token: string, press?: Press) {
+  return timed(press, () =>
+    apiSend<OrderSent>("POST", "/live/routing/orders", { token }),
+  );
 }
 
 /** The one-click path: the order goes outright, no review. The server refuses
  *  unless *this account* has one-click switched on, so this is not a way around
  *  the confirm — it is the confirm having been turned off, per account, on
  *  purpose. */
-export function sendOrderNow(draft: OrderDraft) {
-  return apiSend<OrderSent>("POST", "/live/routing/orders", {
-    ...draft,
-    one_click: true,
-  });
+export function sendOrderNow(draft: OrderDraft, press?: Press) {
+  return timed(press, () =>
+    apiSend<OrderSent>("POST", "/live/routing/orders", {
+      ...draft,
+      one_click: true,
+    }),
+  );
 }
 
 /** Label an account demo or live. `confirm` must repeat the kind — the one

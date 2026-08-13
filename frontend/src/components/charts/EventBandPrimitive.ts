@@ -28,7 +28,7 @@
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 import type { TapeEvent } from "../../lib/replayEngine";
-import { palette } from "../../theme";
+import { ink, palette } from "../../theme";
 
 /** Aggressor hues, shared with BigTradePrimitive. */
 const BUY_RGB = "59, 130, 246"; // palette.blue
@@ -171,7 +171,7 @@ class EdgeRenderer {
       for (const l of labels) {
         // Halo, so a number that lands over a candle stays legible.
         ctx.lineWidth = 3;
-        ctx.strokeStyle = "rgba(14, 17, 23, 0.85)";
+        ctx.strokeStyle = ink().chip.outline;
         ctx.strokeText(l.text, l.x, l.y);
         ctx.fillStyle = l.color;
         ctx.fillText(l.text, l.x, l.y);

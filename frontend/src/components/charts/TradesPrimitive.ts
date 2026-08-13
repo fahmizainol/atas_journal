@@ -25,7 +25,7 @@
 // layer in lightweight-charts.
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
-import { palette } from "../../theme";
+import { ink, palette } from "../../theme";
 
 /** One closed trade, in the terms the chart draws in: bar times (epoch seconds)
  *  and prices. The page derives it from its own trade log. */
@@ -143,7 +143,7 @@ class Renderer {
         // solid took money off the table, hollow gave it back. Shape rather than
         // a second hue, so the mark stays one colour end to end.
         ctx.save();
-        ctx.fillStyle = won ? `rgba(${rgb}, 1)` : palette.bg;
+        ctx.fillStyle = won ? `rgba(${rgb}, 1)` : ink().chip.outline;
         ctx.strokeStyle = `rgba(${rgb}, 1)`;
         ctx.lineWidth = 1.5;
         ctx.beginPath();

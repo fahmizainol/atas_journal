@@ -21,7 +21,7 @@
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 import type { BigTrade } from "../../lib/replayEngine";
-import { palette } from "../../theme";
+import { ink, palette } from "../../theme";
 
 /** Aggressor hues, as "r, g, b" so the renderer can compose its own alpha.
  *  Blue bought, orange sold — the two the candles never use, so a disc never
@@ -36,9 +36,9 @@ const FILL_ALPHA = 0.55;
 /** Radius in px. Square-rooted so the *area* tracks the lots, and measured from
  *  the threshold rather than from zero — every mark on screen is over it, so the
  *  scale is spent on the range that actually varies. */
-const R_MIN = 4;
-const R_MAX = 24;
-const R_GAIN = 1.55;
+const R_MIN = 2;
+const R_MAX = 12;
+const R_GAIN = 0.775;
 const radiusFor = (lots: number, min: number): number =>
   Math.min(R_MAX, R_MIN + R_GAIN * Math.sqrt(Math.max(1, lots - min + 1)));
 
@@ -113,7 +113,7 @@ class Renderer {
         placed.push(box);
         // Halo, so a number that lands over another bubble stays legible.
         ctx.lineWidth = 3;
-        ctx.strokeStyle = "rgba(14, 17, 23, 0.85)";
+        ctx.strokeStyle = ink().chip.outline;
         ctx.strokeText(text, box.x0 + 1, d.y);
         ctx.fillStyle = d.t.buy ? palette.blue : palette.orange;
         ctx.fillText(text, box.x0 + 1, d.y);
