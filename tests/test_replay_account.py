@@ -514,6 +514,152 @@ def test_trading_on_after_a_review_withdraws_it():
     assert again["status"] == "finished" and len(again["flags"]) == 1
 
 
+# --- the gate ---------------------------------------------------------------
+
+
+@_tmp
+def test_each_refusal_has_its_own_code_and_they_are_ordered_by_severity():
+    _epoch("2026-02-03T00:00:00Z")
+    assert acct.refusal(now=_t("2026-02-03T12:00:00Z")) is None
+
+    # An hour between sittings.
+    _sitting("2026-02-03T14:00:00Z", -50.0)
+    hour = acct.refusal(now=_t("2026-02-03T14:20:00Z"))
+    assert hour["code"] == "hour" and hour["until"] == "2026-02-03T15:00:00Z"
+    assert acct.refusal(now=_t("2026-02-03T15:20:00Z")) is None
+
+
+@_tmp
+def test_an_unreviewed_sitting_outranks_the_hour_gate():
+    from api.routers import replays as router
+
+    _epoch("2026-01-01T00:00:00Z")
+    _finish([_paced(-400, 1, at_s=0, held_s=6)])
+    no = acct.refusal()
+    # Not "wait an hour" — the hour has nothing to do with why this is refused.
+    assert no["code"] == "review"
+
+    done = acct.derive()["review_block"]["attempt_id"]
+    router.patch_replay(
+        done,
+        router.PatchIn(
+            status="reviewed",
+            review=router.ReviewIn(items=[router.ReviewItem(flag_idx=0, verdict="leak")]),
+        ),
+    )
+    assert acct.refusal()["code"] == "hour"
+
+
+@_tmp
+def test_a_dead_account_is_never_told_to_wait_an_hour():
+    _epoch("2026-02-03T00:00:00Z")
+    _sitting("2026-02-03T14:00:00Z", -2_100.0)
+
+    blown = acct.refusal(now=_t("2026-02-03T14:10:00Z"))
+    assert blown["code"] == "blown" and blown["until"] is None
+
+    acct.write_cause("held a loser through the number", now=_t("2026-02-03T14:20:00Z"))
+    cool = acct.refusal(now=_t("2026-02-03T14:30:00Z"))
+    assert cool["code"] == "cooldown" and cool["until"] == "2026-02-04T14:00:00Z"
+
+    # Timeout served: not a refusal at all. The create mints the next account.
+    assert acct.refusal(now=_t("2026-02-04T15:00:00Z")) is None
+
+
+@_tmp
+def test_the_hour_gate_counts_a_sitting_that_is_still_open():
+    _epoch("2026-02-03T00:00:00Z")
+    # A second tab must not be told the gate is clear because the sitting in the
+    # first one has not been written off yet.
+    _sitting("2026-02-03T14:00:00Z", None, status="active")
+    no = acct.refusal(now=_t("2026-02-03T14:10:00Z"))
+    assert no["code"] == "hour" and no["until"] == "2026-02-03T15:00:00Z"
+
+
+@_tmp
+def test_the_create_route_refuses_with_the_code_and_the_deadline():
+    from fastapi import HTTPException
+
+    from api.routers import replays as router
+
+    _epoch(acct._iso(datetime.now(timezone.utc) - timedelta(days=1)))
+    _sitting(acct._iso(datetime.now(timezone.utc) - timedelta(minutes=5)), -50.0)
+
+    try:
+        router.create_replay(
+            router.CreateIn(
+                symbol="NQH5", root="NQ", date="2026-02-03", tz="New York",
+                engine_version=1, tape=TAPE, prefs=PREFS, started_ms=TAPE["rth_open_ms"],
+            )
+        )
+    except HTTPException as e:
+        assert e.status_code == 409
+        assert e.detail["code"] == "hour"
+        assert e.detail["until"].endswith("Z")
+    else:
+        raise AssertionError("a sitting opened inside the hour gate")
+
+
+@_tmp
+def test_a_create_after_the_cooldown_opens_a_fresh_account():
+    from api.routers import replays as router
+
+    died = datetime.now(timezone.utc) - timedelta(days=2)
+    _epoch(acct._iso(died - timedelta(hours=1)), cause="revenge traded the recovery")
+    _sitting(acct._iso(died), -2_100.0)
+    assert acct.derive()["status"] == "can_reset"
+
+    router.create_replay(
+        router.CreateIn(
+            symbol="NQH5", root="NQ", date="2026-02-03", tz="New York",
+            engine_version=1, tape=TAPE, prefs=PREFS, started_ms=TAPE["rth_open_ms"],
+        )
+    )
+    v = acct.derive()
+    assert v["status"] == "live"
+    assert v["epoch"]["index"] == 1
+    assert v["equity"] == 50_000.0
+    # And the account that died is still readable from inside the new one.
+    assert v["last_death"]["cause_of_death"] == "revenge traded the recovery"
+
+
+@_tmp
+def test_a_cause_cannot_be_written_for_a_living_account():
+    from fastapi import HTTPException
+
+    from api.routers import replays as router
+
+    _epoch("2026-02-03T00:00:00Z")
+    _sitting("2026-02-03T14:00:00Z", -100.0)
+    for body in (router.CauseIn(cause_of_death="nothing happened"), router.CauseIn(cause_of_death="  ")):
+        try:
+            router.write_cause(body)
+        except HTTPException as e:
+            assert e.status_code == 409
+        else:
+            raise AssertionError("a cause was accepted with no death behind it")
+
+
+@_tmp
+def test_pre_feature_attempts_do_not_gate_the_first_sitting():
+    from api.routers import replays as router
+
+    # Practice from before any of this existed, including one an hour ago.
+    for i in range(3):
+        _sitting(f"2026-01-0{i + 1}T14:00:00Z", -900.0, date=f"2026-01-0{i + 1}")
+    _sitting(acct._iso(datetime.now(timezone.utc) - timedelta(minutes=5)), -900.0)
+
+    assert acct.refusal() is None
+    created = router.create_replay(
+        router.CreateIn(
+            symbol="NQH5", root="NQ", date="2026-02-03", tz="New York",
+            engine_version=1, tape=TAPE, prefs=PREFS, started_ms=TAPE["rth_open_ms"],
+        )
+    )
+    assert created["status"] == "active"
+    assert acct.derive()["equity"] == 50_000.0
+
+
 # --- the route --------------------------------------------------------------
 
 

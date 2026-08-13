@@ -197,8 +197,8 @@ def net_usd(row: dict) -> float:
     return sum(float(t.get("pnl") or 0) for t in trades if isinstance(t, dict))
 
 
-def settled_attempts(*, since: str | None = None, until: str | None = None) -> list[dict]:
-    """Every settled attempt in an epoch, oldest first.
+def epoch_attempts(*, since: str | None = None, until: str | None = None) -> list[dict]:
+    """Every attempt an epoch contains, whatever its status, oldest first.
 
     ``since``/``until`` are ``created_at`` bounds — ``since`` inclusive so an
     attempt opened in the same second the epoch was minted belongs to it,
@@ -206,13 +206,18 @@ def settled_attempts(*, since: str | None = None, until: str | None = None) -> l
     first. Sorting the stamps as strings is exact: they all come out of
     ``replays._iso``, one format, always UTC.
     """
-    rows = [r for r in replays.list_attempts(limit=5000) if r.get("status") in SETTLED]
+    rows = list(replays.list_attempts(limit=5000))
     if since:
         rows = [r for r in rows if (r.get("created_at") or "") >= since]
     if until:
         rows = [r for r in rows if (r.get("created_at") or "") < until]
     rows.sort(key=lambda r: r.get("created_at") or "")
     return rows
+
+
+def settled_attempts(*, since: str | None = None, until: str | None = None) -> list[dict]:
+    """The ones that have finished happening — what the equity walk counts."""
+    return [r for r in epoch_attempts(since=since, until=until) if r.get("status") in SETTLED]
 
 
 # --- the walk ---------------------------------------------------------------
@@ -351,14 +356,17 @@ def derive(*, now: datetime | None = None, state: dict | None = None) -> dict:
     today = _et_day(_iso(now))
     day_net = sum(net_usd(r) for r in w.counted if _et_day(r.get("created_at")) == today)
 
-    last = w.counted[-1] if w.counted else None
+    # The hour gate reads the newest attempt of **any** status, not the newest
+    # settled one. A sitting that is still open started when it started, and a
+    # second tab that opened one two minutes ago should not be told the gate is
+    # clear because that sitting has not been written off yet.
+    opened_ats = [r.get("created_at") or "" for r in epoch_attempts(since=since, until=until)]
+    newest = _parse(max(opened_ats)) if opened_ats else None
     next_sitting_at = None
-    if last and status == "live":
-        opened = _parse(last.get("created_at"))
-        if opened:
-            due = opened + timedelta(seconds=SITTING_GAP_S)
-            if due > now:
-                next_sitting_at = _iso(due)
+    if newest and status == "live":
+        due = newest + timedelta(seconds=SITTING_GAP_S)
+        if due > now:
+            next_sitting_at = _iso(due)
 
     return {
         "now": _iso(now),
@@ -503,6 +511,95 @@ def review_block(view_rows: list[dict]) -> dict | None:
         if row.get("status") == "finished" and (row.get("flags") or []):
             return {"attempt_id": row.get("id"), "flags": row.get("flags") or []}
     return None
+
+
+# --- the gate ---------------------------------------------------------------
+
+
+def refusal(*, now: datetime | None = None, view: dict | None = None) -> dict | None:
+    """Why a new sitting may not open, or None. The server half of the gate.
+
+    A mirror of ``guardRules.accountRefusal``, in the same order and for the
+    same reason: "wait 20 minutes" is the wrong sentence to read at a dead
+    account, so the terminal states come first and the hour gate last.
+
+    Two gates rather than one because they answer different questions. The
+    browser's stops the gesture before it becomes a fill, which is the only way
+    a refusal can be *useful* — by the time this one fires the trade has already
+    been taken and only the record can be refused. This one is the one that is
+    true: it cannot be got round by a stale page, a second tab, or a client that
+    has been edited.
+
+    ``can_reset`` is not a refusal. The cooldown has run out; the create mints
+    the next epoch (see ``ensure_epoch``) and the sitting opens on a fresh
+    account.
+    """
+    now = now or _now()
+    v = view if view is not None else derive(now=now)
+    if v["status"] == "blown":
+        return {
+            "code": "blown",
+            "message": (
+                "the account is blown — write what killed it before anything else. "
+                "The timeout runs from the death either way, so this costs you nothing "
+                "but is not skippable."
+            ),
+            "until": None,
+        }
+    if v["status"] == "cooldown":
+        return {
+            "code": "cooldown",
+            "message": (
+                "the account is blown and the day's timeout has not run out. A day is "
+                "what a blown account costs; that is the whole point of it costing something."
+            ),
+            "until": v["cooldown_until"],
+        }
+    if v["review_block"]:
+        return {
+            "code": "review",
+            "message": (
+                "the last sitting has not been reviewed. Every flag on it needs a verdict "
+                "— a leak or justified — before another one starts."
+            ),
+            "until": None,
+        }
+    if v["next_sitting_at"]:
+        return {
+            "code": "hour",
+            "message": (
+                "an hour between sittings. Back-to-back replays are how one bad session "
+                "becomes six, and the hour is the only part of a rep that a compressed "
+                "clock cannot compress."
+            ),
+            "until": v["next_sitting_at"],
+        }
+    return None
+
+
+def write_cause(text: str, *, now: datetime | None = None) -> dict:
+    """Record what killed the current account. Raises if nothing has died.
+
+    The one piece of state in this module that is written by a person rather
+    than derived, which is exactly why it is the thing the blown state waits on:
+    everything else about a death the walk already knows, and a timeout you
+    serve in silence teaches the timeout rather than the lesson.
+    """
+    now = now or _now()
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("a cause of death has to say something")
+    state = load_state()
+    epochs = state.get("epochs") or []
+    if not epochs:
+        raise ValueError("no account has been opened yet")
+    index = len(epochs) - 1
+    since, until = epoch_bounds(state, index, now=now)
+    if not walk(settled_attempts(since=since, until=until), now=now).death:
+        raise ValueError("this account is still alive")
+    epochs[index]["cause_of_death"] = text
+    save_state(state)
+    return derive(now=now, state=state)
 
 
 def last_death(state: dict, *, now: datetime) -> dict | None:

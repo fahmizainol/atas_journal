@@ -109,7 +109,26 @@ class PatchIn(BaseModel):
 @router.post("/replays")
 def create_replay(body: CreateIn) -> dict:
     """Open an attempt. The client calls this on the first fill — a session you
-    only watched leaves no record."""
+    only watched leaves no record.
+
+    **This is the gate.** The browser refuses the gesture before it becomes a
+    fill, which is the only way a refusal can be useful; this refuses the
+    *record*, which is the only way one can be true. A stale page, a second tab
+    and an edited client all get past the first and none of them gets past this.
+
+    409 rather than 403: the sitting is refused because of the state the account
+    is in, and that state changes on its own — an hour from now, a day from now,
+    or the moment a review is filed. `until` says when, and it is the server's
+    clock that says it.
+    """
+    replay_account.sweep_stale_actives()
+    no = replay_account.refusal()
+    if no:
+        raise HTTPException(409, no)
+    # After a completed cooldown the create is what starts the next account. It
+    # happens here rather than on a button because the account is not a thing
+    # you open, it is the thing you are trading — the next sitting is the reset.
+    replay_account.ensure_epoch()
     try:
         return replays.create(
             symbol=body.symbol,
@@ -170,6 +189,26 @@ def get_account() -> dict:
     """
     replay_account.sweep_stale_actives()
     return replay_account.derive()
+
+
+class CauseIn(BaseModel):
+    cause_of_death: str
+
+
+@router.post("/replays/account/cause")
+def write_cause(body: CauseIn) -> dict:
+    """Record what killed the account, and start its clock running.
+
+    The 24h timeout runs from the death rather than from this, so writing it up
+    promptly costs nothing — but it is not skippable, and that is the point: a
+    timeout served in silence teaches the timeout rather than the lesson.
+
+    Above `/replays/{attempt_id}` like every other named route here.
+    """
+    try:
+        return replay_account.write_cause(body.cause_of_death)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
 
 
 @router.get("/replays")
