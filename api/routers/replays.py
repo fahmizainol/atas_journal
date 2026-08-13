@@ -30,7 +30,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from journal import db, replays
+from journal import db, replay_account, replays
 from journal.live import booking as bookmod
 
 from .. import deps
@@ -139,6 +139,23 @@ def backfill_journal() -> dict:
         attempts += 1
         written += n
     return {"attempts": attempts, "trades": written, "failed": failed}
+
+
+@router.get("/replays/account")
+def get_account() -> dict:
+    """The replay account — equity, the trailing floor, and what it forbids.
+
+    Derived on every call from the attempts on disk (there is no stored
+    balance; see ``journal.replay_account``), which is also why the stale sweep
+    runs first: an ``active`` attempt nobody has written to in an hour is a
+    sitting whose result has not been counted yet, and the account would read
+    high by exactly the amount that sitting lost.
+
+    Declared above ``/replays/{attempt_id}`` — a path parameter would otherwise
+    swallow `account`, the same trap ``backfill_journal`` documents.
+    """
+    replay_account.sweep_stale_actives()
+    return replay_account.derive()
 
 
 @router.get("/replays")
