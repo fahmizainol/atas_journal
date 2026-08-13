@@ -867,6 +867,49 @@ button:disabled {
   border-radius: 2px;
 }
 
+/* ---- the legend on a light chart ----
+   The identity block, the crosshair readout and the indicator rows are the only
+   chrome drawn straight onto the tape with no plate under it — everything else
+   here is a chip, and a dark chip reads on either surface. So this is the whole
+   light pass: flip that text, and flip the halo it is separated from the candles
+   by (a dark glow around dark text on paper is a smudge).
+
+   Hung off the document rather than the chart's own root: the appearance is one
+   setting for the whole app, so `data-chart-light` is set once by
+   applyAppearance and every pane on screen follows it. */
+[data-chart-light] .chart-legend {
+  text-shadow: 0 1px 3px rgba(255, 255, 255, 0.95), 0 0 6px rgba(255, 255, 255, 0.95);
+}
+[data-chart-light] .chart-legend-id {
+  color: #23272f;
+}
+[data-chart-light] .chart-legend-id .tf {
+  color: #5b616e;
+}
+[data-chart-light] .chart-legend-row,
+[data-chart-light] .chart-legend-count b,
+[data-chart-light] .chart-ohlc b {
+  color: #363b45;
+}
+[data-chart-light] .chart-legend-head,
+[data-chart-light] .chart-legend-count,
+[data-chart-light] .chart-legend-row.off,
+[data-chart-light] .chart-ohlc {
+  color: #666c79;
+}
+/* The hover plate goes with them: a near-black wash under dark text is the one
+   state where the row becomes less readable for being pointed at. */
+[data-chart-light] .chart-legend-row:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.85);
+  color: #14171d;
+}
+/* The settings panel hangs inside the legend and inherits its halo, which on a
+   dark surface is invisible and here is a white smudge over the panel's own
+   dark plate. It has a plate — it needs no halo. */
+[data-chart-light] .chart-set {
+  text-shadow: none;
+}
+
 /* ---- per-indicator settings, off the row's "…" ---- */
 /* A row and its "…" are one chip split in two: a layer's settings belong to the
    layer, so they share its box rather than sitting in a bar somewhere above the
@@ -2254,6 +2297,46 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* ---- the replay account (see components/charts/ReplayAccount) ----
+   The chip on the bar. Sized to the 36px row like everything else on it, and
+   quiet by design: equity in monospace so it doesn't jitter as the digits
+   change, and a second span only when something is actually standing in the
+   way. */
+.chart-account-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.chart-account-chip [data-account-block] {
+  font-size: 11px;
+}
+/* A blown account tints its own number, so the chip reads wrong at a glance
+   rather than needing to be read. */
+.chart-account-chip[data-account-status="blown"] b,
+.chart-account-chip[data-account-status="cooldown"] b {
+  color: var(--red);
+}
+/* The band above the tape. Full width and in flow — a floating badge is the
+   shape of a thing you learn to look past, and both states this draws are
+   things you are meant to be unable to work around. */
+.sim-account-note {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  border-bottom: 1px solid var(--card-border);
+}
+.sim-account-note.dead {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+.sim-account-note.pinned {
+  color: var(--text);
+  background: var(--card);
+}
+
 /* ---- chart pages (Replay + Live) ----
    The two pages that fill the viewport instead of scrolling. The height used to
    be measured in JS and published as --sim-fill-h, because the chrome above them
@@ -3522,6 +3605,14 @@ button:disabled {
   border-top: 1px solid var(--card-border);
   background: var(--card);
 }
+/* Hidden by the ▶▌ on the top bar, for a session spent reading rather than
+   scrubbing. `display: none` rather than a height animation: the page measures
+   this row to keep the ticket clear of it, and a row that is 0px but present is
+   a row the measurement has to special-case. Still mounted, so the ref the
+   measurement hangs off never goes null. */
+.sim-transport.away {
+  display: none;
+}
 
 /* ---- the rail ----
    ~34px of icons at the right edge, always there. The panel behind it used to be
@@ -3595,25 +3686,56 @@ button:disabled {
    thumb-sized buttons can, and centred on the foot until it is moved. */
 .sim-quick {
   position: absolute;
-  left: 50%;
+  /* Centred by auto margins against both edges, NOT by `left: 50%` and a
+     translate. They look identical on a desktop and they are not the same box: a
+     shrink-to-fit absolute element takes its available width from the offsets it
+     is given, so `left: 50%` with `right: auto` hands it *half the pane* to size
+     itself in. On a 375px phone that is 187px — less than the pair of market
+     buttons needs — so BUY and SELL stacked, and any third thing in the row
+     re-shuffled which of them sat where. Anchoring both edges gives the box the
+     whole width to shrink inside, and `width: max-content` is what keeps it
+     shrinking rather than stretching to fill it. */
+  left: 0;
+  right: 0;
   bottom: 8px;
-  transform: translateX(-50%);
+  width: max-content;
+  margin-inline: auto;
   z-index: 5;
   display: flex;
   flex-direction: column;
   max-width: calc(100% - 16px);
-  margin: 0;
   padding: 0;
   overflow: hidden;
-  background: rgba(14, 17, 23, 0.86);
-  backdrop-filter: blur(6px);
+  /* See-through at rest so the bars under it stay readable — it sits over live
+     price action and the only thing that has to survive at a glance is the two
+     button labels, which the blur and their own colour carry on their own. It
+     goes solid the moment you interact with it (below): reaching for BUY is
+     exactly when the box should stop pretending it isn't there. */
+  background: rgba(14, 17, 23, 0.32);
+  backdrop-filter: blur(4px);
   border: 1px solid var(--card-border);
   border-radius: 10px;
-  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.28);
+  /* The fade covers the contents too, not just the backing — most of this box's
+     visual mass is two saturated buttons, and a see-through panel behind solid
+     BUY/SELL is not a see-through window. */
+  opacity: 0.72;
+  transition:
+    background-color 0.12s ease,
+    box-shadow 0.12s ease,
+    opacity 0.12s ease;
   /* The box is the drag surface, so the browser must not claim the gesture for
      scrolling first — and a drag over it must not select the button labels. */
   touch-action: none;
   user-select: none;
+}
+.sim-quick:hover,
+.sim-quick:focus-within,
+.sim-quick.dragging {
+  background: rgba(14, 17, 23, 0.9);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  opacity: 1;
 }
 /* Minimised. A pill in the pane's bottom-right, just inside the price axis.
    NOT vertically centred on the right edge, which is where it went first: that
@@ -3675,11 +3797,15 @@ button:disabled {
   color: var(--text);
   background: rgba(255, 255, 255, 0.1);
 }
-/* Dragged off the foot: the page pins it by left/top instead, so the centring
-   transform and the bottom anchor both have to go. */
+/* Dragged off the foot: the page pins it by an inline left/top instead, so the
+   bottom anchor goes — and so does the centring, both halves of it. The right
+   offset has to be released as well as the margin: an inline `left` against a
+   still-anchored `right: 0` is a box stretched between them rather than one
+   placed where it was dropped. */
 .sim-quick.moved {
   bottom: auto;
-  transform: none;
+  right: auto;
+  margin-inline: 0;
 }
 .sim-quick.dragging {
   cursor: grabbing;
@@ -3837,9 +3963,26 @@ button:disabled {
 .sim-quick-btn.sell {
   background: var(--red);
 }
+/* Its own row, under BUY/SELL rather than in among them. In the flow it was a
+   third thumb-sized button on a line with room for two, so a fill split the pair
+   across rows — the two buttons whose position must never move were the two that
+   moved, at the one moment you are in a trade and reaching for them by muscle
+   memory. `order: 1` puts it last whatever the DOM says, and a full basis makes
+   it a row of its own rather than something BUY could ever share a line with.
+
+   Short and wide: the width is what makes it read as the row-level action it is,
+   and the height it gives up is height the tape gets back. Deliberately NOT
+   thumb-sized like the pair above it — flattening is the one gesture here that
+   should cost a deliberate reach, and `q` is the fast way out for anyone who
+   wants one. */
 .sim-quick-btn.flat {
   background: var(--accent);
-  padding: 12px 18px;
+  order: 1;
+  flex: 0 0 100%;
+  flex-direction: row;
+  justify-content: center;
+  min-width: 0;
+  padding: 8px 12px;
 }
 .sim-quick-btn:disabled {
   opacity: 0.45;
@@ -3847,8 +3990,9 @@ button:disabled {
 }
 /* Joins the pair while a trade is on rather than replacing it — the position is
    netted, so those two buttons are how you scale in and out of what this chip is
-   reporting. Takes the whole first line when the four of them won't fit across a
-   phone, which puts it directly above the buttons it belongs to.
+   reporting. It takes a line of its own — the pair alone measures the width of
+   the body, so there was never a phone this fitted beside them on — which puts
+   it directly above the buttons it belongs to, with Close below them.
 
    No panel of its own: it used to float on the tape by itself and needed one,
    and now it sits inside the window's, which already supplies the backing and
@@ -4159,5 +4303,10 @@ button:disabled {
   .sim-quick-btn {
     min-width: 124px;
     padding: 12px 20px;
+  }
+  /* The bar grows a little for a thumb, but stays visibly the shorter of the
+     two heights — see `.sim-quick-btn.flat`. */
+  .sim-quick-btn.flat {
+    padding: 10px 12px;
   }
 }

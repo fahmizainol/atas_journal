@@ -45,6 +45,8 @@ import {
   type SimDay,
 } from "../hooks/useSimulator";
 import { useReplayAttempt } from "../hooks/useReplayAttempt";
+import { useReplayAccount } from "../hooks/useReplayAccount";
+import { AccountChip, AccountNotice, AccountRecap } from "../components/charts/ReplayAccount";
 import { useReplayAttemptDetail, type AttemptDetail } from "../hooks/useReplays";
 import { clearResume, loadResume, saveResume, type ResumePoint } from "../lib/replayResume";
 import {
@@ -104,7 +106,9 @@ import {
   PERFECT_FILLS,
   saveFillModel,
   type FillCfg,
+  type FillModel,
 } from "../lib/fillModel";
+import { MICRO_RATIO, microCommission, microOf } from "../lib/contracts";
 import { FillCues, playCue, simMark } from "../lib/orderSound";
 import { dayRead, VERDICT_LINE, type DayRead, type DayVerdict } from "../lib/dayRead";
 import {
@@ -432,6 +436,32 @@ export function Simulator() {
   const [openPos, setOpenPos] = useState<Position | null>(null);
   const [working, setWorking] = useState<WorkingOrderView[]>([]);
   const [size, setSize] = useState(prefs.size);
+  // Which contract this replay's orders are *sent to*. The tape is the mini's
+  // either way — there are no micro ticks to load — so this is a re-pricing of
+  // the same session, not a different one (see lib/contracts).
+  const [micro, setMicro] = useState(prefs.micro);
+  // The root's micro, or null where it has none — which is what decides the
+  // choice is offered at all, and what the chart's routing badge is called.
+  const microSym = useMemo(() => microOf(root), [root]);
+  // Trading the micro is only really on when there is one to trade. A stored
+  // `micro: true` carried onto a root without a micro would otherwise price the
+  // session at a tenth of itself and name no contract for it.
+  const onMicro = micro && microSym != null;
+  // What the account is charged, in the contract actually being traded: a micro
+  // round turn is not billed at the mini's rate the setting was measured at
+  // (lib/contracts — the same scaling the live broker applies).
+  const charged = useMemo<FillModel>(
+    () => (onMicro ? { ...fills, commission: microCommission(fills.commission) } : fills),
+    [fills, onMicro],
+  );
+  // The contract cannot be changed with skin in the game. The mini and its micro
+  // are two instruments that do not net, so a position opened in one can only be
+  // traded in that one — and a resting order belongs to the contract it was sent
+  // to. The live panel refuses the same switch for the same reason
+  // (components/RoutingPanel, `InstrumentSwitch`); here it also keeps the
+  // netting in `replaySim` from ever having to arbitrate between two contracts
+  // in one position.
+  const contractLocked = openPos != null || working.length > 0;
   // Both bracket legs are optional: zero ticks means the leg isn't attached at
   // all, and an order can be placed with neither — the trade is then yours to
   // close by hand, or to bracket afterwards by dragging a level onto it.
@@ -479,10 +509,18 @@ export function Simulator() {
     timeframe: tfId,
     // What the fills were charged. Stamped with the ticket because it is the
     // other half of the same question: a net figure only means something
-    // alongside the rules that priced it.
-    commission: fills.commission,
-    slipTicks: fills.slipTicks,
-    queueTicks: fills.queueTicks,
+    // alongside the rules that priced it. The rate is the one actually charged,
+    // not the stored mini rate — which is why the contract is stamped beside it:
+    // "$0.50 a side" only reads as right next to the MNQ it was charged on.
+    contract: onMicro ? microSym : root,
+    commission: charged.commission,
+    slipTicks: charged.slipTicks,
+    queueTicks: charged.queueTicks,
+    // Stamped beside `speed` on purpose. The lag is wall-clock milliseconds
+    // applied to tape milliseconds, so a sitting watched at 4× spent a quarter
+    // of the market movement in flight that the same click would have spent
+    // live — the two numbers only read as one story together.
+    latencyMs: charged.latencyMs,
   };
   // Whether the tape running out has already closed this attempt. One shot per
   // session: reaching the end again after a rewind is not a second ending.
@@ -515,6 +553,10 @@ export function Simulator() {
   // Declared up here with the other carried settings so the save effect below can
   // see it — see the rail section further down for what it does.
   const [railPinned, setRailPinned] = useState(prefs.railPinned);
+  // Whether the transport row is in flow. See simPrefs.transportOpen for why it
+  // is a setting at all: every control on it has a key, so a reading session can
+  // have the ~34px back.
+  const [transportOpen, setTransportOpen] = useState(prefs.transportOpen);
 
   // The extra panes' own carried settings, up here for the same reason. What a
   // pane *is* lives further down, with the engines that feed them.
@@ -620,6 +662,7 @@ export function Simulator() {
       startTime,
       speed,
       size,
+      micro,
       stopTicks,
       targetTicks,
       trailTicks,
@@ -641,6 +684,7 @@ export function Simulator() {
       eventMarginal: evMarginal,
       indicators,
       railPinned,
+      transportOpen,
       layout,
       paneTfs: paneTfIds,
       splitPct,
@@ -654,6 +698,7 @@ export function Simulator() {
     startTime,
     speed,
     size,
+    micro,
     stopTicks,
     targetTicks,
     trailTicks,
@@ -675,6 +720,7 @@ export function Simulator() {
     evMarginal,
     indicators,
     railPinned,
+    transportOpen,
     layout,
     paneTfIds,
     splitPct,
@@ -754,7 +800,10 @@ export function Simulator() {
     ro.observe(el);
     read();
     return () => ro.disconnect();
-  }, []);
+    // Re-read when the row is hidden: it stays mounted (so this ref never goes
+    // null) but collapses to nothing, and the ticket must stop clearing a bar
+    // that isn't there.
+  }, [transportOpen]);
 
   // Drag the ticket away. The panel is anchored to the bottom edge in fullscreen,
   // so down is the direction it came from and down is the way it goes back — on a
@@ -819,14 +868,29 @@ export function Simulator() {
   }, []);
 
   const tickSize = sessionRef.current?.tick_size ?? 0.25;
-  const pointValue = sessionRef.current?.point_value ?? 20;
+  /** What a point is worth on the **tape's** contract — the mini, because they
+   *  are the mini's ticks. */
+  const tapePointValue = sessionRef.current?.point_value ?? 20;
+  // What a point is worth in the contract orders are going to *now*: the tape's
+  // figure, or a tenth of it while the ticket is pointed at the micro
+  // (lib/contracts). This prices the ticket and what the guardrails will accept
+  // — the order you are about to place — and nothing that has already happened.
+  // The tick *grid* is untouched either way: MNQ trades the same quarter point,
+  // so every price on this page is where it always was and only the money moves.
+  const pointValue = tapePointValue / (onMicro ? MICRO_RATIO : 1);
   // Everything a fill needs to be priced: what the instrument is worth, and what
   // the account is charged. Rebuilt when either changes, which is what makes
   // turning commission on re-derive the whole log at the new rules rather than
   // leaving the trades already booked under the old ones.
+  //
+  // Deliberately the **tape's** contract and the **stored** rate, not the routed
+  // ones: which contract a trade was in is stamped on the order that opened it
+  // and `replaySim` prices each position from its own stamp. Feeding the routed
+  // figure in here instead is what made switching the ticket to NQ re-price a
+  // position that had been sent, filled and closed as MNQ.
   const fillCfg = useMemo<FillCfg>(
-    () => ({ ...fills, pointValue, tickSize }),
-    [fills, pointValue, tickSize],
+    () => ({ ...fills, pointValue: tapePointValue, tickSize }),
+    [fills, tapePointValue, tickSize],
   );
 
   // The guardrail levels, from the one place that owns them. Practice has to
@@ -834,7 +898,24 @@ export function Simulator() {
   // `/live/routing` rather than being a second set of constants — and fall back
   // to `DEFAULT_GUARDS` (the same numbers the server defaults to) when there is
   // no session to ask, which is the ordinary case for a replay.
-  const guards = useGuardLevels().data ?? DEFAULT_GUARDS;
+  const guardQ = useGuardLevels().data;
+  const guards = guardQ?.guards ?? DEFAULT_GUARDS;
+  // `REPLAY_GUARDRAILS=0` in .env. Off, the rules are still *computed* and still
+  // shown — the day still locks in the strip, the fast-trade share still counts
+  // — and nothing is refused or auto-closed. That split is the point: the reason
+  // to switch this off is to run a session the rules would not allow (a 30-tick
+  // stop, trading through the daily stop to see what the rest of the day did),
+  // and such a session is worth nothing if the readout goes quiet too. Falls
+  // back to enforced whenever the API did not answer.
+  const guardsOn = guardQ?.enforced ?? true;
+  // The account, beside the levels — and unlike them, **not** subject to
+  // `guardsOn`. The guardrails are rules under test, which is what the switch is
+  // for; the account is the stakes, and stakes you can switch off are not
+  // stakes. `dataUpdatedAt` is when this arrived, which is all the countdowns
+  // use the local clock for (see `remainingMs`).
+  const accountQ = useReplayAccount();
+  const account = accountQ.data;
+  const accountAt = accountQ.dataUpdatedAt;
   const tickUsd = tickSize * pointValue;
   // Everything the rules and the behaviour strip need, re-derived whenever the
   // simulation is. Cheap: a couple of passes over a day's trades.
@@ -883,7 +964,10 @@ export function Simulator() {
     simRef.current = st;
     sigRef.current = simSig(st);
     openRef.current = st.open;
-    const views = workingOrders(st).map((o) => orderView(o, clock, st.open));
+    // Each view is priced in the contract its own order went to, which is what
+    // keeps a chip on a micro order reading as micro money after the ticket has
+    // been pointed back at the mini.
+    const views = workingOrders(st).map((o) => orderView(o, clock, st.open, tapePointValue));
     // The trades array is appended to in place by the stepper, and so is the
     // position — a scale-in moves the size and the average on the object React
     // is already holding. Hand over copies or it sees the same reference and
@@ -896,7 +980,7 @@ export function Simulator() {
     // between two published states.
     cuesRef.current.observe(simMark(st));
     setWorking(views);
-    chartRef.current?.setPosition(st.open ? posLine(st.open, barAt) : null);
+    chartRef.current?.setPosition(st.open ? posLine(st.open, barAt, tapePointValue) : null);
     chartRef.current?.setOrders(views);
     const marks = st.trades.map((t) => tradeMark(t, barAt));
     chartRef.current?.setTrades(marks);
@@ -904,7 +988,7 @@ export function Simulator() {
     // draw them there: a position and a working order are horizontal lines, so
     // they carry a price and nothing about where they sit in the tape, and the
     // same view renders on a 1-minute pane and an hourly one unchanged.
-    const pos = st.open ? posLine(st.open, barAt) : null;
+    const pos = st.open ? posLine(st.open, barAt, tapePointValue) : null;
     eachExtra((c) => {
       c.setPosition(pos);
       c.setOrders(views);
@@ -925,7 +1009,7 @@ export function Simulator() {
     // Cheap enough to sit here: this runs when a fill resolves or you do
     // something, not per frame.
     writeResume();
-  }, [barAt, eachExtra, recordAttempt, writeResume]);
+  }, [barAt, eachExtra, recordAttempt, tapePointValue, writeResume]);
 
   // Re-derive everything from the log. Every user action goes through here: an
   // action is rare enough that one pass over the tape costs nothing, and it
@@ -953,9 +1037,13 @@ export function Simulator() {
       const o = openRef.current;
       if (!o || !Number.isFinite(lastPrice)) return 0;
       const dir = o.side === "long" ? 1 : -1;
-      return (lastPrice - o.entryPrice) * dir * pointValue * o.size;
+      // The position's contract, not the ticket's. They are the same until the
+      // ticket is re-pointed after a fill, and that is precisely the moment this
+      // number must not move: what is held is what is held.
+      const pv = tapePointValue / (o.micro ? MICRO_RATIO : 1);
+      return (lastPrice - o.entryPrice) * dir * pv * o.size;
     },
-    [pointValue],
+    [tapePointValue],
   );
 
   const pushHud = useCallback(
@@ -1730,9 +1818,11 @@ export function Simulator() {
       //
       // Skipped entirely for an order that *reduces*: closing size has no
       // target to be too tight, and a practice rule that could refuse an exit
-      // would teach the one habit nobody wants.
+      // would teach the one habit nobody wants. Skipped wholesale when
+      // `REPLAY_GUARDRAILS` is off — the strip still says what the rules would
+      // have said, it just does not stand in the way.
       const reducing = isReducing(openRef.current, side, size);
-      if (!reducing) {
+      if (!reducing && guardsOn) {
         const why =
           dayRefusal(day, false) ??
           shapeRefusal(guards, { stopTicks, targetTicks, size, tickUsd });
@@ -1770,6 +1860,11 @@ export function Simulator() {
             : null,
         edits: [],
         cancelMs: null,
+        // Which contract this one is being sent to, stamped for exactly the
+        // reason the trail above is: the ticket can be pointed elsewhere later,
+        // and an order that filled as a micro is worth what a micro is worth
+        // whatever the picker says afterwards.
+        micro: onMicro,
       };
       // A market order is its own fill and the rebuild below will sound as one —
       // the tick and the chime a few milliseconds apart would read as one
@@ -1778,8 +1873,8 @@ export function Simulator() {
       const log = logRef.current;
       append({ ...log, orders: [...log.orders, rec] });
     },
-    [append, day, guards, size, stopTicks, targetTicks, tickSize, tickUsd,
-     trailTicks, trailStepTicks, trailBeTicks, trailBeOnly],
+    [append, day, guards, guardsOn, onMicro, size, stopTicks, targetTicks, tickSize,
+     tickUsd, trailTicks, trailStepTicks, trailBeTicks, trailBeOnly],
   );
 
   const placeMarket = useCallback(
@@ -1927,14 +2022,14 @@ export function Simulator() {
       autoClosedRef.current = false;
       return;
     }
-    if (autoClosedRef.current) return;
+    if (autoClosedRef.current || !guardsOn) return;
     const why = equityStop(guards, day, hud.openPnl, true);
     if (!why) return;
     autoClosedRef.current = true;
     setRefused(why);
     playCue("canceled");
     closeManual();
-  }, [closeManual, day, guards, hud.openPnl]);
+  }, [closeManual, day, guards, guardsOn, hud.openPnl]);
 
   /**
    * Everything off: the position at the last print, and every order still
@@ -2162,11 +2257,16 @@ export function Simulator() {
    *  all; unticked, the distance box empties and reads "none" — which is also
    *  what clearing the box by hand does, so the two say the same thing. */
   /** What the guardrails will accept for this leg, as a short label. Empty when
-   *  the rule is switched off (a level of 0). */
+   *  the rule is switched off — a level of 0, or the whole layer off via
+   *  `REPLAY_GUARDRAILS`, since a bound nothing refuses is not a bound. The stop
+   *  reads as a ceiling only: the replay does not enforce `stop_ticks_min`
+   *  (lib/guardRules), so quoting a range would name one of those. */
   const legBound = (key: "stop" | "target"): string =>
-    key === "stop"
+    !guardsOn
+      ? ""
+      : key === "stop"
       ? guards.stop_ticks_max > 0
-        ? `${guards.stop_ticks_min}–${guards.stop_ticks_max}`
+        ? `≤${guards.stop_ticks_max}`
         : ""
       : guards.min_target_ticks > 0
         ? `≥${guards.min_target_ticks}`
@@ -2260,6 +2360,9 @@ export function Simulator() {
         titleOpen={setupOpen}
         right={
           <>
+            {/* The account, first on the bar, because it is the only thing here
+                that can end the session before the tape does. */}
+            <AccountChip view={account} receivedAt={accountAt} />
             <Link to="/charts/replay/history" className="sim-topbar-link" title="Every attempt you've recorded">
               History →
             </Link>
@@ -2277,6 +2380,24 @@ export function Simulator() {
               title={sheetOpen ? "Hide the ticket and blotter" : "Show the ticket and blotter"}
             >
               ▤▎
+            </button>
+            {/* The transport's own switch. On the bar rather than on the row it
+                hides, because a button that leaves with the thing it hid gives
+                you no way back — and this is the one piece of chrome that is
+                always on screen. Nothing is lost by hiding it: k plays and
+                pauses, `,` and `.` step, and the clock is on the chart. */}
+            <button
+              type="button"
+              className={`chart-topbar-btn${transportOpen ? " on" : ""}`}
+              onClick={() => setTransportOpen((o) => !o)}
+              aria-pressed={transportOpen}
+              title={
+                transportOpen
+                  ? "Hide the transport — k still plays and pauses, , and . still step"
+                  : "Show the transport"
+              }
+            >
+              ▶▌
             </button>
           </>
         }
@@ -2459,15 +2580,29 @@ export function Simulator() {
           Start time (ET)
           <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
         </label>
+        {/* Which contract the orders go to is *not* here: it sits at the head of
+            the ticket, where Live keeps the same choice (components/RoutingPanel,
+            `InstrumentSwitch`). It is not pre-run configuration — it is what the
+            account is, and it can be changed with a position open. The rate
+            below follows it, which is why the two still read together. */}
         {/* What a fill costs. Pre-run configuration like everything else left in
-            this panel — except that unlike the rest of it, these three *can*
+            this panel — except that unlike the rest of it, these four *can*
             change a fill, which is why editing one re-derives the sitting on the
             spot instead of applying to the next trade only. */}
         <label
           style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}
-          title="Commission per contract per side. A round turn on one contract costs twice this, and it is charged when the trade closes."
+          title={
+            onMicro
+              ? `Commission per contract per side, at the mini's rate. ${microSym} is charged a tenth of it — $${charged.commission.toFixed(2)} a side, floored at $0.50, the way the broker bills it — and that is what the log is priced at.`
+              : "Commission per contract per side. A round turn on one contract costs twice this, and it is charged when the trade closes."
+          }
         >
-          Commission $/side
+          {/* The box holds the mini's rate — it is the account's rate, shared
+              with the Live page — so when the micro is being charged a tenth of
+              it the figure actually taken is said out loud beside it. A box
+              reading 3.50 while the log is priced at 0.50 is the sort of quiet
+              disagreement that makes a P&L untrustworthy. */}
+          Commission $/side{onMicro && ` · ${microSym} $${charged.commission.toFixed(2)}`}
           <input
             type="number"
             min={0}
@@ -2511,13 +2646,29 @@ export function Simulator() {
             style={{ width: 60 }}
           />
         </label>
+        <label
+          style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}
+          title="How long anything you do takes to reach the market — an order, a drag, a cancel, a flatten. It fills off the print that was current when it landed, not the one you clicked. A bracket's stop and target are already resting at the exchange, so they pay none of it. 250 ms is this desk's measured round trip (docs/research/order-latency.md); it is the round trip and not half of it because the price you reacted to had already travelled to you."
+        >
+          Lag (ms)
+          <input
+            type="number"
+            min={0}
+            step={25}
+            value={fills.latencyMs}
+            onChange={(e) =>
+              setFills((f) => ({ ...f, latencyMs: Math.max(0, Math.round(Number(e.target.value) || 0)) }))
+            }
+            style={{ width: 68 }}
+          />
+        </label>
         <button
           type="button"
           style={{ ...btn(palette.bg2), color: palette.muted, alignSelf: "end", padding: "6px 10px", fontSize: 11, fontWeight: 500 }}
           onClick={() => setFills(isPerfect(fills) ? { ...DEFAULT_FILL_MODEL } : { ...PERFECT_FILLS })}
           title={
             isPerfect(fills)
-              ? "Charge fills the way a funded account does: $3.50 a side, a tick of spread, a tick of queue"
+              ? "Charge fills the way a funded account does: $3.50 a side, a tick of spread, a tick of queue, a quarter-second to reach the market"
               : "Fill at the level, for free — the tape read with the account taken out of it"
           }
         >
@@ -2552,6 +2703,12 @@ export function Simulator() {
           </span>
         )}
       </div>
+
+      {/* Above the tape and in flow, not over it. A blown account and the last
+          account's cause of death are both things you are meant to be unable to
+          work around, and a floating badge is exactly the shape of a thing you
+          learn to look past. Renders nothing at all on a healthy first account. */}
+      <AccountNotice view={account} receivedAt={accountAt} />
 
       <div className="sim-body">
         <div className="sim-chart-card">
@@ -2608,6 +2765,12 @@ export function Simulator() {
               onOrderCancel={cancelOrder}
               onPlaceOrder={placeAt}
               onPlaceTyped={placeTyped}
+              // Where a click on this canvas actually sends, and what it is
+              // worth there. Both omitted on the mini, where the tape's own
+              // contract is the one being traded and saying so twice would be
+              // a badge that never turns off.
+              routedTo={onMicro ? microSym : undefined}
+              pointValue={onMicro ? pointValue : undefined}
               ticket={ticket}
               onTicketChange={changeTicket}
               mark={hud.lastPrice}
@@ -2775,6 +2938,8 @@ export function Simulator() {
                     onOrderCancel={cancelOrder}
                     onPlaceOrder={placeAt}
                     onPlaceTyped={placeTyped}
+                    routedTo={onMicro ? microSym : undefined}
+                    pointValue={onMicro ? pointValue : undefined}
                     ticket={ticket}
                     onTicketChange={changeTicket}
                     mark={hud.lastPrice}
@@ -2810,7 +2975,7 @@ export function Simulator() {
               cost a click before every scrub, speed change and step, and hid the
               Play button, which is the control pressed most. ~34px, and only
               Replay pays it — Live has no transport. */}
-          <div ref={footRef} className="sim-transport">
+          <div ref={footRef} className={`sim-transport${transportOpen ? "" : " away"}`}>
               <button
                 type="button"
                 style={btn(playing ? palette.red : palette.green)}
@@ -2948,7 +3113,75 @@ export function Simulator() {
             <span />
           </div>
           <div className="sim-card sim-ticket">
-            <Discipline day={day} guards={guards} refused={refused} />
+            {/* Which contract these gestures are sent to, at the head of the
+                ticket — the row Live carries in the same place, laid out the
+                same way (components/RoutingPanel, `InstrumentSwitch`): the
+                choice, the money it makes a tick worth, and the mismatch with
+                the tape drawn rather than left to be remembered.
+
+                Live's version cannot let the tape follow, because one Rithmic
+                login is one socket. This one cannot either, for a different
+                reason with the same consequence: the micro has no tick store to
+                load (lib/contracts). So the warning is the honest one in both
+                places — a limit price read off this chart is the mini's price,
+                and it is sent as typed.
+
+                Absent entirely on a root with no micro: a select with one option
+                is a question with one answer. */}
+            {microSym && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  flexWrap: "wrap",
+                  fontSize: 11,
+                  color: palette.muted,
+                  margin: "0 0 8px",
+                }}
+              >
+                <select
+                  value={micro ? "micro" : "mini"}
+                  disabled={contractLocked}
+                  onChange={(e) => setMicro(e.target.value === "micro")}
+                  title={
+                    contractLocked
+                      ? `Refused while something is held or working — ${root} and ${microSym} are two ` +
+                        "instruments and do not net against each other, so the position you are " +
+                        "carrying can only be traded in the contract it was opened in. Close it, " +
+                        "or cancel what is resting, and this opens up."
+                      : `Which contract this replay's orders are sent to. The tape stays ${root} ` +
+                        `either way — ${microSym} tracks the same index to within a tick — so ` +
+                        "only the money changes: the P&L, the risk chips and what the guardrails " +
+                        "will accept. It applies to what you place next; trades already booked " +
+                        "keep the contract they were sent in."
+                  }
+                  style={{ fontSize: 11, maxWidth: 120, ...(onMicro ? { borderColor: palette.orange } : null) }}
+                >
+                  <option value="mini">{root}</option>
+                  <option value="micro">{microSym}</option>
+                </select>
+                {/* The money, because that is the only reason to touch this
+                    control — and because every box under it is in ticks. */}
+                <span title="Dollars per tick on the routed contract. The stop and target below are distances in ticks, so this is what turns the geometry into risk.">
+                  ${tickUsd % 1 === 0 ? tickUsd.toFixed(0) : tickUsd.toFixed(2)}/tick
+                </span>
+                {onMicro && (
+                  <span
+                    style={{ color: palette.orange }}
+                    title={
+                      `Orders are priced as ${microSym}; the tape, the chart and every level on ` +
+                      `it are ${root}. The two track within a tick, so the geometry carries ` +
+                      "over — but a limit price read off this chart is the mini's price, sent " +
+                      "as typed."
+                    }
+                  >
+                    ⚠ tape is {root}
+                  </span>
+                )}
+              </div>
+            )}
+            <Discipline day={day} guards={guards} on={guardsOn} refused={refused} />
             <DayReadStrip read={read} verdict={dayVerdict} />
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 22, fontFamily: "monospace" }}>
               <span style={{ color: palette.muted, fontSize: 12, alignSelf: "center" }}>Last</span>
@@ -3335,14 +3568,25 @@ export function Simulator() {
                       {/* The broker's share, spelled out. Net is already after
                           it — this says how much of the distance between a good
                           day and a flat one was commission. The spread is not in
-                          here and cannot be: it is inside the fill prices. */}
+                          here and cannot be: it is inside the fill prices.
+
+                          The rate in the tooltip is read back out of the fees
+                          rather than off the ticket: a sitting may have changed
+                          contract between positions, and the average actually
+                          charged is the only rate that multiplies out to this
+                          total. */}
                       {s.fees_usd > 0 && (
-                        <span title={`${s.contracts} contract(s) × 2 sides × $${fills.commission.toFixed(2)}. Net is already after this.`}>
+                        <span title={`${s.contracts} contract(s) × 2 sides × $${(s.fees_usd / (2 * s.contracts)).toFixed(2)}. Net is already after this.`}>
                           {" "}
                           · fees {fmtUsd(s.fees_usd)}
                         </span>
                       )}
                     </div>
+                    {/* What the sitting did to the account, under what it did on
+                        its own terms. The two are different questions — a
+                        +$400 session that took the floor from $900 away to $500
+                        away is a good sitting and a worse account. */}
+                    <AccountRecap view={account} />
                     <textarea
                       // Keyed by attempt so a new sitting never inherits the
                       // last one's note into an uncontrolled box.
@@ -3400,6 +3644,18 @@ export function Simulator() {
                   >
                     <span style={{ color: t.side === "long" ? palette.green : palette.red }}>
                       {t.side === "long" ? "L" : "S"}×{t.size}
+                      {/* Named only when this row is not in the contract the
+                          ticket is pointed at now — which is the only time the
+                          head of the panel doesn't already say it, and the only
+                          time two rows of "×1" mean different money. */}
+                      {microSym && t.micro !== onMicro && (
+                        <span
+                          style={{ color: palette.muted, fontSize: 10, marginLeft: 4 }}
+                          title={`Traded as ${t.micro ? microSym : root} — the contract the order was sent to, not the one selected now.`}
+                        >
+                          {t.micro ? microSym : root}
+                        </span>
+                      )}
                     </span>
                     <span style={{ color: palette.muted }}>
                       {t.openType === "market" ? "" : `${t.openType === "stop" ? "stp" : "lmt"}→`}
@@ -3530,10 +3786,15 @@ function DayReadStrip({ read, verdict }: { read: DayRead | null; verdict: DayVer
 function Discipline({
   day,
   guards,
+  on,
   refused,
 }: {
   day: ReturnType<typeof dayState>;
   guards: GuardLevels;
+  /** `REPLAY_GUARDRAILS`. Off, every number here is still measured and nothing
+   *  is refused — so the panel has to say so, in the same red the live chart
+   *  uses. A safety layer that is silently off is worse than one nobody built. */
+  on: boolean;
   refused: string | null;
 }) {
   const tone = day.locked ? palette.red : day.slow ? palette.orange : palette.muted;
@@ -3555,17 +3816,31 @@ function Discipline({
           {day.trades} trade{day.trades === 1 ? "" : "s"}
         </span>
         <span
-          style={{ marginLeft: "auto", fontSize: 10, color: palette.muted }}
-          title={`Stop ${fmtUsd(-guards.daily_loss_stop)} · slow ${fmtUsd(-guards.slow_down_at)} · target ≥${guards.min_target_ticks}tk · stop ${guards.stop_ticks_min}–${guards.stop_ticks_max}tk · risk ≤${fmtUsd(guards.max_risk_usd)}`}
+          style={{ marginLeft: "auto", fontSize: 10, color: on ? palette.muted : palette.red }}
+          title={`Stop ${fmtUsd(-guards.daily_loss_stop)} · slow ${fmtUsd(-guards.slow_down_at)} · target ≥${guards.min_target_ticks}tk · stop ≤${guards.stop_ticks_max}tk · risk ≤${fmtUsd(guards.max_risk_usd)}${on ? "" : " — measured, not enforced"}`}
         >
-          stop {fmtUsd(-guards.daily_loss_stop)}
+          {on ? `stop ${fmtUsd(-guards.daily_loss_stop)}` : "rules off"}
         </span>
       </div>
 
+      {!on && (
+        <div style={{ fontSize: 11, color: palette.red, marginTop: 4, lineHeight: 1.5 }}>
+          <b>REPLAY_GUARDRAILS is switched off.</b> Nothing below is enforced —
+          the bracket rules, the daily stop and the auto-flatten are measured and
+          reported, and no order is refused. Remove{" "}
+          <code>REPLAY_GUARDRAILS=0</code> from <code>.env</code> and restart the
+          API to practise against the rules again. Live is a separate switch and
+          is unaffected.
+        </div>
+      )}
+
       {day.locked ? (
         <div style={{ fontSize: 11, color: palette.red, marginTop: 4, lineHeight: 1.5 }}>
-          <b>Day over</b> — {day.locked}. New entries refused; closing out still
-          works. A rewind lifts it, because that un-happens the trades.
+          <b>Day over</b> — {day.locked}.{" "}
+          {on
+            ? "New entries refused; closing out still works."
+            : "Not enforced while the rules are off — this is what would have been refused."}{" "}
+          A rewind lifts it, because that un-happens the trades.
         </div>
       ) : day.slow ? (
         <div style={{ fontSize: 11, color: palette.orange, marginTop: 4, lineHeight: 1.5 }}>
