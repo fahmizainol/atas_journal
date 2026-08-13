@@ -34,6 +34,8 @@ all of them.
 | 7 | Live gets the same layouts | **Built, unverified** |
 | 8 | The design pass — identity block, bar controls, focus, dock | **Built** |
 | 9 | Follow-ups — legend bucketing picker, readout flicker, order-pad minimise, rail pin | **Built** |
+| 10 | The replay account, the sitting lifecycle, the blown-account protocol | **Planned** |
+| 11 | Design-language parity — one guard readout, one refusal, one prefs shape, one keymap | **Planned** |
 
 Branch: `feat/terminal-redesign`, **not pushed**. Master is at `ea97845`.
 
@@ -518,24 +520,223 @@ that appears only under the pointer. The armed tool keeps its solid accent, beca
 
 ---
 
+## Phase 10 — the replay account and the sitting lifecycle
+
+**The problem this phase exists for.** A replay rep is free. No stakes, no witness,
+no memory — so a sitting that ends $900 down ends by closing the tab, and the next
+one starts from $0 an hour later with nothing carried across. Every previous
+discipline layer in this codebase (`guardRules.ts`, `routing.py`) rules on *one
+order at a time*; none of them can say "you already blew this account on Tuesday".
+That is the gap: the replay enforces shape and enforces the day, and has no notion
+of an account that a run of days can end.
+
+So: a **persistent replay account** under the real LucidPro 50K rules, a **sitting
+lifecycle** (arm → trade → finish → forced review → 1h cooldown → next), and a
+**blown-account protocol** (auto-flatten → autopsy → scoped review → a written cause
+of death → a 1-day timeout → a fresh account with that cause pinned to it).
+
+### The rules being modelled
+
+From [`docs/research/lucidpro-50k-survivability.md`](research/lucidpro-50k-survivability.md) §1 —
+the real ones, not a house version:
+
+Start **$50,000** · MLL **$2,000 end-of-day trailing** (`floor = min(peak_close, 52,100) − 2,000`;
+the floor locks at 52,100 → **$50,100 forever**) · DLL **$1,200 soft** (locked out for the
+session, account survives) · target **+$3,000** · caps **4 minis / 40 micros**.
+
+Two policy numbers that are ours rather than Lucid's: **60 minutes between sittings**
+and **24 hours after a blow-up**. Settled with the user, along with: the forced
+review is **scoped** (the death sitting in full, plus flagged trades — not every
+trade ever), there is **no probation or escalating penalty**, and the cause of death
+is **pinned into the next epoch** where it can be read all the way through it.
+
+### The nine decisions
+
+- **D1 — no stored balance.** Equity is `$50,000 + Σ net_usd` over settled attempts
+  since the epoch started, walked in `created_at` order. Ground truth is the attempt
+  files under `data/replays/<date>/<id>/`; a balance field would be a second source
+  of truth that a deleted attempt could desync. String-sorting `created_at` is
+  correct — every stamp comes from `replays._iso`, one format, always UTC. The walk
+  also yields "newest created_at", which is the hour gate, so the gate needs no
+  stamp of its own.
+- **D2 — minimal stored state.** `data/replays/account.json` holds
+  `{"epochs": [{"started_at", "cause_of_death"?}]}` and nothing else. Death, the
+  cooldown end (`died_at + 24h`) and the floor are all *derived*. Written through
+  the `replays._write_json` temp-and-replace pattern, for the reason given there.
+- **D3 — the account is always on**, independent of the `replay_guardrails` switch.
+  Those are rules *under test* and the switch exists so a rule can be measured with
+  it off. The account is not a rule under test; it is the stakes. Nothing turns it off.
+- **D4 — flags are computed server-side** at finish-save time, by a ~40-line mirror
+  that reads the stored `trades.json` and never re-derives a fill. Four kinds: **fast**
+  (resolved under 30s, mirroring `guardRules.FAST_TRADE_MS`), **traded-in-the-hole**,
+  **loss over `max_risk_usd`**, and **rewind-used** (straight off `attempt.rewinds`).
+  Zero flags auto-passes `finished` → `reviewed`: a clean sitting is not made better
+  by a ceremony, and a review you always have to click through is one you stop reading.
+- **D5 — the review UI is the Simulator**, in a read-only `review` mode with the
+  recorder never armed. The alternative was a review page of its own, which would
+  need a second chart, a second replay engine and a second everything. The entry
+  point is `ReplayHistory.tsx`, which writes a resume point plus a review marker and
+  navigates to `/charts/replay`.
+- **D6 — prefs unify as a shared shape and a shared loader**, with the localStorage
+  keys unchanged (`sim.prefs`, `live.chartKnobs`). Zero migration risk is the point:
+  the duplication being removed is in the *type and the validators*, not in the store.
+- **D7 — a settled attempt is one whose status is not `active`**, plus a lazy
+  stale-active sweep at derive/gate time: an `active` attempt whose `updated_at` is
+  over 60 minutes old is closed. Otherwise the way to hide a bad sitting from the
+  account is to close the tab, which is exactly the behaviour this phase exists to
+  price.
+- **D8 — the day boundary for the daily loss limit** is the America/New_York date of
+  `created_at`, because that is the day the prop firm counts.
+- **D9 — live equity** is server settled equity + `dayState.realized` + open P&L,
+  joined **client-side**, in the one place that already joins those two
+  (`guardRules.equityStop`). The floor is EOD-trailing, so it is constant for the
+  whole of a sitting — which is what makes this join safe to do in the browser.
+
+> **The timestamp rule — the one correctness trap in this phase.** There are two
+> unrelated time families here. Replay `entryMs`/`exitMs` are *display-zone wall
+> clocks with the zone dropped* (see the `journal.replays` docstring); `created_at`
+> and `finished_at` are true UTC. Flags use only intra-tape deltas (`exitMs − entryMs`),
+> and epochs, gates and day-loss grouping use only `created_at`. Nothing ever
+> subtracts one family from the other.
+
+### Architecture
+
+**New `src/journal/replay_account.py`** — `load_state`/`save_state`,
+`sweep_stale_actives`, `settled_attempts`, `derive() → AccountView`, `refusal()`
+(the create gate: hour / unreviewed / blown / cooldown), `ensure_epoch`,
+`write_cause`, `flags_for`. Death is the first attempt whose closing equity is at or
+under its own floor; status runs `blown` (until a cause is written) → `cooldown`
+(until +24h) → `can_reset`. `now` is injectable, or none of it is testable.
+
+**`GET /replays/account`** returns the whole view: `now`, `equity`, `floor`,
+`peak_close`, `status`, `day_net`, `day_loss_remaining`, `target_remaining`,
+`next_sitting_at`, `cooldown_until`, `can_reset`, `review_block`, `epoch`,
+`last_death`, `caps`. `now` is in there so every countdown on the client runs off
+the server's clock rather than the browser's.
+
+**API changes** in `api/routers/replays.py`, all new routes declared **above**
+`/replays/{attempt_id}` — the path-swallow trap already documented on
+`backfill_journal`:
+
+- `GET /replays/account` (sweeps stale actives first)
+- `POST /replays/account/cause` `{cause_of_death}` → the view; 409 if nothing died
+- `POST /replays` gates through `replay_account.refusal()` → **409** `{code, message, until}`;
+  after a completed cooldown it mints the next epoch
+- `PUT /replays/{id}` computes and stores `flags` when the status arrives as
+  `finished`, auto-patching to `reviewed` when there are none
+- `PATCH /replays/{id}` accepts a `review` body and refuses `status:"reviewed"`
+  until every flag has a verdict
+
+**Frontend.** A `useReplayAccount` hook on the `["replays","account"]` key,
+invalidated wherever `["replays"]` already is. `guardRules.ts` gains `accountStop`
+(floor breach on live equity) and `accountRefusal` (why no *new* sitting may open —
+null while an attempt is open, because resuming is free), both always-on, sitting
+beside `equityStop`. The Simulator prepends `accountRefusal` to the entry-refusal
+chain ahead of the `guardsOn` branch, fires the existing auto-flatten effect on
+`accountStop` and force-finishes after it, and grows an account row on the recap,
+a countdown chip, and a pinned cause-of-death strip that sits above the pane grid
+for the whole of the next epoch.
+
+The **autopsy** is composed client-side from `GET /replays`, which already inlines
+records and summaries — the epoch equity curve is a cumulative sum in `created_at`
+order and the totals come off the existing `replayStats.pool`. **Review mode** skips
+`armAttempt`/`adoptAttempt` entirely (the recorder is off, nothing is written) and
+refuses `placeOrder`; a new `ReviewPanel` in the rail lists the flags, seeks to
+`flag.ms − 60s` at 1×, takes a leak/justified verdict and a note on each, and files
+the lot.
+
+## Phase 11 — design-language parity
+
+Phase 7 gave Live the same layouts. This closes the rest of the gap, so the two
+terminals are one design rather than two that resemble each other.
+
+- **One guard readout.** A new `GuardMeters.tsx` takes a single feed shape (day-loss
+  bar, floor-distance bar, contracts against the 4/40 cap for the contract in hand,
+  the lock chip, the behaviour numbers) with an adapter on each side: the replay's
+  is account + `dayState`, Live's is `GuardState`. It replaces the replay-local
+  `Discipline` strip. This is also the answer to the open item below that deferred
+  the dock's guard meters as "a *second* rendering of the same facts" — the objection
+  was to a second rendering, and the fix is that there is now one.
+- **One refusal.** A new `RefusalFlash.tsx`, so being told no looks the same on both
+  pages.
+- **One prefs shape.** `ChartReadingPrefs` extracted; `SimPrefs = ChartReadingPrefs &
+  ReplayOnly`, `LiveChartKnobs = ChartReadingPrefs`, one loader parameterised over the
+  validators that already exist. **Keys unchanged**, so nothing stored migrates.
+- **One keymap.** A `usePaneKeys` hook; `LiveChart`'s three keys (q/w/s) widen to the
+  replay's 1–8 bar sizes and Shift+1–4 focus. The transport keys stay replay-only —
+  there is no clock to drive on a live tape.
+- **The transport auto-hides while a position is open.** The row is for scrubbing,
+  and scrubbing is the one thing that must not happen with size on.
+
+### The commit sequence
+
+Each of these is shippable on its own:
+
+1. this doc
+2. `replay_account.py` + `GET /replays/account` (readout only) + `tests/test_replay_account.py`
+3. flags + the `reviewed` status + the review PATCH + the clean-sitting auto-pass
+4. the account surface, read-only (hook, recap row, pinned note, countdown chip)
+5. enforcement — `accountStop`/`accountRefusal`, auto-flatten and force-finish, the
+   refusal chain, loud 429s
+6. the create gates + epoch mint + the cause endpoint + the stale sweep
+7. review mode — Simulator, `ReviewPanel`, the `ReplayHistory` entry point
+8. the blown flow — autopsy card, cause-of-death form
+9. `tools/browser/accountcheck.mjs`
+10. parity: `GuardMeters` replaces `Discipline` on the replay
+11. parity: `GuardMeters` + `RefusalFlash` on Live
+12. parity: the shared prefs shape and loader
+13. parity: the hotkeys
+14. parity: transport auto-hide in position
+
+Backend commits carry pytest. Replay-UI commits carry `typecheck && build` plus a
+browser check. **Commits 11 and 13 touch `/charts/live`, which is manual-test-only by
+standing rule** — they get typecheck and build and are flagged for a hand test, never
+scripted.
+
+### The risks worth writing down
+
+1. The two timestamp families (the rule is boxed above). This is the one that
+   silently produces plausible wrong numbers rather than an error.
+2. Client refusals ship in commit 5 and server gates in commit 6, so for one commit
+   the only thing stopping a refused create is the browser. The 429/409 is surfaced
+   loudly through the existing flush-error path rather than swallowed.
+3. Stale `active` attempts hiding losses — the lazy sweep (D7).
+4. Reopening a `reviewed` attempt regresses it. Accepted: the review is wiped and
+   re-required on the next finish, and the derivation is stateless, so nothing else
+   has to know.
+5. Countdown clock skew — every countdown runs off the view's `now`.
+6. `FAST_TRADE_MS` will exist in TypeScript *and* Python. Cross-reference comments
+   both ways; a threshold that drifts would make the flag disagree with the strip
+   that reports it.
+7. The equity walk is O(attempts) per call. Fine at this scale; memoise on directory
+   mtime only if it ever shows up.
+
+---
+
 ## Open items, not phases
 
-- **The guardrails currently refuse every entry on NQ.** This instance's configured
-  levels are `stop_ticks_min = 100` against `max_risk_usd = 250` at $5/tick — 100 ticks
-  × $5 = $500, so no size satisfies both, and the refusal message points at the stop
-  floor rather than at the contradiction. The code *defaults*
+- **The guardrails refused every entry on NQ — half resolved.** This instance's
+  configured levels are `stop_ticks_min = 100` against `max_risk_usd = 250` at $5/tick —
+  100 ticks × $5 = $500, so no size satisfied both, and the refusal message pointed at
+  the stop floor rather than at the contradiction. The code *defaults*
   (`lib/guardRules.ts`: 40-tick floor, $250 ceiling) are consistent; the configured ones
-  are not. They are consistent for MNQ. **Nothing has been changed** — decide whether the
-  ceiling should scale with the routed contract, or whether the floor is wrong.
+  are not. They are consistent for MNQ.
+  **The replay no longer enforces the stop floor at all** (`lib/guardRules.ts`, and the
+  header there says why): the floor is a finding about where a stop should sit, and
+  refusing a 50-tick stop in practice locked the one place cheap enough to re-measure it.
+  The ceiling, the target floor and the dollar ceiling all still bind, so a 50-tick stop
+  on 1 NQ now places at $250 exactly. **Live is untouched** — `routing.py` still refuses
+  under the floor, so the configured contradiction is still live and still undecided:
+  whether the ceiling should scale with the routed contract, or whether the floor is
+  wrong for NQ.
 - **Saved layouts.** Layout + per-pane bucketing + indicators is a workspace, and
   workspaces want names. The shape would be the existing `chartPrefs` blob with a list
   around it.
-- **The dock's guard meters** (day loss, trailing DD, contracts) are the one parity row
-  left open. They were filed under phase 6 and they do not belong there: the numbers come
-  off `routing.Guards`, which only Live has, and `Discipline` already states the rules in
-  words. Three meters would be a *second* rendering of the same facts — worth building
-  only if reading them at a glance mid-session turns out to matter, which is a question
-  about the live page, not about the chrome.
+- ~~**The dock's guard meters**~~ — **taken up by phase 11.** The objection stands and
+  is what shapes the fix: three meters *beside* `Discipline` would be a second rendering
+  of the same facts, so `GuardMeters` **replaces** it rather than joining it, and the
+  numbers stop being Live-only because phase 10 gives the replay an account to read them
+  off.
 - **The armed-tool banner is still in the canvas.** It is per pane and it belongs there,
   but with the rail also lit there are now two places saying "measuring". That reads fine
   today; if it starts to feel like noise, the banner is the one to drop.
