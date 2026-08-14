@@ -99,6 +99,27 @@ const axisOf = (i) =>
 // (see the note in the run output), but it is not what this file is checking, so
 // the levels are stubbed **in the browser only**. Nothing is written to the
 // user's settings, and the refusal path itself is exercised by the live checks.
+// The replay account (phase 10) refuses a *new sitting* within an hour of the
+// last one — which is the feature working, and which would make every order
+// assertion below fail for an hour after anybody, including another check,
+// traded a replay. Answered with a clean live account so this file goes on
+// testing panes rather than testing the clock. Browser-only, like the levels
+// below; the account's own rules are covered by tests/test_replay_account.py
+// and by accountcheck.mjs, which drives it through its four states on purpose.
+await page.route("**/api/replays/account", (route) =>
+  route.fulfill({
+    json: {
+      now: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      equity: 50000, floor: 48000, peak_close: 50000, status: "live",
+      day_net: 0, day_loss_remaining: 1200, target_remaining: 3000,
+      next_sitting_at: null, cooldown_until: null, can_reset: false,
+      review_block: null,
+      epoch: { index: 0, started_at: "2026-01-01T00:00:00Z", sittings: 0, net: 0 },
+      last_death: null, caps: { minis: 4, micros: 40 },
+    },
+  }),
+);
+
 await page.route("**/live/routing", async (route) => {
   const res = await route.fetch();
   const body = await res.json();
