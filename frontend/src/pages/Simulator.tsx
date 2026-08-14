@@ -860,6 +860,27 @@ export function Simulator() {
   // two depending on width, and a guess is wrong on one of them.
   const footRef = useRef<HTMLDivElement>(null);
   const [foot, setFoot] = useState(0);
+  /** Is the transport actually in flow right now?
+   *
+   *  Not simply `transportOpen`. **A position on takes it away**, whatever the
+   *  preference says, and that is the one piece of chrome on this page that
+   *  hides itself rather than being hidden.
+   *
+   *  The transport is for scrubbing, and scrubbing with size on is the single
+   *  gesture the replay cannot honestly support: a seek truncates the log, so
+   *  rewinding past your own entry un-happens the trade you are in the middle
+   *  of. The recorder counts that as a do-over and flags it, which is the right
+   *  bookkeeping and the wrong moment to be doing bookkeeping — the honest fix
+   *  is that the control is not there to reach for while you are holding
+   *  something.
+   *
+   *  It comes straight back when the position comes off; the preference is never
+   *  written, so the ▶▌ toggle still means what it always meant. The keys are
+   *  unaffected — k still plays and pauses, `,` and `.` still step. Nothing
+   *  about *running* the tape is being taken away, only the row you scrub on.
+   */
+  const transportShown = transportOpen && !openPos;
+
   useEffect(() => {
     const el = footRef.current;
     if (!el) return;
@@ -871,7 +892,7 @@ export function Simulator() {
     // Re-read when the row is hidden: it stays mounted (so this ref never goes
     // null) but collapses to nothing, and the ticket must stop clearing a bar
     // that isn't there.
-  }, [transportOpen]);
+  }, [transportShown]);
 
   // Drag the ticket away. The panel is anchored to the bottom edge in fullscreen,
   // so down is the direction it came from and down is the way it goes back — on a
@@ -2547,9 +2568,11 @@ export function Simulator() {
               onClick={() => setTransportOpen((o) => !o)}
               aria-pressed={transportOpen}
               title={
-                transportOpen
-                  ? "Hide the transport — k still plays and pauses, , and . still step"
-                  : "Show the transport"
+                openPos
+                  ? "Away while a position is on — scrubbing with size on would rewind past your own entry. k still plays and pauses, , and . still step."
+                  : transportOpen
+                    ? "Hide the transport — k still plays and pauses, , and . still step"
+                    : "Show the transport"
               }
             >
               ▶▌
@@ -3130,7 +3153,7 @@ export function Simulator() {
               cost a click before every scrub, speed change and step, and hid the
               Play button, which is the control pressed most. ~34px, and only
               Replay pays it — Live has no transport. */}
-          <div ref={footRef} className={`sim-transport${transportOpen ? "" : " away"}`}>
+          <div ref={footRef} className={`sim-transport${transportShown ? "" : " away"}`}>
               <button
                 type="button"
                 style={btn(playing ? palette.red : palette.green)}
