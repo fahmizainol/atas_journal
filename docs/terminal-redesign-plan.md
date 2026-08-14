@@ -1,8 +1,10 @@
 # Terminal redesign — build plan
 
-*Written 2026-08-12; phases 4–7 built the same day. Phases 1–6 are on
-`feat/terminal-redesign` and verified by `tools/browser/panecheck.mjs` (30/30) and
-`tools/browser/smoke.mjs`. **Phase 7 (Live) is built and UNVERIFIED** — `/charts/live`
+*Written 2026-08-12; phases 4–7 built the same day, phases 10–11 on 2026-08-14. Phases
+1–6 and 10–11 are on `feat/terminal-redesign` and verified by
+`tools/browser/panecheck.mjs` (35/35), `tools/browser/accountcheck.mjs` (21/21) and
+`tools/browser/smoke.mjs` (63/63), plus `tests/test_replay_account.py` for the account
+itself. **Phase 7 (Live) is built and UNVERIFIED** — `/charts/live`
 is manual-test-only by standing rule, so it has been typechecked and built and
 nothing more. [Parity with the prototype](#parity-with-the-prototype--the-checklist)
 is the element-by-element checklist — every control the prototype draws, where it is in
@@ -34,8 +36,8 @@ all of them.
 | 7 | Live gets the same layouts | **Built, unverified** |
 | 8 | The design pass — identity block, bar controls, focus, dock | **Built** |
 | 9 | Follow-ups — legend bucketing picker, readout flicker, order-pad minimise, rail pin | **Built** |
-| 10 | The replay account, the sitting lifecycle, the blown-account protocol | **Planned** |
-| 11 | Design-language parity — one guard readout, one refusal, one prefs shape, one keymap | **Planned** |
+| 10 | The replay account, the sitting lifecycle, the blown-account protocol | **Built** — `04051dc`…`02769ab` |
+| 11 | Design-language parity — one guard readout, one refusal, one prefs shape, one keymap | **Built** — `716f3c7`…`86ce1ce` |
 
 Branch: `feat/terminal-redesign`, **not pushed**. Master is at `ea97845`.
 
