@@ -47,7 +47,7 @@ const workingCount = () =>
  * open on pane 0, so on a narrow pane it covers the middle — a click there hits
  * the legend, not the chart, and pane 0 alone appears unable to place.
  */
-const spaceClick = async (pane, fx = 0.78, fy = 0.45) => {
+const spaceClick = async (pane, fx = 0.78, fy = 0.14) => {
   const box = await page.locator(`.sim-pane[data-pane="${pane}"]`).boundingBox();
   const x = box.x + box.width * fx;
   const y = box.y + box.height * fy;
@@ -63,6 +63,16 @@ const spaceClick = async (pane, fx = 0.78, fy = 0.45) => {
   await page.mouse.click(x, y);
   await page.keyboard.up("Space");
   await page.waitForTimeout(900);
+  // Then let the clock move one bar, and this is not optional any more.
+  //
+  // The fill model charges a **gesture lag** (lib/fillModel): an order does not
+  // reach the market at the instant of the click, it lands ~250ms of tape time
+  // later. On a *paused* replay that moment never arrives, so the order is
+  // neither filled nor working — it is simply not in the simulation yet, and
+  // reads exactly like a gesture the page ignored. This check pauses before
+  // placing, deliberately, so it has to step the tape to see what it placed.
+  await page.keyboard.press(".");
+  await page.waitForTimeout(1200);
   return workingCount();
 };
 /** The x-axis labels a pane is showing, which is how two bucketings tell
@@ -106,6 +116,28 @@ const axisOf = (i) =>
 // testing panes rather than testing the clock. Browser-only, like the levels
 // below; the account's own rules are covered by tests/test_replay_account.py
 // and by accountcheck.mjs, which drives it through its four states on purpose.
+// This check trades. Left alone it would open a **real** sitting in
+// data/replays on the first fill — practice nobody sat, in the user's own
+// track record — and the server's own create gate would then 409 the next run
+// for an hour. Answered with a plausible attempt record: the recorder is happy,
+// nothing is written, and the account below stays the one this file describes.
+await page.route("**/api/replays", (route) =>
+  route.request().method() === "POST"
+    ? route.fulfill({
+        json: {
+          id: "2026-01-01_NQH5_20260101T000000Z",
+          status: "active",
+          repeat_index: 0,
+          note: "",
+          model_id: null,
+        },
+      })
+    : route.fallback(),
+);
+await page.route("**/api/replays/*", (route) =>
+  route.request().method() === "PUT" ? route.fulfill({ json: { ok: true } }) : route.fallback(),
+);
+
 await page.route("**/api/replays/account", (route) =>
   route.fulfill({
     json: {

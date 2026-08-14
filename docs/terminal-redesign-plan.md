@@ -796,6 +796,25 @@ as well:
 - **Never run two browser checks at once.** They drive the same dev server and
   the same `localStorage`, and the second one's setup lands in the middle of the
   first one's assertions. (And never stash a file a running check is reading.)
+- **A paused replay shows you nothing you just placed.** The fill model charges a
+  gesture lag (`lib/fillModel`): an order reaches the market ~250ms of *tape* time
+  after the click, and on a paused replay that moment never arrives — so the order
+  is neither filled nor working, it is simply not in the simulation yet, and it
+  reads exactly like a gesture the page ignored. Any check that pauses before
+  placing has to step the tape (`.`) before it reads the result. This is what made
+  `panecheck`'s order assertions go red after the fill model gained the lag, and
+  the failure looks like a broken gesture rather than a timing rule.
+- **A check that trades must stub `POST /replays`, or it writes practice nobody
+  sat.** The recorder opens a real attempt on the first fill, which puts a sitting
+  into `data/replays` and the journal — and then the account's own create gate
+  409s the *next* run for an hour, so the check fails for reasons that have
+  nothing to do with what it is testing. `panecheck` and `accountcheck` both
+  answer the recorder with a plausible attempt record and write nothing.
+- **Stub `/live/routing` outright rather than fetching and patching it** if there
+  is no Rithmic session up. `route.fetch()` on it reaches the broker and hangs
+  until Playwright's 30s route timeout kills the run. `panecheck` patches (it has
+  historically run with a session); `accountcheck` answers synthetically, and the
+  page only reads `guards` and `replay_guardrails` off it.
 - **A hidden duplicate is still in the DOM.** The in-canvas rail is not rendered when a
   page rail exists precisely because `display: none` left a second
   `button[data-tip^="…"]` and broke a strict-mode locator in `smoke.mjs`.

@@ -157,10 +157,16 @@ export async function shot(page, name) {
   return path;
 }
 
-/** The appearance panel's two selects, opened off the indicator legend's header. */
+/** The appearance panel's selects, opened off the indicator legend's header.
+ *
+ *  Named rather than positional. The panel grew a Preset row above the two
+ *  knobs, which moved every index in the caller by one — and a positional read
+ *  of a panel that gains rows is a check that starts asserting about the wrong
+ *  control without failing first. */
 export async function openAppearance(page) {
   const dots = page.locator(".chart-legend-item[data-ind-item='__appearance'] .chart-legend-dots");
   if ((await page.locator(".chart-set").count()) === 0) await dots.click();
   await page.waitForSelector(".chart-set");
-  return page.locator(".chart-set select");
+  const row = (label) => page.locator(`.chart-set-row:has(.chart-set-label:text-is("${label}")) select`);
+  return { preset: row("Preset"), surface: row("Background"), candles: row("Candles") };
 }

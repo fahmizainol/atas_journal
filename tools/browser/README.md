@@ -54,6 +54,17 @@ Two probes in `lib.mjs` carry most of the weight:
   visible range — and losing the range you spent a minute framing because you
   changed the background is the regression worth a check.
 
+`ink` is the third, and the `light` check is what it exists for. The light
+surfaces are not a background swap: they select a second authored cut of every
+indicator hue (`chartInk` in `frontend/src/theme.ts`), because on paper the dark
+ink's Globex mid line is `#ffffff` and the pale end of every family is within a
+few points of the surface. So a light chart drawn in the wrong ink *loses* ink
+samples rather than gaining them — which is exactly what `ink` counts (pixels
+that differ from the modal background by ≥12 per channel). Comparing a light
+preset against the same chart in the dark one is the cheap way to ask whether the
+re-cut happened, and it fails loudly if a family is ever added to `theme.ts`
+without a light entry.
+
 ## The split pane
 
 ```bash

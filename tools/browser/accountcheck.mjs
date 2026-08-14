@@ -65,6 +65,12 @@ await page.route("**/api/replays**", async (route) => {
   if (reviewDetail && url.pathname.endsWith(`/replays/${reviewDetail.id}`)) {
     return route.fulfill({ json: reviewDetail });
   }
+  // Never write. Every gesture in here is meant to be refused, so nothing
+  // *should* reach the recorder — but a check that can put practice nobody sat
+  // into the real track record is one bad assertion away from doing it.
+  if (route.request().method() !== "GET") {
+    return route.fulfill({ json: { id: "2026-01-01_NQH5_20260101T000000Z", status: "active", repeat_index: 0, note: "", model_id: null } });
+  }
   return route.fallback();
 });
 

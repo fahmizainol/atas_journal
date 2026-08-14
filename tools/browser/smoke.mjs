@@ -294,7 +294,7 @@ const checks = {
     await page.goto(`${BASE}/charts/replay`, { waitUntil: "networkidle", timeout: 60000 });
     await page.waitForSelector(".chart-legend", { timeout: 60000 });
     const sel = await openAppearance(page);
-    await sel.nth(0).selectOption("slate");
+    await sel.surface.selectOption("slate");
     await page.waitForTimeout(300);
 
     await page.goto(`${BASE}/interactions`, { waitUntil: "networkidle", timeout: 60000 });
@@ -307,7 +307,7 @@ const checks = {
 
     // Put it back, so a run doesn't leave the app in a colour nobody chose.
     const sel2 = await openAppearance(page);
-    await sel2.nth(0).selectOption("charcoal");
+    await sel2.surface.selectOption("charcoal");
 
     const hex = (c) => `#${c.map((n) => n.toString(16).padStart(2, "0")).join("")}`;
     return [
@@ -332,16 +332,16 @@ const checks = {
     await shot(page, "appearance-1-before");
 
     const sel = await openAppearance(page);
-    await sel.nth(0).selectOption("black");
-    await sel.nth(1).selectOption("cb");
+    await sel.surface.selectOption("black");
+    await sel.candles.selectOption("cb");
     await page.waitForTimeout(600);
     const after = await probeChart(page);
     const volAfter = await probeVolumeBand(page);
     await shot(page, "appearance-2-black-cb");
 
     // Back to the defaults: the chart should land exactly where it started.
-    await sel.nth(0).selectOption("charcoal");
-    await sel.nth(1).selectOption("classic");
+    await sel.surface.selectOption("charcoal");
+    await sel.candles.selectOption("classic");
     await page.waitForTimeout(600);
     const round = await probeChart(page);
     await shot(page, "appearance-3-roundtrip");
@@ -350,7 +350,7 @@ const checks = {
     await page.reload({ waitUntil: "networkidle" });
     await openChart(page, REPLAY);
     const sel2 = await openAppearance(page);
-    const persisted = await sel2.nth(0).inputValue();
+    const persisted = await sel2.surface.inputValue();
 
     const hex = (c) => `#${c.map((n) => n.toString(16).padStart(2, "0")).join("")}`;
     const volChanged = JSON.stringify(volBefore) !== JSON.stringify(volAfter);
@@ -381,29 +381,29 @@ const checks = {
     await openChart(page, REPLAY);
     const sel = await openAppearance(page);
     const hex = (c) => `#${c.map((n) => n.toString(16).padStart(2, "0")).join("")}`;
-    const values = (n) => sel.nth(n).locator("option").evaluateAll((o) => o.map((x) => x.value));
-    const surfaces = await values(0);
-    const schemes = await values(1);
+    const values = (loc) => loc.locator("option").evaluateAll((o) => o.map((x) => x.value));
+    const surfaces = await values(sel.surface);
+    const schemes = await values(sel.candles);
 
     const bg = new Map();
     for (const s of surfaces) {
-      await sel.nth(0).selectOption(s);
+      await sel.surface.selectOption(s);
       await page.waitForTimeout(400);
       bg.set(s, hex((await probeChart(page)).bg));
       await shot(page, `preset-surface-${s}`);
     }
-    await sel.nth(0).selectOption("charcoal");
+    await sel.surface.selectOption("charcoal");
 
     // Candle schemes are read off the volume gutter: it carries the same up/down
     // pair as flat fills, so it is the cheapest place to see a scheme change.
     const vol = new Map();
     for (const c of schemes) {
-      await sel.nth(1).selectOption(c);
+      await sel.candles.selectOption(c);
       await page.waitForTimeout(400);
       vol.set(c, JSON.stringify(await probeVolumeBand(page)));
       await shot(page, `preset-candles-${c}`);
     }
-    await sel.nth(1).selectOption("classic");
+    await sel.candles.selectOption("classic");
 
     const uniqBg = new Set(bg.values()).size;
     const uniqVol = new Set(vol.values()).size;
@@ -412,6 +412,126 @@ const checks = {
       [`surfaces all distinct (${uniqBg}/${surfaces.length})`, uniqBg === surfaces.length],
       [`surfaces match their names (${[...bg.entries()].map(([k, v]) => `${k}=${v}`).join(" ")})`, true],
       [`candle schemes all distinct (${uniqVol}/${schemes.length})`, uniqVol === schemes.length],
+      [`no console errors${errors.length ? `: ${errors[0]}` : ""}`, errors.length === 0],
+    ];
+  },
+
+  /**
+   * The light surfaces, which are the one appearance change that is not a
+   * background swap: they select a second cut of every indicator hue (theme.ts).
+   *
+   * So the assertion that earns its place is not "the surface went light" — that
+   * is one applyOptions and could not plausibly fail — it is that the chart is
+   * still *legible* on it. Contrast is the observable: with the dark ink on a
+   * near-white surface the Globex VWAP mid line is #ffffff and the pale end of
+   * every family is within a few points of the paper, so a light chart drawn in
+   * the wrong ink loses ink samples rather than gaining them.
+   *
+   * `ink` counts pixels that differ from the modal background by ≥12 per channel
+   * — which is exactly "how much of this chart is distinguishable from its
+   * paper". Comparing it against the same chart in the dark preset is the cheap
+   * way to ask whether the re-cut happened, and it fails loudly if a family is
+   * ever added to theme.ts without a light entry.
+   *
+   * The silhouette assertion is the same one the `appearance` check makes, for
+   * the same reason: crossing between light and dark must not rebuild the chart.
+   */
+  async light({ page, errors }) {
+    await openChart(page, REPLAY);
+    const sel = await openAppearance(page);
+
+    await sel.preset.selectOption("dark-classic");
+    await page.waitForTimeout(600);
+    const dark = await probeChart(page);
+    await shot(page, "light-1-dark-baseline");
+
+    const lit = new Map();
+    for (const p of ["light-paper", "light-day", "light-quiet", "light-cb"]) {
+      await sel.preset.selectOption(p);
+      await page.waitForTimeout(700);
+      lit.set(p, await probeChart(page));
+      await shot(page, `light-2-${p}`);
+    }
+
+    const paper = lit.get("light-paper");
+    const hex = (c) => `#${c.map((n) => n.toString(16).padStart(2, "0")).join("")}`;
+    // Light means the modal surface is bright on every channel.
+    const isLight = (p) => p.bg.every((n) => n > 200);
+    // Within half the dark chart's ink is the honest bar: the two cuts are not
+    // the same picture (a re-cut family lands at a different distance from its
+    // own background), and demanding parity would be asserting about taste.
+    // What it does catch is the failure that matters — a family left in the dark
+    // ink vanishes into the paper and takes its pixels with it.
+    const legible = [...lit.entries()].filter(([, p]) => p.ink > dark.ink * 0.5);
+
+    // Back to the default, so a run doesn't leave the app in a colour nobody chose.
+    await sel.preset.selectOption("dark-classic");
+
+    return [
+      [`dark baseline drew (${dark.ink} ink samples)`, dark.ink > 500],
+      [
+        `all four light presets are light (${[...lit.entries()].map(([k, p]) => `${k}=${hex(p.bg)}`).join(" ")})`,
+        [...lit.values()].every(isLight),
+      ],
+      [
+        `levels survive the re-cut (${legible.length}/${lit.size} within half the dark chart's ink)`,
+        legible.length === lit.size,
+      ],
+      ["visible range survives crossing into light", dark.silhouette === paper.silhouette],
+      [`no console errors${errors.length ? `: ${errors[0]}` : ""}`, errors.length === 0],
+    ];
+  },
+
+  /**
+   * Hiding the transport.
+   *
+   * The row is the one piece of chrome the Replay keeps in flow, so the claim
+   * being made by the ▶▌ toggle is a specific one: nothing is lost by hiding it,
+   * because every control on it has a key. That is what this checks — the row
+   * goes away, the chart gets the pixels, and `k` still plays.
+   *
+   * The pixel assertion is the one worth having. A row hidden with the chart
+   * still sized around it is the failure that looks fine in a screenshot: the
+   * page reads --chart-floor / the measured foot height to keep the ticket
+   * clear, and a hide that doesn't re-measure leaves a strip of nothing.
+   */
+  async transport({ page, errors }) {
+    await openChart(page, REPLAY);
+    const row = page.locator(".sim-transport");
+    const toggle = page.locator("button[title^='Hide the transport'], button[title^='Show the transport']");
+    const before = await probeChart(page);
+    const shownFirst = await row.isVisible();
+
+    await toggle.click();
+    await page.waitForTimeout(700);
+    const hidden = !(await row.isVisible());
+    const after = await probeChart(page);
+    await shot(page, "transport-hidden");
+
+    // The keys are the reason hiding is honest. `k` plays; the clock moves.
+    const clockBefore = await page.evaluate(() => document.querySelector(".sim-clock")?.textContent ?? null);
+    await page.locator("body").press("k");
+    await page.waitForTimeout(1200);
+    await page.locator("body").press("k");
+    const clockAfter = await page.evaluate(() => document.querySelector(".sim-clock")?.textContent ?? null);
+
+    // The choice is meant to outlive the page, like the rail's pin.
+    await page.reload({ waitUntil: "networkidle" });
+    await openChart(page, REPLAY);
+    const stillHidden = !(await page.locator(".sim-transport").isVisible());
+
+    // Put it back.
+    await page
+      .locator("button[title^='Show the transport']")
+      .click()
+      .catch(() => {});
+
+    return [
+      ["transport starts in flow", shownFirst],
+      ["▶▌ hides it", hidden],
+      [`the chart takes the pixels (${before.h} → ${after.h})`, after.h > before.h],
+      [`k still plays with it hidden (${clockBefore} → ${clockAfter})`, clockBefore !== clockAfter],
+      ["the choice survives a reload", stillHidden],
       [`no console errors${errors.length ? `: ${errors[0]}` : ""}`, errors.length === 0],
     ];
   },
