@@ -30,6 +30,7 @@ import { SimIndicators } from "../components/charts/SimIndicators";
 import { QuickDock } from "../components/charts/QuickDock";
 import { TimeframeControl } from "../components/charts/TimeframeControl";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
+import { GuardMeters } from "../components/charts/GuardMeters";
 import { LayoutPicker } from "../components/charts/LayoutPicker";
 import { LAYOUTS, MAX_PANES, clampPaneIndex, gridArea, gridTemplate } from "../lib/paneLayout";
 import { setLinkOn as setLinkModuleOn } from "../lib/paneLink";
@@ -132,7 +133,6 @@ import {
 } from "../lib/guardRules";
 import { fmtWait, remainingMs, type ReviewItem } from "../lib/replayAccount";
 import { useGuardLevels } from "../hooks/useRouting";
-import type { GuardLevels } from "../lib/routingTypes";
 import { palette } from "../theme";
 
 /**
@@ -3395,7 +3395,32 @@ export function Simulator() {
                 )}
               </div>
             )}
-            <Discipline day={day} guards={guards} on={guardsOn} refused={refused} />
+            {/* One guard readout for both terminals — the replay's adapter.
+                It replaced a local `Discipline` strip: see components/charts/
+                GuardMeters for why replacing rather than joining was the point.
+
+                The floor comes off the account and the day off the simulation,
+                which is exactly the join phase 10 made possible — `equity` here
+                is the same live figure `accountStop` fires on, so the meter and
+                the auto-flatten cannot disagree about how much room is left. */}
+            <GuardMeters
+              feed={{
+                on: guardsOn,
+                levels: guards,
+                realized: day.realized,
+                trades: day.trades,
+                locked: day.locked,
+                slow: day.slow,
+                equity: account ? account.equity + day.realized + hud.openPnl : null,
+                floor: account?.floor ?? null,
+                size: openPos?.size ?? 0,
+                cap: onMicro ? (account?.caps.micros ?? 40) : (account?.caps.minis ?? 4),
+                fastShare: day.fastShare,
+                medianGapS: day.medianGapS,
+                tradedInTheHole: day.tradedInTheHole,
+                refused,
+              }}
+            />
             <DayReadStrip read={read} verdict={dayVerdict} />
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 22, fontFamily: "monospace" }}>
               <span style={{ color: palette.muted, fontSize: 12, alignSelf: "center" }}>Last</span>
@@ -3992,111 +4017,6 @@ function DayReadStrip({ read, verdict }: { read: DayRead | null; verdict: DayVer
         }}
       >
         {verdict ? VERDICT_LINE[verdict] : `reading the day — ${read.scored}/3 entries scored`}
-      </div>
-    </div>
-  );
-}
-
-function Discipline({
-  day,
-  guards,
-  on,
-  refused,
-}: {
-  day: ReturnType<typeof dayState>;
-  guards: GuardLevels;
-  /** `REPLAY_GUARDRAILS`. Off, every number here is still measured and nothing
-   *  is refused — so the panel has to say so, in the same red the live chart
-   *  uses. A safety layer that is silently off is worse than one nobody built. */
-  on: boolean;
-  refused: string | null;
-}) {
-  const tone = day.locked ? palette.red : day.slow ? palette.orange : palette.muted;
-  const pct = (x: number | null) => (x == null ? "—" : `${Math.round(x * 100)}%`);
-  const secs = (x: number | null) => (x == null ? "—" : `${Math.round(x)}s`);
-  return (
-    <div style={{ borderBottom: `1px solid ${palette.cardBorder}`, paddingBottom: 8, marginBottom: 8 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 12 }}>
-        <span style={{ fontSize: 10, color: palette.muted, letterSpacing: 0.4 }}>DAY</span>
-        <strong
-          style={{
-            color: day.realized > 0 ? palette.green : day.realized < 0 ? tone : palette.muted,
-            fontFamily: "monospace",
-          }}
-        >
-          {fmtUsd(day.realized)}
-        </strong>
-        <span style={{ color: palette.muted, fontSize: 11 }}>
-          {day.trades} trade{day.trades === 1 ? "" : "s"}
-        </span>
-        <span
-          style={{ marginLeft: "auto", fontSize: 10, color: on ? palette.muted : palette.red }}
-          title={`Stop ${fmtUsd(-guards.daily_loss_stop)} · slow ${fmtUsd(-guards.slow_down_at)} · target ≥${guards.min_target_ticks}tk · stop ≤${guards.stop_ticks_max}tk · risk ≤${fmtUsd(guards.max_risk_usd)}${on ? "" : " — measured, not enforced"}`}
-        >
-          {on ? `stop ${fmtUsd(-guards.daily_loss_stop)}` : "rules off"}
-        </span>
-      </div>
-
-      {!on && (
-        <div style={{ fontSize: 11, color: palette.red, marginTop: 4, lineHeight: 1.5 }}>
-          <b>REPLAY_GUARDRAILS is switched off.</b> Nothing below is enforced —
-          the bracket rules, the daily stop and the auto-flatten are measured and
-          reported, and no order is refused. Remove{" "}
-          <code>REPLAY_GUARDRAILS=0</code> from <code>.env</code> and restart the
-          API to practise against the rules again. Live is a separate switch and
-          is unaffected.
-        </div>
-      )}
-
-      {day.locked ? (
-        <div style={{ fontSize: 11, color: palette.red, marginTop: 4, lineHeight: 1.5 }}>
-          <b>Day over</b> — {day.locked}.{" "}
-          {on
-            ? "New entries refused; closing out still works."
-            : "Not enforced while the rules are off — this is what would have been refused."}{" "}
-          A rewind lifts it, because that un-happens the trades.
-        </div>
-      ) : day.slow ? (
-        <div style={{ fontSize: 11, color: palette.orange, marginTop: 4, lineHeight: 1.5 }}>
-          <b>In the hole.</b> Past {fmtUsd(-guards.slow_down_at)} your measured
-          expectancy flips sign. Live, entries space out here — replay cannot
-          enforce that against a compressed clock, so watch the gap below.
-        </div>
-      ) : null}
-
-      {refused && (
-        <div style={{ fontSize: 11, color: palette.orange, marginTop: 4, lineHeight: 1.5 }}>
-          ⚠ refused — {refused}
-        </div>
-      )}
-
-      <div
-        style={{
-          display: "flex",
-          gap: 10,
-          marginTop: 6,
-          fontSize: 10,
-          color: palette.muted,
-        }}
-      >
-        <span title="Trades that resolved inside 30 seconds. About half your real entries, winning 26% of the time — the one habit the audit found that actually costs money. An entry problem, so it is counted and never blocked.">
-          &lt;30s{" "}
-          <b style={{ color: (day.fastShare ?? 0) > 0.5 ? palette.orange : palette.muted }}>
-            {pct(day.fastShare)}
-          </b>
-        </span>
-        <span title="Median seconds between one entry and the next. Your green days ran 136s and your red days 76s — with the trade COUNT identical. Volume is not the problem; speed is.">
-          gap{" "}
-          <b style={{ color: (day.medianGapS ?? 999) < 76 ? palette.orange : palette.muted }}>
-            {secs(day.medianGapS)}
-          </b>
-        </span>
-        <span title="Was anything opened while the day was already past the slow-down level? A bad start slowed down on costs $147/day; the same start sped up on costs $803.">
-          in the hole{" "}
-          <b style={{ color: day.tradedInTheHole ? palette.orange : palette.muted }}>
-            {day.tradedInTheHole ? "yes" : "no"}
-          </b>
-        </span>
       </div>
     </div>
   );
