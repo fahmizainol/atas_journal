@@ -67,6 +67,7 @@ import {
 } from "../lib/routingTypes";
 import { fmtPts, fmtUsd } from "../lib/simViews";
 import type { LiveTicket } from "../lib/simPrefs";
+import { GuardMeters } from "./charts/GuardMeters";
 import { palette } from "../theme";
 
 const TYPES = ["market", "limit", "stop"] as const;
@@ -645,38 +646,45 @@ function Guard({ guard: g, onDone }: { guard: GuardState; onDone: () => void }) 
         fontSize: 12,
       }}
     >
-      <div
-        style={{
-          fontSize: 10,
-          color: g.on ? palette.muted : palette.red,
-          letterSpacing: 0.4,
+      {/* The shared readout — the same component the replay draws, fed from
+          `GuardState` instead of from a `DayState`. It carries the headline
+          (the day's total, the trade count, the daily-limit meter, the lock and
+          the slow-down) so this block does not say any of it twice; what stays
+          below is the part only Live has.
+
+          No floor meter here yet. Live's drawdown floor is the broker's and
+          this app is not told it — passing the replay account's would be a
+          number about a different account, which is the one thing a meter about
+          how much room is left must never be. */}
+      <GuardMeters
+        feed={{
+          on: g.on,
+          levels: lv,
+          realized: g.realized,
+          trades: g.trades,
+          locked: g.locked,
+          slow: g.slow,
+          equity: null,
+          floor: null,
+          size: 0,
+          cap: 0,
+          // Measured on the replay, where the whole session is re-derivable
+          // from its log. The live server keeps a day, not a behavioural
+          // profile — nulls draw as "—" rather than as zero.
+          fastShare: null,
+          medianGapS: null,
+          tradedInTheHole: null,
+          refused: null,
         }}
-      >
-        {g.on ? "DAY · GUARDED" : "DAY · GUARDRAILS OFF"}
-      </div>
+      />
 
       {!g.on ? (
         <Note tone="red">
-          <b>LIVE_GUARDRAILS is switched off.</b> The daily stop, the slow-down
-          threshold, the minimum target and the stop-width clamp are all
-          unenforced — nothing below is being applied. Remove{" "}
-          <code>LIVE_GUARDRAILS=0</code> from <code>.env</code> and restart to
-          put them back.
+          Remove <code>LIVE_GUARDRAILS=0</code> from <code>.env</code> and
+          restart to put them back.
         </Note>
       ) : (
         <div style={{ marginTop: 2 }}>
-          <strong
-            style={{
-              color:
-                g.realized > 0 ? palette.green : g.realized < 0 ? tone : palette.muted,
-            }}
-          >
-            {fmtUsd(g.realized)}
-          </strong>
-          <span style={{ color: palette.muted }}>
-            {" "}
-            · {g.trades} trade{g.trades === 1 ? "" : "s"}
-          </span>
           {/* Where the number came from, once any of it came off disk. Not a
               warning — a rebuilt total is the correct one, and the state worth
               being alarmed by is the opposite: $0 on an afternoon that has
@@ -726,28 +734,24 @@ function Guard({ guard: g, onDone }: { guard: GuardState; onDone: () => void }) 
         </div>
       )}
 
-      {g.on && g.locked && (
+      {/* GuardMeters says the day is over. This says the thing only Live can:
+          that something was closed for you, and that it is worth checking it
+          landed. */}
+      {g.on && g.locked && g.auto_flattened && (
         <Note tone="red">
-          <b>The day is over</b> — {g.locked}. It stays over even if the running
-          total comes back: "one more to get back to level" is the trade this
-          rule exists to refuse. Closing orders and Flatten still work.
-          {g.auto_flattened && (
-            <>
-              {" "}
-              <b>The open position was closed automatically.</b> Check the
-              platform that it landed — a partial failure is in the order
-              journal, not on this line.
-            </>
-          )}
+          <b>The open position was closed automatically.</b> Check the platform
+          that it landed — a partial failure is in the order journal, not on this
+          line.
         </Note>
       )}
 
+      {/* Same split: the slow-down itself is drawn above; the *enforcement* —
+          entries spaced `min_gap_s` apart — is Live's alone. The replay cannot
+          enforce it against a compressed clock, which is why it is not in the
+          shared component. */}
       {g.on && !g.locked && g.slow && (
         <Note tone="orange">
-          <b>Slow down.</b> Past {fmtUsd(-lv.slow_down_at)}, entries go no closer
-          than {Math.round(lv.min_gap_s)}s apart. A bad start slowed down on
-          costs $147/day; the same start sped up on costs $803. Volume is not the
-          problem — speed is.
+          Entries go no closer than {Math.round(lv.min_gap_s)}s apart from here.
         </Note>
       )}
 

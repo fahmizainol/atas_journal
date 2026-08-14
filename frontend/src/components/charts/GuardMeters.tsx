@@ -20,6 +20,7 @@
 // look alike. The adapters are the only place that knows a `DayState` from a
 // `GuardState`; everything below this line is the same on both.
 
+import { RefusalFlash } from "./RefusalFlash";
 import type { GuardLevels } from "../../lib/routingTypes";
 import { fmtUsd } from "../../lib/simViews";
 import { palette } from "../../theme";
@@ -183,11 +184,7 @@ export function GuardMeters({ feed }: { feed: GuardFeed }) {
         </div>
       ) : null}
 
-      {feed.refused && (
-        <div style={{ fontSize: 11, color: palette.orange, marginTop: 4, lineHeight: 1.5 }}>
-          ⚠ refused — {feed.refused}
-        </div>
-      )}
+      <RefusalFlash reason={feed.refused} />
 
       {/* Measured, never enforced. See `GuardFeed.fastShare`. */}
       {(feed.fastShare != null || feed.medianGapS != null || feed.tradedInTheHole != null) && (
