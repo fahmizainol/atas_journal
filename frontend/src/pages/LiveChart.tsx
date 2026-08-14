@@ -88,6 +88,7 @@ import {
   workingViews,
 } from "../lib/brokerViews";
 import { useOrderIntent } from "../hooks/useOrderIntent";
+import { isTypingTarget, usePaneKeys } from "../hooks/usePaneKeys";
 import { OrderConfirm, OrderFlash } from "../components/OrderConfirm";
 import { brokerMark, FillCues, playCue, simMark } from "../lib/orderSound";
 import { loadLiveHistoryDays, saveLiveHistoryDays } from "../lib/chartPrefs";
@@ -1650,10 +1651,7 @@ export function LiveChart() {
   // point, so it does not get its own bindings here.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-      const el = e.target as HTMLElement | null;
-      const tag = el?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      if (isTypingTarget(e)) return;
       const k = e.key.toLowerCase();
       if (k !== "q" && k !== "w" && k !== "s") return;
       // Stand down while a confirm is open. The dialog owns Enter and Esc, and
@@ -1667,6 +1665,30 @@ export function LiveChart() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [closeAll, intent.pending, placeMarket]);
+
+  // And the pane keys, which Live did not have at all: 1–8 for the focused
+  // pane's bar size, Shift+1–4 to focus one. Phase 7 gave this page the same
+  // layouts and left it driving them by mouse only, which is the kind of gap
+  // that reads as "the replay is the real one and this is the copy".
+  //
+  // The transport keys stay replay-only for the plainest possible reason: there
+  // is no clock to scrub on a live tape.
+  usePaneKeys({
+    paneCount: useCallback(() => paneCountRef.current, []),
+    focused: useCallback(() => focusRef.current, []),
+    setFocus,
+    setPaneTimeframe: useCallback(
+      (pane: number, id: string) =>
+        pane === 0
+          ? setTfId(id)
+          : setPaneTfIds((prev) => prev.map((t, j) => (j === pane ? id : t))),
+      [],
+    ),
+    // The same stand-down the trading keys take: a confirm dialog owns the
+    // keyboard while it is up, and re-bucketing a chart underneath an order you
+    // have not answered for yet is the wrong thing to be doing.
+    disabled: useCallback(() => !!intent.pending, [intent.pending]),
+  });
 
   // The running total behind the title, for whichever account is active. The
   // paper simulation keeps running underneath a real account, so this has to

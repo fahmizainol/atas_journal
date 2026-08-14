@@ -47,6 +47,7 @@ import {
 } from "../hooks/useSimulator";
 import { useReplayAttempt } from "../hooks/useReplayAttempt";
 import { useReplayAccount, useWriteCause } from "../hooks/useReplayAccount";
+import { isTypingTarget, usePaneKeys } from "../hooks/usePaneKeys";
 import { AccountChip, AccountNotice, AccountRecap } from "../components/charts/ReplayAccount";
 import { AutopsyCard } from "../components/charts/AutopsyCard";
 import {
@@ -2309,10 +2310,7 @@ export function Simulator() {
   // everywhere else.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-      const el = e.target as HTMLElement | null;
-      const tag = el?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      if (isTypingTarget(e)) return;
       const k = e.key.toLowerCase();
       if (k === "q" || k === "w" || k === "s") {
         e.preventDefault();
@@ -2341,33 +2339,18 @@ export function Simulator() {
         nudgeSpeed(k === "]" ? 1 : -1);
         return;
       }
-      // Shift+1..4 picks the pane the chrome acts on. Not the bare digits: those
-      // have picked the bar size since before there were panes, and taking a
-      // binding away from a page you drive by keyboard is worse than spending a
-      // modifier. By `code` rather than by `key`, because shifted digits are
-      // punctuation and which punctuation depends on the keyboard layout.
-      if (e.shiftKey && /^Digit[1-4]$/.test(e.code)) {
-        const i = Number(e.code.slice(5)) - 1;
-        if (i < paneCountRef.current) {
-          e.preventDefault();
-          setFocus(i);
-        }
-        return;
-      }
-      if (e.shiftKey) return;
-      if (/^[1-8]$/.test(k)) {
-        const tf = TIMEFRAMES[Number(k) - 1];
-        if (tf) {
-          e.preventDefault();
-          // The focused pane's, not the page's — the same rule the top bar's
-          // picker follows, so the key and the button cannot disagree.
-          changePaneTimeframe(focusRef.current, tf.id);
-        }
-      }
+      // 1–8 and Shift+1–4 are hooks/usePaneKeys — the same bindings Live has.
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [changePaneTimeframe, closeAll, nudgeSpeed, placeMarket, play, stepBack, stepBar, stop]);
+  }, [closeAll, nudgeSpeed, placeMarket, play, stepBack, stepBar, stop]);
+
+  usePaneKeys({
+    paneCount: useCallback(() => paneCountRef.current, []),
+    focused: useCallback(() => focusRef.current, []),
+    setFocus,
+    setPaneTimeframe: changePaneTimeframe,
+  });
 
   const onSpeed = (v: number) => {
     speedRef.current = v;
