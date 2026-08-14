@@ -100,7 +100,92 @@ export const EVENT_LABEL_ST_OPTIONS = [0, 1, 1.5, 2, 3];
  *  candles, over whatever profile gutters are already on. */
 export const EVENT_FILL_OPTIONS = [0, 0.1, 0.2, 0.35];
 
-export interface SimPrefs {
+/**
+ * What both chart pages remember about *reading* a tape.
+ *
+ * Exactly the fields Live carries, and exactly the subset of the replay's that
+ * cannot touch a fill: which bar the chart draws, what counts as a big print,
+ * how the profiles are composited, what selects a tape event, and how the panes
+ * are arranged. It was two identical field lists and two identical validator
+ * chains before, on the reasoning that the two pages read different tapes — true
+ * of the *values*, which is why the two stores are still separate keys, and
+ * never true of the shape.
+ *
+ * **The stores are untouched.** `sim.prefs` and `live.chartKnobs` hold what they
+ * always held; this is a type and a loader, not a migration.
+ */
+export interface ChartReadingPrefs {
+  /** Lots a sweep must exceed to be marked on the chart. A reading choice: it
+   *  changes which prints are drawn, never what fills. */
+  bigLots: number;
+  /** Prominence floor for the HVN/LVN node reader (0 = off). Read off the
+   *  composite and off the developing NY profile alike — one knob, because it is
+   *  one question ("how big does a hump have to be") asked of two profiles. */
+  nodeProm: number;
+  /** How the context days are composited into one profile, if at all. Costs
+   *  nothing extra: the composite is built from tape already loaded and drawn. */
+  composite: CompositeRule;
+  /** How much of each context day goes in — the day session, or the Globex
+   *  session in front of it as well. */
+  compositeSpan: CompositeSpan;
+  /** What selects a tape event. One setting that is really ten, because "is
+   *  this size arriving or defending" is not a question with one threshold. The
+   *  rows are shown or hidden by the chart's own indicator toggles. */
+  eventTuning: EventTuning;
+  /** Strength at which a band carries its lot count (0 = never). */
+  eventLabelSt: number;
+  /** Fill alpha of the band wash at strength 1 (0 = outline only). */
+  eventFill: number;
+  /** Whether the events also draw as a marginal down the volume profiles'
+   *  gutters — the "where did all that size go" reading, which is a different
+   *  question from the bands on the candles. */
+  eventMarginal: boolean;
+  /** Modern VWAP's parameters, stored as one object because the indicator takes
+   *  them as one. A drawing choice: it reads bars already on the chart. */
+  modernVwap: ModernVwapParams;
+  /** Which bar the chart draws (see lib/timeframes). Purely how the tape is
+   *  bucketed for display — it can't change a fill, so it's safe to carry. */
+  timeframe: string;
+  /** Whether the day-scale indicator strip is showing. Chart real estate, so it
+   *  collapses to a pill. */
+  indicators: boolean;
+  /** Whether the ticket/blotter rail reserves layout width instead of opening
+   *  over the tape. Carried between visits because it is a statement about how
+   *  you work, and that outlives a session. */
+  railPinned: boolean;
+  /** How the panes are arranged. `one` is the page as it always was; the rest
+   *  put two, three or four charts on the same tape, each with its own engine on
+   *  its own bucketing. See lib/paneLayout. */
+  layout: LayoutId;
+  /** Each pane's bucketing, indexed by pane. Held for `MAX_PANES` however many
+   *  are on screen, so switching 1 -> 2x2 -> 1 gives every pane back the
+   *  bucketing it had. Pane 0's entry is unused — the page's own `timeframe` is
+   *  pane 0's, and a second copy would be a second source of truth. */
+  paneTfs: string[];
+  /** Where the vertical divider sits, as the left column's percentage of the
+   *  width, and the horizontal one as the top row's percentage of the height.
+   *  Clamped well short of every edge: a pane dragged to nothing is a pane you
+   *  cannot get back by dragging. */
+  splitPct: number;
+  splitPctY: number;
+  /** Whether the panes share one crosshair and one right edge (lib/paneLink).
+   *  A reading choice like the layout itself — it moves viewports, never a
+   *  fill. */
+  linkOn: boolean;
+  /** Which panes take part, indexed like `paneTfs`. The global switch above is
+   *  the one you reach for; this is the per-pane `⇄` badge. */
+  paneLinked: boolean[];
+  /** Whether the tool rail reserves a column beside the charts or floats over
+   *  the tape. Pinned by default — 38px off the width beats covering candles on
+   *  four panes — but on one pane the column is a straight loss. */
+  toolsPinned: boolean;
+}
+
+/** The replay's own settings: the ticket it trades with, the clock it runs on,
+ *  and the two pieces of page posture Live has no equivalent of. Everything
+ *  here either reaches a fill or drives a clock, which is exactly why none of it
+ *  is in `ChartReadingPrefs`. */
+export interface SimPrefs extends ChartReadingPrefs {
   root: string;
   /** ET wall clock the replay starts at, "HH:MM". */
   startTime: string;
@@ -128,56 +213,13 @@ export interface SimPrefs {
   orderType: OrderType;
   /** Hide which day you're trading until the replay ends. */
   blind: boolean;
-  /** Which bar the chart draws (see lib/timeframes). Purely how the tape is
-   *  bucketed for display — it can't change a fill, so it's safe to carry. */
-  timeframe: string;
-  /** Lots a sweep must exceed to be marked on the chart. Like the timeframe, a
-   *  reading choice: it changes which prints are drawn, never what fills. */
-  bigLots: number;
   /** How many prior sessions to draw to the left of the replay. Each one is a
    *  whole tape (a few MB and a million prints), so this is the one setting here
-   *  that costs something — hence a short list of choices rather than a box. */
+   *  that costs something — hence a short list of choices rather than a box.
+   *
+   *  Replay-only because Live has no "before this session" to draw: it is
+   *  watching the session it is in. */
   historyDays: number;
-  /** How the context days are composited into one profile, if at all. A reading
-   *  choice like the two above, and one that costs nothing extra: the composite
-   *  is built from tape that is already loaded and already drawn. */
-  composite: CompositeRule;
-  /** How much of each context day goes in — the day session, or the Globex
-   *  session in front of it as well. */
-  compositeSpan: CompositeSpan;
-  /** Modern VWAP's parameters, stored as one object because the indicator takes
-   *  them as one. A drawing choice like the composite: it reads bars that are
-   *  already on the chart and cannot touch a fill. */
-  modernVwap: ModernVwapParams;
-  /** Prominence floor for the HVN/LVN node reader (0 = off). Read off the
-   *  composite and off the developing NY profile alike — one knob, because it is
-   *  one question ("how big does a hump have to be") asked of two profiles. */
-  nodeProm: number;
-  /** What selects a tape event. A reading choice like the ones above — it
-   *  re-derives which bands are drawn, never a fill — and the one setting here
-   *  that is really ten, because "is this size arriving or defending" is not a
-   *  question with one threshold. The rows themselves are shown or hidden by the
-   *  chart's own indicator toggles, which is where every other layer's on/off
-   *  lives. */
-  eventTuning: EventTuning;
-  /** Strength at which a band carries its lot count (0 = never). */
-  eventLabelSt: number;
-  /** Fill alpha of the band wash at strength 1 (0 = outline only). */
-  eventFill: number;
-  /** Whether the events also draw as a marginal down the volume profiles'
-   *  gutters — the "where did all that size go" reading, which is a different
-   *  question from the bands on the candles. */
-  eventMarginal: boolean;
-  /** Whether the day-scale indicator strip is showing. Chart real estate, so it
-   *  collapses to a pill — and like the chart's other reading choices it can't
-   *  touch a fill, which is what makes it safe to carry between visits. */
-  indicators: boolean;
-  /** Whether the ticket/blotter rail reserves layout width instead of opening
-   *  over the tape. Carried between visits because it is a statement about how
-   *  you work — a Replay session where you read more than you trade wants the
-   *  rail away, and that preference outlives the session. Like the other reading
-   *  choices here it cannot touch a fill. */
-  railPinned: boolean;
   /** Whether the transport row is in flow at the foot of the page.
    *
    *  On by default and worth its ~34px: it is the instrument a replay is driven
@@ -188,40 +230,11 @@ export interface SimPrefs {
    *  reason `railPinned` is: it is a statement about how you work.
    *
    *  The toggle is on the top bar rather than the transport itself — a hide
-   *  button that goes away with the thing it hid leaves nothing to press. */
+   *  button that goes away with the thing it hid leaves nothing to press.
+   *
+   *  Replay-only for the plainest possible reason: there is no clock to
+   *  transport on a live tape. */
   transportOpen: boolean;
-  /** How the panes are arranged. `one` is the page as it always was; the rest
-   *  put two, three or four charts on the same tape, each with its own engine on
-   *  its own bucketing (measured: a pane that repaints per frame costs a quarter
-   *  of the frame rate, one gated on bar close costs nothing — so only the pane
-   *  you are working in repaints live). See lib/paneLayout. */
-  layout: LayoutId;
-  /** Each pane's bucketing, indexed by pane. Held for `MAX_PANES` however many
-   *  are on screen, so switching 1 -> 2x2 -> 1 gives every pane back the
-   *  bucketing it had rather than resetting it. Pane 0's entry is unused — the
-   *  page's own `timeframe` is pane 0's, because that is the one the top bar has
-   *  always driven and a second copy of it would be a second source of truth. */
-  paneTfs: string[];
-  /** Where the vertical divider sits, as the left column's percentage of the
-   *  width, and the horizontal one as the top row's percentage of the height.
-   *  Clamped well short of every edge: a pane dragged to nothing is a pane you
-   *  cannot get back by dragging. Kept across layout changes, so going
-   *  2-col -> 2x2 -> 2-col lands on the dividers you left. */
-  splitPct: number;
-  splitPctY: number;
-  /** Whether the tool rail reserves a column beside the charts or floats over
-   *  the tape. Pinned by default — 38px off the width beats covering candles on
-   *  four panes — but on one pane the column is a straight loss, so it is a
-   *  choice and it sticks. */
-  toolsPinned: boolean;
-  /** Whether the panes share one crosshair and one right edge (lib/paneLink).
-   *  A reading choice like the layout itself — it moves viewports, never a
-   *  fill. */
-  linkOn: boolean;
-  /** Which panes take part, indexed like `paneTfs`. The global switch above is
-   *  the one you reach for; this is the per-pane `⇄` badge, for the pane you
-   *  want to hold still while you scroll the others. */
-  paneLinked: boolean[];
 }
 
 const KEY = "sim.prefs";
@@ -332,13 +345,69 @@ function eventTuning(raw: unknown): EventTuning {
   };
 }
 
+/**
+ * The reading knobs, validated. One chain, both stores.
+ *
+ * Every rule in here was already written twice, identically, once per loader —
+ * which is the duplication that actually costs something: a picker gains an
+ * option, one list is updated, and the other page quietly falls back to its
+ * default on a value the user can see in the first page's dropdown.
+ *
+ * `legacy` is the one asymmetry, and it stays an argument rather than becoming
+ * a shared rule: only `sim.prefs` was ever written by a build that had
+ * `panes: 1 | 2` instead of a layout id, so only it has a shape to translate.
+ */
+function readingPrefs(
+  s: Partial<Record<string, unknown>>,
+  d: ChartReadingPrefs,
+  legacy?: (raw: Record<string, unknown>, fallback: LayoutId) => LayoutId,
+): ChartReadingPrefs {
+  return {
+    // Same reason as the speed below: a threshold that isn't one of the presets
+    // would leave the picker blank.
+    bigLots: pick(s.bigLots, BIG_LOT_OPTIONS, d.bigLots),
+    nodeProm: pick(s.nodeProm, NODE_PROM_OPTIONS, d.nodeProm),
+    composite: pick(s.composite, COMPOSITE_RULES, d.composite),
+    compositeSpan: pick(s.compositeSpan, COMPOSITE_SPANS, d.compositeSpan),
+    eventTuning: eventTuning(s.eventTuning),
+    eventLabelSt: pick(s.eventLabelSt, EVENT_LABEL_ST_OPTIONS, d.eventLabelSt),
+    eventFill: pick(s.eventFill, EVENT_FILL_OPTIONS, d.eventFill),
+    eventMarginal: typeof s.eventMarginal === "boolean" ? s.eventMarginal : d.eventMarginal,
+    modernVwap: modernVwapParams(s.modernVwap),
+    // A retired timeframe id would leave the picker showing a blank.
+    timeframe: TIMEFRAMES.some((t) => t.id === s.timeframe) ? (s.timeframe as string) : d.timeframe,
+    indicators: typeof s.indicators === "boolean" ? s.indicators : d.indicators,
+    railPinned: typeof s.railPinned === "boolean" ? s.railPinned : d.railPinned,
+    // Only the layouts that exist — an unknown id from a later version would
+    // otherwise render nothing at all.
+    layout: isLayoutId(s.layout)
+      ? s.layout
+      : (legacy?.(s as Record<string, unknown>, d.layout) ?? d.layout),
+    paneTfs: paneTfs(s as Record<string, unknown>, d.paneTfs),
+    splitPct: clampRatio(s.splitPct, d.splitPct),
+    splitPctY: clampRatio(s.splitPctY, d.splitPctY),
+    linkOn: typeof s.linkOn === "boolean" ? s.linkOn : d.linkOn,
+    paneLinked: paneFlags(s.paneLinked, d.paneLinked),
+    toolsPinned: typeof s.toolsPinned === "boolean" ? s.toolsPinned : d.toolsPinned,
+  };
+}
+
+/** A defaults object nobody can mutate through. The two objects inside a set of
+ *  reading prefs are handed straight to an engine and an indicator, and a store
+ *  that returned the module's own DEFAULT_* objects would let a page edit the
+ *  defaults for every later load. */
+function freshReading<T extends ChartReadingPrefs>(d: T): T {
+  return { ...d, eventTuning: { ...d.eventTuning }, modernVwap: { ...d.modernVwap } };
+}
+
 export function loadSimPrefs(): SimPrefs {
   const d = DEFAULT_SIM_PREFS;
   try {
     const raw = localStorage.getItem(KEY);
-    if (!raw) return { ...d, modernVwap: { ...d.modernVwap } };
+    if (!raw) return freshReading(d);
     const s = JSON.parse(raw) as Partial<Record<keyof SimPrefs, unknown>>;
     return {
+      ...readingPrefs(s, d, legacyLayout),
       root: typeof s.root === "string" && s.root ? s.root : d.root,
       startTime: typeof s.startTime === "string" && /^\d{1,2}:\d{2}$/.test(s.startTime) ? s.startTime : d.startTime,
       // An unknown speed would leave the transport's <select> showing a blank.
@@ -356,44 +425,11 @@ export function loadSimPrefs(): SimPrefs {
       trailBeOnly: typeof s.trailBeOnly === "boolean" ? s.trailBeOnly : d.trailBeOnly,
       orderType: ORDER_TYPES.includes(s.orderType as OrderType) ? (s.orderType as OrderType) : d.orderType,
       blind: typeof s.blind === "boolean" ? s.blind : d.blind,
-      // A retired timeframe id would leave the picker showing a blank, same as
-      // an unknown speed.
-      timeframe: TIMEFRAMES.some((t) => t.id === s.timeframe) ? (s.timeframe as string) : d.timeframe,
-      // Same reason as the speed: a threshold that isn't one of the presets
-      // would leave the picker blank.
-      bigLots: BIG_LOT_OPTIONS.includes(s.bigLots as number) ? (s.bigLots as number) : d.bigLots,
-      historyDays: HISTORY_DAY_OPTIONS.includes(s.historyDays as number)
-        ? (s.historyDays as number)
-        : d.historyDays,
-      composite: COMPOSITE_RULES.includes(s.composite as CompositeRule)
-        ? (s.composite as CompositeRule)
-        : d.composite,
-      modernVwap: modernVwapParams(s.modernVwap),
-      compositeSpan: COMPOSITE_SPANS.includes(s.compositeSpan as CompositeSpan)
-        ? (s.compositeSpan as CompositeSpan)
-        : d.compositeSpan,
-      nodeProm: NODE_PROM_OPTIONS.includes(s.nodeProm as number)
-        ? (s.nodeProm as number)
-        : d.nodeProm,
-      eventTuning: eventTuning(s.eventTuning),
-      eventLabelSt: pick(s.eventLabelSt, EVENT_LABEL_ST_OPTIONS, d.eventLabelSt),
-      eventFill: pick(s.eventFill, EVENT_FILL_OPTIONS, d.eventFill),
-      eventMarginal: typeof s.eventMarginal === "boolean" ? s.eventMarginal : d.eventMarginal,
-      indicators: typeof s.indicators === "boolean" ? s.indicators : d.indicators,
-      railPinned: typeof s.railPinned === "boolean" ? s.railPinned : d.railPinned,
+      historyDays: pick(s.historyDays, HISTORY_DAY_OPTIONS, d.historyDays),
       transportOpen: typeof s.transportOpen === "boolean" ? s.transportOpen : d.transportOpen,
-      // Only the layouts that exist — an unknown id from a later version would
-      // otherwise render nothing at all.
-      layout: isLayoutId(s.layout) ? s.layout : legacyLayout(s, d.layout),
-      paneTfs: paneTfs(s, d.paneTfs),
-      splitPct: clampSplit(s.splitPct, d.splitPct),
-      splitPctY: clampRatio(s.splitPctY, d.splitPctY),
-      linkOn: typeof s.linkOn === "boolean" ? s.linkOn : d.linkOn,
-      paneLinked: paneFlags(s.paneLinked, d.paneLinked),
-      toolsPinned: typeof s.toolsPinned === "boolean" ? s.toolsPinned : d.toolsPinned,
     };
   } catch {
-    return { ...d, modernVwap: { ...d.modernVwap } };
+    return freshReading(d);
   }
 }
 
@@ -455,42 +491,10 @@ export function saveSimPrefs(p: SimPrefs): void {
 // pickers from drifting. All of these are reading choices: none can move a
 // clock, fill an order, or reach a broker.
 
-export interface LiveChartKnobs {
-  bigLots: number;
-  nodeProm: number;
-  composite: CompositeRule;
-  compositeSpan: CompositeSpan;
-  eventTuning: EventTuning;
-  eventLabelSt: number;
-  eventFill: number;
-  eventMarginal: boolean;
-  /** Modern VWAP's parameters — the replay's field, kept separately so the two
-   *  pages can be looking at different settings of a study layer. */
-  modernVwap: ModernVwapParams;
-  /** Which bar the chart draws (lib/timeframes) — a bucketing rule over the
-   *  tape, same as the replay's, and like it unable to touch a fill. */
-  timeframe: string;
-  /** Whether the day-scale indicator strip is showing. */
-  indicators: boolean;
-  /** Whether the rail panel reserves layout width instead of opening over the
-   *  tape. */
-  railPinned: boolean;
-  /** The pane arrangement, its bucketings, its dividers and its link — the same
-   *  five fields `SimPrefs` carries, documented there. Live keeps its own copy
-   *  for the same reason it keeps its own timeframe: the grid you watch a
-   *  session on is not automatically the grid you study a replay on, and one store
-   *  would make changing either change both. */
-  layout: LayoutId;
-  paneTfs: string[];
-  splitPct: number;
-  splitPctY: number;
-  linkOn: boolean;
-  paneLinked: boolean[];
-  /** The tool rail's pin — see `SimPrefs.toolsPinned`. Its own copy, like the
-   *  rest of the grid: how you want the chrome on a live session is not
-   *  automatically how you want it on a replay. */
-  toolsPinned: boolean;
-}
+/** Live carries exactly the reading knobs and nothing else — no ticket, no
+ *  clock, no context days. It *is* the shared shape, which is the honest way to
+ *  say it: an alias rather than a copy that has to be kept equal by hand. */
+export type LiveChartKnobs = ChartReadingPrefs;
 
 const LIVE_KNOBS_KEY = "live.chartKnobs";
 
@@ -528,34 +532,12 @@ export function loadLiveChartKnobs(): LiveChartKnobs {
   const d = DEFAULT_LIVE_CHART_KNOBS;
   try {
     const raw = localStorage.getItem(LIVE_KNOBS_KEY);
-    if (!raw) return { ...d, eventTuning: { ...d.eventTuning }, modernVwap: { ...d.modernVwap } };
-    const s = JSON.parse(raw) as Partial<Record<keyof LiveChartKnobs, unknown>>;
-    return {
-      bigLots: pick(s.bigLots, BIG_LOT_OPTIONS, d.bigLots),
-      nodeProm: pick(s.nodeProm, NODE_PROM_OPTIONS, d.nodeProm),
-      composite: pick(s.composite, COMPOSITE_RULES, d.composite),
-      compositeSpan: pick(s.compositeSpan, COMPOSITE_SPANS, d.compositeSpan),
-      modernVwap: modernVwapParams(s.modernVwap),
-      eventTuning: eventTuning(s.eventTuning),
-      eventLabelSt: pick(s.eventLabelSt, EVENT_LABEL_ST_OPTIONS, d.eventLabelSt),
-      eventFill: pick(s.eventFill, EVENT_FILL_OPTIONS, d.eventFill),
-      eventMarginal: typeof s.eventMarginal === "boolean" ? s.eventMarginal : d.eventMarginal,
-      // A retired id would leave the picker blank — the sim.prefs rule.
-      timeframe: TIMEFRAMES.some((t) => t.id === s.timeframe) ? (s.timeframe as string) : d.timeframe,
-      indicators: typeof s.indicators === "boolean" ? s.indicators : d.indicators,
-      railPinned: typeof s.railPinned === "boolean" ? s.railPinned : d.railPinned,
-      // Same validators as the replay's — an unknown layout id from a later
-      // version would otherwise render nothing at all.
-      layout: isLayoutId(s.layout) ? s.layout : d.layout,
-      paneTfs: paneTfs(s, d.paneTfs),
-      splitPct: clampRatio(s.splitPct, d.splitPct),
-      splitPctY: clampRatio(s.splitPctY, d.splitPctY),
-      linkOn: typeof s.linkOn === "boolean" ? s.linkOn : d.linkOn,
-      paneLinked: paneFlags(s.paneLinked, d.paneLinked),
-      toolsPinned: typeof s.toolsPinned === "boolean" ? s.toolsPinned : d.toolsPinned,
-    };
+    if (!raw) return freshReading(d);
+    // No legacy layout translation: `live.chartKnobs` never existed in a build
+    // that stored `panes` instead of a layout id.
+    return readingPrefs(JSON.parse(raw) as Record<string, unknown>, d);
   } catch {
-    return { ...d, eventTuning: { ...d.eventTuning }, modernVwap: { ...d.modernVwap } };
+    return freshReading(d);
   }
 }
 
