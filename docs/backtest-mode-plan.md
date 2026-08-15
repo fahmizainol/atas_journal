@@ -1,9 +1,15 @@
 # Backtest mode — build plan
 
-*Written 2026-08-15, decided in one sitting against the built terminal. Nothing
-below is built yet. Branch it off `feat/terminal-redesign`, which is where the
-Simulator, the pane grid and the replay account currently live — this depends on
-all three.*
+*Written 2026-08-15, decided in one sitting against the built terminal, and
+**built the same day** — all twelve commits below are on `feat/terminal-redesign`
+(`e11cfcf`…`cb0e65e`). Verified by `tools/browser/drillcheck.mjs` (15/15) and the
+full pytest suite (881), with `panecheck.mjs` (35/35) alongside to show the
+replay side did not move.*
+
+*Two things the build changed from the plan, both noted in place below: the
+review needed a new `GET /replays/{id}/journal` (the browser cannot compute a
+`trade_key`), and `trade_count` joined `net_usd` as a summary-then-file reader
+once the campaign aggregate hit the same missing-summary trap the sweep had.*
 
 *Read [`docs/terminal-redesign-plan.md`](terminal-redesign-plan.md) phase 10
 first if the account model is unclear. This mode is defined largely by what it
@@ -205,7 +211,16 @@ byte-identical, which `tests/test_live_booking.py` already asserts.
 **`api/routers/replays.py`**
 
 - `POST /replays` accepts `mode`, `drop_ms`, `window`; skips
-  `replay_account.refusal()` entirely when `mode == "drill"`.
+  `replay_account.refusal()` entirely when `mode == "drill"` — **and
+  `ensure_epoch` with it**, which the plan missed. Minting epoch 0 off an
+  unpriced rep would start the real account's life at a moment nothing was at
+  stake, and every sitting either side of that instant would be mis-filed for
+  good. A drill with no model is refused at 400.
+- `GET /replays/{id}/journal` — **not in the plan, and unavoidable.** The review
+  writes through `PUT /notes/{trade_key}`, and a `trade_key` is a truncated
+  SHA-1 of the trade's own content (`journal.trades._trade_key`), so the browser
+  cannot name a trade the mirror has just written. It asks. Fetched only once a
+  rep is over, because the mirror rewrites the attempt's rows on every autosave.
 - `GET /replays/drills?model_id=` — the campaign aggregate: reps, traded, sat
   out, base rate, net, expectancy, and the two histograms (drawn hours vs traded
   hours). **Declared above `/replays/{attempt_id}`**, the path-swallow trap
@@ -214,6 +229,13 @@ byte-identical, which `tests/test_live_booking.py` already asserts.
 > The aggregate reads `data/replays` attempts, **not journal trades**. A sat-out
 > rep has no trades at all, so a trades-based aggregate would report a 100% base
 > rate forever and look entirely plausible doing it.
+>
+> Writing it turned up the same trap one level down, and it is worth the note
+> because both halves of the mode depend on the answer. `summary.trades` is
+> absent on any attempt saved with a partial summary — exactly as `net_usd` is —
+> and a missing count silently turns every rep into a sat-out one. So
+> `trade_count` joined `net_usd` as a summary-then-file reader, and the sweep
+> now uses it too; it had been doing the same fallback by hand.
 
 **No new endpoint for the review.** `PUT /notes/{trade_key}` already takes
 `model_id` + `rules_met` and already sweeps checks belonging to another model's
@@ -237,28 +259,30 @@ rules. The review panel posts to it.
 
 ---
 
-## The commit sequence
+## The commit sequence — all built
 
 Each is shippable alone. Backend commits carry pytest; replay-UI commits carry
 `typecheck && build` plus a browser check.
 
-1. this doc
-2. `replays.create` gains `mode`/`drop_ms`/`window`; `patch` refuses a mode
-   change; tests
-3. `replay_account`: the `epoch_attempts` filter and the `sweep_stale_actives`
-   drill branch, with tests proving a drill moves neither equity nor the gate
-4. `book_attempt` branches to `mode='backtest'` + `model_id`, replay path
-   asserted unchanged
-5. `POST /replays` accepts the new fields and skips the gate for drills
-6. the route: third tab, `/charts/backtest`, Simulator parameterised, model
-   binding in the setup panel — no draw yet, behaves as blind replay
-7. the random drop: the window fields, the clock draw, `snapshotTo` at the drop,
-   the identity block's dateless clock
-8. forward-only transport
-9. attempt-at-the-drop + End rep + the reveal + the rep counter
-10. the review panel posting `PUT /notes/{trade_key}`
-11. `GET /replays/drills` + the Backtests drill block
-12. `tools/browser/drillcheck.mjs`
+| | | |
+|---|---|---|
+| 1 | this doc | — |
+| 2 | `replays.create` gains `mode`/`drop_ms`/`window`; `patch` refuses a mode change | `e11cfcf` |
+| 3 | `replay_account`: the `epoch_attempts` filter and the sweep's drill branch | `bc23443` |
+| 4 | `book_attempt` branches to `mode='backtest'` + `model_id` | `0754267` |
+| 5 | `POST /replays` accepts the new fields and skips the gate for drills | `5397cec` |
+| 6 | the route: third tab, Simulator parameterised, model binding | `2730fc3` |
+| 7 | the random drop | `ec94bc8` |
+| 8 | forward-only transport | `b3a302b` |
+| 9 | attempt-at-the-drop, End rep, the reveal, the rep counter | `76303c8` |
+| 10 | the review panel posting `PUT /notes/{trade_key}` | `0627431` |
+| 11 | `GET /replays/drills` + the Backtests drill block | `f1f46d2` |
+| 12 | `tools/browser/drillcheck.mjs` | `cb0e65e` |
+
+**What the browser check caught**, since it is the argument for having written
+it: the drill title hardcoded the `▨▨▨▨` mask instead of reading `hidden`, so
+ending a rep set `revealed` and the title went on hiding the day. The reveal
+silently did nothing, and every other assertion about the mode passed anyway.
 
 ---
 
