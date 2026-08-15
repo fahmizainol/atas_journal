@@ -76,6 +76,13 @@ export function minutesOf(hhmm: string): number {
   return Number(h) * 60 + Number(m);
 }
 
+/** The inverse: ET minutes past midnight back to "HH:MM". */
+export function hhmm(min: number): string {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
 /** Is the window one a drop can actually be drawn from?
  *
  *  Equal bounds are legal and mean "always drop here" — a fixed-time drill is a

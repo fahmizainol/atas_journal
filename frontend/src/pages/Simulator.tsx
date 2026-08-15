@@ -114,7 +114,9 @@ import {
   SIM_SPEEDS,
 } from "../lib/simPrefs";
 import {
+  hhmm,
   loadDrillPrefs,
+  minutesOf,
   saveDrillPrefs,
   windowOk,
   type DrillPrefs,
@@ -447,16 +449,36 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         ? "The drop window ends before it starts."
         : null;
 
-  /** Any cached day, at random. */
+  // Where in RTH this rep was thrown in, as ET minutes past midnight. Null on
+  // the replay page and until the first draw.
+  //
+  // Drawn *with the day* rather than recomputed where the clock is set: that
+  // code runs again on every context change (a history day added, a corrected
+  // header), and a drop that re-rolled itself under you would move the tape
+  // mid-rep. One draw, one drop.
+  const [drop, setDrop] = useState<number | null>(null);
+
+  /** Any cached day, at random — and in a drill, an hour of it too.
+   *
+   *  Uniform over all 601 cached days, with replacement and no memory of what
+   *  has been sat. At that size a chance repeat is rare, and drawing from a set
+   *  difference would be bookkeeping for very little. */
   const anyDay = useCallback(
     (days: { symbol: string; date: string }[]) => {
       const d = days[Math.floor(Math.random() * days.length)];
       // Drawing is a decision to be somewhere else, so the bookmark goes.
       leaveResume();
       setRevealed(false);
+      if (drillRef.current && drill) {
+        const lo = minutesOf(drillRef.current.dropFrom);
+        const hi = minutesOf(drillRef.current.dropTo);
+        // Inclusive of both bounds: a window with equal ends is a fixed-time
+        // drill, which is a reasonable thing to ask for.
+        setDrop(lo + Math.floor(Math.random() * (hi - lo + 1)));
+      }
       setSel({ symbol: d.symbol, date: d.date });
     },
-    [leaveResume],
+    [drill, leaveResume],
   );
 
   // Which day the picker opens on. A sitting you were in the middle of wins:
@@ -475,13 +497,20 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   useEffect(() => {
     const days = daysQ.data?.days;
     if (sel || !days?.length) return;
-    const p = pendingRef.current;
-    if (p && days.some((d) => d.symbol === p.symbol && d.date === p.date)) {
-      setSel({ symbol: p.symbol, date: p.date });
-      return;
+    // A drill always draws. Two reasons, and the second is a bug the first
+    // would have hidden: a rep you walked away from is not a cold read any
+    // more, so resuming one is not the favour it is on the replay page — and a
+    // resumed day arrives with no drop drawn, which would quietly fall back to
+    // the start time and land every such rep at 09:30.
+    if (!drill) {
+      const p = pendingRef.current;
+      if (p && days.some((d) => d.symbol === p.symbol && d.date === p.date)) {
+        setSel({ symbol: p.symbol, date: p.date });
+        return;
+      }
     }
     anyDay(days);
-  }, [anyDay, daysQ.data, sel]);
+  }, [anyDay, daysQ.data, drill, sel]);
 
   // --- imperative refs (not React state — the frame loop reads these) -------
   const chartRef = useRef<ReplayChartHandle>(null);
@@ -1915,7 +1944,14 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     // start time is where a *new* sitting begins. A context change is not a move
     // through time either way, so it keeps the clock it had.
     const [h, m] = startTime.split(":").map((x) => parseInt(x, 10));
-    const offMin = (Number.isFinite(h) ? h * 60 + m : RTH_OPEN_MIN) - RTH_OPEN_MIN;
+    // A drill is thrown in at the drawn hour instead. The start time is a
+    // setting about where a session begins; a drop is the question the rep is,
+    // so it outranks it — and the drill's setup panel doesn't offer the start
+    // time at all.
+    const startMin = drill && drop != null
+      ? drop
+      : (Number.isFinite(h) ? h * 60 + m : RTH_OPEN_MIN);
+    const offMin = startMin - RTH_OPEN_MIN;
     const clock = !fresh
       ? clockRef.current
       : (resumed?.clock ??
@@ -1923,6 +1959,16 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           data.session_start_ms,
           Math.min(data.session_end_ms, data.rth_open_ms + offMin * 60_000),
         ));
+    // The drawn-from bounds, now that there is a session to measure them
+    // against. Stored rather than derived later because the histogram has to be
+    // able to say a narrow campaign was narrow.
+    if (drill) {
+      const at = (min: number) => data.rth_open_ms + (min - RTH_OPEN_MIN) * 60_000;
+      drillWindowRef.current = {
+        from_ms: at(minutesOf(drillRef.current.dropFrom)),
+        to_ms: at(minutesOf(drillRef.current.dropTo)),
+      };
+    }
     const snap = engineRef.current.snapshotTo(clock);
     chartRef.current?.setSnapshot(snap, fresh ? undefined : { reframe: false });
     // The context pane's own engine over the same tape — the same one path a
@@ -2640,7 +2686,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           // anyway — it is the one thing about this rep worth reading, and it
           // is where the eye already goes for "what am I looking at".
           drill
-            ? `${boundModel?.name ?? "No model"} · ${root} · ▨▨▨▨ · ${startTime}`
+            ? `${boundModel?.name ?? "No model"} · ${root} · ▨▨▨▨ · ${drop == null ? "—" : hhmm(drop)}`
             : !sel
               ? "Pick a session"
               : hidden
@@ -2892,8 +2938,13 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           type="button"
           style={{ ...btn(palette.bg2), alignSelf: "end", padding: "6px 10px" }}
           onClick={() => daysQ.data?.days.length && anyDay(daysQ.data.days)}
-          disabled={!daysQ.data?.days.length}
-          title="Draw another session at random"
+          disabled={!daysQ.data?.days.length || !!drillBlocked}
+          title={
+            drillBlocked ??
+            (drill
+              ? "Draw the next rep — a new day and a new hour of it"
+              : "Draw another session at random")
+          }
         >
           🎲
         </button>
@@ -2941,10 +2992,16 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
             and all three now hang off the legend row they tune (the "…" on it).
             They were only ever questions about one layer each, and this row had
             no way of saying which. */}
-        <label style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}>
-          Start time (ET)
-          <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
-        </label>
+        {/* The drop replaces it in a drill — "where does this session begin"
+            is the question backtest mode answers with a die, so offering a
+            second answer beside it would be two controls fighting over one
+            clock. The drop window above is the drill's version of this. */}
+        {!drill && (
+          <label style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}>
+            Start time (ET)
+            <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+          </label>
+        )}
         {/* Which contract the orders go to is *not* here: it sits at the head of
             the ticket, where Live keeps the same choice (components/RoutingPanel,
             `InstrumentSwitch`). It is not pre-run configuration — it is what the
