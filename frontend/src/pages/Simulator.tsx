@@ -2774,8 +2774,14 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           // In a drill the bound model replaces the date the tape is hiding
           // anyway — it is the one thing about this rep worth reading, and it
           // is where the eye already goes for "what am I looking at".
+          // `hidden`, not a hardcoded mask: the rep ends by revealing the day,
+          // and a title that masked it unconditionally would make the reveal
+          // silently do nothing — which is exactly what it did until
+          // drillcheck asked.
           drill
-            ? `${boundModel?.name ?? "No model"} · ${root} · ▨▨▨▨ · ${drop == null ? "—" : hhmm(drop)}`
+            ? `${boundModel?.name ?? "No model"} · ${
+                hidden ? `${root} · ▨▨▨▨` : `${sel?.symbol ?? root} · ${sel?.date ?? ""}`
+              } · ${drop == null ? "—" : hhmm(drop)}`
             : !sel
               ? "Pick a session"
               : hidden
