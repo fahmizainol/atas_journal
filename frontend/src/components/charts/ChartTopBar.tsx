@@ -133,9 +133,9 @@ export function ChartTopBar({ title, onTitle, titleOpen, children, right }: Char
 
       <div className="chart-topbar-end">
         {right}
-        {/* The Replay|Live switch is the tab strip, reduced to the only two tabs
-            this workspace has. Read off the shared config so a third chart page
-            appears here without anyone remembering to add it. */}
+        {/* The Replay|Live|Backtest switch is the tab strip, reduced to this
+            workspace's tabs. Read off the shared config, which is what made
+            Backtest appear here without a line being written for it. */}
         <nav className="chart-topbar-tabs" aria-label="Chart">
           {CHARTS.tabs.map((t) => (
             <NavLink key={t.to} to={{ pathname: t.to, search }} end={t.end}>

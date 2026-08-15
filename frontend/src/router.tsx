@@ -53,6 +53,12 @@ export const router = createBrowserRouter([
       { path: "charts/live", element: <LiveChart /> },
       { path: "charts/replay", element: <Simulator /> },
       { path: "charts/replay/history", element: <ReplayHistory /> },
+      // Backtest mode is the same page with a different clock and a bound
+      // model — the same argument that keeps Replay and Live adjacent. It is a
+      // route rather than a switch on the Replay page because the two are
+      // different intents on the same tape, and because the mode has to be
+      // fixed for the whole of a sitting.
+      { path: "charts/backtest", element: <Simulator mode="drill" /> },
       // The Auto-Backtest Demo grew into Strategies; keep old links working.
       { path: "auto-backtest", element: <Navigate to="/strategies" replace /> },
       // The Simulator moved out of the Lab into its own Charts workspace, where

@@ -55,6 +55,16 @@ export interface AttemptContext {
    *  ticket you took the first trade with is the one worth stamping. */
   prefs: () => Record<string, unknown>;
   startedMs: number;
+  /** Backtest mode. A drill is unpriced (the account never sees it), binds its
+   *  model session-wide when it books, and opens at the drop rather than at the
+   *  first fill — see docs/backtest-mode-plan.md. */
+  mode?: "replay" | "drill";
+  modelId?: number | null;
+  /** The clock this rep was thrown in at, and the window it was drawn from.
+   *  Neither survives derivation, and the drop histogram is what the mode is
+   *  for. */
+  dropMs?: number | null;
+  window?: { from_ms: number; to_ms: number } | null;
 }
 
 export interface AttemptRecord {
@@ -170,6 +180,10 @@ export function useReplayAttempt() {
               tape: ctx.tape,
               prefs: ctx.prefs(),
               started_ms: ctx.startedMs,
+              mode: ctx.mode ?? "replay",
+              model_id: ctx.modelId ?? null,
+              drop_ms: ctx.dropMs ?? null,
+              window: ctx.window ?? null,
             })
               .then((rec) => {
                 if (mine()) {

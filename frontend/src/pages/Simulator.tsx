@@ -29,6 +29,10 @@ import type { ModernVwapParams } from "../lib/modernVwap";
 import { SimIndicators } from "../components/charts/SimIndicators";
 import { QuickDock } from "../components/charts/QuickDock";
 import { TimeframeControl } from "../components/charts/TimeframeControl";
+import { StudyPicker } from "../components/charts/StudyPicker";
+import { loadStudies, saveStudies } from "../lib/chartPrefs";
+import type { StudySpec } from "../lib/studies";
+import type { LayerState } from "../components/charts/chartLayers";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import { GuardMeters } from "../components/charts/GuardMeters";
 import { LayoutPicker } from "../components/charts/LayoutPicker";
@@ -46,6 +50,7 @@ import {
   type SimDay,
 } from "../hooks/useSimulator";
 import { useReplayAttempt } from "../hooks/useReplayAttempt";
+import { selectableModels, useModels } from "../hooks/useModels";
 import { useReplayAccount, useWriteCause } from "../hooks/useReplayAccount";
 import { isTypingTarget, usePaneKeys } from "../hooks/usePaneKeys";
 import { AccountChip, AccountNotice, AccountRecap } from "../components/charts/ReplayAccount";
@@ -108,6 +113,12 @@ import {
   clampSplit,
   SIM_SPEEDS,
 } from "../lib/simPrefs";
+import {
+  loadDrillPrefs,
+  saveDrillPrefs,
+  windowOk,
+  type DrillPrefs,
+} from "../lib/drillPrefs";
 import type { TapeRange } from "../lib/volumeProfile";
 import { MIN_SAMPLE, SIM_ENGINE_VERSION } from "../lib/replayStats";
 import {
@@ -203,7 +214,25 @@ const firstAt = (t: Float64Array, n: number, ms: number): number => {
 };
 
 
-export function Simulator() {
+/** Stable empties for a pane the layout doesn't currently have — a fresh `[]`
+ *  per render would make the picker's memos churn and the chart rebuild its
+ *  studies every frame. */
+const EMPTY_SPECS: StudySpec[] = [];
+const EMPTY_LAYERS: LayerState[] = [];
+
+/** Which of the two replay-clock pages this is.
+ *
+ *  `replay` is the page you pick a day on. `drill` is backtest mode: one model
+ *  bound for the whole sitting, a random RTH clock on a day you are not shown,
+ *  and no account — see docs/backtest-mode-plan.md.
+ *
+ *  It is a prop rather than page state because the mode is fixed for the whole
+ *  of a sitting and the route is what fixes it. A switch you could flip mid-rep
+ *  would be a switch that moved a finished sitting between two ledgers. */
+export type SimMode = "replay" | "drill";
+
+export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
+  const drill = mode === "drill";
   // Read once, on mount: everything below seeds from it, and from then on the
   // React state is the truth and the store just trails it.
   const [prefs] = useState(loadSimPrefs);
@@ -374,7 +403,49 @@ export function Simulator() {
   // is what persists.
   const [blind, setBlind] = useState(prefs.blind);
   const [revealed, setRevealed] = useState(false);
-  const hidden = blind && !revealed;
+  // Backtest mode is blind by definition — a rep on a day you were shown is not
+  // a rep. `Reveal` still works, because giving up on one draw should not need
+  // the mode switched off.
+  const hidden = (blind || drill) && !revealed;
+
+  // Backtest mode's own three settings (lib/drillPrefs). Held whether or not
+  // this page is the drill, because a hook cannot be conditional — the drill
+  // reads them and the replay ignores them.
+  const [drillPrefs, setDrillPrefs] = useState(loadDrillPrefs);
+  useEffect(() => {
+    if (drill) saveDrillPrefs(drillPrefs);
+  }, [drill, drillPrefs]);
+  const patchDrill = useCallback(
+    (p: Partial<DrillPrefs>) => setDrillPrefs((d) => ({ ...d, ...p })),
+    [],
+  );
+  // Read inside the session-build effect, which is installed once and must not
+  // be re-bound when a setting changes — the same reason `ticketRef` exists.
+  const drillRef = useRef(drillPrefs);
+  drillRef.current = drillPrefs;
+  // The drawn-from window as tape wall clocks, resolved when a day is drawn
+  // (the bounds are ET times and the tape is a wall clock, so they only become
+  // milliseconds once there is a session to measure them against).
+  const drillWindowRef = useRef<{ from_ms: number; to_ms: number } | null>(null);
+  const modelsQ = useModels();
+  // Archived models are off the list but not unbound: a campaign whose model was
+  // archived mid-way keeps booking against it, and the picker says so rather
+  // than silently re-pointing the reps at something else.
+  const models = useMemo(
+    () => selectableModels(modelsQ.data ?? [], drillPrefs.modelId),
+    [modelsQ.data, drillPrefs.modelId],
+  );
+  const boundModel = models.find((m) => m.id === drillPrefs.modelId) ?? null;
+  // Why the drill cannot draw, or null. The server refuses both of these too
+  // (400 on an unbound drill); this is the copy that can say so before you press
+  // anything.
+  const drillBlocked = !drill
+    ? null
+    : drillPrefs.modelId == null
+      ? "Bind a model first — a drill with nothing bound measures nothing."
+      : !windowOk(drillPrefs)
+        ? "The drop window ends before it starts."
+        : null;
 
   /** Any cached day, at random. */
   const anyDay = useCallback(
@@ -636,6 +707,28 @@ export function Simulator() {
   const [toolsPinned, setToolsPinned] = useState(prefs.toolsPinned);
   const [paneLinked, setPaneLinked] = useState(prefs.paneLinked);
   const paneCount = LAYOUTS[layout].panes;
+
+  // The community studies and this chart's own layers, both per pane and both
+  // driven from the topbar ƒ (see StudyPicker). Per pane because a pane is a
+  // question: the study you want on the 5m is usually not the one you want on
+  // the hourly beside it, which is the same reason the visibility map splits.
+  //
+  // The specs are the page's because the page persists them; the *layers* are
+  // each chart's own and only reported here, so the catalogue can show what the
+  // focused pane is drawing without anyone holding a second copy of that state.
+  const [studies, setStudies] = useState<StudySpec[][]>(() =>
+    Array.from({ length: MAX_PANES }, (_, i) => loadStudies(i === 0 ? undefined : `p${i}`)),
+  );
+  const [paneLayers, setPaneLayers] = useState<LayerState[][]>(() =>
+    Array.from({ length: MAX_PANES }, () => []),
+  );
+  const setPaneStudies = useCallback((pane: number, specs: StudySpec[]) => {
+    setStudies((prev) => prev.map((s, i) => (i === pane ? specs : s)));
+    saveStudies(specs, pane === 0 ? undefined : `p${pane}`);
+  }, []);
+  const reportLayers = useCallback((pane: number, next: LayerState[]) => {
+    setPaneLayers((prev) => prev.map((l, i) => (i === pane ? next : l)));
+  }, []);
   /** Which pane the chrome acts on. Claimed by the pointer arriving (the same
    *  event lib/chartFocus already elects the keyboard owner on), so it is
    *  usually the pane you are looking at without anyone having clicked. A pane
@@ -1638,6 +1731,17 @@ export function Simulator() {
   const contextRangesRef = useRef(contextRanges);
   contextRangesRef.current = contextRanges;
 
+  /** What the engine needs to run the weekly anchor back over the context days:
+   *  each day's share of the glued tape and its own seed. Same list, same order
+   *  as the tapes that were glued — that is what makes the tick counts index
+   *  bounds. */
+  const engineContext = useMemo(
+    () => contextDays.map((d) => ({ ticks: d.tape.n, weeklySeed: d.weeklySeed })),
+    [contextDays],
+  );
+  const engineContextRef = useRef(engineContext);
+  engineContextRef.current = engineContext;
+
   /**
    * Stand the context pane up: its own engine over the tape in hand, handed to
    * its chart.
@@ -1663,7 +1767,7 @@ export function Simulator() {
       if (only != null && only !== i) continue;
       const chart = extraCharts.current[i];
       if (!chart) continue;
-      const e = new ReplayEngine(tape, data, paneTfsRef.current[i]);
+      const e = new ReplayEngine(tape, data, paneTfsRef.current[i], engineContextRef.current);
       e.setBigLots(bigLotsRef.current);
       e.setEventTuning(evTuningRef.current);
       extraEngines.current[i] = e;
@@ -1726,7 +1830,7 @@ export function Simulator() {
     // The ⚓ is the user's, and it is placed on a bar time — which the context
     // days don't move. Carried across the rebuild rather than re-placed.
     const anchor = fresh ? null : (engineRef.current?.anchor() ?? null);
-    engineRef.current = new ReplayEngine(tape, data, tfRef.current);
+    engineRef.current = new ReplayEngine(tape, data, tfRef.current, engineContext);
     engineRef.current.setBigLots(bigLotsRef.current);
     engineRef.current.setEventTuning(evTuningRef.current);
     if (anchor != null) engineRef.current.setAnchor(anchor);
@@ -1859,6 +1963,10 @@ export function Simulator() {
         },
         prefs: () => ticketRef.current,
         startedMs: clock,
+        mode,
+        modelId: drill ? drillRef.current.modelId : null,
+        dropMs: drill ? clock : null,
+        window: drill ? drillWindowRef.current : null,
       });
       // A resumed sitting continues the attempt it came from rather than opening
       // a second one on the same day — which the history page would read,
@@ -1896,7 +2004,9 @@ export function Simulator() {
     writeResume();
     if (!fresh && wasPlaying) play();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionQ.data, contextTapes, contextRanges, resumeSettled]);
+    // `engineContext` is memoed off the same `contextDays` as `contextTapes`, so
+    // it changes in lockstep and never adds a rebuild of its own.
+  }, [sessionQ.data, contextTapes, contextRanges, engineContext, resumeSettled]);
 
   // A change of span re-cuts the same days without touching the tape, so the
   // rebuild above sees nothing to do and returns early. Push the new spans on
@@ -2526,11 +2636,16 @@ export function Simulator() {
           is a node, not a date the bar formats for itself. */}
       <ChartTopBar
         title={
-          !sel
-            ? "Pick a session"
-            : hidden
-              ? `${root} · ▨▨▨▨ · ${startTime}`
-              : `${sel.symbol} · ${sel.date} · ${startTime}`
+          // In a drill the bound model replaces the date the tape is hiding
+          // anyway — it is the one thing about this rep worth reading, and it
+          // is where the eye already goes for "what am I looking at".
+          drill
+            ? `${boundModel?.name ?? "No model"} · ${root} · ▨▨▨▨ · ${startTime}`
+            : !sel
+              ? "Pick a session"
+              : hidden
+                ? `${root} · ▨▨▨▨ · ${startTime}`
+                : `${sel.symbol} · ${sel.date} · ${startTime}`
         }
         onTitle={() => setSetupOpen((o) => !o)}
         titleOpen={setupOpen}
@@ -2592,6 +2707,17 @@ export function Simulator() {
           primary={["500t", "1m", "5m", "15m"]}
           compact
         />
+        {/* The community indicator catalogue, next to the bucketing because both
+            answer "what am I reading this tape through". Page-level on purpose:
+            every pane draws the same studies over its own bars, which is how one
+            pick becomes an RSI on the 5m and the 1h at once. */}
+        <StudyPicker
+          layers={paneLayers[focusedPane] ?? EMPTY_LAYERS}
+          onLayer={(key, on) => paneChart(focusedPane)?.setLayer(key, on)}
+          specs={studies[focusedPane] ?? EMPTY_SPECS}
+          onSpecs={(next) => setPaneStudies(focusedPane, next)}
+          paneLabel={paneCount > 1 ? String(focusedPane + 1) : undefined}
+        />
         {/* Which pane the control to the left just changed. Spelled out rather
             than left to the focus ring alone: with two 15m panes side by side
             the ring is the only difference between them, and a bar that silently
@@ -2645,6 +2771,61 @@ export function Simulator() {
           is what makes it a panel rather than a row — it was costing ~48px of
           every session to show settings you had already finished with. */}
       <div className={`sim-setup${setupOpen ? " open" : ""}`}>
+        {/* The binding comes first because nothing else in this panel means
+            anything without it: a drill is one model exercised exclusively, and
+            every trade in the rep books against whatever is chosen here. It is
+            deliberately not on the top bar — it is pre-run configuration you
+            touch once a campaign, which is what this panel is for. */}
+        {drill && (
+          <>
+            <label style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}>
+              Model
+              <select
+                value={drillPrefs.modelId == null ? "" : String(drillPrefs.modelId)}
+                onChange={(e) =>
+                  patchDrill({ modelId: e.target.value ? Number(e.target.value) : null })
+                }
+              >
+                <option value="">— pick a model —</option>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                    {m.archived ? " (archived)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label
+              style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}
+              title="The ET window a rep is thrown in at, drawn uniformly. The default stops at 15:00 so every rep has an hour of runway to the close — narrow it to drill a model where it lives, and remember that narrowing it is you telling yourself where the setup is."
+            >
+              Drop between
+              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <input
+                  type="time"
+                  value={drillPrefs.dropFrom}
+                  onChange={(e) => patchDrill({ dropFrom: e.target.value })}
+                  style={{ width: "100%" }}
+                />
+                <span aria-hidden>→</span>
+                <input
+                  type="time"
+                  value={drillPrefs.dropTo}
+                  onChange={(e) => patchDrill({ dropTo: e.target.value })}
+                  style={{ width: "100%" }}
+                />
+              </span>
+            </label>
+            {drillBlocked && (
+              <span
+                className="neg"
+                style={{ fontSize: 11, alignSelf: "end", paddingBottom: 6, maxWidth: 220 }}
+              >
+                {drillBlocked}
+              </span>
+            )}
+          </>
+        )}
         <label style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}>
           Instrument
           <select value={root} onChange={(e) => setRoot(e.target.value)}>
@@ -2716,13 +2897,19 @@ export function Simulator() {
         >
           🎲
         </button>
-        <label
-          style={{ display: "flex", alignItems: "center", gap: 6, alignSelf: "end", fontSize: 12, color: palette.muted, paddingBottom: 6 }}
-          title="Hide which day this is — the date comes off the picker and the chart's time axis until the tape runs out"
-        >
-          <input type="checkbox" checked={blind} onChange={(e) => setBlind(e.target.checked)} style={{ margin: 0 }} />
-          Blind
-        </label>
+        {/* Not offered in a drill: blind is what the mode *is*, and a checkbox
+            you cannot meaningfully clear is chrome that teaches you the setting
+            doesn't work. Reveal is still there on the session line, because
+            giving up on one draw shouldn't need the mode switched off. */}
+        {!drill && (
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 6, alignSelf: "end", fontSize: 12, color: palette.muted, paddingBottom: 6 }}
+            title="Hide which day this is — the date comes off the picker and the chart's time axis until the tape runs out"
+          >
+            <input type="checkbox" checked={blind} onChange={(e) => setBlind(e.target.checked)} style={{ margin: 0 }} />
+            Blind
+          </label>
+        )}
         {/* The bar lives in the top bar now, not here: it is the one setting on
             this page you change while reading rather than before starting, and
             burying it behind a panel would have been the change most likely to
@@ -2959,6 +3146,9 @@ export function Simulator() {
               composite={historyDays > 0 ? composite : "off"}
               nodeProm={nodeProm}
               modernVwap={mvParams}
+              studies={studies[0] ?? EMPTY_SPECS}
+              onStudiesChange={(next) => setPaneStudies(0, next)}
+              onLayers={(l) => reportLayers(0, l)}
               events={eventOverlay}
               indicatorSettings={indicatorSettings}
               drawingsKey={sel ? `${sel.symbol}|${sel.date}` : undefined}
@@ -3128,6 +3318,9 @@ export function Simulator() {
                     composite={historyDays > 0 ? composite : "off"}
                     nodeProm={nodeProm}
                     modernVwap={mvParams}
+                    studies={studies[i] ?? EMPTY_SPECS}
+                    onStudiesChange={(next) => setPaneStudies(i, next)}
+                    onLayers={(l) => reportLayers(i, l)}
                     events={eventOverlay}
                     indicatorSettings={indicatorSettings}
                     drawingsKey={sel ? `${sel.symbol}|${sel.date}` : undefined}

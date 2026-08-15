@@ -69,9 +69,13 @@ export const WORKSPACES: Workspace[] = [
     // Replay leads because switching workspace lands on tabs[0]. Live is a full
     // chart now, so this is a choice, not a necessity: Replay is the page you
     // can open at any hour, Live is only alive while the feed is.
+    // Backtest sits last because it is the narrowest of the three: one model,
+    // one rep, and a day you are not shown. Replay is the page you open to
+    // trade a session; this is the one you open to drill something specific.
     tabs: [
       { to: "/charts/replay", label: "Replay" },
       { to: "/charts/live", label: "Live" },
+      { to: "/charts/backtest", label: "Backtest" },
     ],
   },
 ];
