@@ -161,19 +161,53 @@ def sweep_stale_actives(*, now: datetime | None = None) -> list[str]:
     an attempt that is still ``active`` because the tab was closed on it is a
     sitting whose result has not been counted, and leaving it that way makes
     "close the tab" a working strategy.
+
+    **A stale drill with no trades is deleted, not settled.** Backtest mode
+    opens its attempt at the drop rather than at the first fill, so that a rep
+    you looked at and correctly passed on is a row — that base rate is the whole
+    point of the mode. The cost is that an abandoned draw and a judged sit-out
+    are the same record, and a base rate degrades exactly as fast as you re-roll
+    draws you do not like. Deleting the empty ones is what keeps "28 of 40 reps
+    had no setup" a number about the market rather than about your patience.
+
+    A stale drill that *did* trade settles like anything else: its trades are
+    real practice whatever the account thinks of them, and dropping them would
+    be the escape hatch this sweep was written to close.
     """
     now = now or _now()
     cutoff = now - timedelta(seconds=STALE_ACTIVE_S)
     closed: list[str] = []
     for row in replays.list_attempts(limit=5000, status="active"):
         seen = _parse(row.get("updated_at")) or _parse(row.get("created_at"))
-        if seen and seen <= cutoff:
-            try:
-                replays.patch(row["id"], status="abandoned")
-            except (ValueError, FileNotFoundError):
-                continue
-            closed.append(row["id"])
+        if not (seen and seen <= cutoff):
+            continue
+        try:
+            if replays.is_drill(row) and not (row.get("summary") or {}).get("trades"):
+                if _trade_count(row) == 0:
+                    replays.delete(row["id"])
+                    closed.append(row["id"])
+                    continue
+            replays.patch(row["id"], status="abandoned")
+        except (ValueError, FileNotFoundError, OSError):
+            continue
+        closed.append(row["id"])
     return closed
+
+
+def _trade_count(row: dict) -> int:
+    """How many trades an attempt actually holds.
+
+    The summary is the browser's number and is absent on an attempt that never
+    autosaved — which is every abandoned drill, since the recorder writes on the
+    first fill and there wasn't one. So the file is the authority for *this*
+    question, and it is only ever asked about attempts the summary is silent on.
+    """
+    try:
+        path = replays.attempt_dir(row["id"]) / "trades.json"
+    except (KeyError, ValueError):
+        return 0
+    trades = replays._read_json(path, []) or []
+    return len(trades) if isinstance(trades, list) else 0
 
 
 def net_usd(row: dict) -> float:
@@ -206,7 +240,17 @@ def epoch_attempts(*, since: str | None = None, until: str | None = None) -> lis
     first. Sorting the stamps as strings is exact: they all come out of
     ``replays._iso``, one format, always UTC.
     """
-    rows = list(replays.list_attempts(limit=5000))
+    # **Drills are not on this account.** Backtest mode is unpriced by design
+    # (docs/backtest-mode-plan.md D2): its reps exist to measure how often a
+    # setup is even there, which a 60-minute gate between sittings makes
+    # uncollectable.
+    #
+    # The filter is *here*, one layer above `settled_attempts`, and that placement
+    # is the load-bearing part. `refusal()` reads `epoch_attempts` directly for
+    # the hour gate and the unreviewed-sitting gate; filtering only the settled
+    # view would leave a drill able to start the 60-minute clock on the real
+    # practice account, which is exactly the coupling this mode must not have.
+    rows = [r for r in replays.list_attempts(limit=5000) if not replays.is_drill(r)]
     if since:
         rows = [r for r in rows if (r.get("created_at") or "") >= since]
     if until:

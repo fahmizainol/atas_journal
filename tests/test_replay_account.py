@@ -291,6 +291,97 @@ def test_the_sweep_settles_an_abandoned_sitting_so_it_cannot_hide_a_loss():
     assert acct.derive(now=later)["epoch"]["sittings"] == 1
 
 
+def _drill(
+    created_at: str,
+    net: float | None,
+    *,
+    status: str = "finished",
+    trades: list | None = None,
+    date: str = "2026-02-03",
+) -> dict:
+    """One backtest-mode rep, stamped like ``_sitting`` and unpriced."""
+    a = replays.create(
+        symbol="NQH5", root="NQ", date=date, tz="New York", engine_version=1,
+        tape=TAPE, prefs=PREFS, started_ms=TAPE["rth_open_ms"], model_id=3,
+        mode="drill", drop_ms=TAPE["rth_open_ms"] + 3_600_000,
+        window={"from_ms": TAPE["rth_open_ms"], "to_ms": TAPE["rth_open_ms"] + 5 * 3_600_000},
+    )
+    # A sat-out rep never autosaves — the recorder writes on a fill and there
+    # wasn't one — so `trades=None` means no save at all, not an empty save.
+    if trades is not None or net is not None:
+        replays.save(
+            a["id"], log=LOG, trades=trades or [],
+            summary={} if net is None else {"net_usd": net}, status=status,
+        )
+    d = replays.attempt_dir(a["id"])
+    rec = replays._read_json(d / "attempt.json", {})
+    rec["created_at"] = created_at
+    rec["updated_at"] = created_at
+    rec["status"] = status
+    replays._write_json(d / "attempt.json", rec)
+    return rec
+
+
+@_tmp
+def test_a_drill_moves_neither_the_equity_nor_the_gate():
+    _epoch("2026-02-03T00:00:00Z")
+    _sitting("2026-02-03T14:00:00Z", -300.0)
+    now = _t("2026-02-03T14:30:00Z")
+    before = acct.derive(now=now)
+    before_refusal = acct.refusal(now=now)
+
+    # Six losing reps that would have blown the account twice over, plus one
+    # opened one minute ago — which under the hour gate would forbid the next
+    # real sitting until 15:29.
+    for i in range(6):
+        _drill(f"2026-02-03T14:0{i}:30Z", -900.0)
+    _drill("2026-02-03T14:29:00Z", -900.0)
+    after = acct.derive(now=now)
+
+    for key in ("equity", "floor", "peak_close", "status", "day_net",
+                "day_loss_remaining", "target_remaining", "next_sitting_at",
+                "cooldown_until", "review_block"):
+        assert before[key] == after[key], f"a drill moved {key}"
+    assert after["equity"] == 49_700.0
+    assert after["epoch"]["sittings"] == 1
+    # The hour gate reads `epoch_attempts` directly, which is why the filter
+    # sits there rather than in `settled_attempts`. The real sitting half an
+    # hour ago legitimately holds the gate; what must not change is *which*
+    # sitting holds it, or a drill a minute old would push it out to 15:29.
+    assert acct.refusal(now=now) == before_refusal
+    assert (before_refusal or {}).get("until") == "2026-02-03T15:00:00Z"
+
+
+@_tmp
+def test_an_unreviewed_drill_does_not_block_the_next_real_sitting():
+    # The review gate turns on a *finished* sitting with flags and no verdicts.
+    # A drill's review is optional by design (D12), so one sitting there
+    # unanswered must not lock the account you actually practise on.
+    _epoch("2026-02-03T00:00:00Z")
+    _drill("2026-02-03T14:00:00Z", -900.0, trades=[_trade(-900.0)])
+    now = _t("2026-02-03T18:00:00Z")
+    assert acct.derive(now=now)["review_block"] is None
+    assert acct.refusal(now=now) is None
+
+
+@_tmp
+def test_a_sat_out_rep_is_deleted_when_it_goes_stale_and_a_traded_one_is_not():
+    _epoch("2026-02-03T00:00:00Z")
+    passed = _drill("2026-02-03T14:00:00Z", None, status="active")
+    traded = _drill("2026-02-03T14:05:00Z", -200.0, status="active",
+                    trades=[_trade(-200.0)], date="2026-02-04")
+
+    later = _t("2026-02-03T16:00:00Z")
+    assert set(acct.sweep_stale_actives(now=later)) == {passed["id"], traded["id"]}
+    # Abandoned draws leave nothing: "28 of 40 reps had no setup" has to be a
+    # fact about the market rather than about how many draws you re-rolled.
+    assert not replays.attempt_dir(passed["id"]).exists()
+    # A rep that traded is real practice whatever the account thinks of it.
+    assert replays.read(traded["id"])["status"] == "abandoned"
+    # And neither one touched the account on the way through.
+    assert acct.derive(now=later)["equity"] == 50_000.0
+
+
 @_tmp
 def test_attempts_from_before_the_first_epoch_are_never_counted():
     # Months of practice already on disk, and no account.json. Minting epoch 0
