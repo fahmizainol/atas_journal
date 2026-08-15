@@ -46,8 +46,8 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from .. import db
-from ..config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS, ET_TZ
+from .. import db, replays
+from ..config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS, ET_TZ, micro_symbol
 from ..ingest import _journal_key, _local_iso, _utc_iso
 
 #: The account name paper trades are booked under. Matches the reserved id in
@@ -454,6 +454,19 @@ def book_attempt(conn: sqlite3.Connection, *, attempt: dict,
     out of the real-money statistics while leaving it visible everywhere a trade
     is listed. The session row goes first for the reason ``book_trade`` gives.
 
+    **The instrument is per trade, not per attempt.** A sitting reads one
+    contract's ticks but may send its orders to that contract's micro — the
+    replay's mini/micro switch, which stamps ``micro`` on each trade
+    (``frontend/src/lib/replaySim.ts``) — and a day can change contract between
+    positions. The money in ``pnl`` is already priced in whichever it was; what
+    a row labelled with the wrong one loses is everything that re-derives from
+    the instrument instead of trusting the total, ``excursion.trade_excursion``
+    being the one that would then read a micro's points at ten times their
+    worth. A root with no micro this app knows (``config.micro_symbol``) books
+    under the mini, which is what it did before any of this existed — as does
+    every attempt saved before the switch existed, whose trades carry no
+    ``micro`` at all.
+
     The caller holds ``deps.db_lock()``.
     """
     attempt_id = str(attempt.get("id") or "")
@@ -468,8 +481,27 @@ def book_attempt(conn: sqlite3.Connection, *, attempt: dict,
         attempt.get("tz") or DEFAULT_DISPLAY_TZ, DISPLAY_TZS[DEFAULT_DISPLAY_TZ]
     )
     instrument = f"{symbol}@{REPLAY_EXCHANGE}"
+    micro_sym = micro_symbol(symbol)
+    micro_instrument = (
+        f"{micro_sym}@{REPLAY_EXCHANGE}" if micro_sym else instrument
+    )
 
-    db.upsert_session(conn, src, "replay", REPLAY_ACCOUNT)
+    # A backtest-mode rep is one model exercised exclusively, which is what
+    # ``sessions.mode='backtest'`` already means (api/routers/sessions.py) — so
+    # it binds the model session-wide and every trade in it inherits it, with no
+    # new mode and no migration. The cost is that drill reps pool with ATAS
+    # engine exports in the Backtests arena row; they stay separable because a
+    # drill's source_file is `replay/<attempt id>` and an import's is its folder,
+    # so splitting that row later is a change to the page and to no stored row.
+    #
+    # `upsert_session` is INSERT OR IGNORE, so the binding is written once and a
+    # later autosave cannot move it. That is the intended behaviour — the mode is
+    # fixed when the sitting opens — arrived at for free.
+    drill = replays.is_drill(attempt)
+    model_id = attempt.get("model_id") if drill else None
+    db.upsert_session(
+        conn, src, "backtest" if drill else "replay", REPLAY_ACCOUNT, model_id
+    )
     # When the sitting happened, in the slot an ATAS export's "Date modified"
     # occupies. Everything that orders a day's takes reads
     # ``imported_files.file_mtime`` — the calendar table's Modified column, the
@@ -488,8 +520,10 @@ def book_attempt(conn: sqlite3.Connection, *, attempt: dict,
         if norm is None:
             continue
         rows.append(journal_row(
-            account=REPLAY_ACCOUNT, instrument=instrument, source_file=src,
-            trade=norm, wall_zone=zone, tag="replay",
+            account=REPLAY_ACCOUNT,
+            instrument=micro_instrument if t.get("micro") else instrument,
+            source_file=src, trade=norm, wall_zone=zone,
+            tag="drill" if drill else "replay",
         ))
     return db.replace_journal(conn, src, rows)
 

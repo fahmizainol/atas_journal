@@ -126,6 +126,28 @@ def test_the_sitting_is_registered_so_practice_is_tagged_replay(conn):
     sess = db.sessions_map(conn)[f"replay/{a['id']}"]
     assert sess["mode"] == "replay"
     assert sess["account"] == "replay"
+    # A replay binds no model — the mode that does is the drill below.
+    assert sess["model_id"] is None
+
+
+def test_a_drill_binds_its_model_the_way_a_backtest_session_does(conn):
+    a = replays.create(symbol="NQU6", root="NQ", date="2026-08-07", tz="New York",
+                       engine_version=1, tape=TAPE, prefs={"size": 1},
+                       started_ms=TAPE["rth_open_ms"], model_id=7, mode="drill",
+                       drop_ms=TAPE["rth_open_ms"], window={"from_ms": 0, "to_ms": 1})
+    _save(a, [_trade()])
+    sess = db.sessions_map(conn)[f"replay/{a['id']}"]
+    # One model exercised exclusively is what `mode='backtest'` already means,
+    # so there is no fourth mode and nothing to migrate.
+    assert sess["mode"] == "backtest"
+    assert sess["model_id"] == 7
+    (t,) = _rows()
+    assert t["model_id"] == 7          # inherited from the session binding
+    assert t["comment"].startswith("drill:")
+    # Pooled with ATAS engine exports in the backtest arena, and separable from
+    # them by this — which is what makes splitting that row later a change to
+    # the page rather than to a stored row.
+    assert t["source_file"] == f"replay/{a['id']}"
 
 
 # --- the clock ---------------------------------------------------------------
