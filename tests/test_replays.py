@@ -177,6 +177,47 @@ def test_patch_touches_the_annotation_and_never_the_trades():
 
 
 @_tmp
+def test_a_drill_records_its_drop_and_the_window_it_was_drawn_from():
+    a = replays.create(
+        symbol="NQH5", root="NQ", date="2026-02-03", tz="New York",
+        engine_version=1, tape=TAPE, prefs=PREFS,
+        started_ms=TAPE["rth_open_ms"] + 4 * 3_600_000, model_id=3, mode="drill",
+        drop_ms=TAPE["rth_open_ms"] + 4 * 3_600_000,
+        window={"from_ms": TAPE["rth_open_ms"], "to_ms": TAPE["rth_open_ms"] + 5 * 3_600_000},
+    )
+    assert replays.is_drill(a)
+    # Neither is derivable later: the drop histogram is the mode's output, and a
+    # narrow campaign must not be mistakeable for a wide one afterwards.
+    assert a["drop_ms"] == TAPE["rth_open_ms"] + 4 * 3_600_000
+    assert a["window"]["to_ms"] == TAPE["rth_open_ms"] + 5 * 3_600_000
+
+
+@_tmp
+def test_an_attempt_written_before_the_mode_existed_is_a_replay():
+    a = _open()
+    stored = replays.read(a["id"])
+    assert stored["mode"] == "replay" and not replays.is_drill(stored)
+    # The 77 sittings already on disk carry no `mode` key at all. Anything
+    # reading attempt["mode"] directly would KeyError on every one of them.
+    assert not replays.is_drill({"id": "x", "status": "finished"})
+
+
+@_tmp
+def test_the_mode_cannot_be_changed_after_the_sitting_opens():
+    a = _open()
+    # Passing the mode it already has is not a change, so it is allowed — the
+    # client sends the whole record back on some paths.
+    replays.patch(a["id"], mode="replay", note="fine")
+    try:
+        replays.patch(a["id"], mode="drill")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a losing replay was relabelled as an unpriced drill")
+    assert not replays.is_drill(replays.read(a["id"]))
+
+
+@_tmp
 def test_listing_is_newest_first_and_inlines_the_summary():
     a = _open(date="2026-02-03")
     b = _open(date="2026-02-05")

@@ -82,6 +82,16 @@ ATTEMPT_ID_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_([A-Z0-9]+)_(\d{8}T\d{6}Z)(?:_
 # the shape of another record.
 STATUSES = ("active", "finished", "abandoned", "reviewed")
 
+# What kind of sitting this is. ``replay`` is the page you pick a day on;
+# ``drill`` is backtest mode — one model, a random RTH clock on a day you are
+# not told the date of (docs/backtest-mode-plan.md).
+#
+# It is written once, at create, and `patch` refuses to change it. Otherwise
+# "relabel the losing sitting as a drill" hides a loss from the account, since
+# the account is drill-blind by design — the same hole the stale-active sweep
+# exists to close, re-opened through a new door.
+MODES = ("replay", "drill")
+
 # A sitting is a few hundred orders at the very most. The bound is here so a
 # runaway client can't write an unbounded file, not because anyone is expected
 # to approach it.
@@ -148,9 +158,28 @@ def create(
     prefs: dict,
     started_ms: int,
     model_id: int | None = None,
+    mode: str = "replay",
+    drop_ms: int | None = None,
+    window: dict | None = None,
 ) -> dict:
     """Open an attempt. Called on the first fill, never before — a session you
-    watched without trading leaves nothing behind."""
+    watched without trading leaves nothing behind.
+
+    **Except in ``mode='drill'``**, where it is called at the drop instead. That
+    reverses the rule above on purpose and only there: a drill rep where you
+    looked and correctly found nothing is the row the whole mode exists to
+    produce, and under the first-fill contract it leaves no trace at all. The
+    cost is that abandoning a drill leaves an empty attempt, which
+    ``replay_account.sweep_stale_actives`` deletes rather than settles.
+
+    ``drop_ms`` is the replay clock the rep was thrown in at and ``window`` the
+    bounds it was drawn from (``{"from_ms", "to_ms"}``, display-zone wall clocks
+    like every other time here). Neither is derivable afterwards — ``started_ms``
+    is the same number today but stops being it the moment a drill can be
+    resumed — and the drop histogram is the mode's most interesting output.
+    """
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r}")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date or ""):
         raise ValueError(f"not a session date: {date!r}")
     if not re.fullmatch(r"[A-Z0-9]+", symbol or ""):
@@ -193,6 +222,13 @@ def create(
         "repeat_index": repeat_index,
         "note": "",
         "model_id": model_id,
+        # Every attempt written before backtest mode existed has no `mode` at
+        # all, so everything downstream reads it as `attempt.get("mode") or
+        # "replay"` — see `is_drill`. Writing it unconditionally here keeps that
+        # fallback needed in exactly one generation of files.
+        "mode": mode,
+        "drop_ms": None if drop_ms is None else int(drop_ms),
+        "window": dict(window) if window else None,
         # Every seek that erased a fill, and how many trades it took with it.
         # An attempt with any of these is a do-over: still a real attempt, but
         # one whose win rate was written with the answer in hand.
@@ -262,13 +298,31 @@ def save(
     return attempt
 
 
+def is_drill(attempt: dict) -> bool:
+    """Is this sitting a backtest-mode rep?
+
+    One reader for the whole codebase, because the fallback matters: attempts
+    written before the mode existed carry no ``mode`` key and are all replays.
+    Anything testing ``attempt["mode"] == "drill"`` directly would KeyError on
+    the 77 sittings already on disk.
+    """
+    return (attempt.get("mode") or "replay") == "drill"
+
+
 def patch(attempt_id: str, **fields: Any) -> dict:
     """Change the things that are yours to change after the fact — the note, the
     model it was practising, the status, the flags raised over it and the review
-    answering them. Never the trades."""
+    answering them. Never the trades, and never the mode."""
     d = _require(attempt_id)
     attempt = _read_json(d / "attempt.json", {})
     now = _utc_now()
+    # A drill is unpriced and a replay is not, so the mode decides whether the
+    # account ever counts this sitting. Letting it move after the fact would
+    # make "relabel it" a way to hide a loss — refuse loudly rather than
+    # silently dropping the field, since an "ok" that ignored you is worse.
+    if "mode" in fields and fields["mode"] is not None:
+        if fields["mode"] != (attempt.get("mode") or "replay"):
+            raise ValueError("an attempt's mode is fixed when it opens")
     if "note" in fields and fields["note"] is not None:
         attempt["note"] = str(fields["note"])
     if "model_id" in fields:
