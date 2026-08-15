@@ -9,7 +9,9 @@
 //
 //   - an attempt opens on the *first fill*, not on page load. A session you
 //     watched and didn't trade leaves no record, so idle poking can't fill the
-//     history with empty rows;
+//     history with empty rows. **Backtest mode is the one exception** — see
+//     `open` below, and docs/backtest-mode-plan.md D9 for why a sat-out rep has
+//     to be a row there;
 //   - writes are debounced and skipped when nothing changed, so playing an hour
 //     of tape without touching anything costs zero requests;
 //   - a rewind past a fill is recorded rather than silently absorbed. `seekTo`
@@ -307,6 +309,35 @@ export function useReplayAttempt() {
     setError(null);
   }, []);
 
+  /**
+   * Open the attempt now, without waiting for a fill. **Backtest mode only.**
+   *
+   * This is the deliberate exception to rule one at the top of this file. A
+   * drill rep where you looked and correctly found nothing is the row backtest
+   * mode exists to produce — it is what makes "the setup was there in 12 of 40
+   * hours" a sentence that can be written — and under the first-fill rule it
+   * leaves no trace at all.
+   *
+   * It writes an empty sitting rather than only creating the record, because
+   * the two things that later ask about it both read files: the stale sweep
+   * asks whether there were trades (`trades.json`), and `finish` needs
+   * something pending to flush. An attempt with a folder and no trades file is
+   * a shape nothing else here has.
+   *
+   * Idempotent: called again on the same armed session it does nothing, so a
+   * re-render or a second effect pass cannot mint two reps for one draw.
+   */
+  const open = useCallback(
+    (log: Log, clockMs: number) => {
+      if (!ctxRef.current || idRef.current || creatingRef.current) return;
+      pendingRef.current = { log, trades: [], clockMs };
+      dirtyRef.current = true;
+      sigRef.current = sig(log, []);
+      void flush();
+    },
+    [flush],
+  );
+
   /** Hand over a freshly published simulation. Cheap on every call but the ones
    *  that changed something. */
   const record = useCallback(
@@ -376,6 +407,6 @@ export function useReplayAttempt() {
 
   return {
     attempt, attemptId, summary, status, error, refusal, clearRefusal,
-    arm, adopt, record, noteRewind, finish, setNote,
+    arm, adopt, open, record, noteRewind, finish, setNote,
   };
 }

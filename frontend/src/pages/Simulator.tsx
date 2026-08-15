@@ -222,6 +222,16 @@ const firstAt = (t: Float64Array, n: number, ms: number): number => {
 const EMPTY_SPECS: StudySpec[] = [];
 const EMPTY_LAYERS: LayerState[] = [];
 
+/** Where the clock stops.
+ *
+ *  The replay plays to the end of the tape, which includes the hour past the
+ *  close. A drill stops at the bell: the rep is a question about the session,
+ *  and the settlement hour is a different market that no model here is about.
+ *  `min` rather than the close outright, because an early-close day's tape ends
+ *  before 16:00 and the clock cannot run past what printed. */
+const endOf = (s: { session_end_ms: number; rth_close_ms: number }, drill: boolean) =>
+  drill ? Math.min(s.session_end_ms, s.rth_close_ms) : s.session_end_ms;
+
 /** Which of the two replay-clock pages this is.
  *
  *  `replay` is the page you pick a day on. `drill` is backtest mode: one model
@@ -389,6 +399,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   const {
     arm: armAttempt,
     adopt: adoptAttempt,
+    open: openAttempt,
     attemptId: attemptIdOf,
     record: recordAttempt,
     noteRewind,
@@ -1134,7 +1145,27 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // them and its totals are `replayStats.pool` — so nothing new is stored and
   // the server is not asked to re-derive what the history page already draws.
   const dead = !!account && account.status !== "live";
-  const attemptsQ = useReplayAttempts({ enabled: dead });
+  // The drill needs the same list for its rep counter, so the two conditions
+  // share one fetch rather than the mode adding a second query on the same key.
+  const attemptsQ = useReplayAttempts({ enabled: dead || drill });
+  /** Reps finished today, for the counter on the bar.
+   *
+   *  Counted off the settled ones only: an `active` row is the rep you are in
+   *  the middle of, and a counter that included it would open every draw
+   *  claiming you had already done it. Local midnight, because the number is
+   *  about your day rather than about the account's (which counts in New York,
+   *  see replay_account._et_day). */
+  const repsToday = useMemo(() => {
+    if (!drill) return 0;
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    return (attemptsQ.data?.attempts ?? []).filter(
+      (a) =>
+        (a.mode ?? "replay") === "drill" &&
+        a.status !== "active" &&
+        new Date(a.created_at).getTime() >= midnight.getTime(),
+    ).length;
+  }, [attemptsQ.data, drill]);
   const writeCause = useWriteCause();
 
   /** Open the death sitting in review mode.
@@ -1863,7 +1894,12 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     histTapesRef.current = contextTapes;
     tapeRef.current = tape;
     sessionRef.current = data;
-    sourceRef.current = replaySource(data.session_end_ms);
+    // A rep runs to the RTH close, not to the end of the tape. The tape carries
+    // the post-close hour too (the `post` segment), and a drill that kept
+    // playing into it would be measuring a market the rep is not about. One
+    // number, set on the source, so the frame loop stops there on its own
+    // rather than every reader of the clock needing to know.
+    sourceRef.current = replaySource(endOf(data, drill));
     if (fresh) {
       // Before anything reads a clock off this tape: every HUD push from here on
       // belongs to this session, and the clock-keyed effects check the stamp.
@@ -2028,6 +2064,10 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         dropMs: drill ? clock : null,
         window: drill ? drillWindowRef.current : null,
       });
+      // And in a drill, open it here rather than waiting for a fill: a rep you
+      // looked at and passed on is the row this mode exists to write. After
+      // `arm`, which is what gives it a context to write against.
+      if (drill && !reviewingRef.current) openAttempt(logRef.current, clock);
       // A resumed sitting continues the attempt it came from rather than opening
       // a second one on the same day — which the history page would read,
       // correctly by its own rules and wrongly in fact, as a re-run of a session
@@ -2392,6 +2432,18 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     void finishAttempt();
   }, [closeManual, finishAttempt]);
 
+  /** End the rep by hand — the drill's version of the same thing.
+   *
+   *  It stops the tape and reveals the day, which `endAttempt` on its own does
+   *  not: reaching the bell does both through the effect below, and pressing
+   *  the button has to leave you in the same state as sitting there until it
+   *  would have. */
+  const endRep = useCallback(() => {
+    stop();
+    endAttempt();
+    setRevealed(true);
+  }, [endAttempt, stop]);
+
   // The daily stop, acting rather than refusing.
   //
   // Watches equity — realised plus what the open position is currently down —
@@ -2440,13 +2492,14 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // end was reached — played to, stepped to, or scrubbed to. It ends the
   // attempt on the same terms, for the same reason: the sitting is over.
   useEffect(() => {
-    const end = sessionRef.current?.session_end_ms;
+    const s = sessionRef.current;
+    const end = s ? endOf(s, drill) : null;
     // Only this session's own clock speaks for this session — see `gen`.
     if (end == null || hud.gen !== sessGenRef.current || hud.clockMs < end) return;
     setRevealed(true);
     if (endedRef.current) return;
     endAttempt();
-  }, [endAttempt, hud.clockMs, hud.gen]);
+  }, [drill, endAttempt, hud.clockMs, hud.gen]);
 
   const stepBar = useCallback(() => {
     const s = sessionRef.current;
@@ -2568,7 +2621,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   const wins = trades.filter((t) => t.pnl > 0).length;
   const sess = sessionRef.current;
   const scrubMin = sess?.session_start_ms ?? 0;
-  const scrubMax = sess?.session_end_ms ?? 1;
+  const scrubMax = sess ? endOf(sess, drill) : 1;
   // Time left in the bar now forming, for the clock to carry. Time bars only:
   // a tick bar closes on a count of prints, which the wall clock knows nothing
   // about, so showing it a countdown would be showing it a guess. Anchored at
@@ -2712,8 +2765,32 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         right={
           <>
             {/* The account, first on the bar, because it is the only thing here
-                that can end the session before the tape does. */}
-            <AccountChip view={account} receivedAt={accountAt} />
+                that can end the session before the tape does.
+
+                Not in a drill: reps are unpriced, so there is no equity, no
+                floor and nothing that could end one early. A chip reading
+                $50,000 all session on a page it has no authority over would be
+                the worst of both — it would look like stakes. */}
+            {!drill && <AccountChip view={account} receivedAt={accountAt} />}
+            {drill && (
+              <>
+                <span
+                  className="sim-topbar-note"
+                  title="Reps you have finished today. Unpriced: no account, no floor, no cooldown — what a drill costs is the tape it takes."
+                >
+                  rep {repsToday + 1}
+                </span>
+                <button
+                  type="button"
+                  className="chart-topbar-btn"
+                  onClick={endRep}
+                  disabled={!ready || endedRef.current}
+                  title="End this rep now and reveal the day (the tape ends it at the bell either way)"
+                >
+                  End rep
+                </button>
+              </>
+            )}
             <Link to="/charts/replay/history" className="sim-topbar-link" title="Every attempt you've recorded">
               History →
             </Link>

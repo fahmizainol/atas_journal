@@ -867,6 +867,59 @@ button:disabled {
   border-radius: 2px;
 }
 
+/* ---- community study rows (see IndicatorLegend's StudyRow) ----
+   Under the layers, behind a rule that is a statement rather than a separator:
+   above it is this app's own, each with a measured reason to exist; below it is
+   borrowed, most of it transpiled from community Pine. The rows are otherwise
+   the same rows — same swatch, same eye, same "…" — because once a study is on
+   the chart it should read like anything else on it. */
+.chart-legend-rule {
+  padding: 4px 4px 1px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  opacity: 0.6;
+}
+/* Slightly quieter than a layer of ours at rest — the provenance, said in
+   weight rather than in another badge on a 260px overlay. */
+.chart-legend-row.study {
+  font-weight: 450;
+}
+/* The ×, which only a study has: a layer of ours can be hidden but never
+   deleted, so there is nothing for it to do on those rows. */
+.chart-legend-x {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 4px;
+  opacity: 0.6;
+}
+.chart-legend-x:hover:not(:disabled) {
+  border: none;
+  background: rgba(26, 29, 39, 0.6);
+  color: var(--red);
+  opacity: 1;
+}
+/* It threw, or it computed nothing over these bars. Both draw nothing, which on
+   a canvas is indistinguishable from a study that was never added — the tooltip
+   on the row carries the reason. */
+.chart-legend-warn {
+  color: var(--red);
+  font-weight: 700;
+}
+/* The marker-only studies — a row with no line and no number reads as broken. */
+.chart-legend-sub {
+  color: var(--muted);
+  font-size: 10px;
+}
+
 /* ---- the legend on a light chart ----
    The identity block, the crosshair readout and the indicator rows are the only
    chrome drawn straight onto the tape with no plate under it — everything else
@@ -1003,10 +1056,24 @@ button:disabled {
   margin-top: 8px;
   color: var(--muted);
 }
-.chart-set-row select {
+.chart-set-row select,
+.chart-set-row input[type="number"],
+.chart-set-row input[type="text"] {
   width: 100%;
+  box-sizing: border-box;
   font-size: 12px;
   padding: 5px 8px;
+}
+.chart-set-row input[type="color"] {
+  width: 44px;
+  height: 24px;
+  padding: 0;
+}
+/* A checkbox wants its label beside it, not above it — the stacked grid the
+   selects use leaves a 12px box marooned under a full-width caption. */
+.chart-set-row.inline {
+  grid-template-columns: 1fr auto;
+  align-items: center;
 }
 /* Said out loud where one knob feeds two rows, because the alternative is
    changing a number here and watching a different row's label move. */
@@ -1253,6 +1320,45 @@ button:disabled {
   opacity: 1;
   visibility: visible;
   transition-delay: 0.35s;
+}
+
+/* ---- off-screen level markers (see ReplayChart's .chart-edge block) ----
+   Hung on the price axis at the top and the bottom of the *price* pane, because
+   the thing they report is vertical: a level that left over the top says so at
+   the top. Same axis gutter as the ◎, and clear of it — that corner is 8px+28px
+   of button, and the badges sit beside it — so the upper marker starts below the
+   pair. The lower one is positioned from the pane height rather than pinned to
+   the bottom, since the element also holds the CVD pane and the time axis.
+   Quieter than either: dashed border and muted text, because this is a note
+   about something you cannot see, not a control. */
+.chart-edge {
+  position: absolute;
+  top: 44px;
+  right: calc(var(--axis-w, 60px) + 8px);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: rgba(14, 17, 23, 0.72);
+  border: 1px dashed var(--card-border);
+  backdrop-filter: blur(6px);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+  /* Hoverable, unlike the other readouts on this canvas: the pill has room for a
+     distance but not for the level's actual price, and that is the number you
+     want before you decide to go and look at it. Costs an 18px hit area in a
+     gutter the ◎ and the badges already own. */
+  cursor: default;
+}
+/* The count of what else is out there the same way. Dimmer again: the nearest
+   level is the answer, this is only "and it is not alone". */
+.chart-edge-n {
+  opacity: 0.6;
 }
 
 /* The crosshair OHLC readout — top-centre, because the top-left corner already
@@ -2297,6 +2403,17 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* Backtest mode's rep counter. It sits where the account chip sits on the
+   replay and reads the same way, because it answers the same question — "how
+   far into this am I" — for a page that has no equity to answer it with.
+   Tabular figures so the count doesn't shift the End rep button beside it. */
+.sim-topbar-note {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---- the replay account (see components/charts/ReplayAccount) ----
    The chip on the bar. Sized to the 36px row like everything else on it, and
    quiet by design: equity in monospace so it doesn't jitter as the digits
@@ -2527,6 +2644,142 @@ button:disabled {
 .nav-menu-item.here {
   color: var(--accent);
   font-weight: 600;
+}
+
+/* ---- indicator catalogue (see components/charts/StudyPicker) ----
+   The ƒ on the chart topbar: search, then two sections — this chart's own layers
+   above the rule, the borrowed ones below it. Add and remove only; what is on
+   the chart is listed on the chart. A popover on the same z-layer as the nav
+   menu, since it opens over the chart and the chart's own corners go to 4. */
+.study-pick {
+  position: relative;
+  flex: none;
+}
+.study-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  width: 330px;
+  max-width: calc(100vw - 24px);
+  padding: 6px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 9px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+}
+.study-search {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.study-results {
+  max-height: min(56vh, 420px);
+  overflow-y: auto;
+  margin-top: 4px;
+}
+/* The rule between ours and theirs. Sticky, because it is the one thing on this
+   list you must not lose track of while scrolling: everything under the second
+   header is borrowed and mostly transpiled from community Pine, and a number
+   read off the wrong side of that line is the whole risk this feature carries. */
+.study-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 6px 3px;
+  background: var(--card);
+  border-bottom: 1px solid var(--card-border);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
+.study-hit + .study-head,
+.study-empty + .study-head {
+  margin-top: 8px;
+}
+/* Which pane an add would land on. Named because with four charts up, "add" is
+   otherwise a gesture with an invisible target. */
+.study-head-pane {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: var(--accent);
+}
+.study-head-note {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  opacity: 0.7;
+  cursor: help;
+}
+/* One row shape, both sections. Three columns: what you scan for, what it
+   actually is, and where it lands. */
+.study-hit {
+  display: grid;
+  grid-template-columns: 74px 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.study-hit:hover {
+  background: var(--bg-2);
+}
+/* Ours are a toggle, not an add — you cannot have two Globex VWAPs — so the
+   first column is a checkmark rather than a short name. */
+.study-hit.mine {
+  grid-template-columns: 16px 1fr auto;
+}
+.study-hit.mine:not(.on) .study-hit-title {
+  color: var(--muted);
+}
+.study-tick {
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1;
+}
+.study-hit-short {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.study-hit-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.study-hit:not(.mine) .study-hit-title {
+  color: var(--muted);
+  font-size: 11px;
+}
+.study-hit-where {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.study-empty {
+  padding: 8px 6px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 /* Announced, not drawn. With no tab strip on a chart page there is nothing else

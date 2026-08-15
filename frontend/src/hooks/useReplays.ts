@@ -27,6 +27,13 @@ export interface AttemptRow {
   repeat_index: number;
   note: string;
   model_id: number | null;
+  /** Which kind of sitting. Absent on every attempt recorded before backtest
+   *  mode existed, which is why nothing reads it without the `?? "replay"`. */
+  mode?: "replay" | "drill";
+  /** Drill only: the clock this rep was thrown in at, and the window it was
+   *  drawn from. Both tape wall clocks. */
+  drop_ms?: number | null;
+  window?: { from_ms: number; to_ms: number } | null;
   rewinds: RewindEvent[];
   discarded_trades: number;
   summary: Partial<AttemptSummary>;
