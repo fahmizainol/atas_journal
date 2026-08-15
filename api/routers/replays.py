@@ -70,6 +70,13 @@ class CreateIn(BaseModel):
     # is armed on a fresh session, fractional the moment it isn't.
     started_ms: float
     model_id: int | None = None
+    # Backtest mode. `drill` opens at the drop rather than the first fill, is
+    # invisible to the account, and binds `model_id` session-wide when it books
+    # — see docs/backtest-mode-plan.md. Defaulting to `replay` keeps every
+    # existing client (and every browser check) sending exactly what it did.
+    mode: str = "replay"
+    drop_ms: float | None = None
+    window: dict | None = None
 
 
 class SaveIn(BaseModel):
@@ -109,7 +116,9 @@ class PatchIn(BaseModel):
 @router.post("/replays")
 def create_replay(body: CreateIn) -> dict:
     """Open an attempt. The client calls this on the first fill — a session you
-    only watched leaves no record.
+    only watched leaves no record. **In `mode="drill"` it calls it at the drop
+    instead**, because a rep you looked at and passed on is the row backtest
+    mode exists to produce, and that mode is not gated below.
 
     **This is the gate.** The browser refuses the gesture before it becomes a
     fill, which is the only way a refusal can be useful; this refuses the
@@ -121,14 +130,30 @@ def create_replay(body: CreateIn) -> dict:
     or the moment a review is filed. `until` says when, and it is the server's
     clock that says it.
     """
+    drill = body.mode == "drill"
+    # A drill with no model is a drill that measures nothing — the binding is
+    # the entire difference between this and a blind replay, and it cannot be
+    # added afterwards (`upsert_session` writes it once).
+    if drill and body.model_id is None:
+        raise HTTPException(400, "a drill must bind a model")
+    # The sweep runs for both — it is what deletes the empty rep the last
+    # abandoned draw left behind, and a drill session is the one most likely to
+    # be leaving them.
     replay_account.sweep_stale_actives()
-    no = replay_account.refusal()
-    if no:
-        raise HTTPException(409, no)
-    # After a completed cooldown the create is what starts the next account. It
-    # happens here rather than on a button because the account is not a thing
-    # you open, it is the thing you are trading — the next sitting is the reset.
-    replay_account.ensure_epoch()
+    if not drill:
+        no = replay_account.refusal()
+        if no:
+            raise HTTPException(409, no)
+        # After a completed cooldown the create is what starts the next account.
+        # It happens here rather than on a button because the account is not a
+        # thing you open, it is the thing you are trading — the next sitting is
+        # the reset.
+        replay_account.ensure_epoch()
+    # A drill passes both: it is unpriced by design, so there is no gate to
+    # clear and no epoch to mint. **It must not call `ensure_epoch` either** —
+    # minting epoch 0 off a drill would start the real account's life at a
+    # moment nothing was at stake, and every sitting before it would fall
+    # outside every epoch for good.
     try:
         return replays.create(
             symbol=body.symbol,
@@ -140,6 +165,9 @@ def create_replay(body: CreateIn) -> dict:
             prefs=body.prefs,
             started_ms=body.started_ms,
             model_id=body.model_id,
+            mode=body.mode,
+            drop_ms=body.drop_ms,
+            window=body.window,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e

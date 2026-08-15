@@ -692,6 +692,56 @@ def test_the_create_route_refuses_with_the_code_and_the_deadline():
 
 
 @_tmp
+def test_a_drill_opens_through_a_gate_that_is_refusing_replays():
+    from fastapi import HTTPException
+
+    from api.routers import replays as router
+
+    _epoch(acct._iso(datetime.now(timezone.utc) - timedelta(days=1)))
+    _sitting(acct._iso(datetime.now(timezone.utc) - timedelta(minutes=5)), -50.0)
+
+    kw = dict(symbol="NQH5", root="NQ", date="2026-02-03", tz="New York",
+              engine_version=1, tape=TAPE, prefs=PREFS, started_ms=TAPE["rth_open_ms"])
+    made = router.create_replay(router.CreateIn(
+        **kw, mode="drill", model_id=3, drop_ms=TAPE["rth_open_ms"],
+        window={"from_ms": TAPE["rth_open_ms"], "to_ms": TAPE["rth_open_ms"] + 1},
+    ))
+    assert replays.is_drill(made)
+    # And it did not spend the account's gate on the way through: the next real
+    # sitting is still refused for the same reason and until the same moment.
+    try:
+        router.create_replay(router.CreateIn(**kw))
+    except HTTPException as e:
+        assert e.status_code == 409 and e.detail["code"] == "hour"
+    else:
+        raise AssertionError("a drill cleared the hour gate for a replay")
+
+    # A drill with nothing bound measures nothing, and the binding cannot be
+    # added later — `upsert_session` is INSERT OR IGNORE.
+    try:
+        router.create_replay(router.CreateIn(**kw, mode="drill"))
+    except HTTPException as e:
+        assert e.status_code == 400
+    else:
+        raise AssertionError("an unbound drill was opened")
+
+
+@_tmp
+def test_a_drill_does_not_mint_the_first_epoch():
+    from api.routers import replays as router
+
+    # No account.json at all, and months of practice on disk. If a drill minted
+    # epoch 0 the real account's life would begin at a moment nothing was at
+    # stake, and every sitting either side of it would be mis-filed for good.
+    router.create_replay(router.CreateIn(
+        symbol="NQH5", root="NQ", date="2026-02-03", tz="New York",
+        engine_version=1, tape=TAPE, prefs=PREFS, started_ms=TAPE["rth_open_ms"],
+        mode="drill", model_id=3,
+    ))
+    assert acct.load_state()["epochs"] == []
+
+
+@_tmp
 def test_a_create_after_the_cooldown_opens_a_fresh_account():
     from api.routers import replays as router
 
