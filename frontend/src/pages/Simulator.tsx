@@ -1473,6 +1473,20 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       // On a live tape the log is append-only, and "un-happening" a fill that
       // really occurred would be a lie about what the session did.
       if (!sourceRef.current.canSeek) return;
+      // **Forward only in a drill.** A rewound rep is a rep that already knew
+      // the answer, and the base rate this mode exists to measure cannot
+      // survive being pooled with those. Pausing, stepping forward and changing
+      // speed are all still yours — the refusal is specifically about going
+      // back over tape you have already traded through.
+      //
+      // Here rather than on the buttons because this is the one choke point
+      // every backward move goes through: ⏪, the `,` key, the transport's
+      // scrubber and the start-time jump. A guard on each of them is a guard
+      // that the next one added will not have.
+      if (drill && clockMs < clockRef.current) {
+        setRefused("Not in a drill — a rep only runs forwards.");
+        return;
+      }
       stop();
       const clamped = Math.max(s.session_start_ms, Math.min(s.session_end_ms, clockMs));
       // What the seek is about to erase, read before it is erased.
@@ -1512,7 +1526,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           noteRewind(from, clamped, dropped);
       }
     },
-    [noteRewind, pushHud, rebuild, stop],
+    [drill, noteRewind, pushHud, rebuild, stop],
   );
 
   // The chart's ⚓ tool moved. The anchored band develops from the tape like the
@@ -3417,8 +3431,12 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                 type="button"
                 style={btn(palette.card)}
                 onClick={stepBack}
-                disabled={!ready}
-                title="One bar back (,) — a rewind: anything done inside the un-happened bar un-happens"
+                disabled={!ready || drill}
+                title={
+                  drill
+                    ? "Not in a drill — a rep only runs forwards, or its base rate is measuring your hindsight"
+                    : "One bar back (,) — a rewind: anything done inside the un-happened bar un-happens"
+                }
               >
                 ⏮
               </button>
@@ -3444,7 +3462,12 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
               </label>
               <input
                 type="range"
-                min={scrubMin}
+                // In a drill the floor is where you already are — which is the
+                // high-water mark, since the clock never goes back. `seekTo`
+                // refuses a backward drag anyway; this is so the control looks
+                // like what it does rather than flashing a refusal at every
+                // grab of the handle.
+                min={drill ? hud.clockMs : scrubMin}
                 max={scrubMax}
                 step={1000}
                 value={hud.clockMs}
