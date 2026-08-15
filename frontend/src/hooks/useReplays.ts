@@ -77,6 +77,32 @@ export function useReplayJournal(id: string | null, opts?: { enabled?: boolean }
   });
 }
 
+export interface DrillCampaign {
+  model_id: number | null;
+  reps: number;
+  traded_reps: number;
+  sat_out: number;
+  /** Traded reps over settled reps — how often the model was there at all. Null
+   *  when there are no reps to divide by. */
+  base_rate: number | null;
+  trades: number;
+  net_usd: number;
+  expectancy: number | null;
+  drawn_by_hour: { hour: number; reps: number }[];
+  traded_by_hour: { hour: number; reps: number }[];
+}
+
+/** A model's backtest-mode campaign. Read off attempts rather than trades: a
+ *  sat-out rep has no trades, and a trades-based aggregate would report a base
+ *  rate of 100% forever. */
+export function useDrillCampaign(modelId: number | null) {
+  return useQuery({
+    queryKey: ["replays", "drills", modelId],
+    queryFn: () => apiGet<DrillCampaign>("/replays/drills", { model_id: modelId }),
+    enabled: modelId != null,
+  });
+}
+
 /** File one trade's rule checks against the model the rep is bound to.
  *
  *  Straight onto `PUT /notes/{trade_key}`, which already takes a model and a

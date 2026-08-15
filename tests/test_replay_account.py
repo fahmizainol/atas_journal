@@ -727,6 +727,39 @@ def test_a_drill_opens_through_a_gate_that_is_refusing_replays():
 
 
 @_tmp
+def test_the_campaign_counts_the_reps_that_had_no_trades():
+    from api.routers import replays as router
+
+    _epoch("2026-02-03T00:00:00Z")
+    # Four reps: two traded, one sat out, one still open. Plus a replay sitting
+    # and a drill on another model, neither of which is this campaign.
+    _drill("2026-02-03T14:00:00Z", 220.0, trades=[_trade(220.0)])
+    _drill("2026-02-03T15:00:00Z", -130.0, trades=[_trade(-130.0)], date="2026-02-04")
+    _drill("2026-02-03T16:00:00Z", None, trades=[], date="2026-02-05")
+    _drill("2026-02-03T17:00:00Z", None, status="active", date="2026-02-06")
+    _sitting("2026-02-03T18:00:00Z", 900.0)
+    other = _drill("2026-02-03T19:00:00Z", -400.0, trades=[_trade(-400.0)], date="2026-02-09")
+    replays.patch(other["id"], model_id=99)
+
+    got = router.drill_campaign(model_id=3)
+    # Three settled reps, not two: the sat-out one is the row the mode exists
+    # to write, and a trades-based aggregate would never have seen it.
+    assert got["reps"] == 3
+    assert got["traded_reps"] == 2 and got["sat_out"] == 1
+    assert abs(got["base_rate"] - 2 / 3) < 1e-9
+    # The rep still being sat is not counted, or every open campaign would
+    # claim a rep it has not finished.
+    assert got["trades"] == 2
+    assert got["net_usd"] == 90.0
+    # Another model's reps are another campaign, and a replay is not one at all.
+    assert router.drill_campaign(model_id=99)["reps"] == 1
+    # The drop histogram covers every settled rep, traded or not — which is what
+    # makes the base rate readable rather than just small.
+    assert sum(h["reps"] for h in got["drawn_by_hour"]) == 3
+    assert sum(h["reps"] for h in got["traded_by_hour"]) == 2
+
+
+@_tmp
 def test_a_drill_does_not_mint_the_first_epoch():
     from api.routers import replays as router
 

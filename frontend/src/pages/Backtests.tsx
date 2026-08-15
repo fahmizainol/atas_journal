@@ -1,4 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { useDrillCampaign } from "../hooks/useReplays";
 import { useFilters } from "../hooks/useFilters";
 import {
   useBacktestDetail,
@@ -201,6 +203,112 @@ const MODE_LABEL: Record<string, string> = {
   replay: "Replay",
   live: "Live",
 };
+
+/** What a backtest-mode campaign has measured on this model.
+ *
+ *  Its own block rather than a fourth row on the table above, because the
+ *  number it exists for is not a per-trade one. Every column up there is
+ *  conditioned on trades that were taken; the base rate is the opposite — how
+ *  often, thrown blind into an hour of RTH, the model was there at all — and it
+ *  is counted over reps including the ones with no trades in them. Sliding that
+ *  into a trades table would put two different denominators in one grid.
+ */
+function DrillBlock({ modelId }: { modelId: number | null }) {
+  const { data } = useDrillCampaign(modelId);
+  if (!data || !data.reps) {
+    return (
+      <div className="panel">
+        <div className="section-title">Drill</div>
+        <div className="section-cap">
+          No backtest-mode reps on this model yet. Bind it on{" "}
+          <Link to="/charts/backtest">Charts → Backtest</Link> and each rep —
+          traded or sat out — lands here.
+        </div>
+      </div>
+    );
+  }
+  const drawnMax = Math.max(...data.drawn_by_hour.map((h) => h.reps), 1);
+  const tradedAt = new Map(data.traded_by_hour.map((h) => [h.hour, h.reps]));
+  return (
+    <div className="panel">
+      <div className="section-title">Drill</div>
+      <div className="section-cap">
+        Thrown in blind at a random hour, one model. The base rate is the number
+        the arenas above cannot produce: how often the setup was there at all,
+        counted over the reps you sat out as well as the ones you traded.
+      </div>
+      <div className="table-scroll-x">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Reps</th>
+              <th>Traded</th>
+              <th>Sat out</th>
+              <th>Base rate</th>
+              <th>Trades</th>
+              <th>Expectancy</th>
+              <th>Net PnL</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>{fmtInt(data.reps)}</td>
+              <td>{fmtInt(data.traded_reps)}</td>
+              <td>{fmtInt(data.sat_out)}</td>
+              <td>{data.base_rate == null ? "—" : fmtPct(data.base_rate * 100)}</td>
+              <td>{fmtInt(data.trades)}</td>
+              <td>{data.expectancy == null ? "—" : fmt(data.expectancy)}</td>
+              <td>
+                <Pnl v={data.net_usd} />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      {/* Drawn against traded, per hour. The pair is what makes the base rate
+          readable: 30% drawn across the whole session and 30% drawn from a
+          window you had already narrowed to the afternoon are different
+          findings, and one number cannot tell them apart. */}
+      <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 3 }}>
+        {data.drawn_by_hour.map((h) => {
+          const t = tradedAt.get(h.hour) ?? 0;
+          return (
+            <div
+              key={h.hour}
+              style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}
+            >
+              <span style={{ width: 34, color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+                {String(h.hour).padStart(2, "0")}:00
+              </span>
+              <span
+                style={{
+                  height: 10,
+                  width: `${(h.reps / drawnMax) * 60}%`,
+                  background: "var(--bg2)",
+                  borderRadius: 2,
+                  position: "relative",
+                }}
+              >
+                <span
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: h.reps ? `${(t / h.reps) * 100}%` : 0,
+                    background: "var(--accent)",
+                    borderRadius: 2,
+                  }}
+                />
+              </span>
+              <span style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+                {t}/{h.reps}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 function ComparisonTable({ comparison }: { comparison: Record<string, SlimMetrics> }) {
   const rows = (["backtest", "replay", "live"] as const).map((mode) => ({
@@ -424,6 +532,10 @@ export function Backtests() {
 
               <div style={{ marginBottom: 16 }}>
                 <ComparisonTable comparison={detail.comparison} />
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <DrillBlock modelId={modelId} />
               </div>
 
               <div className="panel">

@@ -254,6 +254,78 @@ def list_replays(
     }
 
 
+@router.get("/replays/drills")
+def drill_campaign(model_id: int | None = Query(None)) -> dict:
+    """What a backtest-mode campaign has actually measured.
+
+    **Read off the attempts, not off the journal trades**, and that is the whole
+    reason this endpoint exists rather than a filter on the trades table. A rep
+    where you looked and passed on has no trades at all; an aggregate built from
+    trades would therefore see only the reps you traded and report a base rate of
+    100% forever — plausibly, which is the worst way for a number to be wrong.
+
+    ``base_rate`` is traded reps over settled reps: how often, drawn blind into
+    an hour of RTH, the model was there to be traded. The two histograms are
+    what make it readable — hours drawn against hours traded — because a low
+    base rate on a window you narrowed to the afternoon says something quite
+    different from the same number drawn across the whole session.
+
+    Above ``/replays/{attempt_id}``, like every other named route here.
+    """
+    rows = [r for r in replays.list_attempts(limit=5000) if replays.is_drill(r)]
+    if model_id is not None:
+        rows = [r for r in rows if r.get("model_id") == model_id]
+    # An `active` rep is the one being sat right now. Counting it would have
+    # every campaign open claiming a rep it has not finished.
+    settled = [r for r in rows if r.get("status") in replay_account.SETTLED]
+
+    drawn: dict[int, int] = {}
+    traded_by_hour: dict[int, int] = {}
+    traded = net = 0.0
+    traded_reps = 0
+    for r in settled:
+        n = replay_account.trade_count(r)
+        hour = _drop_hour(r)
+        if hour is not None:
+            drawn[hour] = drawn.get(hour, 0) + 1
+            if n:
+                traded_by_hour[hour] = traded_by_hour.get(hour, 0) + 1
+        if n:
+            traded_reps += 1
+            traded += n
+            net += replay_account.net_usd(r)
+
+    return {
+        "model_id": model_id,
+        "reps": len(settled),
+        "traded_reps": traded_reps,
+        "sat_out": len(settled) - traded_reps,
+        "base_rate": (traded_reps / len(settled)) if settled else None,
+        "trades": int(traded),
+        "net_usd": round(net, 2),
+        "expectancy": round(net / traded, 2) if traded else None,
+        "drawn_by_hour": [{"hour": h, "reps": drawn[h]} for h in sorted(drawn)],
+        "traded_by_hour": [
+            {"hour": h, "reps": traded_by_hour.get(h, 0)} for h in sorted(drawn)
+        ],
+    }
+
+
+def _drop_hour(row: dict) -> int | None:
+    """The ET hour a rep was thrown in at, from its stored drop.
+
+    ``drop_ms`` is a *display-zone wall clock with the zone dropped* — see the
+    boxed rule in journal.replay_account — so the hour is arithmetic on the
+    stamp itself and never a timezone conversion. Reading it as UTC and
+    converting would shift every rep by four or five hours and still look like
+    a plausible histogram.
+    """
+    drop = row.get("drop_ms")
+    if not isinstance(drop, (int, float)):
+        return None
+    return int((drop % 86_400_000) // 3_600_000)
+
+
 @router.get("/replays/{attempt_id}/journal")
 def replay_journal(attempt_id: str, scope: Scope = Depends(resolve_scope)) -> dict:
     """The journal rows one attempt produced, each with the key notes hang off.

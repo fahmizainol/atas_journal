@@ -182,11 +182,10 @@ def sweep_stale_actives(*, now: datetime | None = None) -> list[str]:
         if not (seen and seen <= cutoff):
             continue
         try:
-            if replays.is_drill(row) and not (row.get("summary") or {}).get("trades"):
-                if _trade_count(row) == 0:
-                    replays.delete(row["id"])
-                    closed.append(row["id"])
-                    continue
+            if replays.is_drill(row) and trade_count(row) == 0:
+                replays.delete(row["id"])
+                closed.append(row["id"])
+                continue
             replays.patch(row["id"], status="abandoned")
         except (ValueError, FileNotFoundError, OSError):
             continue
@@ -194,14 +193,21 @@ def sweep_stale_actives(*, now: datetime | None = None) -> list[str]:
     return closed
 
 
-def _trade_count(row: dict) -> int:
-    """How many trades an attempt actually holds.
+def trade_count(row: dict) -> int:
+    """How many trades an attempt holds — the summary's number, or the file's.
 
-    The summary is the browser's number and is absent on an attempt that never
-    autosaved — which is every abandoned drill, since the recorder writes on the
-    first fill and there wasn't one. So the file is the authority for *this*
-    question, and it is only ever asked about attempts the summary is silent on.
+    Same shape as ``net_usd`` and for the same reason: ``summary.trades`` is the
+    browser's own count and the one everything else shows, but it is absent on
+    an attempt that never autosaved a full summary — which includes every
+    abandoned drill, since the recorder had no fill to write about.
+
+    The distinction matters most where it is least visible: a drill campaign's
+    base rate is *traded reps over reps*, so a missing count silently turns
+    every rep into a sat-out one and reports a model that never appears.
     """
+    n = (row.get("summary") or {}).get("trades")
+    if isinstance(n, int):
+        return n
     try:
         path = replays.attempt_dir(row["id"]) / "trades.json"
     except (KeyError, ValueError):
