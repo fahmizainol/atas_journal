@@ -130,6 +130,32 @@ def test_the_sitting_is_registered_so_practice_is_tagged_replay(conn):
     assert sess["model_id"] is None
 
 
+def test_the_review_can_find_the_keys_notes_hang_off(conn):
+    """A trade_key is a hash of the trade's own content, so the browser cannot
+    compute one. Backtest mode's review asks for them instead."""
+    from api.routers import replays as rr
+
+    a = _attempt()
+    # Well clear of the first one's exit: a position opened at the same
+    # millisecond another closed never returns to flat between them, so the two
+    # are one logical trade and the review would have one row to show for two
+    # fills.
+    _save(a, [_trade(), _trade(id=2, entryMs=EXIT_MS + 600_000,
+                              exitMs=EXIT_MS + 1_200_000, pnl=-120.0, pts=-3.0)])
+    got = rr.replay_journal(a["id"], make_scope(include_archived=True))["trades"]
+    assert len(got) == 2
+    assert all(len(t["trade_key"]) == 16 for t in got)
+    # Entry order — the order they happened, and the order the review walks.
+    assert got[0]["entry_ts_local"] <= got[1]["entry_ts_local"]
+    # Nothing reviewed yet, and `reviewed` is what says so: a trade with no rows
+    # at all is unscored, which is not the same as one that met no rules.
+    assert [t["reviewed"] for t in got] == [False, False]
+    assert [t["rules_met"] for t in got] == [[], []]
+    # Another attempt's trades are not this one's.
+    assert rr.replay_journal(_attempt(date="2026-08-08")["id"],
+                             make_scope(include_archived=True))["trades"] == []
+
+
 def test_a_drill_binds_its_model_the_way_a_backtest_session_does(conn):
     a = replays.create(symbol="NQU6", root="NQ", date="2026-08-07", tz="New York",
                        engine_version=1, tape=TAPE, prefs={"size": 1},

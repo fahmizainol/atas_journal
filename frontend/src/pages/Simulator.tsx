@@ -59,8 +59,11 @@ import {
   useFileReview,
   useReplayAttemptDetail,
   useReplayAttempts,
+  useReplayJournal,
+  useSaveRuleChecks,
   type AttemptDetail,
 } from "../hooks/useReplays";
+import { DrillReview } from "../components/charts/DrillReview";
 import { clearResume, loadResume, saveResume, type ResumePoint } from "../lib/replayResume";
 import { clearReview, loadReview, saveReview } from "../lib/replayReview";
 import { ReviewPanel } from "../components/charts/ReviewPanel";
@@ -460,6 +463,12 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         ? "The drop window ends before it starts."
         : null;
 
+  // Whether this rep has ended — by hand or at the bell — and the review is
+  // therefore worth offering. Its own flag rather than reading the recorder's
+  // status, because the review must not appear over a rep that merely paused,
+  // and must survive the next autosave reopening the attempt.
+  const [repOver, setRepOver] = useState(false);
+
   // Where in RTH this rep was thrown in, as ET minutes past midnight. Null on
   // the replay page and until the first draw.
   //
@@ -480,6 +489,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       // Drawing is a decision to be somewhere else, so the bookmark goes.
       leaveResume();
       setRevealed(false);
+      setRepOver(false);
       if (drillRef.current && drill) {
         const lo = minutesOf(drillRef.current.dropFrom);
         const hi = minutesOf(drillRef.current.dropTo);
@@ -1155,6 +1165,12 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
    *  claiming you had already done it. Local midnight, because the number is
    *  about your day rather than about the account's (which counts in New York,
    *  see replay_account._et_day). */
+  // The rep's journal rows, and the keys its rule checks hang off. Fetched only
+  // once the rep is over: the mirror rewrites this attempt's rows on every
+  // autosave, so mid-rep the keys are a moving target and any answer filed
+  // against one would be filed against a row about to be replaced.
+  const repJournalQ = useReplayJournal(drill && repOver ? attemptRec.attempt?.id ?? null : null);
+  const saveRules = useSaveRuleChecks(drillPrefs.modelId);
   const repsToday = useMemo(() => {
     if (!drill) return 0;
     const midnight = new Date();
@@ -2442,6 +2458,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     stop();
     endAttempt();
     setRevealed(true);
+    setRepOver(true);
   }, [endAttempt, stop]);
 
   // The daily stop, acting rather than refusing.
@@ -2497,6 +2514,11 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     // Only this session's own clock speaks for this session — see `gen`.
     if (end == null || hud.gen !== sessGenRef.current || hud.clockMs < end) return;
     setRevealed(true);
+    // Sitting there until the bell is the same ending as pressing End rep, and
+    // has to leave the page in the same state — including the review being on
+    // offer. Outside the `endedRef` guard because that one is about not
+    // finishing an attempt twice, not about what the page shows.
+    if (drill) setRepOver(true);
     if (endedRef.current) return;
     endAttempt();
   }, [drill, endAttempt, hud.clockMs, hud.gen]);
@@ -3675,6 +3697,26 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
               onFile={submitReview}
               filing={fileReview.isPending}
               error={fileReview.error instanceof Error ? fileReview.error.message : null}
+            />
+          )}
+
+          {/* Backtest mode's own review, offered when the rep is over and never
+              forced — 🎲 is live either side of it. Above the ticket rather than
+              replacing it: the rep is finished, but the ticket is what the next
+              draw arrives into, and a panel that hid it would make "next rep"
+              feel like leaving the page. */}
+          {drill && repOver && (
+            <DrillReview
+              modelName={boundModel?.name ?? "this model"}
+              rules={boundModel?.rules ?? []}
+              trades={repJournalQ.data?.trades ?? []}
+              saving={saveRules.isPending}
+              error={saveRules.error instanceof Error ? saveRules.error.message : null}
+              onSave={(key, rulesMet) =>
+                saveRules.mutate({ tradeKey: key, rulesMet })
+              }
+              onDraw={() => daysQ.data?.days.length && anyDay(daysQ.data.days)}
+              drawBlocked={drillBlocked}
             />
           )}
 

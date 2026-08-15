@@ -27,13 +27,14 @@ mirror write went wrong would be the wrong trade to make.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from journal import db, replay_account, replays
 from journal.live import booking as bookmod
 
 from .. import deps
+from ..scope import Scope, resolve_scope
 
 router = APIRouter()
 
@@ -251,6 +252,49 @@ def list_replays(
             limit=limit, status=status, symbol=symbol, date=date
         )
     }
+
+
+@router.get("/replays/{attempt_id}/journal")
+def replay_journal(attempt_id: str, scope: Scope = Depends(resolve_scope)) -> dict:
+    """The journal rows one attempt produced, each with the key notes hang off.
+
+    Backtest mode's review needs this and cannot compute it: a `trade_key` is a
+    truncated SHA-1 of the trade's own content (``journal.trades._trade_key``),
+    so the browser has no way to name a trade the mirror has just written. It
+    asks instead.
+
+    The saved model and rule checks come back on each row too, so the panel
+    opens showing what has already been answered rather than blank over trades
+    that were reviewed on a previous visit.
+
+    ``include_archived`` is forced: a review is about the trades this sitting
+    made, and whether their session is archived has nothing to do with it.
+    """
+    src = bookmod.source_file_for_attempt(attempt_id)
+    df = scope.filtered_all
+    rows: list[dict] = []
+    if not df.empty:
+        mine = df[df["source_file"] == src]
+        conn = deps.get_conn()
+        with deps.db_lock():
+            for r in mine.to_dict("records"):
+                key = str(r.get("logical_trade_key") or "")
+                if not key:
+                    continue
+                checks = db.get_rule_checks(conn, key)
+                rows.append({
+                    "trade_key": key,
+                    "direction": r.get("direction"),
+                    "entry_ts_local": str(r.get("entry_ts_local") or ""),
+                    "net_pnl": float(r.get("net_pnl") or 0.0),
+                    "model_id": db.get_trade_model(conn, key),
+                    "rules_met": sorted(rid for rid, met in checks.items() if met),
+                    "reviewed": bool(checks),
+                })
+    # Entry order, which is the order they happened and the order the review
+    # walks them in. The scope's own sort is by trade number and is not it.
+    rows.sort(key=lambda r: r["entry_ts_local"])
+    return {"trades": rows}
 
 
 @router.get("/replays/{attempt_id}")

@@ -62,6 +62,61 @@ export function useReplayAttempts(opts?: { enabled?: boolean }) {
   });
 }
 
+/** The journal rows one attempt produced, with the keys notes hang off.
+ *
+ *  Backtest mode's review needs these and cannot derive them: a trade_key is a
+ *  hash of the trade's own content, written on the server when the mirror runs.
+ *  Enabled only once a rep is over, because that is the only moment the answer
+ *  is stable — the mirror rewrites this attempt's rows on every autosave. */
+export function useReplayJournal(id: string | null, opts?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["replays", "journal", id],
+    queryFn: () =>
+      apiGet<{ trades: DrillTradeRow[] }>(`/replays/${id}/journal`, { include_archived: 1 }),
+    enabled: !!id && (opts?.enabled ?? true),
+  });
+}
+
+/** File one trade's rule checks against the model the rep is bound to.
+ *
+ *  Straight onto `PUT /notes/{trade_key}`, which already takes a model and a
+ *  rules_met list and already sweeps checks belonging to another model's rules.
+ *  A review endpoint of its own would be a second way to write the same rows.
+ *
+ *  Note that this sends the note fields empty. That is correct for a drill —
+ *  there is no note being written here — but it means this must never be used
+ *  to save a trade that has one, or it would blank it. */
+export function useSaveRuleChecks(modelId: number | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ tradeKey, rulesMet }: { tradeKey: string; rulesMet: number[] }) =>
+      apiSend<{ ok: boolean }>("PUT", `/notes/${tradeKey}`, {
+        note: "",
+        tags: [],
+        setups: [],
+        confluences: [],
+        model_id: modelId,
+        rules_met: rulesMet,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["replays", "journal"] });
+      // A rule check moves the trade between compliance buckets.
+      qc.invalidateQueries({ queryKey: ["model-stats"] });
+      qc.invalidateQueries({ queryKey: ["note"] });
+    },
+  });
+}
+
+export interface DrillTradeRow {
+  trade_key: string;
+  direction: string | null;
+  entry_ts_local: string;
+  net_pnl: number;
+  model_id: number | null;
+  rules_met: number[];
+  reviewed: boolean;
+}
+
 export function useReplayAttemptDetail(id: string | null) {
   return useQuery({
     queryKey: ["replays", "detail", id],
