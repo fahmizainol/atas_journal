@@ -1,3 +1,4 @@
+
 export interface Meta {
   has_data: boolean;
   databento_available: boolean;
@@ -116,7 +117,29 @@ export interface TradeRow {
   comment: string;
   model_id: number | null; // effective model (own binding, or a backtest session's)
   session_mode: SessionMode; // the owning session's mode; drives the detail layout
-  setups?: string[]; // attached by GET /trades for table badges
+  /** False when that mode was defaulted rather than read — an imported broker
+   *  export has no session row and reads as `replay`. Anything that asks the
+   *  trader for what a sitting should have captured must gate on this, not on
+   *  the mode. */
+  session_known: boolean;
+  setups?: string[]; // attached by GET /trades — the ARCHIVED era's badges
+  // The review, attached by GET /trades so the top-down surfaces (Review
+  // page's ledger/matrix/facets, the Trades table's cut) can group and count
+  // client-side without a per-axis endpoint.
+  setup?: string | null; // journal.review.SETUPS id
+  discipline?: string | null; // journal.review.DISCIPLINES id
+  grade?: string | null;
+  /** True when the grade was answered blind at the recall front. A false grade
+   * predates blind capture and restates the outcome — any aggregate over
+   * grades must split on this or it will manufacture A-beats-D. */
+  grade_blind?: boolean;
+  watched_labels?: string[]; // display labels ("GX VAH", "no level")
+  reviewed?: boolean; // journal.review.trade_answered
+  /** The debt taxonomy (journal.review.state_of): "reviewed" passes the full
+   * gate; "owed" is touched-but-incomplete at any age OR untouched from the
+   * grading era (2026-08-20) onward; "history" is untouched pre-era backlog —
+   * not owed, not faked. */
+  review_state?: "reviewed" | "owed" | "history";
 }
 
 // --- Models: the live taxonomy, replacing setups + confluences -----------
@@ -579,67 +602,14 @@ export interface Note {
   confluences?: string[];
   model_id?: number | null; // null = off-model
   rules_met?: number[]; // ids of the model's rules this trade satisfied
-}
-
-export interface VideoBookmark {
-  id: number;
-  source_file: string;
-  offset_s: number;
-  label: string;
-  trade_key: string | null; // bound trade; null = free-form bookmark
-  created_at: string;
-  origin: "manual" | "synced"; // hand-placed/anchor vs auto-synced from trade ts
-}
-
-export interface TradeVideoBookmarkStatus {
-  source_file: string;
-  offset_s: number;
-  label: string;
-  origin: "manual" | "synced";
-}
-
-export interface TradeVideoStatus {
-  source_file: string;
-  has_video: boolean;
-  exists: boolean;
-  playable: boolean;
-  bookmark: TradeVideoBookmarkStatus | null;
-}
-
-export interface TradeVideoStatusResponse {
-  statuses: Record<string, TradeVideoStatus>;
-}
-
-export interface SyncResult {
-  created: number;
-  skipped_existing: number;
-  skipped_out_of_range: number;
-  pruned_orphans: number;
-  anchor_trade_key: string;
-}
-
-export interface VideoInfo {
-  path: string;
-  duration_s: number | null;
-  exists: boolean; // file present at the linked path
-  playable: boolean; // extension a browser <video> can play
-}
-
-export interface ScanLinked {
-  source_file: string;
-  day: string; // ISO date of the replayed session
-  attempt_no: number; // parsed from the export filename
-  filename: string; // the recording that matched, e.g. 13-JUN-2026-01.mp4
-}
-
-export interface ScanResult {
-  linked: ScanLinked[]; // attempts newly auto-linked this scan
-  count: number;
-}
-
-export interface VideoData {
-  video: VideoInfo | null; // null = no recording linked to this attempt
-  bookmarks: VideoBookmark[];
+  // The review's enumerated answers — PARTIAL on the server: null/omitted
+  // means unchanged, never cleared. The grade is deliberately absent here: it
+  // is written blind by the recall front.
+  setup?: string | null;
+  discipline?: string | null;
+  // The one partial field where a list REPLACES the stored set (deselecting
+  // one of several has to persist) and [] clears. null still means unchanged.
+  watched_levels?: string[] | null;
 }
 
 export interface Reconcile {
@@ -655,3 +625,4 @@ export interface StatisticsDetail {
   ours: Metrics;
   reconcile: Reconcile;
 }
+

@@ -1,0 +1,282 @@
+<meta charset="utf-8"/>
+<title>Effort vs result at a level</title>
+<style>
+  .er { font: 13px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: #d7dae0; background: #12141a; padding: 22px 26px 60px; max-width: 1100px; }
+  .er h1 { font-size: 21px; margin: 0 0 4px; color: #f2f4f8; letter-spacing: -0.01em; }
+  .er h2 { font-size: 15px; margin: 34px 0 10px; color: #f2f4f8;
+           border-bottom: 1px solid #262a33; padding-bottom: 6px; }
+  .er h2 small { font-weight: 400; color: #8a8f9c; margin-left: 8px; letter-spacing: 0; }
+  .er p { margin: 9px 0; max-width: 76ch; }
+  .er .lede { color: #a8adb9; }
+  .er code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+             background: #1b1e26; padding: 1px 5px; border-radius: 3px; color: #cdd3de; }
+  .er table { border-collapse: collapse; margin: 12px 0; font-variant-numeric: tabular-nums; }
+  .er th, .er td { padding: 5px 12px 5px 0; text-align: right; border-bottom: 1px solid #1e222a; }
+  .er th:first-child, .er td:first-child { text-align: left; }
+  .er th { color: #8a8f9c; font-weight: 500; font-size: 11px;
+           text-transform: uppercase; letter-spacing: .05em; }
+  .er .verdict { border-left: 3px solid #f5455f; background: #1a1216; padding: 11px 16px;
+                 margin: 14px 0; border-radius: 0 4px 4px 0; }
+  .er .verdict.ok { border-left-color: #21c07a; background: #101a15; }
+  .er .verdict b { color: #f2f4f8; }
+  .er .k { color: #f5455f; font-variant-numeric: tabular-nums; }
+  .er .g { color: #21c07a; font-variant-numeric: tabular-nums; }
+  .er .dim { color: #8a8f9c; }
+  .er .bar { display: inline-block; height: 9px; background: #2f6f8f; vertical-align: middle;
+             border-radius: 1px; }
+  .er footer { margin-top: 40px; color: #6e727e; font-size: 11.5px; }
+  @media (prefers-color-scheme: light) {
+    .er { color: #23262d; background: #fff; }
+    .er h1, .er h2, .er .verdict b { color: #0f1115; }
+    .er h2 { border-bottom-color: #e4e6ea; }
+    .er .lede, .er .dim, .er h2 small { color: #6e727e; }
+    .er code { background: #f2f3f5; color: #34383f; }
+    .er th, .er td { border-bottom-color: #eceef1; }
+    .er th { color: #6e727e; }
+    .er .verdict { background: #fdf3f4; }
+    .er .verdict.ok { background: #f1faf5; }
+    .er .k { color: #b91c37; } .er .g { color: #0d7c4a; }
+  }
+</style>
+
+<div class="er">
+  <h1>Effort vs result at a level</h1>
+  <p class="lede">
+    Does a <em>level-anchored</em> window — "since price arrived here, buyers have
+    spent N contracts and gained M ticks" — say anything the chart's existing
+    absorption band does not? The band already scores
+    <code>volume / max(range, tick)</code> over fixed 15-second windows
+    (<code>replayEngine.ts:1305</code>), so this page is the check that runs
+    before the reading gets pixels, not after.
+  </p>
+  <p id="scope" class="dim"></p>
+
+  <div id="verdict"></div>
+
+  <h2>Q0 · How long is a contact <small>the sentence assumes price stays put</small></h2>
+  <p>
+    A contact opens within <b>__CONTACT_TICKS__</b> ticks of a level and closes
+    when price leaves by <b>__EXIT_TICKS__</b>. Everything downstream rests on
+    how long that lasts, because "N contracts spent" is only a number worth
+    reading if N has time to accumulate.
+  </p>
+  <table id="dur"></table>
+
+  <h2>Q1 · Is it already drawn <small>overlap with the absorption band</small></h2>
+  <p>
+    An episode counts as covered when a published band intersects it in
+    <em>both</em> time and price. The denominator matters as much as the answer:
+    bands light only a sliver of the session, so a low overlap is what any
+    episode set would score, including a randomly placed one.
+  </p>
+  <table id="cover"></table>
+
+  <h2>Q2 · Can a fixed baseline score a variable window <small>the normalisation question</small></h2>
+  <p>
+    Absorption's median is taken over windows of one fixed length. A
+    since-contact window has no fixed length, so before it can be scored against
+    anything, its concentration has to not depend on how long it ran. It does.
+  </p>
+  <table id="dur2"></table>
+  <p id="expl"></p>
+
+  <h2>Q3 · Does it separate anything <small>forward __FORWARD_MIN__ min, signed against the aggressor</small></h2>
+  <p>
+    Positive means the side doing the spending was wrong afterwards — what an
+    absorption read claims to see coming. The flag is heavy one-sided effort
+    (top tercile) that gained no ground.
+  </p>
+  <table id="fwd"></table>
+  <p>
+    The flag has two terms and only one of them is order flow: <em>"gained no
+    ground"</em> is a displacement fact that needs no tape at all. Holding it
+    fixed — taking only the episodes that lost ground — isolates what knowing
+    the size spent actually adds.
+  </p>
+  <table id="marg"></table>
+  <p>
+    A null is only worth reporting if the harness could have found something, so
+    the same forward join is scored against terms that are not order flow at all.
+    These are not proposals — they are the proof that a reading of 0.5 above
+    means the signal is absent rather than the join broken.
+  </p>
+  <table id="ctrl"></table>
+
+  <h2>Q4 · Sweep and reclaim <small>the pattern the episode split cuts in half</small></h2>
+  <p>
+    The episode definition has an obvious hole, so it is measured rather than
+    argued about. Price wicks through a level and comes back — the single most
+    readable thing that happens at a level — and the hysteresis turns it into
+    <em>two</em> episodes split at the excursion, with the reversal falling in
+    the gap. Neither episode contains it. Scored on its own terms below:
+    positive means the reclaim direction was right afterwards. The unfiltered
+    set is dominated by two-second flickers, so the rows beneath it keep only
+    excursions that would print a wick you could see.
+  </p>
+  <table id="reclaim"></table>
+
+  <h2>Sweep <small>neither threshold is pinned by anything</small></h2>
+  <p>
+    Both edges of the hysteresis are free parameters, so they are swept rather
+    than defended. The last three rows hold the contact edge at 4 ticks and widen
+    only the exit — the direct test of "let the wick stay inside one episode".
+    It does fix the duration: at an 80-tick exit the median contact reaches 39s.
+    But watch the range exponent, which stays flat at <code>+0.08</code> across a
+    ten-fold widening. The range is pinned by the threshold at <em>every</em>
+    setting, so concentration never stops measuring the setting — and the tape's
+    marginal contribution stays at a coin flip while the halves come apart
+    (0.539 / 0.441 at the widest). Widening also costs something the table
+    cannot show: at 80 ticks, "price is at the level" describes price twenty
+    points away from it.
+  </p>
+  <table id="sweep"></table>
+
+  <h2>By level family</h2>
+  <table id="fam"></table>
+
+  <footer id="foot"></footer>
+</div>
+
+<script>
+const S = __SUMMARY_JSON__;
+const SESS = __SESSIONS_JSON__;
+const FWD_MIN = __FORWARD_MIN__;
+
+const pct = (v, d = 1) => (v * 100).toFixed(d) + "%";
+const sgn = (v, d = 1) => (v > 0 ? "+" : "") + v.toFixed(d);
+const tone = (v, good) => `<span class="${good ? "g" : "k"}">${v}</span>`;
+
+function table(el, head, rows) {
+  document.getElementById(el).innerHTML =
+    "<thead><tr>" + head.map((h) => `<th>${h}</th>`).join("") + "</tr></thead><tbody>" +
+    rows.map((r) => "<tr>" + r.map((c) => `<td>${c}</td>`).join("") + "</tr>").join("") +
+    "</tbody>";
+}
+
+document.getElementById("scope").textContent =
+  `${S.n.toLocaleString()} contact episodes across ${S.sessions} NQ sessions ` +
+  `(${SESS.length} tapes, ${SESS.reduce((a, s) => a + s.ticks, 0).toLocaleString()} ticks), ` +
+  `9 level families: session VWAP ±1σ, developing POC/VAH/VAL, and the prior ` +
+  `session's finished POC/VAH/VAL.`;
+
+// --- Q0
+table("dur", ["Percentile", "Duration"],
+  Object.entries(S.dur_p).map(([p, v]) => [`p${p}`, `${v.toFixed(0)}s`])
+    .concat([["max", `${S.dur_max.toFixed(0)}s`]]));
+
+// --- Q1
+table("cover", ["", "Covered by a band", "n"], [
+  ["All contact episodes", pct(S.covered_all), S.n.toLocaleString()],
+  ["Flagged episodes", pct(S.covered_notable), S.n_notable.toLocaleString()],
+  ["<span class='dim'>Session time lit by any band</span>",
+   `<span class='dim'>${pct(S.lit, 2)}</span>`, `<span class='dim'>—</span>`],
+]);
+
+// --- Q2
+const wide = Math.max(...S.dur_buckets.map((b) => b.conc));
+table("dur2", ["Contact duration", "Median conc (lots/tick)", "", "Median rate (lots/s)", "n"],
+  S.dur_buckets.map((b) => [
+    b.dur, b.conc.toFixed(1),
+    `<span class="bar" style="width:${(b.conc / wide * 120).toFixed(0)}px"></span>`,
+    b.rate.toFixed(2), b.n.toLocaleString(),
+  ]));
+document.getElementById("expl").innerHTML =
+  `Log-log slope of concentration against duration <b>${sgn(S.dur_exp, 3)}</b> ` +
+  `(r ${sgn(S.dur_r, 3)}); on a per-second rate <b>${sgn(S.rate_exp, 3)}</b>. ` +
+  `Neither is flat, so neither is comparable across windows of different length. ` +
+  `The decomposition says why: volume scales as <code>dur^${S.exp_vol.toFixed(2)}</code> ` +
+  `and net delta as <code>dur^${S.exp_effort.toFixed(2)}</code>, but the range only as ` +
+  `<code>dur^${S.exp_range.toFixed(2)}</code> — because an episode <em>cannot</em> be ` +
+  `wider than the exit threshold or it would have ended. The denominator is nearly a ` +
+  `constant, so "concentration" here is volume in a disguise, and volume is duration.`;
+
+// --- Q3
+table("fwd", ["", `Median forward ${FWD_MIN}min (ticks)`, "AUC", "n"], [
+  ["All contacts", sgn(S.fwd_all, 2), "—", S.fwd_n.toLocaleString()],
+  ["Flagged", sgn(S.fwd_notable, 2), S.fwd_auc.toFixed(3), S.n_notable.toLocaleString()],
+  ["<span class='dim'>First half</span>",
+   `<span class='dim'>${sgn(S.fwd_notable_h1, 2)}</span>`,
+   `<span class='dim'>${S.fwd_auc_h1.toFixed(3)}</span>`, "<span class='dim'>—</span>"],
+  ["<span class='dim'>Second half</span>",
+   `<span class='dim'>${sgn(S.fwd_notable_h2, 2)}</span>`,
+   `<span class='dim'>${S.fwd_auc_h2.toFixed(3)}</span>`, "<span class='dim'>—</span>"],
+]);
+
+if (S.auc_marginal !== undefined) {
+  table("marg", ["Episodes that lost ground", `Median forward ${FWD_MIN}min`, "AUC", "n"], [
+    ["Heavy spend (top tercile)", sgn(S.fwd_lost_hi, 2), "", ""],
+    ["Light spend", sgn(S.fwd_lost_lo, 2), "", ""],
+    ["<b>The tape's whole contribution</b>", "",
+     `<b>${S.auc_marginal.toFixed(3)}</b>`, S.lost_n.toLocaleString()],
+  ]);
+}
+
+table("ctrl", ["Positive control — non-tape terms, same forward join", "AUC"], [
+  [`Episode lost ground <span class="dim">(r with forward ${sgn(S.ctrl_r, 3)})</span>`,
+   S.ctrl_auc.toFixed(3)],
+  ["Contact lasted longer than median", S.ctrl_auc_dur.toFixed(3)],
+]);
+
+// --- Q4
+if (S.reclaim && S.reclaim.all) {
+  const R = S.reclaim;
+  table("reclaim",
+    ["Excursion", "n", `Median forward ${FWD_MIN}min`, "Reclaim was right", "h1 / h2",
+     "Delta during the excursion (AUC)"],
+    [["Everything", R.all.n.toLocaleString(), sgn(R.all.median, 1) + "t",
+      pct(R.all.share), `<span class="dim">${pct(R.all.h1)} / ${pct(R.all.h2)}</span>`,
+      R.all.tape_auc.toFixed(3)]]
+      .concat(R.visible.map((w) => [
+        `≥${w.gap}s away, ≥${w.through}t through`, w.n.toLocaleString(),
+        sgn(w.median, 1) + "t", pct(w.share),
+        `<span class="dim">${pct(w.h1)} / ${pct(w.h2)}</span>`, w.tape_auc.toFixed(3),
+      ])));
+}
+
+// --- sweep
+table("sweep",
+  ["contact/exit", "n", "p50 dur", "&lt;15s", "range exp", "flagged fwd", "AUC", "h1 / h2", "marginal AUC"],
+  S.sweep.map((w) => [
+    `<code>${w.cfg}</code>`, w.n.toLocaleString(), `${w.dur_p[50].toFixed(0)}s`,
+    pct(w.frac_under_win, 0), sgn(w.exp_range, 2), sgn(w.fwd_notable, 1),
+    w.fwd_auc.toFixed(3),
+    `<span class="dim">${w.fwd_auc_h1.toFixed(3)} / ${w.fwd_auc_h2.toFixed(3)}</span>`,
+    w.auc_marginal === undefined ? "—" : w.auc_marginal.toFixed(3),
+  ]));
+
+// --- families
+table("fam", ["Level", "Episodes", "Covered by a band", "Flagged", `Flagged fwd ${FWD_MIN}min`],
+  S.by_level.map((f) => [
+    f.level, f.n.toLocaleString(), pct(f.covered), f.notable.toLocaleString(),
+    f.fwd === null ? "—" : sgn(f.fwd, 1),
+  ]));
+
+// --- verdict, written from the numbers rather than by hand
+const marg = S.auc_marginal ?? 0.5;
+const stable = Math.abs(S.fwd_auc_h1 - S.fwd_auc_h2) < 0.05;
+const lives = Math.abs(marg - 0.5) > 0.05 && stable;
+document.getElementById("verdict").innerHTML =
+  `<div class="verdict ${lives ? "ok" : ""}">` +
+  (lives
+    ? `<b>Survives.</b> Knowing the size spent separates the forward move at AUC ` +
+      `${marg.toFixed(3)} on top of the displacement term, and holds across halves.`
+    : `<b>Does not survive.</b> The median contact lasts ` +
+      `<b>${S.dur_p[50].toFixed(0)}s</b> — ${pct(S.frac_under_win, 0)} are shorter ` +
+      `than the 15s window absorption already uses, so there is no room for "N ` +
+      `contracts spent" to accumulate into a reading. Concentration over such a ` +
+      `window scales as <code>dur^${S.dur_exp.toFixed(2)}</code>, which is the ` +
+      `hysteresis threshold reporting itself. And with the displacement term held ` +
+      `fixed, the size spent separates the forward move at AUC ` +
+      `<b>${marg.toFixed(3)}</b>` +
+      (stable ? "" : `, with halves ${S.fwd_auc_h1.toFixed(3)} / ${S.fwd_auc_h2.toFixed(3)} ` +
+        `that do not agree on the sign`) + `.`) +
+  `</div>`;
+
+document.getElementById("foot").innerHTML =
+  `Generated by <code>demo/effort_result_demo.py</code> from the local tick cache — ` +
+  `no fetch, no Databento cost. Absorption is the chart's own detector ported ` +
+  `(15s windows, 3× developing RTH median, 20-window warm-up, adjacent-merge), so ` +
+  `the comparison is against what is actually drawn. Buy aggressor = <code>B</code>. ` +
+  `Sessions: ${SESS.map((s) => s.day).join(", ")}.`;
+</script>

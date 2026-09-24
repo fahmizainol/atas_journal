@@ -6,9 +6,10 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from journal import db
 from journal.config import DEFAULT_DISPLAY_TZ, DISPLAY_TZS
 
-from .. import charts_data
+from .. import charts_data, deps
 from ..scope import Scope, resolve_scope
 
 router = APIRouter()
@@ -38,8 +39,8 @@ def bars(
 
 @router.get("/trades/{trade_no}/excursion")
 def excursion(trade_no: int, scope: Scope = Depends(resolve_scope)) -> dict:
-    trade = _find(scope, trade_no)
-    return charts_data.excursion_summary(trade)
+    """MAE/MFE for one trade."""
+    return charts_data.excursion_summary(_find(scope, trade_no))
 
 
 @router.get("/trade-chart/{trade_no}")

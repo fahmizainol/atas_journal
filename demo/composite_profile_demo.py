@@ -282,7 +282,10 @@ def burst_events(rth: pd.DataFrame) -> list[dict]:
     for r in big.to_dict("records"):
         if cur:
             gap = (r["ts_utc"] - cur[-1]["end_utc"]).total_seconds()
-            span = max(abs(r["hi"] - c["lo"]) for c in cur)
+            # Like edge to like edge, so an up-walk and a down-walk break at the
+            # same distance (hi-vs-member-lo folded each sweep's own range into
+            # one direction's walk and subtracted it from the other's).
+            span = max(max(abs(r["hi"] - c["hi"]), abs(r["lo"] - c["lo"])) for c in cur)
             if gap > BURST_GAP_S or span > BURST_SPAN_PTS:
                 flush()
                 cur = []

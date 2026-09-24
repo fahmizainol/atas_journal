@@ -20,8 +20,8 @@ codes that mean something to a page:
     read back yet, or a **guardrail** refused — the day is over, or the entry is
     too soon after the last one. A property of the moment: try again after doing
     something, or tomorrow.
-  - **422** the order itself is wrong — a limit with no price, a quantity over
-    the ceiling, a confirmation that does not name the environment.
+  - **422** the order itself is wrong — a limit with no price, a quantity under
+    one, a confirmation that does not name the environment.
   - **504** the order plant did not answer in time, which is the one failure
     where the answer to "did it go?" is genuinely *unknown* and the message
     says so rather than guessing.
@@ -50,6 +50,7 @@ watching.
 
 from __future__ import annotations
 
+import time
 from datetime import date
 
 from fastapi import APIRouter, HTTPException
@@ -110,11 +111,14 @@ def routing_status() -> dict:
     broker = live.broker if live is not None else None
     return {
         "enabled": pol.enabled,
-        "max_qty": pol.max_qty,
         # Answerable with no feed and no broker, like `enabled`, and for the
         # same reason: "are the rules on" is a property of the deployment, and
         # the panel has to be able to say it is off before anything is running.
         "guardrails": pol.guardrails,
+        # The replay's own switch. It reaches no order plant — it is answered
+        # here because `/replay` already reads its levels off this endpoint, and
+        # one source for "what practice is told about the rules" is the point.
+        "replay_guardrails": pol.replay_guardrails,
         "guards": {f: getattr(pol.guards, f)
                    for f in type(pol.guards).__dataclass_fields__},
         "refusal": pol.refusal(),
@@ -215,16 +219,16 @@ class GuardsIn(BaseModel):
 
 
 class SettingsIn(BaseModel):
-    max_qty: int | None = Field(None, ge=1)
     guards: GuardsIn | None = None
 
 
 @router.put("/live/routing/settings")
 def routing_settings(body: SettingsIn) -> dict:
-    """The knobs that used to be env vars, plus the guardrail levels.
+    """The guardrail levels. There is no quantity ceiling beside them any more —
+    how large an order may be is ``max_risk_usd``'s question, in dollars on the
+    contract being sent to, and it is the only rule that asks it.
 
-    ``max_qty`` catches a slipped digit before the account's own risk limits are
-    involved. Everything here takes effect on the **next order** rather than
+    Everything here takes effect on the **next order** rather than
     retroactively, which needs no explaining now that there is no lease for it
     to be measured against: an order is checked against the rules as they stand
     when it is sent.
@@ -236,14 +240,12 @@ def routing_settings(body: SettingsIn) -> dict:
     the old numbers back and read as a save that failed.
     """
     s = rtmod.save_settings(
-        max_qty=body.max_qty,
         guards=body.guards.model_dump(exclude_none=True) if body.guards else None)
     live = livemod.current()
     broker = live.broker if live is not None else None
     if broker is not None:
         broker.use_settings(s)
-    return {"max_qty": s.max_qty,
-            "guards": {f: getattr(s.guards, f)
+    return {"guards": {f: getattr(s.guards, f)
                        for f in type(s.guards).__dataclass_fields__}}
 
 
@@ -414,6 +416,35 @@ class OrderIn(BaseModel):
                     "for a sell. Must be at least 1 when be_trigger_ticks is "
                     "set: Rithmic's field is a proto3 scalar, so a zero never "
                     "reaches the wire and 'exactly at the fill' cannot be said.")
+    # --- the ladder: the same trail, run by this app instead ----------------
+    #
+    # None of these four reach the wire. The order goes out as a plain static
+    # bracket and `journal.live.ladder` moves the stop with `modify`, which is
+    # what buys the grid, the breakeven rung and a stop that can still be
+    # dragged — and costs the ratchet if this process stops running. Refused
+    # alongside the two Rithmic-managed fields above: one stop, one owner.
+    ladder_dist_ticks: int = Field(
+        0, ge=0,
+        description="How far behind the high the stop rides. 0 is off, and it "
+                    "is the master switch for the other three. Unlike "
+                    "trail_trigger_ticks this is a real distance, independent "
+                    "of stop_ticks. Refused without a stop, and refused when "
+                    "orders are routed to a contract the tape is not on.")
+    ladder_step_ticks: int = Field(
+        0, ge=0,
+        description="The grid the stop may rest on. 0 means one rung per "
+                    "ladder_dist_ticks. Refused when wider than the trail: the "
+                    "stop would never reach a second rung.")
+    ladder_be_ticks: int = Field(
+        0, ge=0,
+        description="How far past the fill the first rung lands. 0 is breakeven "
+                    "gross — the round trip still owes commission. Refused when "
+                    "it is not closer than the trail distance.")
+    ladder_be_only: bool = Field(
+        False,
+        description="Take the first rung and no other: a breakeven stop rather "
+                    "than a trail. A trail hands back open profit on every "
+                    "pullback, which is what this refuses to do.")
 
 
 @router.post("/live/routing/preview")
@@ -431,7 +462,11 @@ def routing_preview(body: OrderIn) -> dict:
                               target_ticks=body.target_ticks,
                               trail_trigger_ticks=body.trail_trigger_ticks,
                               be_trigger_ticks=body.be_trigger_ticks,
-                              be_ticks=body.be_ticks)
+                              be_ticks=body.be_ticks,
+                              ladder_dist_ticks=body.ladder_dist_ticks,
+                              ladder_step_ticks=body.ladder_step_ticks,
+                              ladder_be_ticks=body.ladder_be_ticks,
+                              ladder_be_only=body.ladder_be_only)
     except PermissionError as e:
         raise HTTPException(409, str(e)) from e
     except ValueError as e:
@@ -462,25 +497,45 @@ class SendIn(BaseModel):
     trail_trigger_ticks: int = 0
     be_trigger_ticks: int = 0
     be_ticks: int = 0
+    ladder_dist_ticks: int = 0
+    ladder_step_ticks: int = 0
+    ladder_be_ticks: int = 0
+    ladder_be_only: bool = False
 
 
 @router.post("/live/routing/orders")
 def routing_orders(body: SendIn) -> dict:
-    """Send an order. The only endpoint that reaches an exchange."""
+    """Send an order. The only endpoint that reaches an exchange.
+
+    Timed wall to wall, and the timing is folded into the response under
+    ``latency`` — ``gate_ms`` for this process's own checks, ``plant_ms`` for
+    the round trip to Rithmic, ``api_ms`` for the handler including everything
+    above ``_submit``. The exchange's own answer arrives after this response and
+    lands on the same record; the panel reads it off the next status poll.
+    """
+    t0 = time.perf_counter()
     broker = _broker()
     try:
         if body.one_click:
-            return broker.send_now(side=body.side, qty=body.qty, type=body.type,
-                                   price=body.price, stop_ticks=body.stop_ticks,
-                                   target_ticks=body.target_ticks,
-                                   trail_trigger_ticks=body.trail_trigger_ticks,
-                                   be_trigger_ticks=body.be_trigger_ticks,
-                                   be_ticks=body.be_ticks)
-        if not body.token:
+            res = broker.send_now(side=body.side, qty=body.qty, type=body.type,
+                                  price=body.price, stop_ticks=body.stop_ticks,
+                                  target_ticks=body.target_ticks,
+                                  trail_trigger_ticks=body.trail_trigger_ticks,
+                                  be_trigger_ticks=body.be_trigger_ticks,
+                                  be_ticks=body.be_ticks,
+                                  ladder_dist_ticks=body.ladder_dist_ticks,
+                                  ladder_step_ticks=body.ladder_step_ticks,
+                                  ladder_be_ticks=body.ladder_be_ticks,
+                                  ladder_be_only=body.ladder_be_only)
+        elif not body.token:
             raise HTTPException(
                 422, "an order needs either a review token or one-click "
                      "trading switched on for this account")
-        return broker.send(body.token)
+        else:
+            res = broker.send(body.token)
+        res["latency"] = broker.note_api_ms(
+            res["tag"], (time.perf_counter() - t0) * 1000)
+        return res
     except HTTPException:
         raise
     except PermissionError as e:
@@ -494,6 +549,49 @@ def routing_orders(body: SendIn) -> dict:
         raise HTTPException(504, str(e)) from e
     except Exception as e:  # noqa: BLE001 — a broker refusal, reported verbatim
         raise HTTPException(502, f"{type(e).__name__}: {e}") from e
+
+
+class PressIn(BaseModel):
+    """What the browser measured for an order it has already sent.
+
+    ``client_ms`` is a **duration**, not an instant, and that is the whole
+    design: the browser times its own press against its own acknowledgement on
+    its own clock, and this process never differences a browser timestamp
+    against ``time.time()``. The two clocks are on different machines here — a
+    Windows browser against a WSL API — and a cross-clock subtraction would
+    report the skew between them as latency, silently and plausibly.
+    """
+
+    tag: str
+    client_ms: float = Field(
+        ..., ge=0,
+        description="Milliseconds from the gesture to the response landing, "
+                    "measured by the browser on `performance.now()`.")
+    gesture: str = Field(
+        "", description="Which button it was — keyboard, dock, ticket, pad. The "
+                        "part of the timeline only the browser can see is also "
+                        "the part that differs between them.")
+
+
+@router.post("/live/routing/latency")
+def routing_latency(body: PressIn) -> dict:
+    """Report a press-to-acknowledgement time for an order already sent.
+
+    A request of its own, after the fact, so that measuring an order costs the
+    order nothing — nothing on the send path waits for this and nothing about
+    the order depends on it.
+
+    Deliberately toothless: no session, no broker, or a tag from before a
+    restart all answer ``ok: false`` rather than raising. It is a measurement
+    arriving late, and the one thing it must never do is put an error in front
+    of somebody who has just sent an order.
+    """
+    live = livemod.current()
+    broker = live.broker if live is not None else None
+    if broker is None:
+        return {"ok": False, "latency": None}
+    got = broker.record_press(body.tag, body.client_ms, body.gesture)
+    return {"ok": got is not None, "latency": got}
 
 
 class ModifyIn(BaseModel):
@@ -525,11 +623,21 @@ def routing_modify(body: ModifyIn) -> dict:
     Nothing is echoed back optimistically. The next routing poll reads the value
     from the broker, so a refused drag shows up as a line returning to where it
     was, which is a more honest error report than a toast.
+
+    **A drag on a laddered stop re-pins the ladder**, and this endpoint is where
+    that is decided rather than inside ``broker.modify`` — because ``modify`` is
+    also how the ladder moves its own stop, and routing a rung through the
+    re-pin would have the ladder re-pin on itself every time it ratcheted. What
+    distinguishes the two is not the level, it is that a request arrived here: a
+    person dragged something.
     """
     broker = _broker()
     try:
-        return broker.modify(body.basket_id, price=body.price,
-                             stop=body.stop, target=body.target)
+        res = broker.modify(body.basket_id, price=body.price,
+                            stop=body.stop, target=body.target)
+        if body.stop is not None:
+            broker.note_manual_stop(body.basket_id, body.stop)
+        return res
     except PermissionError as e:
         raise HTTPException(409, str(e)) from e
     except ValueError as e:

@@ -1,12 +1,24 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   type ColumnDef,
+  type RowData,
   type SortingState,
   flexRender,
   getCoreRowModel,
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
+
+declare module "@tanstack/react-table" {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  interface ColumnMeta<TData extends RowData, TValue> {
+    /** Class stamped on this column's th and every td — how a column opts into
+     *  width-dependent CSS ("narrow-hide" drops it on a phone, "cell-wrap" lets
+     *  its text break). The table can't decide this itself: which columns earn
+     *  390px is a fact about the page, not about tables. */
+    className?: string;
+  }
+}
 
 interface Props<T> {
   data: T[];
@@ -75,7 +87,11 @@ export function DataTable<T>({
           <tr key={hg.id}>
             {expandable && <th aria-hidden style={{ width: 28 }} />}
             {hg.headers.map((h) => (
-              <th key={h.id} onClick={h.column.getToggleSortingHandler()}>
+              <th
+                key={h.id}
+                className={h.column.columnDef.meta?.className}
+                onClick={h.column.getToggleSortingHandler()}
+              >
                 {flexRender(h.column.columnDef.header, h.getContext())}
                 {{ asc: " ▲", desc: " ▼" }[h.column.getIsSorted() as string] ?? ""}
               </th>
@@ -106,7 +122,7 @@ export function DataTable<T>({
                   <td className="expand-chevron">{isOpen ? "▼" : "▶"}</td>
                 )}
                 {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id}>
+                  <td key={cell.id} className={cell.column.columnDef.meta?.className}>
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </td>
                 ))}

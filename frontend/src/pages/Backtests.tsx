@@ -244,6 +244,13 @@ function DrillBlock({ modelId }: { modelId: number | null }) {
               <th>Reps</th>
               <th>Traded</th>
               <th>Sat out</th>
+              {/* Not a fourth slice of the reps — a flag across them. A rewound
+                  rep saw tape twice, so it is in the base rate without being a
+                  cold read; the column is there so a campaign carrying a few
+                  cannot be mistaken for one carrying none. */}
+              <th title="Reps you seeked backwards in. Counted in the base rate like any other, but not cold reads — they had a second look at tape they then traded through.">
+                Rewound
+              </th>
               <th>Base rate</th>
               <th>Trades</th>
               <th>Expectancy</th>
@@ -255,6 +262,9 @@ function DrillBlock({ modelId }: { modelId: number | null }) {
               <td>{fmtInt(data.reps)}</td>
               <td>{fmtInt(data.traded_reps)}</td>
               <td>{fmtInt(data.sat_out)}</td>
+              <td style={data.rewound_reps ? { color: "var(--orange)" } : undefined}>
+                {fmtInt(data.rewound_reps)}
+              </td>
               <td>{data.base_rate == null ? "—" : fmtPct(data.base_rate * 100)}</td>
               <td>{fmtInt(data.trades)}</td>
               <td>{data.expectancy == null ? "—" : fmt(data.expectancy)}</td>

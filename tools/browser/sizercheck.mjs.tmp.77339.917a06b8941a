@@ -1,0 +1,75 @@
+// The ticket's risk sizer, on the page.
+//
+// The arithmetic is pinned by tests/test_risk_sizer.py against a fixture; what
+// that cannot see is whether the panel renders inside a floating 300px ticket,
+// whether the vol ruler's reading actually reaches it, and whether clicking a
+// cell moves the ticket. All three are DOM, so all three are checkable here.
+//
+// Does NOT place an order. It reads the ruler and edits the ticket, which is
+// what the sizer is for; every browser check that traded wrote real practice
+// into the account (see the harness notes), and this one has no reason to.
+// Playwright's context is fresh, so the prefs it edits are its own.
+import { launch, openChart, shot } from "./lib.mjs";
+
+const { browser, page, errors } = await launch();
+try {
+  await openChart(page, "/charts/replay");
+  await page.waitForTimeout(3000);
+
+  // The Σ pill lives in the floating ticket's knob row. Its label carries the
+  // ruler's current reading, which is the end-to-end proof that the chart's
+  // bar-close callback reached the page.
+  const sigma = page.locator("button.sim-knob-rr.sizer");
+  const found = await sigma.count();
+  console.log(`Σ button: ${found ? "present" : "MISSING"}`);
+  if (!found) throw new Error("no sizer button — is the ticket dock open?");
+
+  const label = (await sigma.first().innerText()).trim();
+  console.log(`  label: "${label}"  ${/\d+t/.test(label) ? "(ruler read OK)" : "(NO READING)"}`);
+
+  await sigma.first().click();
+  await page.waitForTimeout(400);
+  const pop = page.locator(".sim-sizer-pop");
+  console.log(`panel: ${(await pop.count()) ? "open" : "MISSING"}`);
+  console.log(`  head: ${(await pop.locator(".sim-sizer-head b").innerText()).trim()}`);
+
+  // Three rows, each with two route cells. A cell reads "<contracts> $<risk>"
+  // with the losers-to-death figure in the corner.
+  const rows = await pop.locator(".sim-sizer-lbl").allInnerTexts();
+  console.log(`  rows: ${rows.map((r) => r.replace(/\s+/g, " ")).join(" | ")}`);
+  const cells = await pop.locator(".sim-sizer-cell").allInnerTexts();
+  console.log(`  cells: ${cells.map((c) => c.replace(/\s+/g, " ")).join(" | ")}`);
+  const note = await pop.locator(".sim-sizer-note").first().innerText();
+  console.log(`  note: ${note.replace(/\s+/g, " ")}`);
+
+  // Does the panel overflow the viewport? It hangs off a dock that usually sits
+  // near an edge, which is the one way a 320px popover goes wrong.
+  const box = await pop.boundingBox();
+  const vp = page.viewportSize();
+  console.log(
+    `  box: ${Math.round(box.x)},${Math.round(box.y)} ${Math.round(box.width)}x${Math.round(box.height)}` +
+      ` — ${box.x >= 0 && box.y >= 0 && box.x + box.width <= vp.width ? "on screen" : "OFF SCREEN"}`,
+  );
+  await shot(page, "sizer-open");
+
+  // Clicking a live cell has to move the ticket. Pick the first enabled one.
+  const before = (await page.locator(".sim-knob.size .sim-knob-v").innerText()).trim();
+  const stopBefore = (await page.locator(".sim-knob.stop .sim-knob-v").innerText()).trim();
+  const pick = pop.locator("button.sim-sizer-cell:not(:disabled)").first();
+  if (await pick.count()) {
+    const what = (await pick.innerText()).replace(/\s+/g, " ");
+    await pick.click();
+    await page.waitForTimeout(400);
+    const after = (await page.locator(".sim-knob.size .sim-knob-v").innerText()).trim();
+    const stopAfter = (await page.locator(".sim-knob.stop .sim-knob-v").innerText()).trim();
+    console.log(`apply "${what}": size ${before} -> ${after}, stop ${stopBefore} -> ${stopAfter}`);
+    console.log(`  panel closed: ${(await page.locator(".sim-sizer-pop").count()) === 0}`);
+  } else {
+    console.log("apply: no enabled cell (nothing fits at this reading)");
+  }
+  await shot(page, "sizer-applied");
+
+  console.log(`console errors: ${errors.length ? errors.join(" | ") : "none"}`);
+} finally {
+  await browser.close();
+}

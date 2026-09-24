@@ -65,7 +65,14 @@ export function CalendarHeatmap({
 
   return (
     <div className="panel">
-      <div className="section-cap">
+      <div
+        className="section-cap"
+        title={
+          "Each cell is that day's latest attempt, so this total is the sum of the " +
+          "takes the days finished on — not of every take. Statistics and the " +
+          "overview still count them all."
+        }
+      >
         {new Date(year, month - 1, 1).toLocaleString("en-US", { month: "long", year: "numeric" })}{" "}
         — net {fmt(monthTotal)}
       </div>
@@ -96,9 +103,6 @@ export function CalendarHeatmap({
                 <div className="cal-cell-head">
                   <span className="cal-day">{day}</span>
                   <span className="cal-flags">
-                    {info?.has_video && (
-                      <span title="A recording is linked to this day">🎥</span>
-                    )}
                     {info && info.attempts > 1 && (
                       <span
                         className="muted cal-attempts"

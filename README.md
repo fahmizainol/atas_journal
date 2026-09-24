@@ -40,6 +40,33 @@ uv run uvicorn api.main:app --port 8000
 FastAPI serves the built SPA (catch-all for client-side routes) with `/api/*`
 taking precedence. Open http://localhost:8000.
 
+## Run (installed on a phone)
+
+The built SPA is a PWA. Served over HTTPS with the manifest, Chrome on Android
+installs it as a WebAPK — own launcher icon, own task, no URL bar — rather than
+a home-screen shortcut. HTTPS is the hard requirement; a LAN IP will never
+install, so the tailnet name does the work:
+
+```bash
+tailscale serve --bg 8000    # once; persists across reboots. NOT `funnel` —
+                             # that would publish it to the internet.
+pnpm dev:phone               # clean build, then API with reload + build --watch
+                             # (the API waits ~15s for that first build)
+```
+
+Then open the `*.ts.net` URL on the phone; the menu must read **Install app**,
+not "Add to Home screen". After a rebuild the service worker serves the previous
+build for one load and picks up the new one on the next, so reopen twice to see
+a change. `dev:api` watches only `api/` and `src/`, so rebuilding the frontend
+does not bounce the API.
+
+While actively editing, `tailscale serve --bg 5173` instead gives HMR against
+the dev server — no build step, but no service worker and no installed-app
+behaviour.
+
+Nothing here authenticates: everything on the tailnet reaches the journal *and*
+the live order routes. Keep that surface to your own devices.
+
 Drop ATAS `.xlsx` exports into `data/imports/` and click **Import from
 data/imports/** in the sidebar (or use the uploader). Re-importing overlapping
 files never double-counts: fills dedupe on `Exchange ID`, journal rows on a

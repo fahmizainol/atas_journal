@@ -40,7 +40,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from .config import root_symbol
+from .config import tape_root
 from .sim import bars as barmod
 from .sim import ticks as tickmod
 
@@ -68,7 +68,7 @@ def session_ticks(instrument: str, day: date) -> pd.DataFrame | None:
     session was never bought; a session with only some segments returns what it
     has, because a chart of a half-session is better than no chart.
     """
-    sym = tickmod.contract_for_cached(root_symbol(instrument), day)
+    sym = tickmod.contract_for_cached(tape_root(instrument), day)
     if sym is None:
         return None
     parts = [

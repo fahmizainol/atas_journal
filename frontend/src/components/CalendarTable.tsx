@@ -22,6 +22,13 @@ const columns: ColumnDef<CalendarDay, any>[] = [
     },
   },
   {
+    accessorKey: "account",
+    header: "Account",
+    // One take carries one account, and the row shows one take — so this names
+    // the book the row's PnL belongs to, not every book that traded that day.
+    cell: (c) => (c.getValue() as string | null) ?? <span className="muted">—</span>,
+  },
+  {
     accessorKey: "net_pnl",
     header: "Net PnL",
     cell: (c) => {
@@ -38,12 +45,15 @@ const columns: ColumnDef<CalendarDay, any>[] = [
   {
     accessorKey: "attempts",
     header: "Attempts",
-    cell: (c) => fmtInt(c.getValue() as number),
-  },
-  {
-    accessorKey: "has_video",
-    header: "Video",
-    cell: (c) => ((c.getValue() as boolean) ? "🎥" : ""),
+    // How many takes exist, against a row that reads only the last of them.
+    cell: (c) => {
+      const n = c.getValue() as number;
+      return (
+        <span title={n > 1 ? `${n} takes this day — the row reads the latest` : undefined}>
+          {fmtInt(n)}
+        </span>
+      );
+    },
   },
   {
     accessorKey: "file_modified",
@@ -66,7 +76,12 @@ export function CalendarTable({
   const { search } = useLocation();
   return (
     <div className="panel">
-      <div className="section-cap">Click a row to explore the day's trades.</div>
+      <div className="section-cap">
+        Click a row to explore the day's trades. A day that was re-done reads its{" "}
+        <b>latest attempt alone</b> — the take it finished on — so the PnL, account and
+        win rate all describe that one take, and <b>Attempts</b> says how many others
+        there are.
+      </div>
       {/* .table-scroll already scrolls both ways and pins the header; the height
           lives in CSS so a phone can trade some of it back (see the Journal
           mobile block) rather than spending most of a 844px screen on it. */}

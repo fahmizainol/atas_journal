@@ -160,6 +160,216 @@ def session_sums(symbol: str, day: date) -> Seed | None:
     return (v, pv, p2v)
 
 
+# --- the weekly *profile* seed ----------------------------------------------
+#
+# Same architecture as the VWAP seed above, for volume-at-price: each prior
+# session collapses to a dense histogram over the instrument's tick grid, and
+# the week behind a session is the sum of those. The chart engine seeds its
+# weekly LevelHist from it and runs the session's own ticks on top — which is
+# the developing weekly POC/value area, to the tick, without a week of ticks
+# in any payload. Honesty rules are inherited wholesale from weekly_seed:
+# a hole in the week means no seed, a roll restarts the week.
+
+Hist = tuple[int, list[float]]  # (lowest tick level, volumes per level from it)
+
+
+def _hist_path(symbol: str, day: date):
+    return tickmod.TICK_CACHE_DIR / f"{symbol}_{day.isoformat()}_hist.json"
+
+
+def _frame_hist(df: pd.DataFrame, tick: float) -> Hist:
+    levels = (df["price"] / tick).round().astype("int64")
+    g = df.groupby(levels)["size"].sum()
+    lo = int(g.index.min())
+    counts = [0.0] * (int(g.index.max()) - lo + 1)
+    for lvl, v in g.items():
+        counts[int(lvl) - lo] = float(v)
+    return lo, counts
+
+
+def _merge_hist(a: Hist | None, b: Hist) -> Hist:
+    if a is None:
+        return b
+    lo = min(a[0], b[0])
+    hi = max(a[0] + len(a[1]), b[0] + len(b[1]))
+    counts = [0.0] * (hi - lo)
+    for src in (a, b):
+        for i, v in enumerate(src[1]):
+            counts[src[0] - lo + i] += v
+    return lo, counts
+
+
+def _live_hist(symbol: str, day: date, tick: float) -> Hist | None:
+    """The recorded-session counterpart, cached in the live day's own directory
+    and keyed by the chunk set — exactly the _live_sums contract."""
+    chunks = list(tickmod.live_chunks(symbol, day))
+    if not chunks:
+        return None
+    path = tickmod.live_day_dir(symbol, day) / "hist.json"
+    if path.exists():
+        try:
+            rec = json.loads(path.read_text())
+            if rec.get("chunks") == chunks and rec.get("tick") == tick:
+                return (int(rec["min"]), list(rec["counts"]))
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+    df = tickmod.live_day_ticks(symbol, day)
+    if df is None or df.empty:
+        return None
+    lo, counts = _frame_hist(df, tick)
+    try:
+        path.write_text(json.dumps(
+            {"chunks": chunks, "tick": tick, "min": lo, "counts": counts}))
+    except OSError:
+        pass
+    return lo, counts
+
+
+def session_hist(symbol: str, day: date, tick: float) -> Hist | None:
+    """Volume-at-price over one session's cached segments, on the tick grid.
+    Cached beside the parquets keyed by the segment set (and the tick size, so
+    an instrument change can't serve another grid's bins). Never fetches."""
+    segs = _segments_on_disk(symbol, day)
+    if not segs:
+        return _live_hist(symbol, day, tick)
+    path = _hist_path(symbol, day)
+    if path.exists():
+        try:
+            rec = json.loads(path.read_text())
+            if rec.get("segments") == segs and rec.get("tick") == tick:
+                return (int(rec["min"]), list(rec["counts"]))
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+    out: Hist | None = None
+    for seg in segs:
+        df = tickmod._read_segment_cached(symbol, day, seg)
+        if df.empty:
+            continue
+        out = _merge_hist(out, _frame_hist(df, tick))
+    if out is None:
+        return None
+    path.write_text(json.dumps(
+        {"segments": segs, "tick": tick, "min": out[0], "counts": out[1]}))
+    return out
+
+
+def _seg_hist_path(symbol: str, day: date):
+    return tickmod.TICK_CACHE_DIR / f"{symbol}_{day.isoformat()}_seghist.json"
+
+
+def session_hist_split(symbol: str, day: date, tick: float) -> dict[str, Hist] | None:
+    """``session_hist`` cut by window instead of summed — {'on': …, 'rth': …}.
+
+    The composite over prior sessions needs both halves of a day *separately*:
+    its span knob asks whether a context day means the whole Globex session or
+    only the RTH one, and a summed histogram cannot be un-summed. Same disk
+    cache discipline as ``session_hist`` (keyed by the segment set and the tick
+    size, never fetches), in its own file so neither invalidates the other.
+
+    The 16:00–17:00 'post' hour is deliberately absent from both. A Globex
+    session is the 18:00 open to the 16:00 close — that is the span the composite
+    write-up measured its balance runs over, and the hour after the bell belongs
+    to the *next* day's context, not this one's.
+    """
+    segs = _segments_on_disk(symbol, day)
+    want = [s for s in segs if s in ("on", "rth")]
+    if not want:
+        return None
+    path = _seg_hist_path(symbol, day)
+    if path.exists():
+        try:
+            rec = json.loads(path.read_text())
+            if rec.get("segments") == want and rec.get("tick") == tick:
+                return {k: (int(v["min"]), list(v["counts"]))
+                        for k, v in rec["hists"].items()}
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+    out: dict[str, Hist] = {}
+    for seg in want:
+        df = tickmod._read_segment_cached(symbol, day, seg)
+        if df.empty:
+            continue
+        out[seg] = _frame_hist(df, tick)
+    if not out:
+        return None
+    try:
+        path.write_text(json.dumps({
+            "segments": want, "tick": tick,
+            "hists": {k: {"min": v[0], "counts": v[1]} for k, v in out.items()},
+        }))
+    except OSError:
+        pass
+    return out
+
+
+def context_hists(
+    contract: str, day: date, count: int, tick: float,
+) -> list[dict] | None:
+    """The *count* sessions in front of *day*, each as its two windows' volume
+    at price — oldest first. The composite's raw material.
+
+    Walks back one calendar day at a time, skipping weekends and exchange
+    closures, and **stops at a roll**: sessions sit wholly on one contract, so
+    a composite that spanned one would average two price series a hundred points
+    apart and every level it named would be fiction. Stops equally at the first
+    session whose ticks were never bought — a composite with a hole in the middle
+    is not the auction it claims to be, and the payload says how many days it
+    actually found rather than pretending to the number asked for.
+
+    Never fetches: this runs behind chart GETs.
+    """
+    sym = tickmod.contract_for_cached(contract, day)
+    if sym is None:
+        return None
+    out: list[dict] = []
+    d = day - timedelta(days=1)
+    # A bounded walk: `count` sessions may sit behind a long holiday weekend, but
+    # not behind an unbounded number of closed days.
+    guard = count * 4 + 10
+    while len(out) < count and guard > 0:
+        guard -= 1
+        if d.weekday() >= 5 or tickmod.market_closed(contract, d):
+            d -= timedelta(days=1)
+            continue
+        if tickmod.contract_for_cached(contract, d) != sym:
+            break  # the roll — everything behind it is a different price series
+        h = session_hist_split(sym, d, tick)
+        if h is None:
+            break  # a session that was never bought; the run of days ends here
+        out.append({"date": d.isoformat(), **{
+            k: {"min": v[0], "counts": v[1]} for k, v in h.items()
+        }})
+        d -= timedelta(days=1)
+    out.reverse()
+    return out
+
+
+def weekly_hist_seed(contract: str, day: date, tick: float) -> Hist | None:
+    """The volume-at-price already behind the weekly profile when *day*'s
+    Globex session opens. (0, []) on the week's first session — the weekly
+    profile IS that session's own, all Monday. None when the week cannot be
+    honestly built, on exactly weekly_seed's rules."""
+    sym = tickmod.contract_for_cached(contract, day)
+    if sym is None:
+        return None
+    seed: Hist = (0, [])
+    d = week_start(day)
+    while d < day:
+        if d.weekday() >= 5 or tickmod.market_closed(contract, d):
+            d += timedelta(days=1)
+            continue
+        if tickmod.contract_for_cached(contract, d) != sym:
+            seed = (0, [])  # pre-roll: the week restarts at the roll
+            d += timedelta(days=1)
+            continue
+        h = session_hist(sym, d, tick)
+        if h is None:
+            return None  # a hole in the week — no honest weekly profile exists
+        seed = _merge_hist(seed if seed[1] else None, h)
+        d += timedelta(days=1)
+    return seed
+
+
 def weekly_seed(contract: str, day: date) -> Seed | None:
     """The accumulation already behind the weekly anchor when *day*'s Globex
     session opens: every same-contract session from the week's start through

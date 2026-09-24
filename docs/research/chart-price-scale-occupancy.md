@@ -15,8 +15,9 @@ afterwards.
 candles are compressed into a ribbon and one NQ tick collapses below one device
 pixel. Median pane occupancy across 8 random sittings was **24%** — the chart
 sits at or under its own `RIBBON = 0.25` "unreadable" threshold *by default*.
-Recovering that space is what makes ticks look smooth. **Nothing adopted yet** —
-this is the measurement, not the fix.
+Recovering that space is what makes ticks look smooth.
+
+**Adopted 2026-08-14** — items 1, 2 and 4 of §7 shipped; §8 has the re-measurement.
 
 **Companion page:** [chart-price-scale-occupancy-visual](chart-price-scale-occupancy-visual.html)
 — the same four sessions in three framings, toggleable (keys `1`/`2`/`3`), with
@@ -156,7 +157,7 @@ but it makes the button close to vestigial.
 
 ## 7. Proposed change, in priority order
 
-Not adopted — this is the shortlist the measurement supports.
+The shortlist the measurement supports. 1, 2 and 4 shipped; 3 did not.
 
 1. Give `mkBand`'s `line()` the same `autoscaleInfoProvider: () => null` that
    `:1884` gives Modern VWAP, for every non-mid key. Largest win, and it makes
@@ -169,7 +170,57 @@ Not adopted — this is the shortlist the measurement supports.
    fit is the strongest of the three.
 4. Ship the off-screen edge marker with 2, not after it.
 
-## 8. Reproducing
+## 8. What shipped, and the same four sessions again
+
+**2026-08-14, `ReplayChart.tsx`** — and so also `/charts/live`, which mounts the
+same component.
+
+1. `mkBand`'s `line()` sets `autoscaleInfoProvider: () => null` on every non-mid
+   key, matching what the Modern VWAP rings already did. Sixteen of the twenty σ
+   lines stop voting.
+2. The weekly anchor is built `mkBand(hues.vwap.weekly, { context: true })`,
+   which extends that to its mid. It is the only anchor demoted mid and all.
+3. **Developing VA lines were left in the fit**, as §7 argued they should be —
+   they are levels the rules test against, and §3 measures them as the tail.
+4. Edge markers (`.chart-edge`): the nearest demoted level off the top and off
+   the bottom, named with its distance from the last trade, hung on the price
+   axis at the two edges of the price pane. Hoverable for the level's actual
+   price, and carrying a `+n` when more are out there the same way.
+
+Two judgment calls the measurement did not make:
+
+- **A half-pane deadband.** A σ line a few points over the edge is off screen in
+  the literal sense and nobody has lost it. Only levels further than half the
+  visible range past the edge get a marker, so the envelope stays quiet and the
+  case the markers exist for still speaks.
+- **Hidden layers are skipped.** A level you toggled off is not a level that went
+  missing, and saying so at the edge would be noise about your own decision.
+
+Re-measured the same way, same four pinned sessions, 1600×900 @ DPR 2, clock at
+11:00. "Before" is the same reading with the bars' span unioned against the
+levels this change demoted — the scale those layers were holding open:
+
+| session | bars | scale before → after | occupancy | device px/tick |
+|---|---|---|---|---|
+| 2026-08-05 | 286 | 2071 → **286** | 14% → **100%** | 0.14 → **0.98** |
+| 2026-08-07 | 256 | 1957 → **345** | 13% → **74%** | 0.14 → **0.82** |
+| 2026-07-29 | 486 | 1090 → **514** | 45% → **95%** | 0.26 → **0.55** |
+| 2026-08-11 | 212 | 281 → **233** | 75% → **91%** | 1.00 → **1.21** |
+
+Against §3's prediction (the `− anchored mid` column: 260 / 397 / 485 / 233) the
+measured scales are 286 / 345 / 514 / 233 — the differences are the clock, not
+the change. **No session was made worse**, including the one that was already
+fine. §5 holds on both counts: 08-05 goes from 7 ticks sharing a pixel row to
+sub-tick, and 07-29 is transformed as a chart (45% → 95%) while staying steppy at
+0.55 device px/tick, because 486 points of bars is a zoom question and no scale
+fix reaches it.
+
+Edge markers on the same four: 08-05 one (`▼ WK VWAP +1σ 239 +3` — the whole
+weekly band under the day, so even its +1σ is below price), 08-07 two, 07-29 one,
+08-11 **none**, which is the deadband working — that session had nothing far
+enough out to be worth a word.
+
+## 9. Reproducing
 
 The probes were one-off scripts under `tools/browser/`, deleted after use, and
 the `window` hooks in `ReplayChart.tsx` were reverted — the file is clean. To

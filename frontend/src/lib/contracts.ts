@@ -43,6 +43,19 @@ const MICROS: Record<string, string> = {
   RTY: "M2K",
 };
 
+/**
+ * The root of a contract symbol: `NQU6` -> `NQ`, `MNQU6` -> `MNQ`, `M2KH6` ->
+ * `M2K`. A symbol that is already a root comes back unchanged.
+ *
+ * Strips a trailing month code and year, which is the only part that varies —
+ * and it has to be anchored to the end rather than searched for, because the
+ * month letters are ordinary letters: `M2K`'s own `K` is a month code sitting
+ * in the middle of a root, and `RTY`'s micro would lose its tail to a looser
+ * pattern. The digits after the letter are what make the match unambiguous.
+ */
+export const rootOf = (symbol: string): string =>
+  symbol.toUpperCase().replace(/[FGHJKMNQUVXZ]\d{1,2}$/, "");
+
 /** This root's micro, or null when it has none (or is already one). Null is a
  *  real answer — it is what takes the choice off the screen. */
 export const microOf = (root: string): string | null =>

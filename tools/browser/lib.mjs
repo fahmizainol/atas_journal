@@ -24,8 +24,85 @@ export const BASE = process.env.APP_URL ?? "http://localhost:5173";
 /** Launch the system Chrome. `channel` rather than Playwright's own bundle:
  *  /usr/bin/google-chrome is already on this machine, and downloading ~300MB of
  *  second browser to look at your own app is a poor trade. */
+/** ISO seconds, the stamp format every account payload uses. */
+export const iso = (d) => new Date(d).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+/**
+ * A live, healthy replay account, as `/api/replays/account` returns one.
+ *
+ * Lives here rather than in the file that drives the account states, because it
+ * is not only that file's: any check that opens `/charts/replay` and wants a
+ * session with nothing owed has to stub this endpoint, and the moment there are
+ * two copies one of them is a payload the app stopped serving. That already
+ * happened — `rules` arrived with the account registry, `accountcheck` grew it,
+ * `presetcheck`'s own copy did not, and the page crashed on a field it reads
+ * unconditionally rather than failing a check.
+ *
+ * A factory, not a constant: callers mutate the result to make the states they
+ * are after, and the two timestamps have to be relative to now.
+ */
+export const healthyAccount = () => ({
+  now: iso(Date.now()),
+  equity: 50_000,
+  floor: 48_000,
+  peak_close: 50_000,
+  status: "live",
+  day_net: 0,
+  day_loss_remaining: 1_200,
+  target_remaining: 3_000,
+  // Real payloads carry this since `liveEquity` — the page indexes into it the
+  // moment a sitting opens, so a stub without it is a crash, not a shortfall.
+  counted_ids: [],
+  cooldown_until: null,
+  can_reset: false,
+  // How the account's finished lives ended. The bar chip reads straight into it
+  // (`fmtRecord`), so — like `counted_ids` and `rules` — a stub without it is a
+  // render crash and every check downstream times out waiting for the chart.
+  record: { passed: 0, blown: 0 },
+  // Whether *this* life has passed. Null is "still going", which is the state a
+  // healthy account is in.
+  passed: null,
+  review_flagged: null,
+  epoch: { index: 0, started_at: iso(Date.now() - 864e5), sittings: 0, net: 0 },
+  last_death: null,
+  caps: { minis: 4, micros: 40 },
+  // Which account answered. The chip draws itself off this, so a stub without
+  // it would test the funded rendering twice.
+  account: "funded",
+  label: "LucidPro 50K",
+  // Which tape day the day figures are about. Null is "no day open", which is
+  // what the page gets before a session is picked.
+  day: null,
+  // The rule shape and this account's figures. Real payloads have carried this
+  // since accounts became a registry, and the page reads into it for the floor
+  // meter's full bar and for whether the floor is a constant — so a stub
+  // without it is a crash, not a shortfall, exactly like `counted_ids` above.
+  rules: {
+    template: "lucid_pro",
+    template_label: "LucidPro",
+    trailing: "eod",
+    // Whether the page may drive its own clock. True on every template that
+    // prices a real product, so the transport is hidden — which is what the
+    // funded page has always done, and is now read from here rather than from
+    // a hardcoded test for the id.
+    real_time: true,
+    start: 50_000,
+    max_loss: 2_000,
+    trail_cap: 52_100,
+    day_loss: 1_200,
+    day_goal: null,
+    profit_target: 3_000,
+    max_minis: 4,
+    max_micros: 40,
+  },
+});
+
 export async function launch({ headed = false } = {}) {
-  const browser = await chromium.launch({ channel: "chrome", headless: !headed });
+  // HARNESS_CHANNEL=msedge when Chrome is not installed (same Chromium, same canvas).
+  const browser = await chromium.launch({
+    channel: process.env.HARNESS_CHANNEL ?? "chrome",
+    headless: !headed,
+  });
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
   const page = await ctx.newPage();
   // Everything the page complained about, kept for the check to report. A chart
@@ -51,9 +128,16 @@ export async function launch({ headed = false } = {}) {
  * `networkidle` is not enough on its own: the tape arrives, then the engine
  * builds bars, then the chart paints — so the page can be idle and blank. Waiting
  * for ink on the canvas is what "loaded" means here.
+ *
+ * It is also not always *possible*. A route holding an open stream — /charts/replay
+ * mounts the page shell, which subscribes to the import feed and the live routing
+ * SSE — never goes network-idle at all, so waiting for it burns the whole timeout
+ * and then fails on a page that has been drawn and correct for minutes. Pass
+ * `waitUntil: "domcontentloaded"` there; the legend and the ink are what the
+ * function actually asserts, and they do not care how the bytes arrived.
  */
-export async function openChart(page, route, { timeout = 60000 } = {}) {
-  await page.goto(`${BASE}${route}`, { waitUntil: "networkidle", timeout });
+export async function openChart(page, route, { timeout = 60000, waitUntil = "networkidle" } = {}) {
+  await page.goto(`${BASE}${route}`, { waitUntil, timeout });
   await page.waitForSelector(".chart-legend", { timeout });
   await page.waitForFunction(
     () => {

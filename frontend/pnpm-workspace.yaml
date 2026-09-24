@@ -1,3 +1,6 @@
 allowBuilds:
   # esbuild's postinstall places the platform binary; without it vite can't run.
   esbuild: true
+  # core-js arrives under posthog-js; its postinstall only prints a funding
+  # banner, and leaving it undeclared makes every `pnpm install` exit non-zero.
+  core-js: false

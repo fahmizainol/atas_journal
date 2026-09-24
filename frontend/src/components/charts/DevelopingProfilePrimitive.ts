@@ -14,6 +14,14 @@
 // "the session so far" — have to be tellable apart, and the cheapest way is to
 // stop them overlapping. Hue does the rest: violet here, blue/gold there.
 //
+// Alone of the three profiles, it carries no event marginal. The composite's and
+// the viewport's still outline where sweeps and absorptions landed against their
+// shape; this gutter is the narrowest of them and the one whose bars move while
+// you watch, and a second outline over a distribution still filling in was read
+// as noise on the histogram rather than as a claim about it. The bands on the
+// candles say where those events were, and the other two gutters say how they
+// sat against value.
+//
 // Developing means developing. Every row is volume that has already printed by
 // the current clock, so rewinding shrinks it and there is no way for a price
 // the session hasn't reached yet to appear in it.
@@ -29,8 +37,6 @@
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 import { ink } from "../../theme";
 import type { ProfileNodes, VolumeProfile } from "../../lib/volumeProfile";
-import { drawEventMarginal } from "../../lib/eventMarginal";
-import type { TapeEvent } from "../../lib/replayEngine";
 
 /** Fraction of the pane this gutter spans, and how far its baseline sits in
  *  from the right edge — the viewport profile's own width, plus a gap, so the
@@ -41,9 +47,9 @@ const INSET_FRAC = 0.11;
 const GAP_PX = 7;
 const GAP = 1; // px between rows, so they read as a histogram not a block
 
-// Violet, the demo page's own profile colour — and distinct from both marginal
-// hues (orange sweeps, fuchsia absorption) that get drawn on top of it, and from
-// the viewport profile's blue and gold beside it. The nodes stay inside that
+// Violet, the demo page's own profile colour — and distinct from the viewport
+// profile's blue and gold beside it, and from the marginal hues (orange sweeps,
+// fuchsia absorption) that draw in those gutters. The nodes stay inside that
 // violet family — they are this histogram's reading, not a fourth layer — and
 // split warm/cool the way the composite's do: one is a price the session kept
 // coming back to, the other one it passed through.
@@ -68,6 +74,9 @@ const LEFT_KEEPOUT = 120;
  *  changes the value-area walk (it annexes a pair of rows at a time, so a 0.5pt
  *  row means it steps a point where the engine steps half of one), and measured
  *  on a real session that moves VAH by ~12pt while POC and VAL land identically.
+ *  Both charts now bin at the engine's own tick, so the two walks agree — but
+ *  the row is a caller's constant and a wide window still groups, so the levels
+ *  keep coming from the engine rather than from whatever grid got drawn.
  *  Shading rows by a number the lines beside them disagree with would be a bug
  *  you could see. So: the shape is the histogram's, the levels are the engine's,
  *  and the two are one distribution again. */
@@ -92,7 +101,6 @@ interface Ctx {
   chart: IChartApi;
   series: ISeriesApi<"Candlestick">;
   data: () => DevelopingData | null;
-  events: () => TapeEvent[];
   visible: () => boolean;
   nodesOn: () => boolean;
 }
@@ -137,21 +145,6 @@ class Renderer {
       // than as bars floating in the middle of the chart.
       ctx.fillStyle = ink().viewportProfile.axis;
       ctx.fillRect(base, 0, 1, scope.mediaSize.height);
-
-      // The events, against the same axis and the same width — which is the
-      // whole reason this profile is worth drawing next to them: it is today's
-      // distribution, so a burst that landed off the session's own shelf is
-      // visible as a disagreement rather than having to be remembered.
-      drawEventMarginal(
-        ctx,
-        (price) => series.priceToCoordinate(price),
-        this.c.events(),
-        profile.rows[0].low,
-        profile.rows[profile.rows.length - 1].high,
-        base,
-        width,
-        -1,
-      );
     });
   }
 }
@@ -256,7 +249,6 @@ export class DevelopingProfilePrimitive {
   private views: View[] = [];
   private requestUpdate?: () => void;
   private _data: DevelopingData | null = null;
-  private _events: TapeEvent[] = [];
   private _visible = true;
   private _nodesOn = true;
 
@@ -265,12 +257,6 @@ export class DevelopingProfilePrimitive {
    *  would be a claim that there is. */
   setData(data: DevelopingData | null) {
     this._data = data;
-    this.requestUpdate?.();
-  }
-
-  /** Already filtered by the caller, same as every other event consumer. */
-  setEvents(events: TapeEvent[]) {
-    this._events = events;
     this.requestUpdate?.();
   }
 
@@ -290,7 +276,6 @@ export class DevelopingProfilePrimitive {
       chart: param.chart,
       series: param.series,
       data: () => this._data,
-      events: () => this._events,
       visible: () => this._visible,
       nodesOn: () => this._nodesOn,
     };

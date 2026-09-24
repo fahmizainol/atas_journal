@@ -235,6 +235,15 @@ Turning it off is loud. The chart's top bar carries a red chip whenever the laye
 the order panel says so in full. A safety layer that is silently off is worse than one that was
 never built, because it gets traded as though it were there.
 
+`/replay` applies its own mirror of these rules and has its own switch, `REPLAY_GUARDRAILS`,
+same polarity and defaulting to on. The two are independent on purpose: the live flag protects
+an account, the replay's protects a habit — and the replay is also the only place cheap enough
+to *test* a rule, which is why running a session the rules would refuse (a 30-tick stop, trading
+past the daily stop to see what the rest of the day did) must not require disarming the funded
+account's layer. Off, the replay refuses nothing and auto-flattens nothing, but every rule is
+still computed and the discipline strip reports in red that it is not enforcing — the same
+loudness, for the same reason.
+
 **Honest caveat:** none of this is un-bypassable by whoever owns the machine. What it buys is
 friction and visibility, not impossibility.
 

@@ -18,8 +18,8 @@ inside its window; missing fills just mean fewer markers, never wrong PnL.
 from __future__ import annotations
 
 import hashlib
-from itertools import groupby
 
+import numpy as np
 import pandas as pd
 
 # A logical trade must not span a session break. Intraday lots are seconds to a
@@ -27,6 +27,12 @@ import pandas as pd
 # position at a gap this large is force-closed so position drift can't merge
 # unrelated sessions into one trade.
 SESSION_GAP = pd.Timedelta(hours=1)
+
+#: ``SESSION_GAP`` in the integer unit the event scan works in. Timestamps are
+#: compared as microseconds since epoch rather than as Timestamps: the scan is
+#: the one part of this module that touches every lot twice, and boxing 5k
+#: Timestamps to compare them was most of what made it slow.
+_GAP_US = SESSION_GAP // pd.Timedelta(microseconds=1)
 
 
 def _trade_key(seed: str, instrument: str) -> str:
@@ -36,158 +42,291 @@ def _trade_key(seed: str, instrument: str) -> str:
 def build_logical_trades(
     journal: pd.DataFrame, executions: pd.DataFrame | None = None
 ) -> pd.DataFrame:
-    """Group ATAS Journal lots per (account, instrument) into flat->flat trades.
+    """Group ATAS Journal lots per (account, instrument, source_file) into
+    flat->flat trades.
 
     Each journal row contributes a signed open event at ``open_ts_utc`` and a
     signed close event at ``close_ts_utc``. Walking those events in time order,
     a trade boundary falls wherever the running net position returns to flat.
     PnL is the sum of the grouped lots' ATAS PnL, so it reconciles exactly.
+    See :func:`_trade_ids` for the grouping and the session-gap rule.
+
+    Whole-column throughout. This runs on every cold scope build — which any
+    write invalidates — so the per-trade shape it replaced put a multi-second
+    rebuild behind the next page load of every trade-derived surface.
     """
     if journal is None or journal.empty:
         return pd.DataFrame()
 
-    cols_out: list[dict] = []
-    # Group by source_file too: each ATAS export is one replay attempt, and two
-    # attempts at the same account/instrument/replayed-date must never share a
-    # flat->flat span — otherwise their lots interleave by timestamp and merge
-    # into bogus combined trades. Isolating attempts here is what lets the day
-    # view show take-1 and take-2 separately instead of blended.
-    for (_account, instrument, _source_file), grp in journal.groupby(
-        ["account", "instrument", "source_file"]
-    ):
-        grp = grp.reset_index(drop=True)
-        span_of = _assign_spans(grp)
-        grp = grp.assign(_span=grp.index.map(span_of))
-        for _span, lots in grp.groupby("_span"):
-            _finalize(lots.sort_values("open_ts_utc"), instrument, cols_out, executions)
+    work = journal.reset_index(drop=True)
+    # Databases written before the commission column, and frames built by hand
+    # in tests, simply do not have it. Absent is the same statement NULL makes
+    # in it — no commission known — so it is filled that way rather than zeroed.
+    if "fees" not in work:
+        work = work.assign(fees=np.nan)
+    # One id per flat->flat trade, ascending in (account, instrument,
+    # source_file, span) order — the order the old per-group loop emitted rows
+    # in. That ordering is load-bearing: the sort at the bottom is by entry
+    # stamp alone and trades do share one, so the input order is what breaks
+    # those ties and fixes ``trade_no``.
+    uid = _trade_ids(work)
 
-    df = pd.DataFrame(cols_out)
-    if not df.empty:
-        df = df.sort_values("entry_ts_utc").reset_index(drop=True)
-        df.insert(0, "trade_no", range(1, len(df) + 1))
+    # Lots in trade order, then by open time within the trade. This is the order
+    # ``lot_keys`` and ``comment`` are written in, and its first row names the
+    # trade — so it decides ``trade_key``, which notes, reviews, recall cards and
+    # rule checks are all filed under.
+    #
+    # ``lexsort`` is **stable**, so lots sharing an open stamp keep their journal
+    # order. The per-span ``sort_values`` this replaced was not: below 16 lots
+    # numpy falls back to an insertion sort and is stable by accident, and above
+    # it the tie order is whatever quicksort did. Since a trade's key is its first
+    # lot's, that made ``trade_key`` — the id every note is filed under — depend
+    # on an unspecified permutation. Nothing downstream reads ``lot_keys`` in
+    # order (``lot_to_logical_map`` builds a dict from it), so making the order
+    # defined costs nothing and removes that exposure.
+    order = np.lexsort((_micros(work["open_ts_utc"]), uid))
+    lots = work.take(order)
+    uid = uid[order]
+
+    abs_open = lots["open_volume"].abs()
+    abs_close = lots["close_volume"].abs()
+    lots = lots.assign(
+        _uid=uid,
+        _abs_open=abs_open,
+        _abs_close=abs_close,
+        _w_open=lots["open_price"] * abs_open,
+        _w_close=lots["close_price"] * abs_close,
+    )
+
+    # One pass for everything that is a plain reduction over a trade's lots.
+    g = lots.groupby("_uid", sort=False)
+    df = g.agg(
+        _seed=("dedupe_key", "first"),
+        source_file=("source_file", "first"),
+        instrument=("instrument", "first"),
+        account=("account", "first"),
+        _first_open_vol=("open_volume", "first"),
+        _w_open=("_w_open", "sum"),
+        _abs_open=("_abs_open", "sum"),
+        _w_close=("_w_close", "sum"),
+        _abs_close=("_abs_close", "sum"),
+        leg_count=("dedupe_key", "size"),
+        entry_ts_utc=("open_ts_utc", "min"),
+        exit_ts_utc=("close_ts_utc", "max"),
+        entry_ts_local=("open_ts_local", "min"),
+        exit_ts_local=("close_ts_local", "max"),
+        gross_pnl=("pnl", "sum"),
+        _fees=("fees", "sum"),
+    ).reset_index(drop=True)
+
+    # A trade whose lots carry no size has no average price to quote — nan, not
+    # a division blow-up. Every other column above is a sum, which needs no such
+    # guard. (Grouped sums use a compensated kernel, so an average here can land
+    # a ULP off what summing that trade's lots on their own gave — closer to the
+    # exact value, and ~1e-12 on a price the fill matcher compares at 1e-4.)
+    df["avg_entry"] = _wavg(df.pop("_w_open"), df["_abs_open"])
+    df["avg_exit"] = _wavg(df.pop("_w_close"), df.pop("_abs_close"))
+    df["max_contracts"] = df.pop("_abs_open")
+    df["direction"] = np.where(df.pop("_first_open_vol") > 0, "Long", "Short")
+    # Column-wise. The per-trade version of this was ``Timedelta.total_seconds()``
+    # on one pair of stamps, whose scalar path is a ULP *less* accurate than the
+    # division here — so ~1% of durations move by ~1e-14s, which is 12 orders of
+    # magnitude below the nearest threshold anything compares them against.
+    df["duration_s"] = (df["exit_ts_utc"] - df["entry_ts_utc"]).dt.total_seconds()
+    df["leg_count"] = df["leg_count"].astype("int64")
+
+    instruments = df["instrument"].to_numpy()
+    df["trade_key"] = [_trade_key(s, i)
+                       for s, i in zip(df.pop("_seed").to_numpy(), instruments)]
+
+    # The two per-trade lists. Split once on the trade boundaries rather than
+    # asking pandas for a group at a time — the frame is ~1 lot per trade, so a
+    # per-group call is nearly all overhead.
+    bounds = np.flatnonzero(np.r_[True, uid[1:] != uid[:-1]])[1:]
+    # Every ATAS lot this logical trade absorbed. Lets ``lot_to_logical_map``
+    # resolve an ATAS row back to the logical trade that owns it, so notes /
+    # model / rule checks bind to the same key in either view.
+    df["lot_keys"] = [list(a) for a in np.split(lots["dedupe_key"].to_numpy(), bounds)]
+    df["comment"] = [
+        "; ".join(dict.fromkeys([c for c in a if c]))
+        for a in np.split(lots["comment"].fillna("").to_numpy(), bounds)
+    ]
+
+    # Commission is the sum of the lots' own, which is why it had to be carried
+    # per lot rather than re-derived per trade: a scale-out is charged by the
+    # portion, and a trade that closed in four lots pays four times. A trade
+    # whose lots all report NULL sums to 0.0 — no commission known, which is
+    # every imported ATAS row and is what those trades showed before the column
+    # existed.
+    df["commission"] = df.pop("_fees").fillna(0.0)
+    df["net_pnl"] = df["gross_pnl"] - df["commission"]
+    df["open_position"] = False
+    df["fills"] = _window_fills(
+        executions, df["account"].to_numpy(), instruments,
+        _micros(df["entry_ts_utc"]), _micros(df["exit_ts_utc"]),
+    )
+
+    df = df[[
+        "trade_key", "lot_keys", "source_file", "instrument", "account",
+        "direction", "avg_entry", "avg_exit", "max_contracts", "leg_count",
+        "entry_ts_utc", "exit_ts_utc", "entry_ts_local", "exit_ts_local",
+        "duration_s", "gross_pnl", "commission", "net_pnl", "open_position",
+        "fills", "comment",
+    ]]
+    df = df.sort_values("entry_ts_utc").reset_index(drop=True)
+    df.insert(0, "trade_no", range(1, len(df) + 1))
     return df
 
 
-def _assign_spans(grp: pd.DataFrame) -> dict[int, int]:
-    """Map each lot's row index to a flat->flat span id via running position.
+def _micros(ts: pd.Series) -> np.ndarray:
+    """A UTC timestamp column as microseconds since epoch."""
+    return ts.to_numpy("datetime64[us]").astype("int64")
 
-    Events sharing a timestamp are applied as one batch (opens before closes)
-    and the flat check happens only after the batch, so a position that is
-    momentarily netted to zero mid-instant doesn't split a trade spuriously.
+
+def _wavg(weighted: pd.Series, weight: pd.Series) -> np.ndarray:
+    """Weighted mean per trade, nan where the weights sum to zero."""
+    w = weight.to_numpy(dtype=float)
+    return np.divide(weighted.to_numpy(dtype=float), w,
+                     out=np.full(len(w), np.nan), where=w != 0)
+
+
+def _trade_ids(work: pd.DataFrame) -> np.ndarray:
+    """A flat->flat trade id per lot, from a running net position.
+
+    Each lot contributes a signed open event and a signed close event; walking
+    those in time order, a trade boundary falls wherever the position returns to
+    flat. Events sharing a timestamp are one batch (opens before closes) and the
+    flat check happens only after the batch, so a position momentarily netted to
+    zero mid-instant does not split a trade spuriously.
+
+    Grouped by ``source_file`` as well as account and instrument: each ATAS
+    export is one replay attempt, and two attempts at the same
+    account/instrument/replayed-date must never share a flat->flat span —
+    otherwise their lots interleave by timestamp and merge into bogus combined
+    trades. Isolating attempts here is what lets the day view show take-1 and
+    take-2 separately instead of blended.
+
+    **Why this can be a cumulative sum at all.** The scan looks sequential — a
+    session gap force-closes an open position, which resets the running total —
+    but at a gap the position is zero either way: either the previous batch left
+    it flat, or the gap rule just zeroed it. So the reset points are fixed by the
+    timestamps alone, and the position is a cumsum restarted at each of them
+    rather than a loop that has to be walked.
     """
-    events: list[tuple] = []
-    for i, r in grp.iterrows():
-        events.append((r["open_ts_utc"], 0, r["open_volume"], i, True))
-        events.append((r["close_ts_utc"], 1, r["close_volume"], i, False))
-    events.sort(key=lambda e: (e[0], e[1]))
+    n = len(work)
+    # ``ngroup`` numbers groups in sorted key order, which is the order the
+    # emitted trades must come out in (see the sort in the caller).
+    grp = work.groupby(["account", "instrument", "source_file"],
+                       sort=True).ngroup().to_numpy()
+    zeros, ones = np.zeros(n, np.int8), np.ones(n, np.int8)
+    ev_grp = np.concatenate([grp, grp])
+    ev_ts = np.concatenate([_micros(work["open_ts_utc"]), _micros(work["close_ts_utc"])])
+    ev_kind = np.concatenate([zeros, ones])
+    ev_dv = np.concatenate([work["open_volume"].to_numpy(dtype=float),
+                            work["close_volume"].to_numpy(dtype=float)])
+    ev_row = np.concatenate([np.arange(n), np.arange(n)])
+    ev_is_open = np.concatenate([np.ones(n, bool), np.zeros(n, bool)])
 
-    span_of: dict[int, int] = {}
-    span = 0
-    pos = 0.0
-    prev_ts = None
-    for ts, batch in groupby(events, key=lambda e: e[0]):
-        if pos != 0.0 and prev_ts is not None and ts - prev_ts > SESSION_GAP:
-            span += 1
-            pos = 0.0
-        for _ts, _kind, dv, row_idx, is_open in batch:
-            if is_open:
-                span_of[row_idx] = span
-            pos += dv
-        prev_ts = ts
-        if abs(pos) < 1e-9:
-            pos = 0.0
-            span += 1
-    return span_of
+    # Group, then instant, then opens before closes. Stable, so events left tied
+    # by all three stay in lot order.
+    order = np.lexsort((ev_kind, ev_ts, ev_grp))
+    e_grp, e_ts, e_dv = ev_grp[order], ev_ts[order], ev_dv[order]
+    e_row, e_is_open = ev_row[order], ev_is_open[order]
+
+    # --- collapse to batches: one instant within one group ---
+    starts = np.empty(len(order), bool)
+    starts[0] = True
+    starts[1:] = (e_grp[1:] != e_grp[:-1]) | (e_ts[1:] != e_ts[:-1])
+    batch_of_event = np.cumsum(starts) - 1
+    at = np.flatnonzero(starts)
+    b_grp, b_ts = e_grp[at], e_ts[at]
+    b_dv = np.add.reduceat(e_dv, at)
+    nb = len(at)
+
+    # --- the running position, restarted wherever it is known to be flat ---
+    first = np.zeros(nb, bool)
+    first[0] = True
+    new_grp = first.copy()
+    new_grp[1:] = b_grp[1:] != b_grp[:-1]
+    seg_break = new_grp.copy()
+    seg_break[1:] |= (b_ts[1:] - b_ts[:-1]) > _GAP_US
+    running = np.cumsum(b_dv)
+    seg_at = np.flatnonzero(seg_break)
+    # The total carried in before each segment, subtracted back off so every
+    # segment counts up from zero.
+    carry = np.concatenate([[0.0], running[seg_at[1:] - 1]])
+    pos = running - carry[np.cumsum(seg_break) - 1]
+    flat = np.abs(pos) < 1e-9
+
+    # A trade ends when the position goes flat, and also at a session gap that
+    # found it open — that gap is a force-close, which is a boundary too.
+    prev_flat = np.zeros(nb, bool)
+    prev_flat[1:] = flat[:-1]
+    gap_closed = seg_break & ~new_grp & ~prev_flat
+    uid_of_batch = np.cumsum(new_grp | gap_closed | prev_flat) - 1
+
+    # Every lot has exactly one open event, so every lot gets exactly one id.
+    out = np.empty(n, np.int64)
+    out[e_row[e_is_open]] = uid_of_batch[batch_of_event[e_is_open]]
+    return out
 
 
 def _window_fills(
-    executions: pd.DataFrame | None, account: str, instrument: str,
-    start, end,
-) -> list[dict] | None:
-    """Executions for this account/instrument inside [start, end], as marker dicts.
-
-    Returns None when no executions are available in the window (e.g. a
-    truncated Replay export), so the chart simply omits fill markers.
-    """
-    if executions is None or executions.empty:
-        return None
-    m = (
-        (executions["account"] == account)
-        & (executions["instrument"] == instrument)
-        & (executions["ts_utc"] >= start)
-        & (executions["ts_utc"] <= end)
-    )
-    sub = executions[m].sort_values("ts_utc")
-    if sub.empty:
-        return None
-    return [
-        {
-            "exchange_id": f["exchange_id"],
-            "ts_local": f["ts_local"],
-            "ts_utc": f["ts_utc"],
-            "direction": f["direction"],
-            "price": f["price"],
-            "volume": f["volume"],
-        }
-        for _, f in sub.iterrows()
-    ]
-
-
-def _finalize(
-    lots: pd.DataFrame, instrument: str, out: list[dict],
     executions: pd.DataFrame | None,
-) -> None:
-    account = lots.iloc[0]["account"]
-    open_vol = lots["open_volume"]
-    close_vol = lots["close_volume"]
-    direction = "Long" if open_vol.iloc[0] > 0 else "Short"
+    accounts: np.ndarray, instruments: np.ndarray,
+    starts: np.ndarray, ends: np.ndarray,
+) -> list[list[dict] | None]:
+    """Per trade, its account/instrument executions inside [start, end].
 
-    abs_open = open_vol.abs()
-    abs_close = close_vol.abs()
+    ``starts`` and ``ends`` are microseconds since epoch, matching :func:`_micros`.
+    ``None`` for a trade with no executions in the window (e.g. a truncated
+    Replay export), so the chart simply omits fill markers.
 
-    def wavg(price: pd.Series, weight: pd.Series) -> float:
-        total = weight.sum()
-        return float((price * weight).sum() / total) if total else float("nan")
+    Each account/instrument's executions are sorted and turned into marker dicts
+    **once**, and each trade then takes a slice of that. The obvious shape — mask
+    the whole executions frame per trade — is four boolean Series, a sort and a
+    row-wise walk for every trade in the journal, which cost more than the rest
+    of this module put together while touching only a few hundred rows.
 
-    avg_entry = wavg(lots["open_price"], abs_open)
-    avg_exit = wavg(lots["close_price"], abs_close)
-    max_contracts = float(abs_open.sum())
+    Trades whose windows overlap therefore share marker dicts rather than each
+    getting a copy. The trade frame is already documented read-only (see
+    ``api.scope``); this makes a fill dict read-only on the same terms.
+    """
+    n = len(starts)
+    if executions is None or executions.empty:
+        return [None] * n
 
-    entry_ts_utc = lots["open_ts_utc"].min()
-    exit_ts_utc = lots["close_ts_utc"].max()
-    entry_ts_local = lots["open_ts_local"].min()
-    exit_ts_local = lots["close_ts_local"].max()
-    duration_s = (exit_ts_utc - entry_ts_utc).total_seconds()
+    by_key: dict[tuple, tuple[np.ndarray, list[dict]]] = {}
+    for key, sub in executions.groupby(["account", "instrument"], sort=False):
+        # Stable: fills sharing a stamp are common (one order filling in pieces),
+        # and their export order is the only meaningful order they have.
+        sub = sub.sort_values("ts_utc", kind="stable")
+        by_key[key] = (
+            _micros(sub["ts_utc"]),
+            [
+                {
+                    "exchange_id": f["exchange_id"],
+                    "ts_local": f["ts_local"],
+                    "ts_utc": f["ts_utc"],
+                    "direction": f["direction"],
+                    "price": f["price"],
+                    "volume": f["volume"],
+                }
+                for _, f in sub.iterrows()
+            ],
+        )
 
-    gross_pnl = float(lots["pnl"].sum())
-    comments = [c for c in lots["comment"].fillna("").tolist() if c]
-
-    out.append({
-        "trade_key": _trade_key(lots.iloc[0]["dedupe_key"], instrument),
-        # Every ATAS lot this logical trade absorbed. Lets ``lot_to_logical_map``
-        # resolve an ATAS row back to the logical trade that owns it, so notes /
-        # model / rule checks bind to the same key in either view.
-        "lot_keys": lots["dedupe_key"].tolist(),
-        "source_file": lots.iloc[0]["source_file"],
-        "instrument": instrument,
-        "account": account,
-        "direction": direction,
-        "avg_entry": avg_entry,
-        "avg_exit": avg_exit,
-        "max_contracts": max_contracts,
-        "leg_count": int(len(lots)),
-        "entry_ts_utc": entry_ts_utc,
-        "exit_ts_utc": exit_ts_utc,
-        "entry_ts_local": entry_ts_local,
-        "exit_ts_local": exit_ts_local,
-        "duration_s": duration_s,
-        "gross_pnl": gross_pnl,
-        "commission": 0.0,
-        "net_pnl": gross_pnl,
-        "open_position": False,
-        "fills": _window_fills(executions, account, instrument, entry_ts_utc, exit_ts_utc),
-        "comment": "; ".join(dict.fromkeys(comments)),
-    })
+    out: list[list[dict] | None] = []
+    for account, instrument, lo, hi in zip(accounts, instruments, starts, ends):
+        found = by_key.get((account, instrument))
+        if found is None:
+            out.append(None)
+            continue
+        stamps, markers = found
+        a = int(np.searchsorted(stamps, lo, "left"))
+        b = int(np.searchsorted(stamps, hi, "right"))
+        out.append(markers[a:b] or None)
+    return out
 
 
 def lot_to_logical_map(
@@ -244,8 +383,12 @@ def atas_trades(journal: pd.DataFrame) -> pd.DataFrame:
     df["exit_ts_local"] = df["close_ts_local"]
     df["duration_s"] = (df["exit_ts_utc"] - df["entry_ts_utc"]).dt.total_seconds()
     df["gross_pnl"] = df["pnl"]
-    df["commission"] = 0.0
-    df["net_pnl"] = df["pnl"]
+    # Per lot here, where the column lives, rather than per trade — the lot view
+    # is one row per journal row, so this is the same number the logical view
+    # sums. NULL means no commission was ever reported, hence 0.0 and a net that
+    # equals gross, which is what an imported ATAS row has always shown.
+    df["commission"] = (df["fees"].fillna(0.0) if "fees" in df else 0.0)
+    df["net_pnl"] = df["pnl"] - df["commission"]
     df["leg_count"] = 2
     df["open_position"] = False
     df["trade_key"] = df["dedupe_key"].str[:16]
@@ -265,9 +408,24 @@ def atas_trades(journal: pd.DataFrame) -> pd.DataFrame:
 
 
 def reconcile(logical: pd.DataFrame, journal: pd.DataFrame) -> dict:
-    """Sanity-check computed logical PnL against ATAS Journal total PnL."""
+    """Sanity-check computed logical PnL against ATAS Journal total PnL.
+
+    **Both sides are net, and they have to be the same side.** ``net_pnl`` now
+    subtracts the commission carried per lot, while the journal's own ``pnl``
+    column is gross and always was — so comparing one against the other would
+    report every live day's commission as a reconciliation failure, which is
+    a real number being flagged as a bug. Subtracting the same lots' fees from
+    the journal total keeps the two comparable and the difference at zero.
+
+    Imported rows are unaffected: their ``fees`` is NULL, which sums to 0.0, so
+    this is the identical arithmetic it has always done on them.
+    """
     logical_pnl = float(logical["net_pnl"].sum()) if not logical.empty else 0.0
-    atas_pnl = float(journal["pnl"].sum()) if not journal.empty else 0.0
+    if journal.empty:
+        atas_pnl = 0.0
+    else:
+        fees = (journal["fees"].fillna(0.0).sum() if "fees" in journal else 0.0)
+        atas_pnl = float(journal["pnl"].sum() - fees)
     return {
         "logical_net_pnl": logical_pnl,
         "atas_journal_pnl": atas_pnl,

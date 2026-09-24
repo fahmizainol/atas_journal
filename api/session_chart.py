@@ -36,14 +36,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from functools import cached_property
 from typing import Callable
 
 import numpy as np
 import pandas as pd
 
-from journal.config import root_symbol, tick_size
+from journal.config import tape_root, tick_size
 from journal.sim import bars as barmod
 from journal.sim import ib as ibmod
+from journal.sim import modern_vwap as mvmod
 from journal.sim import profile as profmod
 from journal.sim import ticks as tickmod
 from journal.sim import vwap as vwapmod
@@ -105,8 +107,8 @@ def _strictly_increasing(times: np.ndarray) -> np.ndarray:
 
 
 def _footprint(t: pd.DataFrame, b: pd.DataFrame, ts_size: float) -> list[list[list[float]]]:
-    """Per-bar volume-at-price, straight off the tape: one [price, size] list per
-    bar, aligned 1:1 with the bar rows.
+    """Per-bar volume-at-price, straight off the tape: one [price, size, delta]
+    list per bar, aligned 1:1 with the bar rows.
 
     This is what lets the chart's volume profile be *exact*. Spreading a bar's
     volume across its high-low range — all a 1-minute OHLCV bar can support — is
@@ -115,10 +117,37 @@ def _footprint(t: pd.DataFrame, b: pd.DataFrame, ts_size: float) -> list[list[li
     pre-aggregated is deliberate: the frontend's fixed-range tool profiles
     arbitrary sub-ranges as you drag, and summing these maps client-side keeps
     that exact and instant instead of a round-trip per mousemove.
+
+    ``delta`` is that level's signed aggressor volume — the same quantity
+    ``_per_bar_delta`` sums per bar, cut by price instead, and by the same sign
+    convention (B lifted, A hit), so the profile's rows and the CVD pane cannot
+    disagree about which way a session leaned. It rides along here rather than
+    arriving as a second map because it is one groupby over ticks the pass has
+    already binned, and because the sub-range sums the fixed-range tool does
+    client-side have to carry it or the tool would be the one reading that
+    can't be tinted.
+
+    A feed that tagged nothing at all (every tick ``"N"`` — an older cache, or a
+    symbol the vendor never tagged) ships two-element rows instead, exactly as
+    ``_per_bar_delta`` returns None: the frontend reads the *presence* of the
+    third element and not its value, because a level of zero is a real reading
+    (the two sides cancelled there) and must not be spelled the same as no
+    reading at all.
     """
     n = len(b)
     price = t["price"].to_numpy()
-    size = t["size"].to_numpy()
+    # Float before anything signs it, exactly as `_per_bar_delta` does — and not
+    # a style choice. The tape's `size` arrives as uint32, so `-size` does not
+    # negate, it *wraps*: a one-lot sell became 4294967295 and a row's delta came
+    # out as (sells x 2^32) + the true figure. Only the sell side was affected,
+    # so the column stayed plausible on buy-heavy levels and the lane it feeds
+    # scaled itself against a 4-billion outlier. `_per_bar_delta` cast first and
+    # was right all along, which is why the CVD pane and this disagreed about
+    # which way a level leaned — the one thing this file's docstring promises
+    # cannot happen.
+    size = t["size"].to_numpy().astype(float)
+    side = t["side"].to_numpy()
+    tagged = bool(((side == "B") | (side == "A")).any())
     # Bars are contiguous runs of ticks, so a tick's bar is where its index falls
     # relative to the bar end offsets. Trailing ticks (past the last full bar)
     # land at n and are dropped — they belong to no drawn bar.
@@ -131,28 +160,40 @@ def _footprint(t: pd.DataFrame, b: pd.DataFrame, ts_size: float) -> list[list[li
         # representation noise, and two spellings of 20134.25 must be one level.
         "price": np.round(price[keep] / ts_size) * ts_size,
         "size": size[keep],
+        # An untagged print belongs to neither side, so it adds size and no
+        # delta — the rule `_per_bar_delta` applies to the same ticks.
+        "delta": np.where(
+            side[keep] == "B",
+            size[keep],
+            np.where(side[keep] == "A", -size[keep], 0.0),
+        ).astype(float),
     })
-    g = df.groupby(["bar", "price"], sort=True)["size"].sum().reset_index()
+    g = df.groupby(["bar", "price"], sort=True)[["size", "delta"]].sum().reset_index()
 
     out: list[list[list[float]]] = [[] for _ in range(n)]
-    for bar, p, s in zip(g["bar"].to_numpy(), g["price"].to_numpy(), g["size"].to_numpy()):
-        out[int(bar)].append([float(p), float(s)])
+    for bar, p, s, d in zip(
+        g["bar"].to_numpy(),
+        g["price"].to_numpy(),
+        g["size"].to_numpy(),
+        g["delta"].to_numpy(),
+    ):
+        out[int(bar)].append([float(p), float(s), float(d)] if tagged else [float(p), float(s)])
     return out
 
 
-def _cvd_series(t: pd.DataFrame, b: pd.DataFrame) -> np.ndarray | None:
-    """Cumulative volume delta per bar: the running sum of signed aggressor
-    volume (buy market orders minus sell market orders) as of each bar's close.
+def _per_bar_delta(t: pd.DataFrame, b: pd.DataFrame) -> np.ndarray | None:
+    """Signed aggressor volume per bar: buy market orders minus sell market
+    orders, straight off the tape's ``side`` and binned over the same tick frame
+    the footprint is — so it lines up with the candles bar-for-bar.
 
-    Straight off the tape's aggressor ``side``, binned over the same tick frame
-    the footprint is — so it lines up with the candles bar-for-bar. Anchored at
-    the first drawn bar (the 18:00 Globex open when the night is on the chart,
-    else the bell) and accumulated across the whole session: one line to read
-    order-flow pressure against price.
+    The raw quantity *both* delta reads on the chart are built from: the
+    cumulative line below, and the windowed oscillator the frontend draws off
+    the ``delta`` rows (see the frame's ``delta`` field). One pass, one sign
+    convention, so the two panes cannot disagree about which way a bar leaned.
 
-    Returns the per-bar cumulative series aligned 1:1 with ``b``, or ``None``
-    when the feed carried no aggressor side (every tick ``"N"`` — an older
-    cache, or a symbol the vendor never tagged): there is nothing to accumulate.
+    Returns the per-bar series aligned 1:1 with ``b``, or ``None`` when the feed
+    carried no aggressor side (every tick ``"N"`` — an older cache, or a symbol
+    the vendor never tagged): there is nothing to sign.
     """
     n = len(b)
     side = t["side"].to_numpy()
@@ -166,16 +207,29 @@ def _cvd_series(t: pd.DataFrame, b: pd.DataFrame) -> np.ndarray | None:
     keep = bar_of < n
     per_bar = np.zeros(n)
     np.add.at(per_bar, bar_of[keep], signed[keep])
-    return np.cumsum(per_bar)
+    return per_bar
 
 
-def _cvd_rows(cvd: np.ndarray | None, times: np.ndarray) -> list[dict]:
-    """The CVD series as ``{time, value}`` rows for the chart's own pane. Empty
+def _cvd_series(delta: np.ndarray | None) -> np.ndarray | None:
+    """Cumulative volume delta per bar: the running sum of ``_per_bar_delta`` as
+    of each bar's close.
+
+    Anchored at the first drawn bar (the 18:00 Globex open when the night is on
+    the chart, else the bell) and accumulated across the whole session: one line
+    to read order-flow pressure against price. ``None`` in, ``None`` out — an
+    untagged tape has nothing to accumulate.
+    """
+    return None if delta is None else np.cumsum(delta)
+
+
+def _delta_rows(series: np.ndarray | None, times: np.ndarray) -> list[dict]:
+    """A per-bar delta series as ``{time, value}`` rows for a pane of its own —
+    the cumulative line, or the raw per-bar delta the oscillator windows. Empty
     when there was no aggressor side, so the pane and its legend toggle simply
-    don't appear rather than drawing a flat zero line."""
-    if cvd is None:
+    don't appear rather than drawing a flat zero line that reads as balance."""
+    if series is None:
         return []
-    return [{"time": int(tm), "value": float(v)} for tm, v in zip(times, cvd)]
+    return [{"time": int(tm), "value": float(v)} for tm, v in zip(times, series)]
 
 
 def _cvd_divergences(
@@ -289,12 +343,22 @@ def _profile_rows(prof: profmod.DevelopingProfile, times: np.ndarray) -> list[di
     ]
 
 
-def _profile_slots(gx_rows: list[dict], ny_rows: list[dict]) -> dict:
-    """Both developing value areas, each in the slot that names it — the frontend
-    colours from the slot (``profile_globex`` silver, ``profile_ny`` fuchsia) and
-    gives each its own legend toggle. Mirrors ``vwap_slots``: both anchors are
-    always drawn, and which the engine traded is already said by ``vwap_anchor``."""
-    return {"profile_globex": gx_rows, "profile_ny": ny_rows}
+def _profile_slots(gx_rows: list[dict], ny_rows: list[dict],
+                   wk_rows: list[dict] | None = None) -> dict:
+    """The developing value areas, each in the slot that names it — the frontend
+    colours from the slot (``profile_globex`` silver, ``profile_ny`` fuchsia,
+    ``profile_weekly`` amber) and gives each its own legend toggle. Mirrors
+    ``vwap_slots``: every anchor that can be drawn is drawn, and which one the
+    engine traded is already said by ``vwap_anchor``.
+
+    The weekly slot is optional so the callers that predate it keep their exact
+    payload — an absent key and an empty list mean the same thing to the chart
+    (no row), and a caller that never had the layer shouldn't grow a field
+    claiming it considered one."""
+    out = {"profile_globex": gx_rows, "profile_ny": ny_rows}
+    if wk_rows is not None:
+        out["profile_weekly"] = wk_rows
+    return out
 
 
 def vwap_slots(gx_rows: list[dict], ny_rows: list[dict], wk_rows: list[dict],
@@ -349,6 +413,27 @@ def _post_bars(post: pd.DataFrame, n: int, offset: int) -> pd.DataFrame:
     return pb.assign(start_idx=pb["start_idx"] + offset, end_idx=pb["end_idx"] + offset)
 
 
+def _roll_root(contract: str) -> str:
+    """The name a multi-day walk has to be asked under.
+
+    ``weekly_seed``, ``weekly_hist_seed`` and ``context_hists`` all resolve a
+    contract *per day* off the roll map, and only a root does that:
+    ``ticks.contract_for_cached`` takes anything else at face value. So a walk
+    asked under a journal instrument label — ``NQU6@CME``, which is what the
+    Trades and Calendar charts pass — looks for each prior day's ticks under a
+    symbol nothing was ever cached as, finds nothing, and returns None.
+
+    That is not hypothetical: it is why the weekly VWAP was silently absent on
+    every journal chart. An absent weekly line is *also* what an honest hole in
+    the week looks like, so the failure had no symptom to report.
+
+    A pinned contract whose root doesn't roll (a synthetic under test) is left
+    alone — face value is the right reading there.
+    """
+    root = tape_root(contract)
+    return root if tickmod.rolls(root) else contract
+
+
 @dataclass
 class SessionFrame:
     """Everything a chart draws for one session, before anyone's trades go on it.
@@ -365,11 +450,35 @@ class SessionFrame:
     vwap_weekly: list[dict]
     profile_globex: list[dict]
     profile_ny: list[dict]
+    #: The developing *weekly* value area — the Globex accumulation carrying the
+    #: week behind it. Empty, never approximated, when the week has a hole in it
+    #: or the night isn't on disk (``weekly.weekly_hist_seed``'s rules).
+    profile_weekly: list[dict]
+    #: The prior sessions' volume-at-price, oldest first, each cut into its two
+    #: windows — what a client-side composite is built from. See
+    #: ``weekly.context_hists``. Empty when none could be honestly assembled.
+    context_profiles: list[dict]
+    #: The Modern VWAP anchored at the developing Globex POC, in both of the
+    #: chart's re-arm rules, as ``{time, value}``: ``naked`` re-anchors when the
+    #: POC itself migrates, ``revisit`` when price leaves the POC and comes back.
+    #: Two series because they are two different lines and each is its own level
+    #: family; here so ``journal.level_tag`` can measure fills against them, see
+    #: ``journal.sim.modern_vwap``. Empty when there is no developing profile to
+    #: anchor on (a session with no night on disk).
+    mv_poc_naked: list[dict]
+    mv_poc_revisit: list[dict]
     bar_time: Callable[[object], int]
     ib: object
     footprint: list
     cvd: list[dict]
     cvd_divergences: list[dict]
+    #: Signed aggressor volume *per bar* (not accumulated), as ``{time, value}``.
+    #: What the CVD oscillator windows into its histogram — the sum or EMA, its
+    #: fractal pivots and the divergences off them are all computed on the
+    #: frontend (see charts/cvdOscLayer), because the replay steps the same
+    #: indicator off its own live tape and one implementation is the only way
+    #: those two agree. Empty when the tape carried no aggressor side.
+    delta: list[dict]
     ema9: list[dict]
     ema20: list[dict]
     ema50: list[dict]
@@ -379,6 +488,31 @@ class SessionFrame:
     #: The contract the roll resolved for this session — `NQH6`, not the export's
     #: stale `NQU6` label. Callers report it as the chart's `instrument`.
     symbol: str
+    #: This contract's tick. Carried rather than looked up again by every reader
+    #: that needs to turn a price into ticks.
+    tick: float
+
+    @cached_property
+    def vol_shelf(self) -> list[dict]:
+        """The strongest live volume shelf's edges, per bar — see
+        ``journal.sim.vol_shelf``.
+
+        A property and not a field, unlike every level above it, because nothing
+        the *chart* draws reads it. The four charts that draw shelves compute
+        them in TypeScript off the ``footprint`` they are already sent
+        (``lib/volumeShelf.ts``), which is what lets the replay step them on its
+        own tape; this exists so ``journal.level_tag`` can measure fills against
+        the same bands, and the tagger runs after a session rather than during
+        one. Computing it eagerly would put it on the critical path of every
+        chart request to serve a reader that is not on it — about 0.2s a session,
+        for nothing.
+
+        Cached, so a tagger asking twice pays once, and invisible to the response
+        builders, which name their fields explicitly.
+        """
+        from journal.sim import vol_shelf as vsmod  # deferred: keeps import cost off the frame
+
+        return vsmod.shelf_series(self.bars, self.footprint, self.tick)
 
 
 def resolve_symbol(contract: str, day: date, allow_fetch: bool = True) -> str | None:
@@ -393,7 +527,7 @@ def resolve_symbol(contract: str, day: date, allow_fetch: bool = True) -> str | 
     None when the roll map has never seen a session at or before this day and we
     are not allowed to buy the probe.
     """
-    root = root_symbol(contract)
+    root = tape_root(contract)
     if not tickmod.rolls(root):
         return contract
     if allow_fetch:
@@ -433,6 +567,7 @@ def session_frame(
     resolution: str = "tick",
     div_ticks: int | None = None,
     allow_fetch: bool = True,
+    context_days: int = 0,
 ) -> SessionFrame | None:
     """One session's bars + the anchored VWAPs + display times. None if no data.
 
@@ -463,6 +598,12 @@ def session_frame(
     The Globex anchor needs the night on disk; when it isn't (a window whose
     overnight was never bought) both the Globex VWAP and the Globex profile are
     simply absent rather than fetched — see ticks.cached_overnight.
+
+    ``context_days`` asks for the prior sessions' volume-at-price alongside the
+    session itself, which is what a multi-session composite is built from. Off by
+    default because it costs a disk read per prior day and only the charts that
+    draw a composite want it; the histograms themselves are cached (see
+    ``weekly.session_hist_split``), so the cost is paid once per session ever.
     """
     sym = resolve_symbol(contract, day, allow_fetch)
     if sym is None:
@@ -533,17 +674,30 @@ def session_frame(
     # (weekly.weekly_seed returns None). On the week's first session the seed
     # is zero and the weekly line coincides with the Globex one, which is what
     # a weekly anchor genuinely looks like on a Monday.
-    wk_seed = weeklymod.weekly_seed(contract, day) if rth_i0 > 0 else None
+    walk_as = _roll_root(contract)
+    wk_seed = weeklymod.weekly_seed(walk_as, day) if rth_i0 > 0 else None
     w_wk = vwapmod.vwap_bands(full, seed=wk_seed) if wk_seed is not None else None
 
     times = _strictly_increasing(np.asarray(_epoch_local(b_all["ts_utc"], tz)))
 
+    # Each bar's own tick VWAP and variance, so the chart can draw a
+    # tick-accurate VWAP anchored at *any* bar without being shipped the tape —
+    # see journal.sim.vwap.bar_moments for why two floats are enough. Every
+    # cumulative anchored VWAP on the frontend (the ⚓ tool, Modern VWAP, the
+    # Dynamic Swing VWAP's cumulative mode) accumulates these, which is what
+    # keeps them equal to the session bands drawn beside them.
+    b_vwap, b_var = vwapmod.bar_moments(
+        full, b_all["start_idx"].to_numpy(), b_all["end_idx"].to_numpy())
+
     bars_rows = [
         {"time": int(tm), "open": float(o), "high": float(h),
-         "low": float(lo), "close": float(c), "volume": float(v)}
-        for tm, o, h, lo, c, v in zip(
+         "low": float(lo), "close": float(c), "volume": float(v),
+         # Omitted, never zeroed, on a bar that caught no volume: absent means
+         # "fall back to hlc3", zero would mean "this bar traded at 0".
+         **({} if not np.isfinite(bv) else {"tvwap": float(bv), "tvar": float(bd)})}
+        for tm, o, h, lo, c, v, bv, bd in zip(
             times, b_all["open"], b_all["high"], b_all["low"], b_all["close"],
-            b_all["volume"])
+            b_all["volume"], b_vwap, b_var)
     ]
     vwap_gx_rows = [] if w_gx is None else _vwap_rows(w_gx, bar_pos, times)
     # A bar that closed overnight has no NY VWAP yet — the anchor hasn't started,
@@ -572,6 +726,54 @@ def session_frame(
         profmod.developing_profile(full.iloc[rth_i0:rth_end].reset_index(drop=True), ny_bars, tsz),
         times[ny_in],
     )
+    # The weekly value area: the Globex accumulation seeded with the week's prior
+    # sessions, exactly as the weekly VWAP above is seeded with their three sums.
+    # Same honesty rule, and the same gate — a week that cannot be built has no
+    # weekly line *and* no weekly value area, rather than one of the two.
+    wk_hist = (
+        weeklymod.weekly_hist_seed(walk_as, day, tsz) if rth_i0 > 0 else None
+    )
+    profile_wk_rows: list[dict] = []
+    if wk_hist is not None:
+        lo, counts = wk_hist
+        c = np.asarray(counts, dtype="float64")
+        nz = np.flatnonzero(c)
+        profile_wk_rows = _profile_rows(
+            profmod.developing_profile(
+                full, b_all, tsz, seed=((nz + lo) * tsz, c[nz]),
+            ),
+            times,
+        )
+
+    # The Modern VWAP's POC anchor, off the Globex value area just built — the
+    # same series and the same source the chart's own indicator reads (its
+    # `pocSource` default is globex). Computed here rather than only in the
+    # browser so the level tagger has it; the frontend keeps drawing its own.
+    # Both re-arm rules, because which one a fill sat on is the open question:
+    # they agree on where the level is and disagree on when it is worth
+    # re-anchoring, so one cannot stand in for the other.
+    mv_poc_rows = {
+        mode: mvmod.poc_mid_rows(
+            times, b_all["high"].to_numpy(dtype="float64"),
+            b_all["low"].to_numpy(dtype="float64"),
+            b_all["close"].to_numpy(dtype="float64"),
+            b_all["volume"].to_numpy(dtype="float64"),
+            profile_gx_rows, tsz, mode,
+            # The tape's own per-bar average, so the measured line is the drawn
+            # line: the frontend accumulates exactly these moments now.
+            bar_vwap=b_vwap,
+        )
+        for mode in mvmod.MODES
+    }
+
+    # The days in front of this one, for whoever draws a composite over them.
+    # Assembled here rather than in a second endpoint because a composite is a
+    # statement about *this* session's context: fetched separately it could
+    # answer for a different contract than the one the roll just resolved.
+    context = (
+        weeklymod.context_hists(walk_as, day, context_days, tsz)
+        if context_days > 0 else None
+    ) or []
 
     # Snap trade instants (tick times) onto the bar grid: the frontend's
     # nearestBar would do this anyway, but doing it here keeps the marker on the
@@ -603,10 +805,13 @@ def session_frame(
         ema50_rows = _ema_rows(m_closes, m_times, 50)
         ema200_rows = _ema_rows(m_closes, m_times, 200)
 
-    # One CVD pass feeds both the pane series and the divergence marks, so they
-    # can't drift out of sync. thr is a price distance off the contract's grid.
-    cvd_arr = _cvd_series(full, b_all)
-    cvd_rows = _cvd_rows(cvd_arr, times)
+    # One delta pass feeds the cumulative pane, its divergence marks and the
+    # windowed oscillator, so none of the three can drift out of sync. thr is a
+    # price distance off the contract's grid.
+    delta_arr = _per_bar_delta(full, b_all)
+    cvd_arr = _cvd_series(delta_arr)
+    cvd_rows = _delta_rows(cvd_arr, times)
+    delta_rows = _delta_rows(delta_arr, times)
     divergences = _cvd_divergences(b_all, cvd_arr, times, (div_ticks or DIV_ZZ_TICKS) * tsz)
 
     # RSI(14) and ATR(14) on the *drawn* timeframe — the tick bars on screen, like
@@ -623,11 +828,16 @@ def session_frame(
         vwap_weekly=vwap_wk_rows,
         profile_globex=profile_gx_rows,
         profile_ny=profile_ny_rows,
+        profile_weekly=profile_wk_rows,
+        context_profiles=context,
+        mv_poc_naked=mv_poc_rows["pocMove"],
+        mv_poc_revisit=mv_poc_rows["distance"],
         bar_time=bar_time,
         ib=ib,
         footprint=_footprint(full, b_all, tick_size(contract)),
         cvd=cvd_rows,
         cvd_divergences=divergences,
+        delta=delta_rows,
         ema9=ema9_rows,
         ema20=ema20_rows,
         ema50=ema50_rows,
@@ -635,4 +845,5 @@ def session_frame(
         rsi=rsi_rows,
         atr_points=atr_rows,
         symbol=sym,
+        tick=tick_size(contract),
     )

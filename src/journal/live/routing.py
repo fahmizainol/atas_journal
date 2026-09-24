@@ -51,7 +51,7 @@ has been asked what is working. Those are checked on every order, not once per
 quarter of an hour, so the last line of defence never sits expired while
 somebody is trading or granted while nobody is.
 
-**TWO ENV VARS ARE KEPT, AND THEY POINT OPPOSITE WAYS.** ``LIVE_ROUTING`` —
+**THREE ENV VARS ARE KEPT, AND THE FIRST TWO POINT OPPOSITE WAYS.** ``LIVE_ROUTING`` —
 without it the ORDER plant is never opened and every routing endpoint answers
 403. It is the deployment-level "this machine must never trade", which the
 always-on host needs and which no amount of clicking can undo. ``LIVE_GUARDRAILS``
@@ -62,6 +62,17 @@ losing money. Guardrails live in the environment rather than in the UI for one
 reason: turning them off should require leaving the chart, not a toggle you can
 reach at 09:31 with a red P&L. Everything else that used to be an env var — and
 the guard *levels* themselves — is a setting with a visible control.
+
+The third is ``REPLAY_GUARDRAILS``, and it governs nothing in this module. The
+replay applies its own mirror of these rules in the browser
+(``frontend/src/lib/guardRules.ts``) and reads the levels off ``/live/routing``,
+so the switch that turns that mirror off is answered here for the same reason the
+levels are: one place owns what practice is told about the rules. It is on unless
+switched off, like ``LIVE_GUARDRAILS``, and it is *separate* from it because the
+two protect different things — one protects an account, the other protects a
+habit, and a session spent measuring what a 30-tick stop does should not require
+switching off the layer that stands between a bad morning and a blown account.
+The reverse holds too: no value of ``REPLAY_GUARDRAILS`` reaches an order plant.
 
 THE CONFIRM IS A TOKEN, NOT A CHECKBOX. ``preview()`` renders an order as a
 sentence and mints a single-use token bound to that exact intent; ``consume()``
@@ -91,16 +102,29 @@ KINDS = ("demo", "live")
 # How long a reviewed order stays sendable. Short: the sentence names a price,
 # and a price that was true a minute ago is a different order.
 PREVIEW_TTL_S = 45.0
-# Ceiling on a single order, before the account's own RMS ever sees it. A
-# fat-fingered quantity is the cheapest accident to make and the most expensive
-# to have, and the broker's limit is not visible from here.
-MAX_QTY_DEFAULT = 5
+
+# THERE IS NO QUANTITY CEILING, AND THAT IS THE DECISION RATHER THAN AN
+# OMISSION. There used to be one — ``max_qty``, five, unreachable from the panel
+# and so in practice a constant. It was justified as a typo-catcher, but it was
+# never the rule it was standing in for: five contracts on a 50-tick stop is
+# $125 of MNQ and $1,250 of NQ, ten times apart with the same number in the box,
+# and the order path takes its symbol from whatever the feed is on. A ceiling
+# that passes both cannot be the thing protecting the account, and having it
+# there made it look as though something was.
+#
+# ``Guards.max_risk_usd`` is the rule, in the unit the operating plan is written
+# in, and it is now the only one. Two things follow that a reader should know
+# rather than discover: with ``LIVE_GUARDRAILS=0`` nothing bounds a quantity at
+# all, and the dollar rule stays silent when the contract's dollars-per-tick is
+# unknown (see ``_check_shape``) rather than guessing a multiplier. Both were
+# true of the size a five-lot could reach before; neither is now capped by a
+# second rule underneath.
 
 _SIDES = ("buy", "sell")
 _TYPES = ("market", "limit", "stop")
 
 #: Settings keys in the ``ai_settings`` table (a general key-value store despite
-#: the name — ``trading_profile`` and ``recordings_folder`` already live there).
+#: the name — ``trading_profile`` already lives there).
 ACCOUNTS_KEY = "routing_accounts"
 SETTINGS_KEY = "routing_settings"
 INSTRUMENTS_KEY = "routing_instruments"
@@ -327,26 +351,41 @@ class Guards:
     stop_ticks_max: int = 60
     #: Refuse an entry with no stop and no target at all.
     require_bracket: bool = True
-    #: When the day crosses ``daily_loss_stop``, close what is open rather than
-    #: only refusing the next entry.
+    #: When the day crosses ``daily_loss_stop``, close what is *still* open
+    #: rather than only refusing the next entry.
     #:
-    #: THE STOP IS MEASURED ON EQUITY, NOT ON REALISED, AND THAT IS WHY THIS
-    #: EXISTS. A rule that only counted closed trades would sit silent through
-    #: an $800 open loss and then refuse the *next* order — which is the one
-    #: thing that was never the problem. The account's own drawdown does not
-    #: wait for you to book it, so neither does this.
+    #: THE STOP IS MEASURED ON BOOKED P&L, NOT ON EQUITY. It used to be equity,
+    #: on the argument that a position held at −$800 has already spent the
+    #: drawdown whether or not it has been booked. True of the *account's*
+    #: floor, which the firm marks continuously — and that one still reads
+    #: equity. It is not true of this rule, which is a rule about how much
+    #: losing a day is allowed to have done, and a trade the market has not yet
+    #: taken anything for has not done any of it. Marking a runner to market and
+    #: ending it on that mark closes trades at their worst moment, which is the
+    #: opposite of what a discipline rail is for.
+    #:
+    #: So the only moment the stop can be reached is the moment a trade books,
+    #: and this decides what happens when one books with size still on: a
+    #: scale-out that took the day past the line and left a runner. Off, the day
+    #: still locks and still refuses the next entry — it just leaves the runner
+    #: to you.
     auto_flatten: bool = True
     #: The most a single entry may put at risk: stop distance x size x the
     #: contract's own dollars-per-tick.
     #:
-    #: THIS IS THE RULE ``max_qty`` CANNOT BE. A quantity ceiling assumes it
-    #: knows which contract the quantity is of — and 5 contracts on a 50-tick
+    #: THIS IS THE WHOLE OF HOW LARGE AN ORDER MAY BE — there is no quantity
+    #: ceiling beside it any more, and there was one. A quantity ceiling assumes
+    #: it knows which contract the quantity is of, and 5 contracts on a 50-tick
     #: stop is $125 on MNQ and $1,250 on NQ, ten times apart, with the same
     #: number in the box. The order path takes its symbol from whatever the feed
     #: is on, so "the chart is NQ but the plan was written for MNQ" is a live
     #: hazard rather than a hypothetical. Risk in dollars is the only form of
     #: this rule that is true whatever is being traded, and it is the unit the
     #: operating plan is written in.
+    #:
+    #: Which makes the two places it declines to speak worth knowing: it is
+    #: skipped entirely with ``LIVE_GUARDRAILS=0``, and it stays silent when the
+    #: contract's dollars-per-tick is unknown. Nothing bounds a quantity there.
     max_risk_usd: float = 250.0
     #: Per side, per contract. The day's running total is measured net of it,
     #: because a $500 stop that ignores its round turns is not a $500 stop.
@@ -367,16 +406,14 @@ def _num(raw: dict, key: str, default: float, lo: float = 0.0) -> float:
 class Settings:
     """The knobs that used to be env vars. Defaults are the old defaults."""
 
-    max_qty: int = MAX_QTY_DEFAULT
     guards: Guards = field(default_factory=Guards)
 
 
 def settings() -> Settings:
     raw = _read(SETTINGS_KEY)
-    try:
-        qty = int(raw.get("max_qty", MAX_QTY_DEFAULT))
-    except (TypeError, ValueError):
-        qty = MAX_QTY_DEFAULT
+    # A stored ``max_qty`` is read past rather than migrated away: the key is
+    # harmless where it sits, and a store rewritten on read is a store that
+    # cannot be rolled back to.
     g = raw.get("guards")
     g = g if isinstance(g, dict) else {}
     d = Guards()
@@ -394,11 +431,10 @@ def settings() -> Settings:
         commission_per_side=_num(g, "commission_per_side",
                                  d.commission_per_side),
     )
-    return Settings(max_qty=max(1, qty), guards=guards)
+    return Settings(guards=guards)
 
 
-def save_settings(max_qty: int | None = None,
-                  guards: dict | None = None) -> Settings:
+def save_settings(guards: dict | None = None) -> Settings:
     """Write the order-entry settings. Any argument left None is kept.
 
     ``guards`` is a *partial* dict — the panel sends the one level being edited
@@ -410,10 +446,7 @@ def save_settings(max_qty: int | None = None,
     for k, v in (guards or {}).items():
         if k in want and v is not None:
             want[k] = v
-    _write(SETTINGS_KEY, {
-        "max_qty": max(1, int(cur.max_qty if max_qty is None else max_qty)),
-        "guards": want,
-    })
+    _write(SETTINGS_KEY, {"guards": want})
     return settings()
 
 
@@ -425,10 +458,14 @@ class Policy:
     """The one deployment-level answer, plus the settings it carries around."""
 
     enabled: bool
-    max_qty: int
     #: Is the discipline layer enforced on this machine? ``LIVE_GUARDRAILS``.
     #: Defaults to **True** — see ``_flag_off``.
     guardrails: bool = True
+    #: Does the *replay* apply its mirror of the rules? ``REPLAY_GUARDRAILS``,
+    #: also defaulting to True. Nothing in this module reads it — it is carried
+    #: here so the browser can be told, and so the two switches are declared in
+    #: one place. See the module docstring for why it is not the same flag.
+    replay_guardrails: bool = True
     guards: Guards = field(default_factory=Guards)
 
     def refusal(self) -> str | None:
@@ -441,7 +478,7 @@ class Policy:
 
 
 def policy() -> Policy:
-    """Read the routing policy: two env vars and the stored settings.
+    """Read the routing policy: three env vars and the stored settings.
 
     ``load_env()`` first, for the same reason ``rithmic.credentials`` does it:
     this repo does not load ``.env`` at import, so a module going straight to
@@ -453,8 +490,8 @@ def policy() -> Policy:
     load_env()
     s = settings()
     return Policy(enabled=_flag("LIVE_ROUTING"),
-                  max_qty=s.max_qty,
                   guardrails=not _flag_off("LIVE_GUARDRAILS"),
+                  replay_guardrails=not _flag_off("REPLAY_GUARDRAILS"),
                   guards=s.guards)
 
 
@@ -560,6 +597,32 @@ class Intent:
     #: is eventually wrong on one side only.
     be_ticks: int = 0
 
+    #: --- the ladder: the same trail, run by this app instead ---------------
+    #:
+    #: The four knobs the Simulator practises and the backtest engine trades
+    #: (`sim/rules.py`'s `trail_stop_ticks` and friends, `replaySim.ts:433`),
+    #: which Rithmic's own trail cannot express: it has one free variable, rides
+    #: at `stop_ticks` by force, and recomputes absolutely on every new extreme.
+    #: Running it here buys the grid, the breakeven rung, and a stop that can
+    #: still be dragged — and costs the ratchet the moment this process dies.
+    #:
+    #: **Nothing here reaches the wire.** These are read by `Broker._submit` into
+    #: a `LadderRunner`, and the order goes out as a plain static bracket. That
+    #: is why they are refused alongside `trail_trigger_ticks` rather than merged
+    #: with it: one stop cannot have two owners.
+    ladder_dist_ticks: int = 0
+    #: The grid the stop may rest on. 0 = one rung per `ladder_dist_ticks`.
+    ladder_step_ticks: int = 0
+    #: How far past the entry the first rung lands. 0 is breakeven *gross* — the
+    #: round trip still owes commission.
+    ladder_be_ticks: int = 0
+    #: Take the first rung and no other: a breakeven stop rather than a trail.
+    ladder_be_only: bool = False
+
+    @property
+    def has_ladder(self) -> bool:
+        return self.ladder_dist_ticks > 0
+
     def sentence(self, kind: str, tick_size: float) -> str:
         """The order in words. This is the confirm popup's entire content.
 
@@ -595,6 +658,27 @@ class Intent:
                 f"{self.trail_trigger_ticks} ticks in profit")
         if self.be_trigger_ticks or self.trail_trigger_ticks:
             parts.append("Rithmic moves it, not this app")
+        if self.has_ladder:
+            rung = (f"every {self.ladder_step_ticks} ticks"
+                    if self.ladder_step_ticks else "in whole trail-widths")
+            first = (f"{self.ladder_be_ticks} ticks past the fill"
+                     if self.ladder_be_ticks else "at the fill")
+            if self.ladder_be_only:
+                parts.append(
+                    f"stop jumps once to {first} and then stays "
+                    f"({self.ladder_dist_ticks} ticks behind the high is what "
+                    "earns it)")
+            else:
+                parts.append(
+                    f"stop trails {self.ladder_dist_ticks} ticks behind the "
+                    f"high, {rung}, starting {first}")
+            # The counterpart of the Rithmic line above, and the more important
+            # of the two: this ratchet lives in this process. Whoever reads the
+            # confirm has to know that closing the app, or losing it, freezes the
+            # stop where it last got to.
+            parts.append(
+                "THIS APP moves it, not Rithmic — if it stops running the stop "
+                "stays where it last got to")
         return ", ".join(parts) + "."
 
 
@@ -603,20 +687,25 @@ def build_intent(pol: Policy, *, side: str, qty: int, type: str,
                  symbol: str, exchange: str, account_id: str,
                  reducing: bool = False, tick_usd: float = 0.0,
                  trail_trigger_ticks: int = 0,
-                 be_trigger_ticks: int = 0, be_ticks: int = 0) -> Intent:
+                 be_trigger_ticks: int = 0, be_ticks: int = 0,
+                 ladder_dist_ticks: int = 0, ladder_step_ticks: int = 0,
+                 ladder_be_ticks: int = 0, ladder_be_only: bool = False,
+                 feed_symbol: str | None = None) -> Intent:
     """Validate a request into an ``Intent``. Raises ``ValueError`` with a reason.
 
-    The quantity cap is checked here rather than at send time so the refusal
-    lands on the review, where there is room to say why. Everything else is
-    shape: a limit with no price is not a conservative order, it is a bug that
-    would reach the exchange as something else.
+    The checks here are shape: a limit with no price is not a conservative
+    order, it is a bug that would reach the exchange as something else.
 
-    THE TWO GROUPS ARE DIFFERENT KINDS OF RULE. Side, type, price, quantity are
-    typo-catchers and are checked whatever ``LIVE_GUARDRAILS`` says: there is no
-    session in which a naked 40-lot was meant. The bracket rules below it are
-    discipline, they are fitted to one trader's book, and they are skipped both
-    when the guardrails are off and when the order is *reducing* — closing size
-    has no target to be too tight.
+    THE TWO GROUPS ARE DIFFERENT KINDS OF RULE. Side, type, price are
+    typo-catchers and are checked whatever ``LIVE_GUARDRAILS`` says. The bracket
+    rules below them are discipline, they are fitted to one trader's book, and
+    they are skipped both when the guardrails are off and when the order is
+    *reducing* — closing size has no target to be too tight.
+
+    **Quantity is only bounded below.** How large an order may be is
+    ``max_risk_usd``'s question, asked in dollars on the contract actually being
+    sent to; see the note beside ``PREVIEW_TTL_S`` for why the ceiling that used
+    to sit here was not an answer to it.
     """
     side = (side or "").strip().lower()
     type = (type or "").strip().lower()
@@ -626,18 +715,13 @@ def build_intent(pol: Policy, *, side: str, qty: int, type: str,
         raise ValueError(f"order type must be one of {', '.join(_TYPES)}")
     if qty < 1:
         raise ValueError("quantity must be at least 1")
-    if qty > pol.max_qty:
-        raise ValueError(
-            f"quantity {qty} is over this app's ceiling of {pol.max_qty} — "
-            "raise it in the order-entry settings if you meant it. The "
-            "account's own risk limits are a separate and later thing; this one "
-            "is here to catch a slipped digit.")
     if type == "market":
         price = None
     elif price is None or not (price == price) or price <= 0:  # NaN-safe
         raise ValueError(f"a {type} order needs a price")
     if min(stop_ticks, target_ticks, trail_trigger_ticks,
-           be_trigger_ticks, be_ticks) < 0:
+           be_trigger_ticks, be_ticks, ladder_dist_ticks, ladder_step_ticks,
+           ladder_be_ticks) < 0:
         raise ValueError("bracket distances are in ticks and cannot be negative")
     if be_trigger_ticks and not stop_ticks:
         raise ValueError(
@@ -668,6 +752,11 @@ def build_intent(pol: Policy, *, side: str, qty: int, type: str,
             "a trailing stop needs a stop to trail: Rithmic rides it at the "
             "stop's own distance behind the high, so there is nothing to "
             "measure from without one.")
+    _check_ladder(ladder_dist_ticks, ladder_step_ticks, ladder_be_ticks,
+                  stop_ticks=stop_ticks,
+                  trail_trigger_ticks=trail_trigger_ticks,
+                  be_trigger_ticks=be_trigger_ticks,
+                  symbol=symbol, feed_symbol=feed_symbol)
     if not account_id or account_id == PAPER:
         raise ValueError("no real account to send to")
     if pol.guardrails and not reducing:
@@ -678,7 +767,71 @@ def build_intent(pol: Policy, *, side: str, qty: int, type: str,
                   symbol=symbol, exchange=exchange, account_id=account_id,
                   trail_trigger_ticks=int(trail_trigger_ticks),
                   be_trigger_ticks=int(be_trigger_ticks),
-                  be_ticks=int(be_ticks))
+                  be_ticks=int(be_ticks),
+                  ladder_dist_ticks=int(ladder_dist_ticks),
+                  ladder_step_ticks=int(ladder_step_ticks),
+                  ladder_be_ticks=int(ladder_be_ticks),
+                  ladder_be_only=bool(ladder_be_only))
+
+
+def _check_ladder(dist: int, step: int, be: int, *, stop_ticks: int,
+                  trail_trigger_ticks: int, be_trigger_ticks: int,
+                  symbol: str, feed_symbol: str | None) -> None:
+    """Every way an app-run trail is asked for and cannot be honoured.
+
+    Shape rules, not discipline — these hold whatever ``LIVE_GUARDRAILS`` says,
+    because each one describes a ladder that would silently do nothing or do
+    something other than what was typed. The discipline question (is a 40-tick
+    trail a good idea) is not asked here and is not this file's to ask.
+    """
+    if not dist:
+        # Everything below is conditional on there being a ladder at all — and
+        # the settings are allowed to sit at non-zero with the master switch off,
+        # exactly as the ticket stores them.
+        return
+    if not stop_ticks:
+        raise ValueError(
+            "a trailing stop needs a stop to trail: the ladder moves the stop "
+            "leg the order goes out with, and there is no leg without one.")
+    if trail_trigger_ticks or be_trigger_ticks:
+        # Not a preference. Rithmic re-derives its managed stop absolutely on
+        # every new extreme, so the two would take turns overwriting each other
+        # and the level on the chart would be whichever spoke last.
+        which = "a trailing" if trail_trigger_ticks else "a breakeven"
+        raise ValueError(
+            f"this order asks for both {which} bracket managed by Rithmic and a "
+            "ladder run by this app. One stop cannot have two owners — they "
+            "would overwrite each other on every tick of profit. Pick one.")
+    if step > dist:
+        raise ValueError(
+            f"the ladder's step ({step} ticks) is wider than the trail itself "
+            f"({dist}): the stop would never reach the second rung. Use a step "
+            "at or under the trail distance, or 0 for one rung per trail width.")
+    if be >= dist:
+        raise ValueError(
+            f"the ladder's first rung ({be} ticks past the fill) is not closer "
+            f"than the trail distance ({dist}), so the stop would be asked to "
+            "sit in front of the price that justifies it. Keep the breakeven "
+            "offset under the trail distance.")
+    if feed_symbol and feed_symbol != symbol:
+        # Decided rather than approximated: `use_instrument` is explicit that the
+        # tape does not follow routing, so the ladder would be reading the mini's
+        # prints while the position is in the micro. They track within a tick,
+        # which is exactly what makes silently allowing it the wrong call — it
+        # would be right often enough never to be noticed when it wasn't.
+        raise ValueError(
+            f"orders are routed to {symbol} but the tape being watched is "
+            f"{feed_symbol}. The ladder measures the high off the tape this app "
+            "can see, so it cannot trail a position in another contract. Three "
+            "ways out, and the first is usually the one you want: use Rithmic's "
+            "own trail, which rides its own feed for the contract it is on; or "
+            f"route back to {feed_symbol}, remembering that is ten times the "
+            f"money a micro is; or reconnect the feed on {symbol}. The tape "
+            "cannot simply be re-pointed — one login is one socket and the "
+            "subscription is made at connect — so the third means stopping the "
+            "feed and starting it again on that contract. **Until one of those, "
+            "every order carrying a ladder is refused here**, so this is a "
+            "setting to change rather than a click to repeat.")
 
 
 def _check_shape(g: Guards, stop_ticks: int, target_ticks: int,

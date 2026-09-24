@@ -14,7 +14,7 @@ const MODES: { value: SessionMode; label: string; title: string }[] = [
 
 // Per-attempt session controls: what this export *is* (live money, a replay, or
 // a single-model backtest) and whether it counts toward the default statistics.
-// Keyed by source_file, the same key the video link and bookmarks already use.
+// Keyed by source_file, the same key notes and the day explorer already use.
 export function SessionControl({ sourceFile }: { sourceFile: string }) {
   const { data: sessions = [] } = useSessions();
   const { data: models = [] } = useModels();

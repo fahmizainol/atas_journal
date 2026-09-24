@@ -1116,3 +1116,52 @@ reconciled.
 
 **Honest caveat, and it is in the doc too:** none of this is un-bypassable by whoever owns the
 machine. It buys friction and visibility, not impossibility.
+
+### Phase 7c — how long the press took (built 2026-08-13)
+
+"Press the button, and the order is at the exchange *when*?" — measured rather than felt, and
+split into legs, because "the order was slow" is at least four different bugs and a single
+end-to-end number cannot tell them apart.
+
+Every send writes `latency` events into the same `orders.jsonl` the order path already keeps —
+one line per answer, each carrying everything known so far, so a reader takes the last line for
+a tag and has the whole timeline. The legs:
+
+| field | measured by | what it is |
+|---|---|---|
+| `client_ms` | browser | the gesture handler to the response in hand — what the trader experienced |
+| `net_ms` | browser | `client_ms - api_ms`: fetch, dev proxy, JSON, React getting round to the handler |
+| `api_ms` | API | the whole request handler, session lookup and parsing included |
+| `gate_ms` | API | our own work before the wire — guardrails, the day's arithmetic, the journal write |
+| `plant_ms` | API | our submit to Rithmic's order plant answering with a basket id |
+| `exch_ms` | API | the wire to the exchange's **first** word on the order. The honest end of "placed" |
+
+Plus `gesture` — key, dock, click, ticket, pad, and the `+confirm` variants — because the slow
+part of a press is rarely the wire, and the axis that actually separates the fast presses from
+the slow ones is which button it was.
+
+**THREE CLOCKS, AND NOTHING IS EVER SUBTRACTED ACROSS THEM.** The browser times its own press
+against its own acknowledgement on `performance.now()`; the API times its own wire call on
+`perf_counter()`. No press timestamp is shipped to the server and differenced against
+`time.time()` — the browser is on Windows and this API is in WSL, and a cross-clock subtraction
+would report the skew between the two as latency, plausibly, in the right order of magnitude,
+and wrongly. `net_ms` is a duration minus a duration, which is sound; every other field is a
+single-clock span.
+
+Three shapes worth knowing:
+
+- **The exchange's answer arrives after the response has gone back.** So `exch_ms` is null on
+  the reply to the send and lands on the record a moment later, by tag — which is why the
+  timings are keyed on our own `user_tag` (ours, and unique before Rithmic has said a word)
+  rather than on the basket id. The panel reads it off the next status poll.
+- **The browser reports its number on a request of its own**, after the order is already gone,
+  awaited by nobody, and swallowed on failure. Measuring an order must not cost the order
+  anything, and there is nothing useful to say to somebody who has just sent an order about a
+  statistic that went missing.
+- **A send that failed is still timed** — the twenty seconds a wedged plant costs is exactly
+  the number that would explain the afternoon, and a record of only the sends that worked hides
+  it.
+
+On screen in two places: the acknowledgement carries the press time (`BUY 1 sent · 142 ms ·
+B4711`), and the order panel's last-order strip carries the full breakdown, which is where you
+go when that number was surprising.

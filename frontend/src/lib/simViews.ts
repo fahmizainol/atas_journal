@@ -21,6 +21,7 @@ import {
   workingOrders,
   type OrderRec,
   type Position,
+  type Side,
   type SimState,
   type Trade,
 } from "./replaySim";
@@ -72,6 +73,72 @@ export const tradeMark = (t: Trade, barAt: BarAt): TradeMarkView => ({
   // blotter is where the two R's get compared; a chart label has room for one.
   r: t.rCash,
   reason: t.reason,
+});
+
+/** One row of the blotter, whichever clock filled it.
+ *
+ *  The paper simulation and the broker record a closed round trip differently —
+ *  different casing, different nullability, and the broker's `pnl` is gross
+ *  where the simulation's is net. This is what they are both mapped *to*, so
+ *  that Replay and Live can draw the same card (`components/charts/Blotter`)
+ *  rather than keeping two row layouts in step by hand. `brokerViews.blotterRows`
+ *  is the other mapper.
+ *
+ *  Nullable wherever a source can honestly not know: a trade opened bare has no
+ *  risk to divide by, and a row restored from the journal has neither that nor
+ *  its commission (see `booking.day_trades`). Null prints as "—", never as 0. */
+export interface BlotterRow {
+  id: number;
+  /** When the **position** this row came off opened — the same instant on every
+   *  scale-out of one entry, which is what makes `replaySim.openStamps` able to
+   *  count the day's trades off a list of rows. Not shown; carried so the two
+   *  sources cannot be counted by two different rules. */
+  entryMs: number;
+  side: Side;
+  size: number;
+  /** The badge to draw beside the size, or null for the ordinary case where the
+   *  row is in the contract orders go to now. Resolved by the mapper because
+   *  only the caller knows what "now" is — and in a review it is nothing, so
+   *  every row would otherwise be badged as differing from a selection that is
+   *  not being offered. */
+  contract: string | null;
+  /** `market`, `limit`, `stop` — how the position was opened. Null when the
+   *  source cannot say. */
+  openType: string | null;
+  reason: string;
+  entryPrice: number;
+  exitPrice: number;
+  /** **Net**, both sources. `fees` is what is already out of it. */
+  pnl: number;
+  fees: number | null;
+  /** Excursion R (size-blind) and stake R (dollars over dollars). They part
+   *  company only when size changed mid-trade, which is when both are worth
+   *  printing. */
+  r: number | null;
+  rCash: number | null;
+  /** The dollars the entry staked — `rCash`'s denominator, and the figure the
+   *  order pad's sizer quoted before it went on. The *position's*: every
+   *  scale-out of one entry repeats it, so it is never totalled. */
+  riskUsd: number | null;
+}
+
+/** A closed paper trade as a blotter row. `contract` is decided by the caller
+ *  and passed in, for the reason `BlotterRow.contract` gives. */
+export const blotterRow = (t: Trade, contract: string | null = null): BlotterRow => ({
+  id: t.id,
+  entryMs: t.entryMs,
+  side: t.side,
+  size: t.size,
+  contract,
+  openType: t.openType,
+  reason: t.reason,
+  entryPrice: t.entryPrice,
+  exitPrice: t.exitPrice,
+  pnl: t.pnl,
+  fees: t.fees,
+  r: t.r,
+  rCash: t.rCash,
+  riskUsd: t.riskUsd,
 });
 
 /** A working order as the chart and the panel want it: levels resolved to the

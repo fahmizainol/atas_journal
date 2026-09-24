@@ -3,7 +3,8 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Sidebar } from "../components/Sidebar";
 import { FilterBar } from "../components/FilterBar";
 import { useImportFeed } from "../hooks/useBacktests";
-import { WORKSPACES, workspaceForPath } from "../lib/workspaces";
+import { useActivityPing } from "../lib/activity";
+import { WORKSPACES, filterBarForPath, workspaceForPath } from "../lib/workspaces";
 
 export function Layout() {
   const { pathname, search } = useLocation();
@@ -11,6 +12,10 @@ export function Layout() {
   // Poll the auto-import watcher from the shell so any page refreshes when a
   // new export lands, not just the Backtests tab.
   useImportFeed();
+  // Count minutes of use, from the shell because every route renders inside it
+  // — including the chart pages, which draw none of the chrome below. No-op
+  // unless VITE_POSTHOG_KEY is set.
+  useActivityPing();
   // The data/timezone sidebar is hidden by default to maximise content width;
   // toggle it open with the ☰ button in the tab bar.
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -18,7 +23,10 @@ export function Layout() {
   return (
     // The workspace id rides on the shell so mobile styling can target one
     // product at a time — the Lab is tuned for phones; the Journal isn't (yet).
-    <div className={`app-shell ws-${active.id}`}>
+    // `chromeless` rides alongside it because the rules that follow from drawing
+    // no chrome — zero page padding, a shell floored at the viewport — follow
+    // from the flag, not from which workspace happens to set it.
+    <div className={`app-shell ws-${active.id}${active.chrome ? "" : " chromeless"}`}>
       {/* The data sidebar is import/timezone plumbing over ATAS exports — a
           chart page reads the tick cache and has no use for it, and both of them
           hardcode their timezone. Gated on `chrome` rather than left mounted so
@@ -73,7 +81,7 @@ export function Layout() {
             </nav>
           </>
         )}
-        {active.filterBar && <FilterBar />}
+        {filterBarForPath(pathname) && <FilterBar />}
         <Suspense fallback={<div className="page-fallback" />}>
           <Outlet />
         </Suspense>

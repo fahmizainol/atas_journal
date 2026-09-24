@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { NavMenu } from "../NavMenu";
+import { FullscreenButton } from "./FullscreenButton";
 import { CHARTS } from "../../lib/workspaces";
 import {
   armAudio,
@@ -10,16 +11,6 @@ import {
   soundOn,
   soundPack,
 } from "../../lib/orderSound";
-
-/** Is native fullscreen actually available for a plain element?
- *
- *  iOS Safari says no — it only ever fullscreens a <video> — and the button has
- *  to be absent there rather than present and inert. Checked once at module
- *  load: the answer cannot change for the life of the document. */
-const CAN_FULLSCREEN =
-  typeof document !== "undefined" &&
-  document.fullscreenEnabled === true &&
-  typeof document.documentElement.requestFullscreen === "function";
 
 /** What the order cues are set to: silent, the platform tones, or the spoken
  *  pack. The mute state and the pack choice as one setting, because that is how
@@ -76,7 +67,6 @@ export type ChartTopBarProps = {
  */
 export function ChartTopBar({ title, onTitle, titleOpen, children, right }: ChartTopBarProps) {
   const { search } = useLocation();
-  const [isFull, setIsFull] = useState(false);
   // The sound switch lives here rather than on either page's setup panel for the
   // same reason the fullscreen button does: both chart pages make the same
   // noises, and a setting that has to be found twice gets set twice differently.
@@ -91,23 +81,6 @@ export function ChartTopBar({ title, onTitle, titleOpen, children, right }: Char
   // Audio cannot start outside a user gesture, and a fill is not one — so the
   // bar that is always on screen is what arms it (see lib/orderSound).
   useEffect(armAudio, []);
-
-  useEffect(() => {
-    if (!CAN_FULLSCREEN) return;
-    // Esc leaves fullscreen without going through the button, so the icon has to
-    // follow the document rather than a click count.
-    const sync = () => setIsFull(document.fullscreenElement != null);
-    document.addEventListener("fullscreenchange", sync);
-    sync();
-    return () => document.removeEventListener("fullscreenchange", sync);
-  }, []);
-
-  const toggleFull = useCallback(() => {
-    // Whole document, not the chart element: the page already fills the viewport,
-    // so the only pixels left to win are the browser's own tab and address bars.
-    if (document.fullscreenElement) void document.exitFullscreen();
-    else void document.documentElement.requestFullscreen().catch(() => {});
-  }, []);
 
   return (
     <div className="chart-topbar">
@@ -161,17 +134,7 @@ export function ChartTopBar({ title, onTitle, titleOpen, children, right }: Char
         >
           {CUE_ICON[cue]}
         </button>
-        {CAN_FULLSCREEN && (
-          <button
-            type="button"
-            className={`chart-topbar-btn${isFull ? " on" : ""}`}
-            onClick={toggleFull}
-            aria-pressed={isFull}
-            title={isFull ? "Leave fullscreen (Esc)" : "Fullscreen — hides the browser's own chrome"}
-          >
-            ⛶
-          </button>
-        )}
+        <FullscreenButton />
       </div>
     </div>
   );

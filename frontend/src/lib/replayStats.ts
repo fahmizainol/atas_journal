@@ -107,6 +107,31 @@ export interface Activity {
   last_exit_ms: number | null;
   clock_start_ms: number | null;
   clock_end_ms: number | null;
+  /** The sitting's equity excursion, in dollars from where it opened.
+   *
+   *  Unlike every other field here these are not folds over `trades` — they are
+   *  read off the simulation, because the money a position was up or down
+   *  *between* two fills is not in `trades` at all. That absence is the whole
+   *  reason they are persisted: an intraday-trailing account derives its floor
+   *  from the equity path including an open position, and the server re-walking
+   *  booked P&L alone would compute a lower floor than the browser enforced,
+   *  permanently (`journal.replay_account.excursion`).
+   *
+   *  **Sitting-relative, never absolute.** The equity a sitting opened at is the
+   *  account's business and can change under it — an earlier attempt deleted, a
+   *  sitting settled behind the page's back — and a figure that had baked it in
+   *  would be wrong the moment the walk moved.
+   *
+   *  `peak_usd` carries the floor forward; `trough_usd` is an order-free death
+   *  check; `min_room_usd` is the browser's own verdict, the closest equity ever
+   *  came to the floor it was under *at the time*, and the only one of the three
+   *  that can catch a sitting which ran up, raised its own floor, and fell back
+   *  through it. Null on a page with no account behind it (a drill), and absent
+   *  on every attempt written before this shipped — the walk reads absence as
+   *  "no reading", never as zero. */
+  peak_usd: number | null;
+  trough_usd: number | null;
+  min_room_usd: number | null;
 }
 
 export type AttemptSummary = Totals & Derived & Activity;
@@ -221,6 +246,11 @@ export function summarize(
     discarded: Trade[];
     clockStartMs: number | null;
     clockEndMs: number | null;
+    /** The equity path, off the simulation. See `Activity.peak_usd` for why it
+     *  arrives through here rather than being derived from `trades`. */
+    peakUsd?: number | null;
+    troughUsd?: number | null;
+    minRoomUsd?: number | null;
   },
 ): AttemptSummary {
   const totals = totalsOf(trades);
@@ -237,6 +267,9 @@ export function summarize(
     last_exit_ms: trades.length ? trades[trades.length - 1].exitMs : null,
     clock_start_ms: ctx.clockStartMs,
     clock_end_ms: ctx.clockEndMs,
+    peak_usd: ctx.peakUsd ?? null,
+    trough_usd: ctx.troughUsd ?? null,
+    min_room_usd: ctx.minRoomUsd ?? null,
   };
 }
 

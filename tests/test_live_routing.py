@@ -51,7 +51,9 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -138,7 +140,7 @@ def _policy(**over) -> rt.Policy:
     50/120 bracket in order to say anything about the gates, which is the
     coupling that makes a suite stop being read.
     """
-    base = dict(enabled=True, max_qty=5, guardrails=False)
+    base = dict(enabled=True, guardrails=False)
     base.update(over)
     return rt.Policy(**base)
 
@@ -167,13 +169,21 @@ def test_the_policy_reads_the_environment_and_fails_closed(monkeypatch):
 
 
 def test_the_settings_that_used_to_be_env_vars_round_trip():
-    assert rt.settings().max_qty == rt.MAX_QTY_DEFAULT
-    rt.save_settings(max_qty=2)
-    assert rt.settings().max_qty == 2
-    # A floor rather than an error: a nonsense value should not be able to leave
-    # the app unable to send anything at all.
-    rt.save_settings(max_qty=0)
-    assert rt.settings().max_qty == 1
+    assert rt.settings().guards.daily_loss_stop == rt.Guards().daily_loss_stop
+    rt.save_settings(guards={"daily_loss_stop": 400.0})
+    assert rt.settings().guards.daily_loss_stop == 400.0
+
+
+def test_a_settings_store_written_before_the_ceiling_went_reads_clean():
+    """A stored ``max_qty`` is read past rather than migrated away.
+
+    It is the shape every existing install's store is in, and the key going
+    unrecognised must not take the guard levels beside it down with it.
+    """
+    rt._write(rt.SETTINGS_KEY, {"max_qty": 5, "guards": {"daily_loss_stop": 400.0}})
+    s = rt.settings()
+    assert s.guards.daily_loss_stop == 400.0
+    assert not hasattr(s, "max_qty")
 
 
 # --- the tags -----------------------------------------------------------------
@@ -231,10 +241,17 @@ def _intent(**over) -> rt.Intent:
     return rt.build_intent(_policy(), **base)
 
 
-def test_a_slipped_digit_is_caught_before_the_review_is_even_rendered():
-    with pytest.raises(ValueError, match="ceiling"):
-        _intent(qty=50)
-    assert _intent(qty=5).qty == 5
+def test_a_quantity_is_bounded_below_and_nowhere_else():
+    """Zero is a bug in whatever built the request; large is a decision.
+
+    Nothing here refuses 50 for being 50 — how large an order may be is
+    ``max_risk_usd``'s question, in dollars on the contract it is going to, and
+    this policy has the layer off. See the no-ceiling test below.
+    """
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="at least 1"):
+            _intent(qty=bad)
+    assert _intent(qty=50).qty == 50
 
 
 def test_a_resting_order_without_a_price_is_refused_rather_than_softened():
@@ -354,15 +371,24 @@ class FakeClient:
         self.fail_cancel_all = False
         self.fail_exit = False
         self.hang = False
-        #: What `get_front_month_contract` answers, per root. None models a
-        #: login with no micro entitlement, which must not be an outage.
-        self.front_months: dict[str, str | None] = {"MNQ": MICRO}
+        #: What `get_front_month_contract` answers, per root. A root that is
+        #: missing *raises*, which is what the real client does — it turns an
+        #: empty `trading_symbol` into `RithmicErrorResponse` (ticker.py:49).
+        #: So "no micro on this login" and "could not ask right now" arrive
+        #: here as the same exception and are not distinguishable, which is
+        #: exactly why the panel's copy claims a failed question rather than a
+        #: missing entitlement.
+        self.front_months: dict[str, str] = {"MNQ": MICRO}
 
     async def subscribe_to_pnl_updates(self):
         self.subscribed = True
 
     async def get_front_month_contract(self, root, exchange):
-        return self.front_months.get(root)
+        try:
+            return self.front_months[root]
+        except KeyError:
+            raise LookupError(
+                f"no front-month contract for {root}/{exchange}") from None
 
     async def list_orders(self, **kw):
         return self._orders
@@ -451,7 +477,13 @@ def wired():
         loop.run(b.attach(c))
         rt.set_tag(SYS, "DEMO1", "demo")
         b.use_account("DEMO1")
-        yield b, c, loop
+        try:
+            yield b, c, loop
+        finally:
+            # `attach` starts the ladder's thread. Daemon threads would not fail
+            # the run, but a suite that leaks one per test is a suite where a
+            # real hang is invisible among them.
+            b.ladder.stop()
 
 
 # --- paper is the default ----------------------------------------------------
@@ -581,7 +613,7 @@ def test_one_click_is_refused_until_this_account_turns_it_on(wired):
     assert out["how"] == "one_click" and len(c.submitted) == 1
 
 
-def test_one_click_still_obeys_the_gates_and_the_quantity_ceiling(wired):
+def test_one_click_still_obeys_the_gates_and_the_shape_checks(wired):
     b, c, _ = wired
     rt.set_one_click(SYS, "DEMO1", True)
     # On paper: the fast path is faster, not freer.
@@ -590,8 +622,10 @@ def test_one_click_still_obeys_the_gates_and_the_quantity_ceiling(wired):
         b.send_now(side="buy", qty=1, type="market", price=None,
                    stop_ticks=0, target_ticks=0)
     b.use_account("DEMO1")
-    with pytest.raises(ValueError, match="ceiling"):
-        b.send_now(side="buy", qty=99, type="market", price=None,
+    # Skipping the review skips the review, not the validation — the order is
+    # built the same way either way.
+    with pytest.raises(ValueError, match="needs a price"):
+        b.send_now(side="buy", qty=1, type="limit", price=None,
                    stop_ticks=0, target_ticks=0)
     assert c.submitted == []
 
@@ -1050,6 +1084,84 @@ def test_a_stop_limit_drag_keeps_the_gap_it_was_written_with(wired):
     b.modify("B1", stop=19990.0)
     (m,) = c.modified
     assert m["trigger_price"] == 19990.0 and m["price"] == 19987.0
+
+
+def _armed_with_split_bracket(wired, net=7):
+    """One position, several stop legs. What a part-filled bracket really is.
+
+    Rithmic brackets a **fill, not an order**: a 7-lot bracket entry that fills
+    in chunks answers with a stop *and* a target per chunk, each its own basket
+    at its own price. Measured on MNQU6 2026-08-24 — entry 202083398 filling 4
+    then 3 came back as legs 202083399..402, and the same day's 5+2 fill did it
+    again. Seven micros split routinely; a mini fills in one print and never
+    shows it, which is why this went unseen until the size went up.
+    """
+    b, c, loop = wired
+    (on_order,) = c.on_exchange_order_notification.handlers
+    (on_pnl,) = c.on_instrument_pnl_update.handlers
+    for basket, size in (("S4", 4), ("S2", 2), ("S1", 1)):
+        loop.run(on_order(_order(basket, price=0.0, trigger_price=19950.0,
+                                 price_type=4, transaction_type=2,
+                                 quantity=size, total_unfilled_size=size)))
+    for basket, size in (("T4", 4), ("T2", 2), ("T1", 1)):
+        loop.run(on_order(_order(basket, price=20100.0, trigger_price=0.0,
+                                 price_type=1, transaction_type=2,
+                                 quantity=size, total_unfilled_size=size)))
+    loop.run(on_pnl(_pnl(net=net, avg_open_fill_price=20000.0)))
+    return b, c, loop
+
+
+def test_dragging_one_stop_moves_every_leg_of_a_part_filled_bracket(wired):
+    """The bug behind "I placed 7 and now there are five stops on my chart".
+
+    Moving only the leg that was grabbed leaves the rest of the position at the
+    old price while the chart draws the one that moved — a position protected at
+    two prices, reporting one. The whole set moves or none of it does.
+    """
+    b, c, _ = _armed_with_split_bracket(wired)
+    res = b.modify("S4", stop=19990.0)
+    assert {m["basket_id"] for m in c.modified} == {"S4", "S2", "S1"}
+    assert all(m["trigger_price"] == 19990.0 for m in c.modified)
+    assert set(res["baskets"]) == {"S4", "S2", "S1"} and not res["stuck"]
+
+
+def test_a_stop_drag_does_not_touch_the_target_legs(wired):
+    """The fan-out is per leg, not per bracket. A stop that dragged its own
+    targets down with it would close the position at a loss on the next print."""
+    b, c, _ = _armed_with_split_bracket(wired)
+    b.modify("S4", stop=19990.0)
+    assert not {"T4", "T2", "T1"} & {m["basket_id"] for m in c.modified}
+
+
+def test_dragging_one_target_moves_every_target_leg(wired):
+    b, c, _ = _armed_with_split_bracket(wired)
+    b.modify("T4", target=20150.0)
+    assert {m["basket_id"] for m in c.modified} == {"T4", "T2", "T1"}
+    assert all(m["price"] == 20150.0 for m in c.modified)
+
+
+def test_a_sibling_that_refuses_the_move_is_reported_not_swallowed(wired):
+    """Half a stop moved is the state the fan-out exists to prevent, so when it
+    happens anyway it is named. Silence here would read as a clean drag."""
+    b, c, _ = _armed_with_split_bracket(wired)
+    original = c.modify_order
+
+    async def _refuse_one(**kw):
+        if kw.get("basket_id") == "S2":
+            raise RuntimeError("Atomic order operation in progress")
+        return await original(**kw)
+
+    c.modify_order = _refuse_one
+    res = b.modify("S4", stop=19990.0)
+    assert res["stuck"] == ["S2"] and set(res["baskets"]) == {"S4", "S1"}
+
+
+def test_a_plain_resting_order_drag_fans_out_to_nothing(wired):
+    """`price` is the drag on an ordinary working order, and an unrelated order
+    resting on the closing side is somebody's scale-out, not a bracket leg."""
+    b, c, _ = _armed_with_position(wired)
+    b.modify("B1", price=19940.0)
+    assert [m["basket_id"] for m in c.modified] == ["B1"]
 
 
 def test_a_trailing_stop_refuses_the_drag_instead_of_losing_it(wired):
@@ -1580,7 +1692,13 @@ def guarded():
         loop.run(b.attach(c))
         rt.set_tag(SYS, "DEMO1", "demo")
         b.use_account("DEMO1")
-        yield b, c, loop
+        try:
+            yield b, c, loop
+        finally:
+            # `attach` starts the ladder's thread. Daemon threads would not fail
+            # the run, but a suite that leaks one per test is a suite where a
+            # real hang is invisible among them.
+            b.ladder.stop()
 
 
 # --- the switch --------------------------------------------------------------
@@ -1640,22 +1758,45 @@ def test_the_replay_switch_is_its_own_switch(monkeypatch):
 
 
 def test_switching_the_layer_off_leaves_the_typo_catchers_alone():
-    """max_qty and the order-shape checks are not discipline rules.
+    """The order-shape checks are not discipline rules.
 
-    They catch a slipped digit, and there is no session in which a naked 40-lot
-    was meant — so they survive ``LIVE_GUARDRAILS=0``, while the bracket rules,
-    which are fitted to one trader's book, do not.
+    They catch a slipped digit — a limit with no price would reach the exchange
+    as something else — so they survive ``LIVE_GUARDRAILS=0``, while the bracket
+    rules, which are fitted to one trader's book, do not.
     """
     off = _policy(guardrails=False)
-    with pytest.raises(ValueError, match="ceiling"):
-        rt.build_intent(off, side="buy", qty=99, type="market", price=None,
+    with pytest.raises(ValueError, match="needs a price"):
+        rt.build_intent(off, side="buy", qty=1, type="limit", price=None,
                         stop_ticks=0, target_ticks=0, symbol=CONTRACT,
                         exchange="CME", account_id="DEMO1")
-    # ...and the same order with a legal quantity and no bracket at all passes,
-    # which it would not with the rules on.
+    # ...and a market order with no bracket at all passes, which it would not
+    # with the rules on.
     assert rt.build_intent(off, side="buy", qty=1, type="market", price=None,
                            stop_ticks=0, target_ticks=0, symbol=CONTRACT,
                            exchange="CME", account_id="DEMO1").qty == 1
+
+
+def test_there_is_no_quantity_ceiling_and_the_dollar_rule_is_the_whole_of_it():
+    """The rule that went, and what has to be true in its place.
+
+    A 99-lot is not refused for being 99 — with the layer off nothing bounds a
+    quantity at all, which is the hole this states out loud rather than leaves
+    to be found. With the layer on it is refused in dollars, on the contract it
+    is actually going to, and the same 99 passes on a small enough one.
+    """
+    off = _policy(guardrails=False)
+    assert rt.build_intent(off, side="buy", qty=99, type="market", price=None,
+                           stop_ticks=0, target_ticks=0, symbol=CONTRACT,
+                           exchange="CME", account_id="DEMO1").qty == 99
+
+    on = _guarded_policy(max_risk_usd=250.0)
+    with pytest.raises(ValueError, match="risks"):
+        _shape(on, qty=99, tick_usd=2.50)          # NQ: $12,375
+    # Quantity alone decides nothing. Two contracts of NQ is refused where four
+    # of MNQ is fine, and the number in the box is the smaller one.
+    with pytest.raises(ValueError, match="risks"):
+        _shape(on, qty=3, tick_usd=2.50)
+    assert _shape(on, qty=4, tick_usd=0.125).qty == 4
 
 
 # --- the shape of an entry ----------------------------------------------------
@@ -1813,9 +1954,9 @@ def test_the_guard_levels_round_trip_and_a_partial_patch_keeps_the_rest():
     # Untouched by that write, and untouched again by one that names something
     # else entirely.
     assert rt.settings().guards.min_target_ticks == 100
-    rt.save_settings(max_qty=3)
+    rt.save_settings(guards={"min_target_ticks": 120})
     assert rt.settings().guards.daily_loss_stop == 400.0
-    assert rt.settings().max_qty == 3
+    assert rt.settings().guards.min_target_ticks == 120
 
 
 def test_a_nonsense_level_falls_back_rather_than_disabling_the_rule(store):
@@ -1851,6 +1992,30 @@ def test_the_days_total_is_what_this_process_paired_net_of_commission(guarded):
     assert b.snapshot()["guard"]["trades"] == 1
 
 
+def test_a_position_closed_in_two_portions_is_one_trade(guarded):
+    """The count on the panel is positions, not the lots underneath them.
+
+    A Rithmic bracket is attached per *partial fill*, so an ordinary entry and
+    exit routinely closes in two portions — and each of them books a lot. This
+    used to increment the day's trade count, which is how a live day the
+    journal recorded 8 trades of came to read "12 closed" on the page it was
+    traded from. The blotter still gets a row each; the count does not.
+    """
+    b, c, loop = guarded
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 2, 20000.0)))
+    loop.run(h(_fill("X1", "sell", 1, 20010.0)))          # the first leg pair
+    loop.run(h(_fill("X2", "sell", 1, 20020.0)))          # and the second
+    assert len(b.trades) == 2, "two lots on the blotter"
+    assert b.snapshot()["guard"]["trades"] == 1, "one trade in the day"
+
+    # A second decision is a second trade, however few lots it took.
+    loop.run(h(_fill("E2", "buy", 1, 20030.0, ss=1_700_000_060)))
+    loop.run(h(_fill("X3", "sell", 1, 20040.0, ss=1_700_000_090)))
+    assert len(b.trades) == 3
+    assert b.snapshot()["guard"]["trades"] == 2
+
+
 def test_the_day_locks_on_the_trade_that_crosses_the_line(guarded):
     b, c, loop = guarded
     p = b.preview(**GUARDED)
@@ -1865,40 +2030,58 @@ def test_the_day_locks_on_the_trade_that_crosses_the_line(guarded):
         b.preview(**GUARDED)
 
 
-def test_a_lock_does_not_drop_a_review_while_something_is_still_held(guarded):
-    """Because dropping it would take away a scale-out somebody already read.
+def _held_lock(loop):
+    """A day locked by a scale-out that left size on, with the automatic flatten
+    **off** — the only world in which "still held" outlives the lock.
 
-    A rule that refuses the exit is worse than no rule. The lock still blocks
-    new entries, and never a reducing one; ``flatten`` is gated on nothing.
+    With it on, the lock closes the runner and ``_auto_flatten`` drops anything
+    staged on purpose: a token minted before the day was over is not a decision,
+    and there is no longer a position for it to be about. Off is the case these
+    two tests are about — a locked day somebody is still holding through, which
+    is exactly when a review that evaporated would be a rule trapping them in a
+    trade.
     """
-    b, c, loop = guarded
+    b = _broker(policy=_guarded_policy(auto_flatten=False))
+    c = FakeClient()
+    loop.run(b.attach(c))
+    rt.set_tag(SYS, "DEMO1", "demo")
+    b.use_account("DEMO1")
     p = b.preview(**GUARDED)
     (h,) = c.on_exchange_order_notification.handlers
     loop.run(h(_fill("E1", "buy", 2, 20000.0)))
     loop.run(h(_fill("X1", "sell", 1, 19970.0)))          # one off, one still on
     assert b.day_locked
-    # Still spendable — and refused by the day rule rather than by a missing
-    # token, which is the refusal that names a reason.
-    with pytest.raises(PermissionError, match="the day is over"):
-        b.send(p["token"])
+    return b, c, p
 
 
-def test_a_token_staged_before_the_stop_cannot_be_spent_after_it(guarded):
+def test_a_lock_does_not_drop_a_review_while_something_is_still_held():
+    """Because dropping it would take away a scale-out somebody already read.
+
+    A rule that refuses the exit is worse than no rule. The lock still blocks
+    new entries, and never a reducing one; ``flatten`` is gated on nothing.
+    """
+    with _Loop() as loop:
+        b, _, p = _held_lock(loop)
+        # Still spendable — and refused by the day rule rather than by a missing
+        # token, which is the refusal that names a reason.
+        with pytest.raises(PermissionError, match="the day is over"):
+            b.send(p["token"])
+        b.ladder.stop()
+
+
+def test_a_token_staged_before_the_stop_cannot_be_spent_after_it():
     """The reason the check is inside ``_submit`` and not only on the review.
 
     ``send`` spends a token minted earlier, so a guard that ran at preview time
     alone could be walked past by staging an order while still allowed and
     sending it once the day was over.
     """
-    b, c, loop = guarded
-    p = b.preview(**GUARDED)
-    (h,) = c.on_exchange_order_notification.handlers
-    loop.run(h(_fill("E1", "buy", 2, 20000.0)))
-    loop.run(h(_fill("X1", "sell", 1, 19970.0)))          # locks, still holding
-    assert b.day_locked                                  # the token survived
-    with pytest.raises(PermissionError, match="the day is over"):
-        b.send(p["token"])
-    assert c.submitted == []
+    with _Loop() as loop:
+        b, c, p = _held_lock(loop)
+        with pytest.raises(PermissionError, match="the day is over"):
+            b.send(p["token"])
+        assert c.submitted == []
+        b.ladder.stop()
 
 
 def test_the_way_out_still_works_after_the_day_is_over():
@@ -2068,12 +2251,13 @@ def test_the_settings_endpoint_patches_one_level_and_reports_them_all():
 
 
 def test_the_risk_ceiling_is_measured_in_dollars_not_contracts():
-    """The hole ``max_qty`` leaves open, and it is not hypothetical.
+    """Why the quantity ceiling that used to sit here was removed rather than
+    raised, and it is not hypothetical.
 
     The order path takes its symbol from whatever the feed is on. Five contracts
     on a 50-tick stop is $125 of MNQ or $1,250 of NQ — ten times apart, with the
-    same number in the box and the same quantity ceiling passing both. On a
-    $2,000 trailing drawdown that is sixteen losses or one and a half.
+    same number in the box, and any quantity ceiling passes both. On a $2,000
+    trailing drawdown that is sixteen losses or one and a half.
     """
     pol = _guarded_policy(max_risk_usd=250.0)
     micro, mini = 0.125, 2.50          # $ per tick: MNQ 0.25x2, NQ 0.25x20
@@ -2127,13 +2311,23 @@ def test_the_broker_measures_risk_on_the_contract_the_feed_is_actually_on():
 
 # --- the automatic flatten ----------------------------------------------------
 #
-# The half of the daily stop that acts rather than refuses, and the reason the
-# stop had to move off realised P&L: a rule that only counts closed trades sits
-# silent through an open loss that has already spent the drawdown, then refuses
-# the *next* order — which was never the problem.
+# The half of the daily stop that acts rather than refuses.
+#
+# **IT FIRES ON BOOKED P&L, AND IT USED TO FIRE ON EQUITY.** The old argument
+# was that a position held at −$800 has already spent the drawdown whether or
+# not it has been booked. That is true of the *account's* floor, which the firm
+# marks continuously and which still reads equity — and it is not true of this
+# rule, which is about how much a losing day is allowed to have *done*. Marking
+# a runner and ending it on that mark closes trades at their worst moment, which
+# is the opposite of what a discipline rail is for.
+#
+# So the only moment the stop can be reached is the moment a trade books, and
+# the only case left for the flatten to act on is a close that took the day past
+# the line and left size on: a scale-out with a runner behind it.
 
 
-def _equity_broker(loop, **guards):
+def _stopped_broker(loop, **guards):
+    """Guards on, armed, nothing traded yet."""
     b = _broker(policy=_guarded_policy(**guards))
     c = FakeClient()
     loop.run(b.attach(c))
@@ -2142,32 +2336,57 @@ def _equity_broker(loop, **guards):
     return b, c
 
 
-def test_an_open_loss_counts_toward_the_daily_stop():
-    """Nothing booked, everything at risk: the case realised P&L cannot see."""
+def _scale_out_past_the_stop(b, c, loop, *, held=1):
+    """Open ``held + 1`` and close one of them $600 down. Locks the day with
+    ``held`` still on — the one shape the automatic flatten exists for."""
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", held + 1, 20000.0)))
+    loop.run(h(_fill("X1", "sell", 1, 19970.0)))
+    return h
+
+
+def test_a_close_that_spends_the_day_closes_what_is_left():
+    """The rule, in one trade: one clip books −$607 against a $500 stop and the
+    runner behind it does not get to keep running."""
     with _Loop() as loop:
-        b, c = _equity_broker(loop)
+        b, c = _stopped_broker(loop)
+        _scale_out_past_the_stop(b, c, loop)
+        assert b.day_locked and "realised" in b.day_locked
+        assert c.cancel_alls == 1 and c.exits == 1
+        # The flatten's own sentence names the booked figure it fired on, and
+        # is on disk beside the lock's.
+        events = [json.loads(x) for x in b.journal.path.read_text().splitlines()]
+        (why,) = [e for e in events if e["event"] == "auto_flatten"]
+        assert "booked" in why["reason"]
+        assert why["realized"] == pytest.approx(-607.0)
+
+
+def test_an_open_loss_does_not_reach_the_daily_stop():
+    """The deliberate reversal. A position $900 down and unbooked is a position
+    the market has not yet taken anything for, so the day is not over and
+    nothing is closed for you — equity is *reported*, and enforced on by the
+    firm's floor rather than by this."""
+    with _Loop() as loop:
+        b, c = _stopped_broker(loop)
         (h,) = c.on_exchange_order_notification.handlers
         (hp,) = c.on_instrument_pnl_update.handlers
         loop.run(h(_fill("E1", "buy", 1, 20000.0)))
-        loop.run(hp(_pnl(net=1, open_position_pnl=-200.0)))
-        assert b.day_locked is None                 # $200 down: still trading
-        assert b.snapshot()["guard"]["equity"] == pytest.approx(-200.0)
-
-        loop.run(hp(_pnl(net=1, open_position_pnl=-600.0)))
-        assert b.day_locked and "equity" in b.day_locked
-        assert c.cancel_alls == 1 and c.exits == 1   # and it closed the position
+        loop.run(hp(_pnl(net=1, open_position_pnl=-900.0)))
+        assert b.day_locked is None
+        assert c.exits == 0
+        assert b.snapshot()["guard"]["equity"] == pytest.approx(-900.0)
+        assert b.snapshot()["guard"]["realized"] == 0.0
 
 
 def test_the_flatten_cancels_the_bracket_before_it_exits():
     """Same order as the kill switch, and the same reason: exiting under a live
     bracket can leave that bracket to open a fresh position the other way."""
     with _Loop() as loop:
-        b, c = _equity_broker(loop)
+        b, c = _stopped_broker(loop)
         order: list[str] = []
         c.cancel_all_orders = _record(c, order, "cancel_all")
         c.exit_position = _record(c, order, "exit")
-        (hp,) = c.on_instrument_pnl_update.handlers
-        loop.run(hp(_pnl(net=2, open_position_pnl=-900.0)))
+        _scale_out_past_the_stop(b, c, loop)
         assert order == ["cancel_all", "exit"]
 
 
@@ -2177,30 +2396,44 @@ def _record(client, sink, name):
     return go
 
 
-def test_the_automatic_flatten_fires_once_however_many_updates_arrive():
-    """A PnL plant that keeps reporting a losing position must not queue a
-    second exit behind the first, and a position re-opened afterwards must not
-    arm another. The latch clears at the roll and nowhere else."""
+def test_the_automatic_flatten_fires_once_however_many_trades_book():
+    """A second losing close must not queue a second exit behind the first. The
+    latch clears at the roll and nowhere else."""
     with _Loop() as loop:
-        b, c = _equity_broker(loop)
-        (hp,) = c.on_instrument_pnl_update.handlers
-        for _ in range(5):
-            loop.run(hp(_pnl(net=1, open_position_pnl=-900.0)))
+        b, c = _stopped_broker(loop)
+        h = _scale_out_past_the_stop(b, c, loop, held=2)
         assert c.exits == 1
-        loop.run(hp(_pnl(net=3, open_position_pnl=-4000.0)))
+        # Another clip off, still holding one. The day is already locked, so
+        # nothing re-arms.
+        loop.run(h(_fill("X2", "sell", 1, 19960.0)))
         assert c.exits == 1
         b.roll_day(date(2026, 8, 7))
         assert b._flattening is False
 
 
-def test_a_flat_account_is_not_flattened():
-    """There is nothing to close, and the realised latch already has this case.
-    Sending an exit for a position nobody holds is a message to the exchange
-    saying something untrue about what we think we own."""
+def test_a_close_that_leaves_nothing_on_is_not_flattened():
+    """The ordinary case: the trade that spent the day *was* the last of the
+    position. There is nothing to close, and sending an exit for a position
+    nobody holds is a message to the exchange saying something untrue about what
+    we think we own."""
     with _Loop() as loop:
-        b, c = _equity_broker(loop)
-        (hp,) = c.on_instrument_pnl_update.handlers
-        loop.run(hp(_pnl(net=0, open_position_pnl=-900.0)))
+        b, c = _stopped_broker(loop)
+        (h,) = c.on_exchange_order_notification.handlers
+        loop.run(h(_fill("E1", "buy", 1, 20000.0)))
+        loop.run(h(_fill("X1", "sell", 1, 19970.0)))
+        assert b.day_locked
+        assert c.exits == 0
+
+
+def test_the_profit_lock_never_closes_a_winning_position():
+    """Both levels end the day; only the loss half acts. A profit lock that
+    flattened would take a runner off somebody for having a good day."""
+    with _Loop() as loop:
+        b, c = _stopped_broker(loop, daily_profit_lock=500.0)
+        (h,) = c.on_exchange_order_notification.handlers
+        loop.run(h(_fill("E1", "buy", 2, 20000.0)))
+        loop.run(h(_fill("X1", "sell", 1, 20030.0)))       # +$593 booked
+        assert b.day_locked and "profit lock" in b.day_locked
         assert c.exits == 0
 
 
@@ -2208,10 +2441,9 @@ def test_the_automatic_flatten_can_be_switched_off_on_its_own():
     """Off, the stop still locks the day — it just stops acting. Somebody who
     wants to manage the exit by hand keeps the refusal and loses the exit."""
     with _Loop() as loop:
-        b, c = _equity_broker(loop, auto_flatten=False)
-        (hp,) = c.on_instrument_pnl_update.handlers
-        loop.run(hp(_pnl(net=1, open_position_pnl=-900.0)))
-        assert c.exits == 0 and b.day_locked is None   # realised is still clean
+        b, c = _stopped_broker(loop, auto_flatten=False)
+        _scale_out_past_the_stop(b, c, loop)
+        assert b.day_locked and c.exits == 0
 
 
 def test_a_flatten_that_only_half_lands_still_locks_and_still_says_so():
@@ -2219,10 +2451,9 @@ def test_a_flatten_that_only_half_lands_still_locks_and_still_says_so():
     with its reason. A half-landed exit has to leave the day locked and the
     failure on disk, because that is the state a person has to act on."""
     with _Loop() as loop:
-        b, c = _equity_broker(loop)
+        b, c = _stopped_broker(loop)
         c.fail_exit = True
-        (hp,) = c.on_instrument_pnl_update.handlers
-        loop.run(hp(_pnl(net=1, open_position_pnl=-900.0)))
+        _scale_out_past_the_stop(b, c, loop)
         assert b.day_locked
         events = [json.loads(x) for x in b.journal.path.read_text().splitlines()]
         (done,) = [e for e in events if e["event"] == "auto_flattened"]
@@ -2231,9 +2462,10 @@ def test_a_flatten_that_only_half_lands_still_locks_and_still_says_so():
 
 def test_the_guardrails_being_off_switches_the_automatic_flatten_off_too(wired):
     b, c, loop = wired
-    (hp,) = c.on_instrument_pnl_update.handlers
-    loop.run(hp(_pnl(net=1, open_position_pnl=-9000.0)))
-    assert c.exits == 0
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 2, 20000.0)))
+    loop.run(h(_fill("X1", "sell", 1, 19970.0)))
+    assert c.exits == 0 and b.day_locked is None
 
 
 # --- routing to the micro ----------------------------------------------------
@@ -2252,16 +2484,67 @@ def test_the_micro_is_offered_alongside_the_contract_the_feed_is_watching():
         assert b.snapshot()["feed_symbol"] == CONTRACT
 
 
-def test_a_login_without_the_micro_is_not_an_outage():
-    """A missing sibling leaves the session exactly as capable as before."""
+def test_a_failed_lookup_still_offers_the_micro_but_marks_it():
+    """The 2026-09-07 gateway: template 113 unanswered for every root, CME
+    entitled at level 1 and 2. Giving up there costs the capability for the
+    whole session, so the month on screen is assembled instead — and flagged,
+    because what nobody can check is whether the micro's front month has rolled
+    ahead of the mini's."""
     with _Loop() as loop:
         b = _broker()
         c = FakeClient()
         c.front_months = {}
         loop.run(b.attach(c))
-        assert b.instruments == [CONTRACT]
+        assert b.instruments == [CONTRACT, MICRO]   # NQU6 -> MNQU6, same month
+        assert b.instrument_lookup_failed is True   # never passed off as resolved
+        b.use_instrument(MICRO)                     # and it is genuinely routable
+        assert b.symbol == MICRO and b.point_value == 2.0
+
+
+def test_a_resolved_micro_is_not_flagged():
+    """The flag has to stay off on the ordinary connect or it means nothing on
+    the connect where the contract really was guessed."""
+    with _Loop() as loop:
+        b = _broker()
+        loop.run(b.attach(FakeClient()))
+        assert b.instruments == [CONTRACT, MICRO]
+        assert b.instrument_lookup_failed is False
+        assert b.instrument_lookup_error is None
+
+
+def test_a_root_with_no_micro_assembles_nothing():
+    """`micro_symbol` carries the pair table, so a root with no micro yields
+    nothing rather than an `M`+root guess — which is wrong for RTY."""
+    with _Loop() as loop:
+        b = Broker("RTYU6", "CME", DAY, _policy(), system=SYS)
+        c = FakeClient()
+        c.front_months = {}
+        loop.run(b.attach(c))
+        assert b.instruments == ["RTYU6"]
+        assert b.instrument_lookup_failed is False   # nothing was even asked
         with pytest.raises(LookupError, match="not routable"):
-            b.use_instrument(MICRO)
+            b.use_instrument("M2KU6")
+
+
+def test_the_lookup_cannot_stall_the_connect():
+    """It runs inside `attach`. Unbounded, the 2026-09-07 gateway cost ~100s of
+    dead waiting before routing came up — three library retries at ~33s."""
+    import journal.live.broker as _bm
+
+    async def _never(root, exchange):
+        await asyncio.sleep(60)
+
+    with _Loop() as loop:
+        b = _broker()
+        c = FakeClient()
+        c.get_front_month_contract = _never
+        started = time.monotonic()
+        with mock.patch.object(_bm, "SIBLING_TIMEOUT_S", 0.2):
+            loop.run(b.attach(c))
+        assert time.monotonic() - started < 10
+        assert b.instrument_lookup_failed is True
+        assert "TimeoutError" in (b.instrument_lookup_error or "")
+        assert b.instruments == [CONTRACT, MICRO]   # still offered, still marked
 
 
 def test_switching_to_the_micro_reprices_the_risk_by_ten(wired):
@@ -2313,7 +2596,7 @@ def test_the_day_survives_the_switch(wired):
     cleared when you moved to micros would be a way to unlock a day that is
     over — the same accident `use_account` refuses to allow."""
     b, _, _ = wired
-    b._count_day({"pnl": -300.0, "size": 1})
+    b._count_day({"pnl": -300.0, "size": 1, "fees": 7.0})
     before = b.day_realized
     b.use_instrument(MICRO)
     assert b.day_realized == before
@@ -2347,15 +2630,71 @@ def test_the_preference_is_a_root_not_a_contract_month():
 
 
 def test_a_preference_the_login_cannot_route_leaves_the_feed_contract():
-    """A stale entry, or an entitlement that has gone away, degrades to where
-    every session started before this — never to a refusal."""
+    """A stale entry degrades to where every session started before this —
+    never to a refusal. `MES` while the feed is on NQ is the case the fallback
+    cannot paper over: it is a different product, not a missing month."""
+    rt.set_instrument(SYS, "MES")
+    with _Loop() as loop:
+        b = _broker()
+        loop.run(b.attach(FakeClient()))
+        assert b.symbol == CONTRACT
+        assert MICRO in b.instruments and "MESU6" not in b.instruments
+
+
+def test_a_dropped_preference_is_said_out_loud_not_just_dropped():
+    """The degrade is safe; being quiet about it is not.
+
+    A preference the session cannot reach at all — a different product, not a
+    missing month — still degrades to the feed contract. What changed is that
+    it now says so, on the object and in the journal. Before this there was no
+    record the choice had been made.
+    """
+    rt.set_instrument(SYS, "MES")
+    with _Loop() as loop:
+        b = _broker()
+        loop.run(b.attach(FakeClient()))
+
+        assert b.symbol == CONTRACT            # still degrades, never refuses
+        assert b.instrument_want == "MES"      # and now says what it dropped
+
+        snap = b.snapshot()
+        assert snap["instrument_want"] == "MES"
+
+        # Durable, because the panel is only true while somebody is looking.
+        events = [json.loads(x) for x in b.journal.path.read_text().splitlines()]
+        (dropped,) = [x for x in events if x["event"] == "instrument_unavailable"]
+        assert dropped["want"] == "MES" and dropped["routing"] == CONTRACT
+        assert dropped["offered"] == [CONTRACT, MICRO]
+
+
+def test_a_preference_that_was_honoured_leaves_nothing_to_report():
+    """The loud field must stay quiet on the ordinary morning, or it is noise
+    and gets ignored on the morning it matters."""
+    rt.set_instrument(SYS, "MNQ")
+    with _Loop() as loop:
+        b = _broker()
+        loop.run(b.attach(FakeClient()))
+        assert b.symbol == MICRO
+        assert b.instrument_want is None
+        assert b.instrument_lookup_failed is False
+        assert b.snapshot()["instrument_want"] is None
+
+
+def test_a_micro_preference_is_honoured_through_an_assembled_contract():
+    """2026-09-07 again, with the stored choice that made it matter. The
+    session cannot ask Rithmic, but it can still route where the trader said —
+    which is the whole difference between this and a plan re-sized by ten."""
     rt.set_instrument(SYS, "MNQ")
     with _Loop() as loop:
         b = _broker()
         c = FakeClient()
         c.front_months = {}
         loop.run(b.attach(c))
-        assert b.symbol == CONTRACT and b.instruments == [CONTRACT]
+        assert b.symbol == MICRO and b.point_value == 2.0
+        assert b.instrument_want is None            # honoured, nothing dropped
+        assert b.instrument_lookup_failed is True   # but not silently
+        assert "no front-month contract for MNQ" in b.instrument_lookup_error
+        assert b.snapshot()["instrument_lookup_error"] == b.instrument_lookup_error
 
 
 def test_another_login_does_not_inherit_the_preference():
@@ -2573,6 +2912,31 @@ def _restarted(policy=None):
     return _broker(policy=policy or _guarded_policy())
 
 
+def test_a_rebuilt_day_counts_positions_too(guarded):
+    """The restart must not re-report the day in lots.
+
+    ``_rebuild_day`` reads rows rather than fills, so it is a second place the
+    trade count is decided and a second place it could disagree with the
+    ledger. It groups by the same key: two lots off one position come back as
+    one trade, with ``restored`` still saying how many rows it read.
+    """
+    b, c, loop = guarded
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 2, 20000.0)))
+    loop.run(h(_fill("X1", "sell", 1, 20010.0)))
+    loop.run(h(_fill("X2", "sell", 1, 20020.0)))
+    assert b.snapshot()["guard"]["trades"] == 1
+
+    with _Loop() as loop2:
+        b2 = _restarted()
+        loop2.run(b2.attach(FakeClient()))
+        b2.use_account("DEMO1")
+        guard = b2.snapshot()["guard"]
+        assert guard["trades"] == 1, "one position, however many rows behind it"
+        assert guard["restored"] == 2, "and both rows were read"
+        assert b2.day_realized == pytest.approx(b.day_realized)
+
+
 def test_a_restart_rebuilds_the_day_rather_than_handing_back_the_loss_stop(guarded):
     b, c, loop = guarded
     (h,) = c.on_exchange_order_notification.handlers
@@ -2688,3 +3052,376 @@ def test_a_journal_that_cannot_be_read_leaves_the_day_empty_rather_than_dead(
     b.account_id = "DEMO1"
     assert b.day_realized == 0.0 and b.day_locked is None
     assert b.snapshot()["guard"]["restored"] == 0
+
+
+# --- the ladder: the same trail, run by this app instead ----------------------
+#
+# Rithmic's trail has one free variable and rides at `stop_ticks` by force. The
+# Simulator and the backtest engine trail by four knobs, so what was practised
+# was never what was traded. The ladder closes that: `journal.live.ladder` runs
+# the replay's own rule off the live tape and moves the stop leg with `modify`.
+#
+# Nothing about it reaches the wire, which is the property most of these guard —
+# a ladder order goes out as a plain static bracket, and the app does the rest.
+
+
+def test_a_ladder_order_goes_out_as_a_plain_static_bracket(wired):
+    """The whole difference from the native trail: Rithmic is told nothing. If
+    these fields ever appear, two agents are moving one stop."""
+    b, c, _ = wired
+    _send(b, ladder_dist_ticks=40, ladder_step_ticks=20, ladder_be_ticks=4)
+    (template, msg), = c.plants["order"].sent
+    assert template == 330
+    assert msg["bracket_type"] == _bt().TARGET_AND_STOP_STATIC
+    assert "trailing_stop_trigger_ticks" not in msg
+    assert "break_even_ticks" not in msg
+
+
+def test_the_ladder_is_remembered_against_its_own_order(wired):
+    """Same hazard as the native trail's per-tag registration: a shared slot
+    lets the next order inherit this one's ladder, which is a stop that starts
+    moving on a trade nobody asked to be trailed."""
+    b, _, _ = wired
+    _send(b, ladder_dist_ticks=40)
+    _send(b)
+    assert len(b._sent_ladder) == 1
+
+
+def test_a_ladder_and_rithmics_own_trail_cannot_both_be_asked_for(wired):
+    """One stop, two owners. Rithmic re-derives its managed stop absolutely on
+    every new extreme, so they would take turns overwriting each other."""
+    b, _, _ = wired
+    with pytest.raises(ValueError, match="two owners"):
+        b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=50, target_ticks=120,
+                  trail_trigger_ticks=25, ladder_dist_ticks=40)
+
+
+def test_a_ladder_and_a_native_breakeven_cannot_both_be_asked_for(wired):
+    b, _, _ = wired
+    with pytest.raises(ValueError, match="two owners"):
+        b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=50, target_ticks=120,
+                  be_trigger_ticks=25, be_ticks=3, ladder_dist_ticks=40)
+
+
+def test_a_ladder_without_a_stop_is_refused(wired):
+    """The ladder moves the stop leg the order goes out with. Without one there
+    is no leg to move, and the order would be accepted and then trail nothing."""
+    b, _, _ = wired
+    with pytest.raises(ValueError, match="needs a stop to trail"):
+        b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=0, target_ticks=120, ladder_dist_ticks=40)
+
+
+def test_a_step_wider_than_the_trail_is_refused(wired):
+    """It would take the first rung and never reach a second — a breakeven stop
+    wearing the word trail, which is `ladder_be_only`'s job and should be asked
+    for by name."""
+    b, _, _ = wired
+    with pytest.raises(ValueError, match="never reach the second rung"):
+        b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=50, target_ticks=120,
+                  ladder_dist_ticks=40, ladder_step_ticks=60)
+
+
+def test_a_breakeven_rung_past_the_trail_distance_is_refused(wired):
+    b, _, _ = wired
+    with pytest.raises(ValueError, match="in front of the price"):
+        b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=50, target_ticks=120,
+                  ladder_dist_ticks=40, ladder_be_ticks=40)
+
+
+def test_the_ladder_is_refused_when_routing_points_at_another_contract(wired):
+    """`use_instrument` is explicit that the tape does not follow routing. The
+    ladder measures the high off the tape it can see, so on MNQ-while-watching-NQ
+    it would be trailing the wrong instrument — near enough to be right most of
+    the time, which is what makes allowing it the wrong call."""
+    b, _, _ = wired
+    b.use_instrument(MICRO)
+    with pytest.raises(ValueError, match="tape being watched"):
+        b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=50, target_ticks=120, ladder_dist_ticks=40)
+
+
+def test_rithmics_own_trail_still_works_on_the_other_contract(wired):
+    """The counterpart of the refusal above, and the reason it is survivable:
+    Rithmic's trail rides its own feed for the contract it is on."""
+    b, c, _ = wired
+    b.use_instrument(MICRO)
+    _send(b, trail_trigger_ticks=25)
+    (_, msg), = c.plants["order"].sent
+    assert msg["trailing_stop_trigger_ticks"] == 25
+
+
+def test_ladder_settings_alone_are_not_a_ladder(wired):
+    """`ladder_dist_ticks` is the master switch. The rest may sit at non-zero
+    with it off, exactly as the ticket stores them, and none of the shape rules
+    fire — otherwise turning the trail off would start refusing orders."""
+    b, c, _ = wired
+    _send(b, ladder_dist_ticks=0, ladder_step_ticks=60, ladder_be_ticks=99)
+    (_, msg), = c.plants["order"].sent
+    assert msg["bracket_type"] == _bt().TARGET_AND_STOP_STATIC
+    assert b._sent_ladder == {}
+
+
+def test_the_confirm_says_THIS_APP_moves_the_stop(wired):
+    """The inverse of the native trail's sentence, and the more important half:
+    this ratchet lives in this process, so closing the app freezes the stop."""
+    b, _, _ = wired
+    p = b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=50, target_ticks=120,
+                  ladder_dist_ticks=40, ladder_step_ticks=20, ladder_be_ticks=4)
+    s = p["sentence"]
+    assert "trails 40 ticks behind the high, every 20 ticks, starting 4 ticks past the fill" in s
+    assert "THIS APP moves it" in s
+    assert "stays where it last got to" in s
+    assert "Rithmic moves it" not in s
+
+
+def test_the_confirm_says_a_breakeven_only_ladder_jumps_once(wired):
+    b, _, _ = wired
+    p = b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=50, target_ticks=120,
+                  ladder_dist_ticks=40, ladder_be_ticks=4, ladder_be_only=True)
+    assert "jumps once to 4 ticks past the fill and then stays" in p["sentence"]
+
+
+def test_a_ladder_survives_the_review_round_trip(wired):
+    """The token carries the intent. A ladder staged for review must be the
+    ladder that is armed, not one silently dropped between preview and send."""
+    b, _, _ = wired
+    p = b.preview(side="buy", qty=1, type="market", price=None,
+                  stop_ticks=50, target_ticks=120,
+                  ladder_dist_ticks=40, ladder_step_ticks=20, ladder_be_ticks=4)
+    b.send(p["token"])
+    cfg, = b._sent_ladder.values()
+    # Ticks resolved to prices once, at the edge: 40 x 0.25.
+    assert (cfg.dist, cfg.step, cfg.be) == (10.0, 5.0, 1.0)
+
+
+# --- the ladder, wired to fills and to the position ---------------------------
+
+
+def _stop_leg_row(basket="S1", side="sell", price=19950.0):
+    """A working stop leg, as the exchange reports one after the entry fills."""
+    return _order(basket, notify_type=1, status="working",
+                  transaction_type=2 if side == "sell" else 1,
+                  price_type=4, trigger_price=price, price=0.0)
+
+
+def test_a_fill_arms_the_ladder_the_order_asked_for(wired):
+    b, c, loop = wired
+    tag = _send(b, ladder_dist_ticks=40, ladder_step_ticks=20,
+                ladder_be_ticks=4)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    snap = b.ladder.snapshot()
+    assert snap is not None
+    assert snap["side"] == "long" and snap["entry"] == 20000.0
+    # Ticks resolved to prices at the edge, once.
+    assert (snap["dist"], snap["step"], snap["be"]) == (10.0, 5.0, 1.0)
+
+
+def test_a_fill_on_a_plain_order_arms_nothing(wired):
+    b, c, loop = wired
+    tag = _send(b)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    assert b.ladder.snapshot() is None
+
+
+def test_the_ladder_arms_from_the_fill_not_from_the_pnl_plant(wired):
+    """The PnL plant reports a state rather than an event and carries no order,
+    so it cannot say *which* ladder. Arming there would either arm the wrong one
+    or arm none."""
+    b, c, loop = wired
+    _send(b, ladder_dist_ticks=40)
+    (on_pnl,) = c.on_instrument_pnl_update.handlers
+    loop.run(on_pnl(_pnl(net=1, avg_open_fill_price=20000.0)))
+    assert b.ladder.snapshot() is None
+
+
+def test_going_flat_disarms_the_ladder(wired):
+    b, c, loop = wired
+    tag = _send(b, ladder_dist_ticks=40)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    assert b.ladder.snapshot() is not None
+    (on_pnl,) = c.on_instrument_pnl_update.handlers
+    loop.run(on_pnl(_pnl(net=0)))
+    assert b.ladder.snapshot() is None
+
+
+def test_switching_account_disarms_the_ladder(wired):
+    """A ladder carried across would not merely refuse a drag on the new
+    account — it would send modifies to the old account's stop."""
+    b, c, loop = wired
+    tag = _send(b, ladder_dist_ticks=40)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    b.use_account(PAPER)
+    assert b.ladder.snapshot() is None
+
+
+def test_the_stop_leg_is_found_on_the_closing_side(wired):
+    b, c, loop = wired
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_stop_leg_row("S1", "sell", 19950.0)))
+    (on_pnl,) = c.on_instrument_pnl_update.handlers
+    loop.run(on_pnl(_pnl(net=1, avg_open_fill_price=20000.0)))
+    assert b._stop_leg() == "S1"
+
+
+def test_a_resting_entry_on_the_same_side_is_not_mistaken_for_the_stop(wired):
+    """A long's stop is a sell. A *buy* stop resting on the chart is somebody's
+    next entry, and moving it as though it were the exit is the kind of wrong
+    that should not reach the wire."""
+    b, c, loop = wired
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_stop_leg_row("BUYSTOP", "buy", 20050.0)))
+    (on_pnl,) = c.on_instrument_pnl_update.handlers
+    loop.run(on_pnl(_pnl(net=1, avg_open_fill_price=20000.0)))
+    assert b._stop_leg() is None
+
+
+def test_there_is_no_stop_leg_while_flat(wired):
+    b, c, loop = wired
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_stop_leg_row("S1", "sell", 19950.0)))
+    assert b._stop_leg() is None
+
+
+def test_the_ladder_raises_rather_than_moving_a_stop_that_is_not_there(wired):
+    """The runner's contract is that a raise means the stop is still where it
+    was — so "there is no leg" has to raise, not return quietly."""
+    b, _, _ = wired
+    with pytest.raises(LookupError, match="no working stop"):
+        b._move_stop(19960.0)
+
+
+def test_the_ladder_moves_the_stop_leg_by_its_own_price(wired):
+    """Post-fill, a bracket leg is an ordinary working order: moved by its own
+    price on its own basket, never by `stop_ticks` — template 341 is dead once
+    the entry fills and the ticks path cannot read the distance back."""
+    b, c, loop = wired
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_stop_leg_row("S1", "sell", 19950.0)))
+    (on_pnl,) = c.on_instrument_pnl_update.handlers
+    loop.run(on_pnl(_pnl(net=1, avg_open_fill_price=20000.0)))
+    b._move_stop(19975.0)
+    (m,) = c.modified
+    assert m["basket_id"] == "S1"
+    assert m["trigger_price"] == 19975.0
+    assert "stop_ticks" not in m
+
+
+def test_a_batch_of_prints_reaches_the_ladder_as_its_extremes(wired):
+    """The feed hands over the batch, not the last print: a drain can carry a
+    spike the closing tick does not show."""
+    b, c, loop = wired
+    tag = _send(b, ladder_dist_ticks=40, ladder_step_ticks=20,
+                ladder_be_ticks=4)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    b.on_ticks(pd.DataFrame({"price": [20000.0, 20015.0, 20001.0]}))
+    assert b.ladder.snapshot()["hwm"] == 20015.0
+
+
+def test_prints_are_ignored_while_no_ladder_is_running(wired):
+    b, _, _ = wired
+    b.on_ticks(pd.DataFrame({"price": [20000.0, 20500.0]}))
+    assert b.ladder.snapshot() is None
+
+
+def test_the_ladder_is_on_the_routing_snapshot(wired):
+    """A stop that moves on its own is the one thing on the chart nobody put
+    there by hand, so the panel has to be able to draw it."""
+    b, c, loop = wired
+    assert b.snapshot()["ladder"] is None
+    tag = _send(b, ladder_dist_ticks=40)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    assert b.snapshot()["ladder"]["side"] == "long"
+
+
+def _laddered(b, c, loop, **over):
+    """An open long with a ladder running and a working stop leg to move."""
+    kw = dict(ladder_dist_ticks=40, ladder_step_ticks=20, ladder_be_ticks=4)
+    kw.update(over)
+    tag = _send(b, **kw)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    loop.run(h(_stop_leg_row("S1", "sell", 19950.0)))
+    (on_pnl,) = c.on_instrument_pnl_update.handlers
+    loop.run(on_pnl(_pnl(net=1, avg_open_fill_price=20000.0)))
+    return tag
+
+
+def test_a_drag_of_the_position_stop_repins_the_running_ladder(wired):
+    b, c, loop = wired
+    _laddered(b, c, loop)
+    b.note_manual_stop("S1", 19990.0)
+    assert b.ladder.snapshot()["ladder"] == 19990.0
+
+
+def test_a_drag_of_someone_elses_stop_order_does_not_repin_the_ladder(wired):
+    """A resting *stop entry* is an order of kind "stop" too, so it reaches the
+    modify endpoint looking exactly like a drag of this position's exit. Re-pinning
+    on it would move the grid to a level from a trade that has not happened."""
+    b, c, loop = wired
+    _laddered(b, c, loop)
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_stop_leg_row("NEXTENTRY", "buy", 20100.0)))
+    b.note_manual_stop("NEXTENTRY", 20100.0)
+    assert b.ladder.snapshot()["ladder"] is None
+
+
+def test_a_missing_stop_leg_does_not_spend_the_give_up_budget(wired):
+    """The gap between a position opening and Rithmic's notification for the leg
+    it attached. Counting that as a failure would spend all three lives inside a
+    millisecond and leave the trade untrailed for the rest of its life."""
+    b, c, loop = wired
+    tag = _send(b, ladder_dist_ticks=40, ladder_step_ticks=20,
+                ladder_be_ticks=4)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    (on_pnl,) = c.on_instrument_pnl_update.handlers
+    loop.run(on_pnl(_pnl(net=1, avg_open_fill_price=20000.0)))
+    # Far enough in front to want a rung, with no leg for it to land on.
+    for _ in range(20):
+        b.on_ticks(pd.DataFrame({"price": [20100.0]}))
+    time.sleep(0.2)
+    assert b.ladder.snapshot()["failures"] == 0
+    assert c.modified == []
+    # And once the leg turns up, the rung is taken.
+    loop.run(h(_stop_leg_row("S1", "sell", 19950.0)))
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not c.modified:
+        time.sleep(0.01)
+    (m,) = c.modified
+    assert m["basket_id"] == "S1"
+
+
+def test_a_ladder_position_is_not_server_managed_so_drags_are_allowed(wired):
+    """The inverse of the native trail. Rithmic is not moving this stop, so
+    there is nothing for a drag to fight — and re-pinning it is the feature."""
+    b, c, loop = wired
+    tag = _send(b, ladder_dist_ticks=40)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    assert b._managed_bracket is False
+    assert b._server_managed({"trail_by_ticks": 0}, "stop") is False
+
+
+def test_detaching_stops_the_ladder_and_leaves_the_stop_alone(wired):
+    """Losing the ratchet is lost tightening, not lost protection: the stop is a
+    working order at the broker, not something this process holds up."""
+    b, c, loop = wired
+    tag = _send(b, ladder_dist_ticks=40)["tag"]
+    (h,) = c.on_exchange_order_notification.handlers
+    loop.run(h(_fill("E1", "buy", 1, 20000.0, user_tag=tag)))
+    b.detach("test")
+    b.on_ticks(pd.DataFrame({"price": [20100.0]}))
+    assert c.modified == []

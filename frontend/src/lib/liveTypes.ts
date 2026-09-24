@@ -136,6 +136,15 @@ export interface LiveContract {
   floor: string;
   expiry: string | null;
   days_to_expiry: number | null;
+  /** The contract this root is actually trading in today, off the exchange's
+   *  own quarterly calendar. Computed on the server so the roll rule has one
+   *  owner — see `journal.live.harvest.front_month`, which explains why it is
+   *  arithmetic rather than a lookup. */
+  front_month: string | null;
+  /** Whether `symbol` *is* that contract. `null` means no opinion (a root with
+   *  no known cycle) and must not be drawn as `false`: "cannot judge" and "wrong
+   *  contract" are different sentences, and only one is worth interrupting for. */
+  is_front: boolean | null;
   sessions: number;
   recorded: number;
   missing: number;

@@ -9,11 +9,12 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from journal import db, metrics
+from journal import trade_context as tcmod
 from journal.live.booking import REPLAY_PREFIX
-from journal.recordings import parse_attempt_no
+from journal.ingest import parse_attempt_no
 
 from .. import deps
-from ..scope import Scope, resolve_scope
+from ..scope import Scope, resolve_scope, text_cell
 from ..serialize import records, sanitize
 from ..summary import summary_extras
 
@@ -33,6 +34,18 @@ def _to_display_iso(raw: str | None, tz) -> str | None:
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
     return ts.tz_convert(tz).isoformat()
+
+
+def _attempt_order(imported_at: dict, file_mtime: dict):
+    """Sort key placing the oldest-worked-on attempt first.
+
+    The export's "Date modified" leads, then the upload time, with the filename
+    breaking ties. One definition because two readers must agree on it: the day
+    explorer orders and defaults its attempt buttons by it, and the calendar
+    picks each day's *latest* attempt with it. If the two drifted, a cell would
+    report a take the explorer does not open when you click through to it.
+    """
+    return lambda sf: (file_mtime.get(sf) or "", imported_at.get(sf, ""), sf)
 
 
 def _attempts_for_day(
@@ -57,7 +70,7 @@ def _attempts_for_day(
     with. Parsing one would read every sitting as "Attempt 1".
     """
     files = day_all["source_file"].dropna().unique().tolist()
-    files.sort(key=lambda s: (file_mtime.get(s) or "", imported_at.get(s, ""), s))
+    files.sort(key=_attempt_order(imported_at, file_mtime))
     out, sittings = [], 0
     for sf in files:
         if str(sf).startswith(REPLAY_PREFIX + "/"):
@@ -79,44 +92,55 @@ def calendar(scope: Scope = Depends(resolve_scope)) -> dict:
     if tf.empty:
         return {"months": [], "days": []}
 
-    # A day cell sums *every* in-scope attempt of that day: collapsing to the
-    # latest take is what made replay stats survivorship-biased. Filter by mode
-    # (or pick a single attempt in the day explorer) to read one take alone.
+    # A day cell reads its **single latest attempt** — never a sum across takes.
+    # Re-doing a day and reading the takes added together answers a question
+    # nobody asks; what the calendar is for is "where did this day finish", and
+    # that is the take you finished on. ``attempts`` still counts every in-scope
+    # take of the day, so a cell showing one of several says so, and the day
+    # explorer opens that same take by default and lets you switch.
     #
-    # The attempt count and video badge are derived from the same frame as the
-    # cell's PnL, so a day whose archived attempts are filtered out can't badge
-    # "3 attempts" over a total that only covers one.
+    # This collapses by *file*, not by account. On the handful of days where
+    # separate books traded — a prop account and a paper twin, say — only the
+    # book whose file was touched last is in the cell; the others are reachable
+    # through the day explorer's attempt buttons but are not in the day's PnL,
+    # and so are not in the month total either. Filter by account to read one
+    # book across the month.
+    #
+    # The aggregates elsewhere (statistics, overview, ``scope.filtered``) still
+    # sum every attempt: collapsing *those* to the latest take is what makes
+    # replay stats survivorship-biased, and that has not changed.
     t = tf.copy()
     t["date"] = t["entry_ts_local"].dt.date
-    attempts_by_day = t.groupby("date")["source_file"].nunique().to_dict()
-    files_by_day = (
-        t.groupby("date")["source_file"].apply(lambda s: set(s.dropna())).to_dict()
-    )
+    order = _attempt_order(scope.imported_at, scope.file_mtime)
 
-    conn = deps.get_conn()
-    with deps.db_lock():
-        linked = db.linked_video_source_files(conn)
     days = []
     for d, g in t.groupby("date"):
-        pnl = g["net_pnl"].astype(float)
+        files = sorted(g["source_file"].dropna().unique().tolist(), key=order)
+        # The day's latest take, and the rows belonging to it alone. A day with
+        # no source file at all is not something the importer produces, but if
+        # one existed its rows would still be worth showing over nothing.
+        latest = files[-1] if files else None
+        shown = g[g["source_file"] == latest] if latest else g
+        pnl = shown["net_pnl"].astype(float)
         n = len(pnl)
-        # Latest "Date modified" across the day's takes, so the table view can
-        # sort by when a day was last worked on — re-imported, for an export;
-        # sat down with, for a Simulator attempt, which has no file and stamps
-        # its start time here instead (see ``booking.book_attempt``). NULL for
-        # days whose files predate mtime capture, and for practice recorded
-        # before that stamp existed until the replay backfill has been run.
-        # UTC ISO strings sort lexicographically.
-        mtimes = [scope.file_mtime.get(sf) for sf in files_by_day.get(d, set())]
-        latest_mtime = max((m for m in mtimes if m), default=None)
+        # One file carries one account by construction (``db.infer_session``
+        # assigns a single account per source file), so this is a scalar.
+        accounts = shown["account"].dropna().unique().tolist()
         days.append({
             "date": d.isoformat(),
             "net_pnl": float(pnl.sum()),
             "trades": n,
             "win_rate": float((pnl > 0).sum() / n * 100) if n else 0.0,
-            "attempts": int(attempts_by_day.get(d, 1)),
-            "has_video": bool(files_by_day.get(d, set()) & linked),
-            "file_modified": _to_display_iso(latest_mtime, scope.tz),
+            "attempts": max(len(files), 1),
+            "account": ", ".join(sorted(accounts)) or None,
+            # The shown take's "Date modified" — which is the latest of the day,
+            # since that is the key it was picked on. It lets the table sort by
+            # when a day was last worked on: re-imported, for an export; sat down
+            # with, for a Simulator attempt, which has no file and stamps its
+            # start time here instead (see ``booking.book_attempt``). NULL for
+            # files predating mtime capture, and for practice recorded before
+            # that stamp existed until the replay backfill has been run.
+            "file_modified": _to_display_iso(scope.file_mtime.get(latest), scope.tz),
         })
     months = sorted({(d.year, d.month) for d in t["date"]}, reverse=True)
     month_objs = [{"year": y, "month": m,
@@ -174,15 +198,28 @@ def day_detail(
     if not notes_df.empty and day_keys:
         sub = notes_df[notes_df["trade_key"].isin(day_keys)]
         for _, r in sub.iterrows():
-            setup_map[r["trade_key"]] = json.loads(r["setups_json"] or "[]")
+            setup_map[r["trade_key"]] = json.loads(text_cell(r["setups_json"]) or "[]")
     for r in trade_rows:
         r["setups"] = setup_map.get(r["logical_trade_key"], [])
     file_modified = next(
         (a["file_modified"] for a in attempts if a["source_file"] == selected), None
     )
+
+    # Was the direction right, over this attempt's entries. Read by LOGICAL key
+    # and through a set, because in the ATAS view a scaled trade is several rows
+    # sharing one key — counting it once per fill would let one entry outvote
+    # three. Keys with no measured row are kept as None on purpose: they are the
+    # gap between "trades taken" and "trades the tape could speak to", and
+    # ``direction_edge`` reports both denominators.
+    ctx_keys = sorted({r["logical_trade_key"] for r in trade_rows})
+    conn = deps.get_conn()
+    with deps.db_lock():
+        ctx_rows = [db.get_trade_context(conn, k) for k in ctx_keys]
+
     return {
         "kpis": sanitize(kpis),
         "extras": sanitize(summary_extras(day_df)),
+        "entry_direction": sanitize(tcmod.direction_edge(ctx_rows)),
         "equity": records(equity, ["ts", "trade_no", "pnl", "equity", "drawdown"]),
         "per_trade_bars": per_trade_bars,
         "trades": trade_rows,

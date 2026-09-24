@@ -179,11 +179,8 @@ export function setOneClick(accountId: string, on: boolean) {
  *  where they were. There is no field for turning the layer off — that is
  *  `LIVE_GUARDRAILS` in the environment, so that switching the rules off means
  *  leaving the chart. */
-export function saveRoutingSettings(s: {
-  max_qty?: number;
-  guards?: Partial<GuardLevels>;
-}) {
-  return apiSend<{ max_qty: number; guards: GuardLevels }>(
+export function saveRoutingSettings(s: { guards?: Partial<GuardLevels> }) {
+  return apiSend<{ guards: GuardLevels }>(
     "PUT",
     "/live/routing/settings",
     s,

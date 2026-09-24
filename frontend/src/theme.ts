@@ -142,6 +142,37 @@ export const modernVwapPalette = {
   fill: "147, 197, 253",
 } as const;
 
+// The app's own directional pair — the green and red the regime ribbon and the
+// calendar already agree on — as "r, g, b" triplets rather than finished
+// colours, for the layers that mix their own alpha per element: the Zeiierman
+// VWAP's per-point line and flags, and the volume profile's delta lane.
+//
+// Two cuts and not one. Both hues are lighter than white-surface text, so on
+// paper the pair reads as a highlighter stroke; the light cut is the same
+// opposition darkened until it doesn't. Hoisted rather than written out at each
+// use so a green that moves moves everywhere at once.
+export const directionalTriplets = {
+  dark: {
+    up: "33, 192, 122",
+    down: "245, 69, 95",
+    /** No direction to report — an unflipped swing, a row whose sides cancel. */
+    flat: "138, 143, 156",
+  },
+  light: { up: "13, 124, 74", down: "185, 28, 55", flat: "110, 114, 126" },
+} as const;
+
+// Dynamic Swing Anchored VWAP [Zeiierman] — the *other* swing-anchored VWAP (see
+// lib/dynamicSwingVwap for why there are two). Its one axis is direction, which
+// is a binary opposition rather than the ordered loud→quiet ramp Modern VWAP's
+// regime is, so it cannot be re-cut into a single hue the way that one was: it
+// takes the directional pair above instead.
+export const dynamicSwingVwapPalette = {
+  bull: directionalTriplets.dark.up,
+  bear: directionalTriplets.dark.down,
+  /** Before the first flip, when there is no direction to report. */
+  flat: directionalTriplets.dark.flat,
+} as const;
+
 // Initial Balance (first 60 min of RTH). Session structure rather than an
 // anchor family, so it gets its own hue — lime, which nothing else on the chart
 // uses — instead of a shade of an existing one. `ext` is the faint dashed
@@ -174,6 +205,10 @@ export const ibPalette = {
 export const profilePalette = {
   ny: { edge: "#e879f9", poc: "#d946ef" },
   globex: { edge: "#7dd3fc", poc: "#38bdf8" },
+  // The weekly value area rides the weekly VWAP's orange, one family per
+  // horizon — a weekly level and the weekly band it belongs to read as kin,
+  // and nothing else on the chart owns orange.
+  weekly: { edge: "#f97316", poc: "#fb923c" },
 } as const;
 
 // The multi-session composite (Simulator only): the value the days *behind* this
@@ -282,6 +317,70 @@ export interface ChartInk {
     regime: Record<"trending" | "ranging" | "undefined", string>;
     fill: string;
   };
+  /** The Zeiierman swing-flip VWAP. Direction triplets, not hex — the line is
+   *  coloured per point and the flags mix their own alpha. */
+  dynamicSwingVwap: Record<"bull" | "bear" | "flat", string>;
+  /** The higher-timeframe candles drawn over this chart's own (the ATAS
+   *  "External Chart" read — see lib/externalChart).
+   *
+   *  Deliberately *not* the candle scheme's up/down pair. This layer's whole job
+   *  is to be read as a different bar from the ones underneath it, and giving it
+   *  the same green/red would make a 15-minute box and the 1-minute candles
+   *  inside it one visual family — exactly the confusion the outline is there to
+   *  avoid. Blue/red is ATAS's own pair and is unclaimed on this chart at these
+   *  weights. `range` is the high/low box, which is chrome around the body and
+   *  follows the surface's grid rather than the direction. */
+  externalChart: { bull: string; bear: string; fillBull: string; fillBear: string; range: string };
+  /** The higher-timeframe trend (lib/htfTrend): one gold for every frame's EMA
+   *  line — the frames are told apart by dash — and a faint green/red wash for
+   *  the frames' agreement. The wash is a background, so it is kept well under
+   *  the weight at which it would start competing with the candles' own
+   *  green/red; the ribbon is a 5px strip and can afford to be solid. */
+  htfTrend: { line: string; washUp: string; washDown: string; ribbonUp: string; ribbonDown: string };
+  /** The ranked S/R zones (lib/rankedZones).
+   *
+   *  Green/red, which the External Chart layer above deliberately avoided — and
+   *  the reason that argument does not carry here is shape, not hue. That layer
+   *  draws bar-shaped outlines, so the candle scheme's pair would have made a
+   *  15-minute box and the candles inside it one family. These are wide
+   *  horizontal bands *under* price, which nothing on this chart could mistake
+   *  for a candle, and support/resistance is the one place a bull/bear pair is
+   *  the reading rather than a decoration.
+   *
+   *  Earthier and darker than any of the four candle schemes on purpose: this is
+   *  a background, and a wash that competes with the bars drawn on top of it has
+   *  defeated itself. `bar` is the strength meter inside the zone, which is the
+   *  one part that must stay legible over the fill, so it carries most of the
+   *  chroma the border and fill gave up. */
+  /** USD economic-calendar releases (journal.econ_calendar): a vertical line per
+   *  print, coloured by ForexFactory's impact tier. Fuchsia/amber, never the
+   *  candle pair: FF's own red is the default down candle, and a release is a
+   *  clock event, not a direction. */
+  econEvents: { high: string; medium: string; low: string; label: string };
+  /** Gamma levels: walls one book carries (dashed), walls both carry (solid),
+   *  the flip band's edges and wash, and the tag text. */
+  gex: {
+    /** Call resistance (C1..) and put support (P1..): one book / both books. */
+    call: string;
+    callBoth: string;
+    put: string;
+    putBoth: string;
+    flip: string;
+    flipFill: string;
+    label: string;
+  };
+  rankedZones: {
+    support: string;
+    resistance: string;
+    supportFill: string;
+    resistanceFill: string;
+    supportBar: string;
+    resistanceBar: string;
+    broken: string;
+    brokenFill: string;
+    text: string;
+    barText: string;
+  };
   profile: Record<ProfileAnchor, { edge: string; poc: string }>;
   composite: { poc: string; edge: string; fill: string; hvn: string; lvn: string };
   ema: Record<keyof typeof emaPalette, string>;
@@ -290,14 +389,32 @@ export interface ChartInk {
    *  and the range tool's own copy of it. Washes, so rgba strings. `axis` is the
    *  hairline baseline, which follows the surface's grid. */
   viewportProfile: { va: string; out: string; poc: string; axis: string };
+  /** The net-delta lane drawn beside those rows when the profile is being read
+   *  for flow as well as for structure (`deltaBarFill`). Triplets rather than
+   *  finished colours, so the lane composes its own alpha. */
+  profileDelta: Record<"up" | "down" | "flat", string>;
   /** The developing (session-to-here) profile and its node reading. */
   developingProfile: { va: string; out: string; poc: string; hvn: string; lvn: string };
   /** The range tool's own box, which is chrome around the profile above. */
   rangeBox: { shade: string; shadeSel: string; edge: string; edgeSel: string };
+  /** Volume shelves (lib/volumeShelf): the price x time raster of size-per-visit,
+   *  and the boxes drawn round the bands that cleared the threshold.
+   *
+   *  `ramp` is a triplet rather than a finished colour because the raster's whole
+   *  content is in its alpha — one hue, opacity carrying the z-score — so the
+   *  cell composes it per pixel. Its own hue, not the profile families': a shelf
+   *  is a different reading from a value area (size per visit, not size), and
+   *  drawing it in the same blue or violet would say they were the same claim. */
+  volShelf: { ramp: string; box: string; boxLive: string };
   /** The label chips the canvas primitives draw. The text on them is the layer's
    *  own colour, so only the plate flips — but it has to, or a darkened level
    *  writes its price in dark ink on a near-black chip. */
   chip: { bg: string; strong: string; outline: string };
+  /** The stroke round a burst∩absorption overlap (EventBandPrimitive). A
+   *  neutral brighter than either event hue, because the collision is a fact
+   *  about *both* — colouring it either side's would take sides, and blending
+   *  blue with orange makes mud. */
+  eventCollide: string;
   /** How heavily the ±1σ→±2σ VWAP wash is laid down (VwapBandPrimitive).
    *
    *  Not a colour but part of the same failure: a wash is a fraction of the
@@ -315,6 +432,52 @@ export interface ChartInk {
 const darkInk: ChartInk = {
   vwap: vwapPalette,
   modernVwap: modernVwapPalette,
+  dynamicSwingVwap: dynamicSwingVwapPalette,
+  externalChart: {
+    bull: "#4d8bff",
+    bear: "#f5455f",
+    fillBull: "rgba(77, 139, 255, 0.10)",
+    fillBear: "rgba(245, 69, 95, 0.10)",
+    range: "rgba(138, 143, 156, 0.55)",
+  },
+  htfTrend: {
+    line: "#facc15",
+    washUp: "rgba(34, 197, 94, 0.07)",
+    washDown: "rgba(239, 68, 68, 0.07)",
+    ribbonUp: "rgba(34, 197, 94, 0.75)",
+    ribbonDown: "rgba(239, 68, 68, 0.75)",
+  },
+  // Cyan calls, the one hue no anchor, profile, zone or candle is drawn in (the
+  // ⚓ VWAP's teal is the nearest, and it is one hand-placed line); pale peach
+  // puts, far enough off the weekly's saturated orange and the composite's rose
+  // to read as their own family, and never as a bear candle.
+  gex: {
+    call: "rgba(34, 211, 238, 0.55)",
+    callBoth: "rgba(34, 211, 238, 0.95)",
+    put: "rgba(253, 186, 140, 0.55)",
+    putBoth: "rgba(253, 186, 140, 0.95)",
+    flip: "rgba(165, 243, 252, 0.7)",
+    flipFill: "rgba(34, 211, 238, 0.09)",
+    label: "#a5f3fc",
+  },
+  econEvents: {
+    high: "rgba(217, 70, 239, 0.85)",
+    medium: "rgba(245, 158, 11, 0.75)",
+    low: "rgba(148, 163, 184, 0.55)",
+    label: "#e5e7eb",
+  },
+  rankedZones: {
+    support: "#15a06b",
+    resistance: "#c2453a",
+    supportFill: "rgba(21, 160, 107, 0.11)",
+    resistanceFill: "rgba(194, 69, 58, 0.11)",
+    supportBar: "rgba(21, 160, 107, 0.5)",
+    resistanceBar: "rgba(194, 69, 58, 0.5)",
+    broken: "rgba(148, 163, 184, 0.75)",
+    brokenFill: "rgba(148, 163, 184, 0.06)",
+    text: "rgba(214, 219, 228, 0.75)",
+    barText: "rgba(255, 255, 255, 0.92)",
+  },
   profile: profilePalette,
   composite: compositePalette,
   ema: emaPalette,
@@ -325,6 +488,7 @@ const darkInk: ChartInk = {
     poc: "rgba(224, 165, 42, 0.72)",
     axis: palette.grid,
   },
+  profileDelta: directionalTriplets.dark,
   developingProfile: {
     va: "rgba(139, 92, 246, 0.46)",
     out: "rgba(139, 92, 246, 0.16)",
@@ -338,7 +502,13 @@ const darkInk: ChartInk = {
     edge: "rgba(108, 92, 231, 0.55)",
     edgeSel: "rgba(147, 130, 255, 0.95)",
   },
+  volShelf: {
+    ramp: "249, 115, 22",
+    box: "rgba(249, 115, 22, 0.55)",
+    boxLive: "rgba(251, 146, 60, 0.95)",
+  },
   chip: { bg: "rgba(14, 17, 23, 0.82)", strong: "rgba(14, 17, 23, 0.92)", outline: "rgba(14, 17, 23, 0.85)" },
+  eventCollide: "rgba(230, 232, 238, 0.85)",
   bandAlpha: 0.3,
   candles: {},
 };
@@ -363,9 +533,16 @@ const lightInk: ChartInk = {
     regime: { trending: "29, 78, 216", ranging: "90, 110, 160", undefined: "110, 114, 126" },
     fill: "30, 58, 138",
   },
+  // The directional pair, darkened for paper — see `directionalTriplets`.
+  dynamicSwingVwap: {
+    bull: directionalTriplets.light.up,
+    bear: directionalTriplets.light.down,
+    flat: directionalTriplets.light.flat,
+  },
   profile: {
     ny: { edge: "#a21caf", poc: "#c026d3" },
     globex: { edge: "#075985", poc: "#0284c7" },
+    weekly: { edge: "#c2410c", poc: "#ea580c" },
   },
   composite: {
     // Dark ink runs poc pale / edge deep; light ink runs poc deep / edge deeper
@@ -395,6 +572,7 @@ const lightInk: ChartInk = {
     poc: "rgba(180, 83, 9, 0.72)",
     axis: "#cfd4dd",
   },
+  profileDelta: directionalTriplets.light,
   developingProfile: {
     va: "rgba(109, 40, 217, 0.34)",
     out: "rgba(109, 40, 217, 0.13)",
@@ -408,8 +586,66 @@ const lightInk: ChartInk = {
     edge: "rgba(79, 70, 229, 0.5)",
     edgeSel: "rgba(55, 48, 163, 0.95)",
   },
+  // Darker and more saturated than the dark surface's: the raster is carried by
+  // alpha, and a light background swallows a pale wash that reads fine on black.
+  volShelf: {
+    ramp: "194, 65, 12",
+    box: "rgba(194, 65, 12, 0.55)",
+    boxLive: "rgba(154, 52, 18, 0.95)",
+  },
   // The plate flips with the surface; the text stays the layer's own colour.
   chip: { bg: "rgba(255, 255, 255, 0.86)", strong: "rgba(255, 255, 255, 0.94)", outline: "rgba(255, 255, 255, 0.9)" },
+  eventCollide: "rgba(43, 49, 59, 0.85)",
+  // Both outlines a step darker, and the washes a step lighter: on paper the
+  // dark cut's blue reads fine but its 10% fill is invisible against white,
+  // while the same fill at the dark chart's weight over a light surface is what
+  // turns a hollow box into a solid block.
+  externalChart: {
+    bull: "#1d4ed8",
+    bear: "#be123c",
+    fillBull: "rgba(29, 78, 216, 0.09)",
+    fillBear: "rgba(190, 18, 60, 0.09)",
+    range: "rgba(85, 91, 104, 0.5)",
+  },
+  // Gold darkened to stay a line on paper; the washes a touch heavier, since a
+  // 7% tint over white is close to invisible.
+  htfTrend: {
+    line: "#a16207",
+    washUp: "rgba(22, 163, 74, 0.09)",
+    washDown: "rgba(220, 38, 38, 0.09)",
+    ribbonUp: "rgba(22, 163, 74, 0.8)",
+    ribbonDown: "rgba(220, 38, 38, 0.8)",
+  },
+  // Same treatment as the External Chart pair above: outlines a step darker and
+  // the washes a step lighter, because the dark cut's 11% fill disappears
+  // against white while its bar weight turns into a slab.
+  gex: {
+    call: "rgba(14, 116, 144, 0.55)",
+    callBoth: "rgba(14, 116, 144, 0.95)",
+    put: "rgba(194, 65, 12, 0.5)",
+    putBoth: "rgba(194, 65, 12, 0.9)",
+    flip: "rgba(8, 145, 178, 0.75)",
+    flipFill: "rgba(8, 145, 178, 0.10)",
+    label: "#155e75",
+  },
+  econEvents: {
+    high: "rgba(162, 28, 175, 0.8)",
+    medium: "rgba(217, 119, 6, 0.75)",
+    low: "rgba(100, 110, 125, 0.5)",
+    label: "#1f2937",
+  },
+  rankedZones: {
+    support: "#0f766e",
+    resistance: "#9f3a2e",
+    supportFill: "rgba(15, 118, 110, 0.09)",
+    resistanceFill: "rgba(159, 58, 46, 0.09)",
+    supportBar: "rgba(15, 118, 110, 0.42)",
+    resistanceBar: "rgba(159, 58, 46, 0.42)",
+    broken: "rgba(100, 110, 125, 0.7)",
+    brokenFill: "rgba(100, 110, 125, 0.06)",
+    text: "rgba(52, 58, 68, 0.8)",
+    barText: "rgba(255, 255, 255, 0.95)",
+  },
   bandAlpha: 0.13,
   candles: {
     // White/grey inverts wholesale — this scheme is "the candles are the least
@@ -447,6 +683,40 @@ export function setActiveInk(next: ChartInk): void {
 
 export function ink(): ChartInk {
   return active;
+}
+
+/** What a delta bar is filled with, for the two histograms that draw a delta
+ *  lane beside their rows (the viewport profile and the fixed-range tool).
+ *
+ *  Hue is the sign and that is all it carries — which side was the aggressor at
+ *  that price. How *much* is the bar's length, which is the channel a histogram
+ *  already has and the one an eye reads lengths off. One flat alpha, so a run of
+ *  rows leaning the same way reads as one block of that colour rather than as a
+ *  gradient nobody can decode. */
+export function deltaBarFill(delta: number, ink: ChartInk["profileDelta"]): string {
+  return `rgba(${delta > 0 ? ink.up : delta < 0 ? ink.down : ink.flat}, 0.72)`;
+}
+
+/** The visit lane's prior-visits segment (`lib/deltaFlow.readVisitLane`),
+ *  drawn behind the latest visit's bar.
+ *
+ *  Same hues, less than half the weight: the two segments are one quantity cut
+ *  at one moment, so a third colour would say more than is true, and the wash
+ *  is what keeps the standing lean legible as *background* to the visit rather
+ *  than as a second bar competing with it. */
+export function deltaUnderFill(delta: number, ink: ChartInk["profileDelta"]): string {
+  return `rgba(${delta > 0 ? ink.up : delta < 0 ? ink.down : ink.flat}, 0.3)`;
+}
+
+/** The same hue at full strength, for the cap and verdict glyph on a *flagged*
+ *  delta row (`lib/deltaFlow`).
+ *
+ *  The mark is deliberately not a fourth colour: a flagged row is one of these
+ *  rows, singled out, and giving it its own hue would say it is a different kind
+ *  of thing. Opacity is the whole difference — the flagged row is the one in
+ *  focus, the rest of the lane stays washed behind it. */
+export function deltaFlagInk(delta: number, ink: ChartInk["profileDelta"]): string {
+  return `rgb(${delta > 0 ? ink.up : delta < 0 ? ink.down : ink.flat})`;
 }
 
 export type Tone = "pos" | "neg" | "neutral";

@@ -85,6 +85,23 @@ _MONTH_CODES = {"F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6,
 # no expiry at all, which the surface can say; a plausible wrong one it cannot.
 _THIRD_FRIDAY_ROOTS = {"NQ", "ES", "YM", "RTY", "MNQ", "MES", "MYM", "M2K"}
 
+_CODE_OF_MONTH = {m: c for c, m in _MONTH_CODES.items()}
+
+# The months those roots list on: March, June, September, December. Paired with
+# `_THIRD_FRIDAY_ROOTS` rather than assumed for every root, for the same reason
+# that whitelist exists — the energy roots list monthly, and a quarterly answer
+# for one of them would be wrong most of the year.
+_QUARTERLY = (3, 6, 9, 12)
+
+# How far in front of expiry the volume roll happens: CME equity-index futures
+# roll on the Thursday eight days before the third Friday. The migration is a
+# few days wide rather than an instant, so this is the *start* of it — the
+# conservative edge for what the number is used for here. Naming the new
+# contract while both still trade costs a few days of a warning that is merely
+# early; naming the old one a few days late is the failure being guarded
+# against, and it is silent.
+ROLL_LEAD_DAYS = 8
+
 
 def parse_contract(symbol: str) -> tuple[str, int, int] | None:
     """``"NQU6"`` -> ``("NQ", 9, 2026)``. None if it is not a raw contract.
@@ -125,8 +142,66 @@ def contract_expiry(symbol: str) -> date | None:
     root, month, year = parsed
     if root not in _THIRD_FRIDAY_ROOTS:
         return None
+    return _third_friday(year, month)
+
+
+def _third_friday(year: int, month: int) -> date:
+    """The CME equity-index settlement date, in one place.
+
+    Shared by ``contract_expiry`` and ``front_month`` rather than written twice:
+    the second copy is the one that would be wrong, and a roll warning that
+    disagrees with the expiry it is drawn beside is worse than neither.
+    """
     d = date(year, month, 1)
     return d + timedelta(days=(4 - d.weekday()) % 7 + 14)  # first Friday, then two weeks
+
+
+def front_month(root: str, on: date | None = None) -> str | None:
+    """The contract ``root`` is actually trading in on ``on`` — ``"NQ"`` -> ``"NQZ6"``.
+
+    Calendar arithmetic and deliberately nothing else, because this is read on
+    the **live path** where both of the other ways to answer it are barred.
+    ``sim.ticks._probe_front_month`` bills Databento, which a live path must
+    never do (and the on-disk roll map ends 2026-06-30 regardless). Rithmic's
+    own front-month lookup went silent on template 113 for every root on
+    2026-09-07 — the outage ``Broker._find_siblings`` already carries a fallback
+    for. A date is the one input this process can always answer from, offline,
+    at any hour, with no entitlement.
+
+    None for a root outside ``_THIRD_FRIDAY_ROOTS`` — the same answer
+    ``contract_expiry`` gives, for the same reason sharpened by what sits on top
+    of this one: the only thing built on it is a warning, and a warning that
+    cries wolf on a root nobody can settle gets turned off, taking the true ones
+    with it.
+    """
+    r = (root or "").strip().upper()
+    if r not in _THIRD_FRIDAY_ROOTS:
+        return None
+    on = on or date.today()
+    # This year's remaining quarters, then next year's — the December contract
+    # rolls into March across a year boundary, which a single pass would miss.
+    for year in (on.year, on.year + 1):
+        for month in _QUARTERLY:
+            if _third_friday(year, month) - timedelta(days=ROLL_LEAD_DAYS) > on:
+                return f"{r}{_CODE_OF_MONTH[month]}{year % 10}"
+    return None
+
+
+def is_front_month(symbol: str, on: date | None = None) -> bool | None:
+    """Whether ``symbol`` is the contract its own root is trading in on ``on``.
+
+    **Three answers, not two.** ``None`` is *no opinion* — not a raw contract,
+    or a root with no known cycle — and a caller must never read it as False.
+    "We cannot judge this" and "this is the wrong contract" earn very different
+    words on a screen, and only the second is worth interrupting somebody for.
+    """
+    parsed = parse_contract(symbol)
+    if parsed is None:
+        return None
+    front = front_month(parsed[0], on)
+    if front is None:
+        return None
+    return (symbol or "").strip().upper() == front
 
 
 def replay_window(symbol: str, recorded: set[date] | None = None,
@@ -146,10 +221,20 @@ def replay_window(symbol: str, recorded: set[date] | None = None,
     ``sessions_between``), so a handful of the count is always days the exchange
     did not trade. Answering the finer question means reading every day's ticks,
     which is what ``pending`` is for — too heavy for something a page polls.
+
+    ``front_month`` and ``is_front`` are the *other* end of the same calendar,
+    and they ride here because this is already the per-contract row a page
+    polls. The expiry above says when a contract stops being replayable; these
+    say when it stopped being the one the market trades, which happens **eight
+    days earlier** and is the one a live feed can sit through without noticing.
+    On 2026-09-14 that gap was 290 NQ points between the tape on screen and the
+    contract the orders were going to.
     """
     today = today or tickmod.session_date_for(pd.Timestamp.now(tz="UTC"))
     floor = today - timedelta(days=REPLAY_DAYS)
     expiry = contract_expiry(symbol)
+    parsed = parse_contract(symbol)
+    front = front_month(parsed[0], today) if parsed else None
     # Up to yesterday: today's session is the live feed's job, and counting it
     # as a hole would make every morning open with a fresh one.
     reachable = sessions_between(floor, today - timedelta(days=1))
@@ -161,6 +246,9 @@ def replay_window(symbol: str, recorded: set[date] | None = None,
         "floor": floor.isoformat(),
         "expiry": None if expiry is None else expiry.isoformat(),
         "days_to_expiry": None if expiry is None else (expiry - today).days,
+        "front_month": front,
+        # None is "no opinion", never False — see ``is_front_month``.
+        "is_front": None if front is None else symbol.strip().upper() == front,
         "sessions": len(reachable),
         "recorded": len(reachable) - len(missing),
         "missing": len(missing),
@@ -371,13 +459,13 @@ async def sweep_standalone(symbol: str, start: date, end: date | None = None,
     force-log-out a running feed; callers check. When a feed *is* up, its own
     background sweep does this work on its connection instead.
     """
-    from async_rithmic import RithmicClient, SysInfraType
+    from async_rithmic import SysInfraType
 
-    from .rithmic import credentials, install_redaction
+    from .rithmic import credentials, install_redaction, new_client
 
     creds = credentials()
     install_redaction(creds["password"])
-    client = RithmicClient(**creds)
+    client = new_client(creds)
     await client.connect(plants=[SysInfraType.HISTORY_PLANT])
     try:
         return await sweep(client, symbol, start, end, exchange, on_day)

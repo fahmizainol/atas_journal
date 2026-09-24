@@ -1,0 +1,6 @@
+# pnpm 11 asks before running a dependency's install scripts. esbuild's is a
+# binary-integrity check; the bundle builds correctly without it because the
+# platform binary arrives as an optional dependency, so it stays off and
+# `pnpm install` runs without a prompt.
+allowBuilds:
+  esbuild: false

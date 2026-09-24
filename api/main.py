@@ -28,6 +28,8 @@ from .routers import (  # noqa: E402
     confluences,
     day_notes,
     drafts,
+    econ,
+    gex,
     edges,
     filters,
     imports,
@@ -39,6 +41,7 @@ from .routers import (  # noqa: E402
     notes,
     overview,
     regime,
+    recall,
     replays,
     research,
     sessions,
@@ -48,7 +51,6 @@ from .routers import (  # noqa: E402
     statistics,
     strategies,
     trades,
-    videos,
 )
 from .serialize import SanitizedJSONResponse  # noqa: E402
 
@@ -160,10 +162,11 @@ app.include_router(setups.router, prefix="/api")
 app.include_router(confluences.router, prefix="/api")
 app.include_router(charts.router, prefix="/api")
 app.include_router(calendar.router, prefix="/api")
+app.include_router(econ.router, prefix="/api")
+app.include_router(gex.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 app.include_router(ai.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
-app.include_router(videos.router, prefix="/api")
 app.include_router(strategies.router, prefix="/api")
 app.include_router(regime.router, prefix="/api")
 app.include_router(interactions.router, prefix="/api")
@@ -177,17 +180,38 @@ app.include_router(live.router, prefix="/api")
 # when LIVE_ROUTING is unset, which is more use than a 404 that reads as a
 # missing feature.
 app.include_router(live_orders.router, prefix="/api")
+app.include_router(recall.router, prefix="/api")
 app.include_router(replays.router, prefix="/api")
 
 
 # --- Prod static frontend (mounted last; only if a build exists) ---------
 _DIST = ROOT / "frontend" / "dist"
 if _DIST.is_dir():
-    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+    _DIST_ROOT = _DIST.resolve()
+    # check_dir=False: `vite build --watch` (see `pnpm dev:phone`) empties dist/
+    # at the start of every rebuild, so assets/ disappears for a second or two.
+    # StaticFiles only tests the directory in its constructor, which made that
+    # window fatal — a rebuild landing while the API imported, or while --reload
+    # re-imported it, killed the server outright. A file that is missing right
+    # now should be a 404, not a boot crash.
+    app.mount(
+        "/assets",
+        StaticFiles(directory=_DIST / "assets", check_dir=False),
+        name="assets",
+    )
 
     @app.get("/{full_path:path}")
     def spa(full_path: str) -> FileResponse:
-        candidate = _DIST / full_path
-        if full_path and candidate.is_file():
+        # `full_path` arrives percent-decoded, so a request for
+        # ``/%2e%2e/%2e%2e/.env`` reaches here as ``../../.env`` — Starlette's
+        # path normalisation happens before the decode and does not catch it.
+        # Unresolved, that walked straight out of dist/ and served the repo's
+        # .env. Resolve first, then require the result to still be inside dist.
+        candidate = (_DIST / full_path).resolve()
+        if (
+            full_path
+            and candidate.is_file()
+            and candidate.is_relative_to(_DIST_ROOT)
+        ):
             return FileResponse(candidate)
         return FileResponse(_DIST / "index.html")

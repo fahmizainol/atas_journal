@@ -11,6 +11,7 @@ is stored verbatim.
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from contextlib import AbstractContextManager, nullcontext
 from datetime import date, datetime
@@ -45,12 +46,33 @@ def _local_iso(dt: datetime | None, source_tz: ZoneInfo) -> str | None:
     return dt.replace(tzinfo=source_tz).isoformat()
 
 
-def _journal_key(row: dict) -> str:
+def _journal_key(row: dict, lot: str | None = None) -> str:
+    """The content hash a journal row dedupes on.
+
+    **Passing no ``lot`` must reproduce the old seven-part hash byte for byte.**
+    Every imported row in the database is keyed under that form, and
+    ``trades._trade_key`` derives from it the id that notes, reviews, recall
+    cards and rule checks are all filed under — so the parts are never
+    reordered and nothing is ever inserted before the end. A discriminator is
+    appended, only when one is passed.
+
+    It exists because those seven parts are **not unique for a scale-out**. The
+    lots of one position share an open stamp (``Broker._open_state`` freezes it
+    and no scale-in re-bases it), and the portions closed by one sweep share an
+    exit price and a per-lot P&L — so several genuinely distinct lots hash
+    identically and ``db.insert_journal``, which is INSERT OR IGNORE, keeps one
+    and silently drops the rest. Size and reason do not separate them either:
+    four 1-lot ``reduce`` portions closing in the same second are identical in
+    both. The live broker therefore passes its own per-lot id, which is the one
+    thing that does.
+    """
     parts = [
         str(row["account"]), str(row["instrument"]),
         str(row["open_ts_local"]), str(row["close_ts_local"]),
         str(row["open_price"]), str(row["close_price"]), str(row["pnl"]),
     ]
+    if lot is not None:
+        parts.append(str(lot))
     return hashlib.sha1("|".join(parts).encode()).hexdigest()
 
 
@@ -68,6 +90,26 @@ def source_key(path: Path, base: Path = IMPORTS_DIR) -> str:
         return path.resolve().relative_to(base.resolve()).as_posix()
     except ValueError:
         return path.name
+
+
+# A trailing "-<digits>" on the export's stem is the attempt number. The date
+# range uses underscores (``_05032026``), so the only hyphen is this suffix.
+_ATTEMPT_SUFFIX = re.compile(r"-(\d+)$")
+
+
+def parse_attempt_no(source_file: str) -> int:
+    """Attempt number encoded in an ATAS export filename (no suffix → 1).
+
+    ``ATAS_statistics_04032026_05032026.xlsx`` → 1 (first take, implicit).
+    ``…15042026-2.xlsx`` → 2, ``…15042026-02.xlsx`` → 2 (zero-pad tolerated).
+
+    The number lives in the filename rather than in a row count, which makes it
+    stable across take deletions: the day view's "Attempt N" label always names
+    the same export, however many of its siblings have since been removed.
+    """
+    stem = Path(source_file).stem  # drops the .xlsx extension
+    m = _ATTEMPT_SUFFIX.search(stem)
+    return int(m.group(1)) if m else 1
 
 
 def _sheet_rows(wb, name: str) -> list[tuple]:
@@ -130,6 +172,12 @@ def parse_file(
             "price_pnl": float(price_pnl) if price_pnl is not None else None,
             "profit_ticks": float(profit_ticks) if profit_ticks is not None else None,
             "pnl": float(pnl) if pnl is not None else None,
+            # ATAS's Journal sheet carries no commission — the column belongs to
+            # the live broker, which is the only source that knows one. NULL and
+            # not 0.0 on purpose: it means "never reported", and `trades.py`
+            # renders it as zero commission, which is exactly what these rows
+            # did before the column existed.
+            "fees": None,
             "comment": str(comment or ""),
             "source_file": source,
         }

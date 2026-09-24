@@ -570,6 +570,412 @@ page shows is, and a lot of derivation sits between them.
 
 ---
 
+## Charts — `/charts/replay`
+
+### 1. Prop-firm account simulator — pick the plan, not just the size
+
+*Added 2026-08-18.*
+
+The replay account is currently **one hardcoded plan**: LucidPro 50K, in
+`src/journal/replay_account.py` (`START_EQUITY 50_000`, `MAX_LOSS 2_000`,
+`TRAIL_CAP 52_100`, lock $50,100, EOD trail). Make the plan a *choice*, the way
+Live's `RoutingPanel` makes the account a choice — a selector in the replay rail,
+the picked plan drawn as a badge everywhere the account appears, and the floor
+computed under that plan's rule.
+
+**Scope decision (2026-08-18): two plans, LucidPro 50K and LucidDaily 50K.** Not
+the size ladder, not a generic multi-firm spec table — the two plans actually
+being chosen between. Same $50K start, same $2,000 MLL, same $52,100 buffer and
+$50,100 lock; **the only thing that differs is when the floor is allowed to
+move** — LucidPro steps it once at the daily close, LucidDaily tracks the running
+peak. Build the spec as a table anyway (one dict per plan) so a third row is data,
+not a refactor.
+
+**Switch decision (2026-08-18): switching plans mints a new epoch.** An account is
+bound to its plan for its life. `data/replays/account.json` epochs gain a `plan`
+field (absent ⇒ `lucidpro`, so every existing epoch reads correctly); the picker
+writes a new epoch at $50K rather than re-deriving history. No retro-death when
+you switch — and, deliberately, no "where would I be under the other plan"
+comparison. If that comparison is wanted later it is a *read-only shadow walk*,
+never a second account of record.
+
+**Why LucidDaily is worth simulating at all** — from the plan comparison and the
+measurement run in `data/research/replay-trail/intraday_dd.py` (the study has no
+write-up; these numbers are the residue):
+
+- Intraday trailing charges you for **profit you touched but never banked**. Over
+  the 66 stored sittings at flat 1 NQ, the extra floor room it demands over an
+  EOD trail is a **median $232, mean $320, p90 $760, max $1,232**; 18/66 days
+  (27%) cost more than $500. Effective MLL under an intraday floor ≈ **$1,768 on
+  a median day, $1,240 on a p90 day**, of $2,000 — an 8-loss budget becomes ~7,
+  and ~5 on the bad tail.
+- **The daily stop does not defend against it** ($232 → $198 median). The tax is
+  manufactured by the green part of the day; a rule that only watches losses
+  cannot see it. If Daily is ever armed live it needs a *new* guardrail — a
+  giveback-from-peak lock — not a tighter loss stop.
+- Whether the trail watches **open** trades or closed balance only moves the
+  median ($232 vs $0) but barely the tail (p90 $760 vs $593, max $1,232 both).
+  Lucid's own sources contradict each other on this; the measurement says the
+  answer is not load-bearing.
+- Against that cost Daily drops the 40% funded-consistency rule (and with it the
+  `+$1,000 daily profit lock` that exists only to feed it), the 3-day payout
+  cycle and the $2,000/$2,500 payout caps. Its own extra cost is the red-folder
+  news rule: a **hard breach**, not a session lock.
+
+- [ ] Lift the plan constants out of `replay_account.py` into a spec table
+      (`start`, `max_loss`, `trail_cap`, `lock`, `trail: "eod" | "intraday"`,
+      daily-loss rule, consistency rule). `walk()` takes the spec; everything
+      that currently reads a module constant reads the spec instead. Keep
+      `FAST_TRADE_MS` where it is — it is behaviour, not plan (and it is
+      duplicated in `lib/guardRules.ts`; they must stay equal).
+- [ ] Decide what the intraday floor marks against **before** building it. The
+      server walks `trade_pnls(row)` cumulatively — a *closed-balance* path, which
+      is exactly the cheap reading the measurement says is tail-equivalent.
+      Marking open positions needs the tape, which the server does not have;
+      the honest options are (a) closed-balance only, stated in the UI, (b) the
+      recorder stamps a per-sitting peak-equity mark, (c) per-trade MFE from the
+      stored excursions. **(a) first** — it is one line of the same walk, and the
+      p90/max are unchanged.
+- [ ] **`guardRules.accountStop` assumes the floor is constant for a sitting.**
+      That assumption *is* the EOD rule, and it is the only reason the browser can
+      join live equity to a server-derived floor. Under an intraday plan the floor
+      climbs with every new equity high, so the client must recompute it live —
+      this is the real work in this item, not the plan table.
+- [ ] Simulate the floor and the daily rule; **show** the rest. Consistency
+      percentages, payout cadence and caps, and the news rule are policy, not
+      path — they belong in the account panel as text next to the plan badge, not
+      as silent refusals. A red-folder breach in particular cannot be enforced
+      without an econ calendar, and inventing one that half-works is worse than
+      printing the rule.
+- [ ] The account panel should read: plan badge, equity, floor, **distance to
+      floor**, and (intraday only) the peak the floor is trailing. The peak is the
+      number that explains a death nobody remembers earning.
+- [ ] Consider writing the plan comparison up as
+      `docs/research/luciddaily-vs-lucidpro.md` so it renders in Lab → Research —
+      it currently exists only in a transcript and in the header comment of
+      `intraday_dd.py`.
+
+### 2. Trailing sitting-profit lock — the give-back floor
+
+*Added 2026-08-21.*
+
+The give-back guardrail the LucidDaily notes above call for, measured and worth
+building. The rule, exactly as tested: **per sitting**, once cumulative PnL
+touches **+$500**, a floor arms at **$0**; each further +$500 milestone the peak
+touches ratchets the floor up $500 (peak ≥ $1,000 ⇒ floor $500, and so on). Cum
+PnL at or below the floor ends the sitting. Never armed below +$500 — days that
+start red belong to the ordinary daily loss rule, not to this.
+
+**Why $500 and why at all** — measured on the full mirrored history (106
+sittings, 1,060 trades, walk at trade closes): actual **−$21.3k → −$8.5k**
+(+$12.9k). Fired 16 times: **12 saves +$14.6k vs 3 lockouts −$1.7k**; worst
+single lockout −$873, best single save +$3.6k. The asymmetry is structural — a
+lockout can only forfeit remaining upside, a give-back can run from +$1.3k to
+deep red, and the reads *measured during* give-backs are degraded (46% right at
+30s after a loss vs 55% after a win; this-week analysis, 2026-08-21). A $250
+step recovers more (history → breakeven) but fires in a third of sittings and
+its lockouts cost 4×; $500 keeps an 8.5:1 save-to-cost ratio.
+
+- [ ] **Show before enforcing.** First cut is a read-only line — armed state,
+      current floor, distance to it — on the replay account chip/panel, next to
+      the plan floor. A silent refusal that fires 15% of sittings needs trust
+      the number hasn't earned yet.
+- [ ] Split-half the history (early vs late sittings) before wiring any
+      enforcement. The +$12.9k is one August-heavy sample; the study lives in
+      scratch only — port the walk (trivial: one cumsum + ratchet per sitting)
+      somewhere it can re-run as sittings accrue.
+- [ ] It marks **closed PnL**, same seam and same honest options (a)/(b)/(c) as
+      the intraday-floor decision above — do not build a second answer to the
+      same question. Closed-balance first, stated in the UI.
+- [ ] Ownership: this is a *sitting* rule, not an *account* rule — it applies
+      identically to paper, drill and account sittings, so it belongs beside
+      `guardRules` / the sim session walk, not inside `replay_account.py`'s
+      plan spec. The plan floor answers "is the account alive"; this answers
+      "has this sitting stopped earning its keep".
+- [ ] If enforced: end-of-sitting lock, not a trade veto — the tested rule cuts
+      the *rest of the sitting*, and that is what the numbers priced. No
+      trade-by-trade exceptions, or the measurement no longer applies.
+
+### 3. Continuous-run replay — random start, then the next day
+
+*Added 2026-09-24.*
+
+Replay today drops you on a random cached day every sitting
+(`Simulator.tsx` `anyDay`: uniform over ~600 days, with replacement, no memory).
+The idea: draw the **start** day at random as now, but once that day is ended,
+the next sitting opens on the **next trading day** after it, not another random
+draw. You trade the era continuously — this week's regime into next week's, the
+losing streak that lasts a fortnight, the Monday after a Friday blow-off —
+which is what live trading actually feels like, and what a prop account's
+consecutive-day floor is actually measured against.
+
+Why it matters beyond feel: every account sim in `bracket-survival.md` (and the
+2026-09 Flex/Direct/budget runs) draws days **independently**, which assumes
+regimes don't cluster. They do. A run of sittings through consecutive days is
+the only in-app sample of how the trader handles serially correlated days.
+
+- [ ] A run is a first-class thing: `(symbol root, start date, cursor)`,
+      persisted like the `sim.resume.*` bookmark (per mode). "End day" advances
+      the cursor; a fresh draw is an explicit "start a new run", never implicit.
+- [ ] Next day = next **cached** RTH session after the cursor, across the
+      contract roll (resolve via `tickmod.cached_*`, not a root glob — see the
+      replay-tape two-stores trap). Skip holidays/missing tapes, but surface the
+      gap ("skipped 2 days — no tape") rather than jumping silently.
+- [ ] Blindness: the date stays hidden until reveal, as today. Knowing it's
+      "the day after" is fine; knowing the calendar date is not.
+- [ ] **Show the weekday** (Mon/Tue/…) up front, even while the date is
+      hidden. A live trader always knows it — Monday opens off a weekend gap,
+      Friday afternoons thin out — and in a continuous run it also tells you
+      when a weekend (or a holiday skip) sits between two sittings. The
+      weekday alone doesn't give the date away.
+- [ ] Prior-day context (`contextTicks`, composites, prior VA) must come from
+      the real preceding days — it already does per day, just check it holds
+      at a run boundary.
+- [ ] Replay accounts: a continuous run is the natural fit for an account's
+      life — consecutive tape days instead of random ones. Decide whether an
+      account *is* a run (one cursor per account) or runs are independent of
+      accounts. Leaning: account-bound, since the account's day already is
+      the tape day (`replay-account-registry`).
+- [ ] End of corpus: the cursor hits the last cached day → say so and offer a
+      new random run; don't wrap.
+- [ ] Drill mode keeps random drops — it's for reps, not continuity.
+
+---
+
+## Journal / review
+
+### 1. Add the Modern VWAP POC anchors to the auto-derived levels — DONE (2026-08-18/19)
+
+*Added 2026-08-18. Built the same day; the second re-arm rule added 2026-08-19.*
+
+**The result, first: fills do not cluster on either line.** Over the backfilled
+journal (995 scored fills carrying the family, 69 days):
+
+| family | mean rank | median | at level (<0.05) |
+|---|---|---|---|
+| `value_low` — tightest on the board | 0.405 | 0.36 | 13.0% |
+| `mv_poc_revisit` | 0.473 | 0.48 | 9.3% |
+| `mv_poc_naked` | 0.483 | 0.48 | 8.0% |
+| `trend_ema` — the null control | 0.501 | 0.48 | 6.9% |
+
+Both POC anchors sit in the bottom two of the nine families, a hair inside the
+control. `mv_poc_revisit` is marginally the tighter of the pair, and its entries
+alone rank 0.463 / 10.1% against 0.482 / 8.0% for `mv_poc_naked` — but at ~0.01
+per standard error on the mean that is a difference worth naming and not one
+worth acting on, and neither line is remotely in `value_low`'s company. So both
+are very nearly "a level nobody trades off", measured on my own fills. That is a
+fact about where I fill, not a verdict on the indicator, and it is exactly the
+answer this item was built to be able to get.
+
+The level tagger scores every finished sitting's fills against the families in
+`src/journal/level_tag.py::FAMILIES` (bands, value high/low/mid, session mean,
+EMA — 7 before this item, 9 after). Add the **Modern VWAP anchored at the POC**
+(`anchor: "poc"`, `rearmTicks: 50`) under **both** re-arm rules as levels it can
+measure fills against: `rearmMode: "pocMove"` ("naked POC" — the POC has to
+migrate) and `rearmMode: "distance"` (the chart's "price leaves the POC").
+
+**The blocker is that Modern VWAP is frontend-only.** It lives in
+`frontend/src/lib/modernVwap.ts` and is drawn through the shared `modernVwapLayer`
+on `/charts` and `/lab/interactions`; there is **no Python implementation**, and
+`level_tag` reads its levels off `api/session_chart.py::session_frame` slots. So
+this item is mostly *port the anchor logic server-side*, and only incidentally a
+family-map edit.
+
+- [x] Port the anchor + re-arm rules to Python and expose them as `session_frame`
+      slots. The rules to reproduce exactly: anchored at the developing POC; once
+      fired the anchor **disarms**, and re-arms either when the POC has migrated
+      ≥ `rearmTicks` from the price it last anchored at (`pocMove`), or when a
+      bar closes ≥ `rearmTicks` from the POC *as of that bar* (`distance`).
+      Causal — fires on bar close, no lookahead. Cross-reference the TS file in
+      both directions the way `FAST_TRADE_MS` is cross-referenced.
+      → `src/journal/sim/modern_vwap.py` (mid line only — no bands, no regime, no
+      signals; both modes at 50 ticks, pinned in code rather than read from a chart
+      knob, because a family whose definition moves with a user setting cannot be
+      compared across trades; `mode` is a required argument that raises on an
+      unknown value, so no caller can silently measure against the wrong line).
+      Exposed as `SessionFrame.mv_poc_naked` / `mv_poc_revisit`, `{time, value}`
+      rows off the **Globex** developing profile, which is the indicator's own
+      `pocSource` default. The two are genuinely different lines: on real sessions
+      `distance` fires 49-74 anchors to `pocMove`'s 10-12, and they separate by up
+      to 83-179 points.
+      **Parity is tested, not asserted:** `tests/test_modern_vwap.py` transpiles
+      the TypeScript with the frontend's esbuild, runs it under node on a shared
+      600-bar fixture, and compares the two mid series — it *skips* when node or
+      esbuild is missing rather than passing silently.
+      A session with no developing profile gets **no line**, where the frontend
+      degrades to a plain session anchor: that fallback is fine for a drawing and
+      false for a level (it is the session VWAP under a name claiming otherwise).
+- [x] Decide **own family vs joining `session_mean`**. It is a VWAP, so
+      collinearity with `vwap`/`gxvwap`/`wkvwap` is the obvious worry — but an
+      anchor that jumps to a migrating POC is a different line from a session
+      integral, and folding it into `session_mean` would hide it (a family's
+      distance is to its *nearest* member). Default to a new family, with a
+      `FAMILY_LABELS` entry, and let the rank machinery answer the question:
+      `trend_ema` sitting at 0.500 is the built-in null control.
+      → **Own family per re-arm rule**, `mv_poc_naked` and `mv_poc_revisit`, one
+      member each. The three session means are one line asked from three start
+      times; these restart wherever the day's agreed price last moved, so on a
+      trending day they sit nowhere near them. Folded into `session_mean` either
+      could have won the family on days the session VWAPs were far away and read
+      afterwards as "traded off VWAP". And the two are kept apart from *each
+      other* for the same reason at a smaller scale: pooled, a fill near either
+      would score as "near the POC anchor" and neither rule could ever be shown
+      to be the better one — which is the only comparison this pair supports.
+- [x] Bump `METHOD` (currently `v1-drift20-pool600-n25`) — the family map moved,
+      so every stored rank is stale — and re-run `demo/level_tag_backfill.py`
+      over the 6,657 rows / 679 trades / 64 days.
+      → `v3-drift20-pool600-n25` (v2 was the first rule alone). Backfill re-scored
+      **737 logical trades / 1,474 fills / 69 days**, writing 8,955 rows (448
+      mechanical exits skipped as always). 4 days skipped for no cached tape or a
+      tape that disagrees with the fills (2025-01-30, 2026-06-15, 2026-08-10,
+      2026-08-12).
+      The v2 run left 32 rows behind under the old stamp, which is a bug the
+      whole-trade replace cannot catch: those rows belong to two trade keys that
+      no longer exist (a re-import re-cut them), so nothing re-scores them and
+      nothing deletes them. `db.prune_trade_levels` now drops rows by stamp at the
+      end of a **whole-journal** backfill only — a since-date run would delete good
+      rows for trades it never looked at. `trade_levels_methods` is a single method
+      again.
+- [x] `LevelStrip` in `TradeDetail.tsx` renders from the families, so it picks the
+      new ones up for free — check the label fits the strip at the widths the
+      revamp (item 3) settles on.
+      → It renders from its own `FAMILY_LABELS` copy and falls back to the raw key,
+      so it needed the two entries: "naked-POC VWAP" and "revisited-POC VWAP", the
+      longer of them 18 characters against the existing "value low (VAL)".
+- [x] Keep them look-at-only in their claims. The POC anchor itself is
+      **unvalidated** — measuring where fills land is exactly the use it was built
+      for, and is not evidence the level works.
+      → Still unvalidated, and now with a measured base rate that gives it no
+      support either: see the result at the top of this item.
+
+### 2. Scrap the model and confluence fields from the review — DONE (2026-08-18)
+
+The review asked each booked trade for a **model** (tri-state select, "no model"
+is an answer) and **≥1 tag** (placeholder "confluence, signs…"), plus an optional
+note. Both are gone.
+
+**The reason is that the levels are now derived, and derived beats declared.** The
+tagger measures which level families a fill actually landed on, per fill, without
+a self-report — and those families are more specific than the model names in use
+today. The confluence field was asking a human to type, from memory, a worse
+version of a number the app already computes.
+
+> **Scope grew once, and the growth is the feature.** As filed, this item ended
+> at "notes only", and accepted the loss of the claimed-vs-measured comparison as
+> the price. That was the wrong trade, and the sharper rule is: **drop the
+> declaration that duplicates a measurement; keep the declaration a measurement
+> can score.** Confluence failed both halves — a worse copy of `trade_levels`,
+> and unfalsifiable ("I saw the VAH and the 9 EMA" is never wrong). What replaced
+> it is a **thesis**: `bounce`, `break` or `revert`, from a closed vocabulary,
+> claiming what price will do next. That duplicates nothing and the tape settles
+> it.
+>
+> **The hazard, and it is fatal if unhandled.** Asked at review time, a thesis is
+> chosen knowing the outcome: it grades near-perfectly and teaches nothing.
+> Grading a contaminated claim is *worse* than not grading, because it
+> manufactures evidence. So the claim is collected **at the ticket**, one
+> optional click before the order goes out, and every stored row carries
+> `captured: 'entry' | 'review'`. The review still asks on trades that skipped
+> it — a retrospective claim beats no record — but the two must never be pooled,
+> and any accuracy quoted over a mixed set is a number the hindsight invented.
+>
+> **Never required at the ticket.** The chart gestures exist to be fast, and a
+> mandatory field on the fast path is one that gets answered carelessly. What
+> skipping it costs is one question in the review, which is where the slow
+> version belongs.
+>
+> **What the grade actually says.** Whether the *market* did what you claimed —
+> never whether the trade made money, and it does not read the P&L at all. That
+> separation is the whole point, because it exposes the two disagreements a P&L
+> column hides: **right thesis / bad execution** and **wrong thesis / lucky
+> money**. Neither was visible before.
+>
+> **It needed no new measurement.** `trade_levels.dist_ticks` at the entry anchor
+> locates the level, `journal.excursion` gives the hold's MAE/MFE, and
+> `trade_context.pre_run_pts_5m` says whether the approach was faded or joined —
+> which is what separates a bounce claim from a break claim *before* the outcome
+> is consulted. `bounce` and `break` turn out to be the same geometric claim from
+> opposite directions (both say "this level now holds", both die when price
+> trades back through it); only the setup axis tells them apart. `revert` is
+> graded on MFE reaching the named target, not on the exit — closing early is an
+> execution decision the exit measurements already judge.
+>
+> Five verdicts, not two: `confirmed`, `refuted`, and then `incoherent` (the
+> level is on the far side of the entry — the market was never asked),
+> `unlocatable` (the fill was not unusually close to anything, so "the level" has
+> no referent) and `unmeasured` (the background measurements have not landed, or
+> the day was never cached). Collapsing those three into "refuted" would file
+> mis-clicks and cache gaps as evidence that the trader reads badly.
+
+**Gate decision (2026-08-18): a thesis and a non-empty note per booked trade.**
+Every settled rep with ≥1 booked trade still parks at `finished` until each trade
+has both; zero-trade reps still auto-pass. Usually the thesis is already there
+from the ticket, so what is owed is the note — written with the machine's verdict
+on your own claim in front of you, which is the one moment the prose is worth
+typing. The forced pause between sittings survives.
+
+- [x] This **inverts V7**. The server gated on tags precisely because `model_id`
+      NULL cannot distinguish off-model from never-answered, which forced the
+      model choice client-side. Neither new field has that problem — a thesis row
+      exists or does not, a note is empty or is not — so the server gates the
+      whole review (`_unanswered`) and the client-forced tri-state is gone.
+- [x] Touch list, as built: `ReviewPanel.tsx` (model select and tag picker out,
+      `ThesisRow` in — exported, because `DrillReview.tsx` renders the same
+      thing), `api/routers/replays.py` (`_untagged` → `_unanswered`, both 409
+      messages, `_record_intent`), `api/routers/notes.py` (`PUT /intent`,
+      `GET /intent/vocab`), `db.trade_intent`, `journal/intent.py`, and the
+      thesis stamped on `OrderRec` → `Position` → `Trade` in `replaySim.ts`
+      exactly as `micro` and `trail` are.
+- [x] **Do not delete the columns or the vocabulary.** Held: `GET /notes/tags`,
+      `model_id`, `setups` and `confluences` are all still written — the review's
+      save echoes every one of them untouched, because the Trades page and the
+      journal read them and a form that stopped asking is not a licence to blank
+      what was written elsewhere.
+- [x] Restate `level_tag`'s design decision 1 for the new gate. The tagger must
+      never satisfy the gate — automatic now (the machine writes no prose, and it
+      cannot supply a claim either). `test_measuring_does_not_satisfy_the_review_gate`
+      asserts both halves.
+- [x] ~~Accept, explicitly, what is lost: the claimed-vs-measured comparison.~~
+      **Not lost — rebuilt in a form that settles.** The old comparison was
+      against a list of levels, which the measurement could only agree or
+      disagree with; the new one is against a prediction, which the tape marks.
+- [x] Harness: `tools/browser/drillcheck.mjs` unlocks 🎲 through the stateful
+      stubs, now split across `/notes` (the note) and `/intent` (the claim), and
+      checks the pair — a thesis alone leaves it locked, which is the assertion
+      that would catch a server gating on only one of the two.
+
+**The one thing this leaves open**, because it cannot be answered by building:
+whether an entry-time thesis is a question worth answering under time pressure.
+The click is cheap and skippable by design, so the failure mode is not friction —
+it is a picker that sits on `bounce` all session and stamps a claim nobody made.
+The chip is coloured when set, and the state is deliberately **not** persisted
+across reloads, but only use will say whether that is enough.
+
+### 3. Revamp the trade detail
+
+*Added 2026-08-18.*
+
+`frontend/src/components/TradeDetail.tsx` (354 lines) is now three things stacked
+in the order they were built: the journal form, `LevelStrip` after it, and
+`TradeRecordingPanel`. It reads as a form with attachments rather than as a view
+of a trade.
+
+- [ ] Lead with the trade, not the form. Entry/exit, side, size, R, MFE/MAE and
+      the level strip are what the page is *about*; after item 2 the human input
+      is one note, which no longer deserves the top of the page.
+- [ ] **Wire up the context windows.** Pre-entry / post-exit price is already
+      stored per trade in `journal.db` at ~96% coverage and has **no UI at all** —
+      a sparkline or mini-chart of the window around the fill is the single
+      highest-value thing missing from this page, and the data cost is zero.
+- [ ] Decide whether this component and the review card converge. They are asking
+      about the same object from two directions; after item 2 they may be the same
+      card with a different header.
+- [ ] Check it against the terminal-redesign dock's `overflow: hidden` — the same
+      clipping that bit the ticket's Σ popovers applies to anything this page
+      floats.
+
+---
+
 ## Platform / data
 
 ### 1. Let the Lab use Rithmic-backfilled days to fill missing sessions

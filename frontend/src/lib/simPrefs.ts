@@ -12,26 +12,29 @@
 // the most recent cached day, and that's the one you almost always want after
 // new data lands.
 
+import type { UsdBracket } from "./bracketUsd";
 import { DEFAULT_BIG_LOTS, DEFAULT_EVENT_TUNING, type EventTuning } from "./replayEngine";
 import type { OrderType } from "./replaySim";
 import { DEFAULT_NODE_PROM } from "./volumeProfile";
 import type { CompositeRule, CompositeSpan } from "./compositeProfile";
-import { DEFAULT_TIMEFRAME_ID, TIMEFRAMES } from "./timeframes";
+import { DEFAULT_TIMEFRAME_ID, isTimeframeId } from "./timeframes";
 import { DEFAULT_MODERN_VWAP, modernVwapParams, type ModernVwapParams } from "./modernVwap";
+import {
+  DEFAULT_DYNAMIC_SWING_VWAP,
+  dynamicSwingVwapParams,
+  type DsvParams,
+} from "./dynamicSwingVwap";
 import { MAX_PANES, clampRatio, isLayoutId, type LayoutId } from "./paneLayout";
+import { sanitizeHistoryDayOverrides, type HistoryDayOverrides } from "./contextDays";
+import { DEFAULT_PRESET_BUCKET, PRESET_BUCKET_IDS, type PresetBucket } from "./volRuler";
 
 /** Replay speeds, as multiples of real time. */
-export const SIM_SPEEDS = [1, 5, 30, 120, 300];
+export const SIM_SPEEDS = [1, 3, 5, 15, 30, 120, 300];
 
 /** Big-trade thresholds offered in the setup bar, in lots. 50 is the default
  *  and the one the write-up is cut at; 25 shows the ordinary flow around it, 100
  *  and 200 keep only what a session has a handful of. */
 export const BIG_LOT_OPTIONS = [25, 50, 100, 200];
-
-/** Prior sessions the chart can carry as context. Three is a working week's
- *  worth of levels behind you and about three million extra prints in memory;
- *  past that it is a deliberate choice, so the steps get coarse. */
-export const HISTORY_DAY_OPTIONS = [0, 1, 3, 5, 10];
 
 /** How the context days are grouped into one composite profile.
  *
@@ -100,6 +103,11 @@ export const EVENT_LABEL_ST_OPTIONS = [0, 1, 1.5, 2, 3];
  *  candles, over whatever profile gutters are already on. */
 export const EVENT_FILL_OPTIONS = [0, 0.1, 0.2, 0.35];
 
+/** Strength below which a published event isn't drawn (1 = all of them). The
+ *  demo pages have exactly this filter; here it is per kind, so a chart with
+ *  both on can keep every burst while only showing the strongest shelves. */
+export const EVENT_FLOOR_OPTIONS = [1, 1.5, 2, 3];
+
 /**
  * What both chart pages remember about *reading* a tape.
  *
@@ -134,8 +142,16 @@ export interface ChartReadingPrefs {
   eventTuning: EventTuning;
   /** Strength at which a band carries its lot count (0 = never). */
   eventLabelSt: number;
-  /** Fill alpha of the band wash at strength 1 (0 = outline only). */
-  eventFill: number;
+  /** Fill alpha of the band wash at strength 1 (0 = outline only), per kind —
+   *  with both kinds on, quieting one without toggling it off is what keeps the
+   *  overlap readable. */
+  eventFillSweep: number;
+  eventFillAbsorb: number;
+  /** Strength below which a published event isn't drawn, per kind (1 = every
+   *  published event — strength starts at 1). A repaint, not a re-derivation:
+   *  unlike the tuning it only filters what the engine already found. */
+  eventFloorSweep: number;
+  eventFloorAbsorb: number;
   /** Whether the events also draw as a marginal down the volume profiles'
    *  gutters — the "where did all that size go" reading, which is a different
    *  question from the bands on the candles. */
@@ -143,6 +159,8 @@ export interface ChartReadingPrefs {
   /** Modern VWAP's parameters, stored as one object because the indicator takes
    *  them as one. A drawing choice: it reads bars already on the chart. */
   modernVwap: ModernVwapParams;
+  /** The Zeiierman swing-flip VWAP's parameters, on the same terms. */
+  dynamicSwingVwap: DsvParams;
   /** Which bar the chart draws (see lib/timeframes). Purely how the tape is
    *  bucketed for display — it can't change a fill, so it's safe to carry. */
   timeframe: string;
@@ -179,6 +197,16 @@ export interface ChartReadingPrefs {
    *  the tape. Pinned by default — 38px off the width beats covering candles on
    *  four panes — but on one pane the column is a straight loss. */
   toolsPinned: boolean;
+  /** Which bucketing the bracket presets read their stop at (lib/volRuler
+   *  `PRESET_BUCKETS`) — 500 prints a bar, 30 seconds, or 15.
+   *
+   *  A reading choice, and it belongs in this list for the same reason the
+   *  timeframe does: it changes what a number on screen *says*, and it reaches a
+   *  fill only when a preset is clicked, which is a separate act. Both pages get
+   *  it because the presets are on both. Not the drawn timeframe and not the Σ
+   *  sizer's ATR — three independent answers to "how big is a bar" now sit on
+   *  one ticket, which is deliberate and documented where they are used. */
+  presetBucket: PresetBucket;
 }
 
 /** The replay's own settings: the ticket it trades with, the clock it runs on,
@@ -202,6 +230,12 @@ export interface SimPrefs extends ChartReadingPrefs {
    *  (a manual close, or a level dragged on afterwards). */
   stopTicks: number;
   targetTicks: number;
+  /** Dollars the leg is pinned to, or `null` when the distance is the setting
+   *  (lib/bracketUsd). Carried like everything else on the ticket: which of the
+   *  two you think in is a habit, and re-picking it every sitting is how a
+   *  one-lot bracket ends up on a two-lot ticket. */
+  stopUsd: number | null;
+  targetUsd: number | null;
   /** The ladder, in ticks — the same four knobs the backtest engine trails by
    *  (`trail_stop_ticks` and friends). `trailTicks` is the master switch: zero
    *  and the stop is yours to move. The page resolves these to prices at
@@ -211,15 +245,40 @@ export interface SimPrefs extends ChartReadingPrefs {
   trailBeTicks: number;
   trailBeOnly: boolean;
   orderType: OrderType;
+  /** Send the opposite side of the market button you press — but only from flat.
+   *
+   *  For trading a model backwards without having to think in reverse at the
+   *  moment of the click, which is exactly when a mental flip gets fumbled: you
+   *  read the setup, you press the button the setup says, and the ticket sends
+   *  the other one.
+   *
+   *  **Only from flat**, and that is the whole of the rule. Once size is on, the
+   *  buttons mean what they say — a flip that applied to an exit would turn the
+   *  click that gets you out into the click that doubles you up, and one that
+   *  applied to an add would close you instead. Market orders only: a resting
+   *  order's side is not a choice but a reading of which side of the mark it
+   *  sits on (`placeAt`), and there is no such thing as a bid above the offer to
+   *  flip it into. */
+  reverseEntry: boolean;
   /** Hide which day you're trading until the replay ends. */
   blind: boolean;
-  /** How many prior sessions to draw to the left of the replay. Each one is a
-   *  whole tape (a few MB and a million prints), so this is the one setting here
-   *  that costs something — hence a short list of choices rather than a box.
+  /** How many prior sessions to draw to the left of the replay, per bar size.
    *
-   *  Replay-only because Live has no "before this session" to draw: it is
-   *  watching the session it is in. */
-  historyDays: number;
+   *  Each day is a whole tape (a few MB and a million prints), so this is the
+   *  one setting here that costs something — hence a short list of choices
+   *  rather than a box.
+   *
+   *  Per bar because the right answer *is* per bar: an hourly with one day
+   *  behind it has twenty-three candles on it, and a 1m with ten has fourteen
+   *  thousand it will never scroll to. `lib/contextDays` holds the rule that
+   *  says which; this map is only what you have overridden it to, so a bar
+   *  nobody has an opinion about is absent and keeps following the rule.
+   *
+   *  Replaces a single number that applied to every bar at once. That pref is
+   *  not migrated: it was `3` for everyone, which the rule now gives at 15m and
+   *  improves on everywhere else, so carrying it forward would have meant
+   *  shipping a default nobody would ever see. */
+  historyDaysByTf: HistoryDayOverrides;
   /** Whether the transport row is in flow at the foot of the page.
    *
    *  On by default and worth its ~34px: it is the instrument a replay is driven
@@ -253,6 +312,10 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   // for a month and then being refused it is worse than not rehearsing.
   stopTicks: 50,
   targetTicks: 120,
+  // In ticks to begin with, because that is what the guardrail bounds beside the
+  // boxes are written in and what the presets set. The dollar pin is a choice.
+  stopUsd: null,
+  targetUsd: null,
   // Off by default: an auto-stop you didn't ask for is one that moves your
   // levels while you're reading the tape. The breakeven offset is pre-set to the
   // 4 ticks an NQ round trip actually costs, so switching the trail on gives you
@@ -262,10 +325,13 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   trailBeTicks: 4,
   trailBeOnly: false,
   orderType: "market",
+  reverseEntry: false,
   blind: false,
   timeframe: DEFAULT_TIMEFRAME_ID,
   bigLots: DEFAULT_BIG_LOTS,
-  historyDays: 3,
+  // Nothing overridden: every bar opens on what `defaultHistoryDays` says it
+  // wants, which is the whole point of the map being sparse.
+  historyDaysByTf: {},
   // The measured rule, not the convenient one. Costs one profile call over tape
   // that is already in memory, so the only reason to turn it off is that you
   // don't want the levels on the chart.
@@ -276,6 +342,7 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   compositeSpan: "globex",
   // His own defaults, and off by default in the legend — see chartPrefs.
   modernVwap: { ...DEFAULT_MODERN_VWAP },
+  dynamicSwingVwap: { ...DEFAULT_DYNAMIC_SWING_VWAP },
   nodeProm: DEFAULT_NODE_PROM,
   // The measured numbers, so an untouched chart is the write-up's chart. The
   // layer itself starts hidden (the indicator toggles' own default), because the
@@ -284,7 +351,10 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   // presence.
   eventTuning: { ...DEFAULT_EVENT_TUNING },
   eventLabelSt: 1.5,
-  eventFill: 0.2,
+  eventFillSweep: 0.2,
+  eventFillAbsorb: 0.2,
+  eventFloorSweep: 1,
+  eventFloorAbsorb: 1,
   // On: it costs no chart room (it draws inside gutters that are already there)
   // and it is the reading the bands can't give.
   eventMarginal: true,
@@ -310,12 +380,20 @@ export const DEFAULT_SIM_PREFS: SimPrefs = {
   linkOn: true,
   paneLinked: [true, true, true, true],
   toolsPinned: true,
+  presetBucket: DEFAULT_PRESET_BUCKET,
 };
 
 const ORDER_TYPES: OrderType[] = ["market", "limit", "stop"];
 
 const int = (v: unknown, min: number, fallback: number): number =>
   typeof v === "number" && Number.isFinite(v) && v >= min ? Math.floor(v) : fallback;
+
+/** A stored dollar pin, or `null` for "this leg is in ticks" (lib/bracketUsd).
+ *  Anything unreadable unpins rather than falling back to a figure: a leg that
+ *  goes on re-deriving its distance from a number nobody can account for is
+ *  worse than one that simply stopped following. */
+const pin = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : null;
 
 /** One of the offered values, or the default. Same rule as the speed and the
  *  timeframe: a saved number that isn't on the list would leave its picker
@@ -325,8 +403,12 @@ const pick = <T>(v: unknown, options: readonly T[], fallback: T): T =>
   options.includes(v as T) ? (v as T) : fallback;
 
 /** The ten event knobs, each validated against its own list. Stored as one
- *  object because it is handed to the engine as one. */
-function eventTuning(raw: unknown): EventTuning {
+ *  object because it is handed to the engine as one.
+ *
+ *  Exported for lib/chartPrefs, which keeps the same knobs for the charts that
+ *  have no run config to hold them — one clamp, however many stores, for the
+ *  reason `readingPrefs` below gives about a picker gaining an option. */
+export function eventTuning(raw: unknown): EventTuning {
   const d = DEFAULT_EVENT_TUNING;
   if (!raw || typeof raw !== "object") return { ...d };
   const s = raw as Partial<Record<keyof EventTuning, unknown>>;
@@ -371,11 +453,26 @@ function readingPrefs(
     compositeSpan: pick(s.compositeSpan, COMPOSITE_SPANS, d.compositeSpan),
     eventTuning: eventTuning(s.eventTuning),
     eventLabelSt: pick(s.eventLabelSt, EVENT_LABEL_ST_OPTIONS, d.eventLabelSt),
-    eventFill: pick(s.eventFill, EVENT_FILL_OPTIONS, d.eventFill),
+    // A blob written before the wash split carries one `eventFill` for both
+    // kinds — it seeds both, so an old setting keeps meaning what it meant.
+    eventFillSweep: pick(
+      s.eventFillSweep ?? s.eventFill,
+      EVENT_FILL_OPTIONS,
+      d.eventFillSweep,
+    ),
+    eventFillAbsorb: pick(
+      s.eventFillAbsorb ?? s.eventFill,
+      EVENT_FILL_OPTIONS,
+      d.eventFillAbsorb,
+    ),
+    eventFloorSweep: pick(s.eventFloorSweep, EVENT_FLOOR_OPTIONS, d.eventFloorSweep),
+    eventFloorAbsorb: pick(s.eventFloorAbsorb, EVENT_FLOOR_OPTIONS, d.eventFloorAbsorb),
     eventMarginal: typeof s.eventMarginal === "boolean" ? s.eventMarginal : d.eventMarginal,
     modernVwap: modernVwapParams(s.modernVwap),
-    // A retired timeframe id would leave the picker showing a blank.
-    timeframe: TIMEFRAMES.some((t) => t.id === s.timeframe) ? (s.timeframe as string) : d.timeframe,
+    dynamicSwingVwap: dynamicSwingVwapParams(s.dynamicSwingVwap),
+    // A string that names no bar would leave the picker showing a blank. One you
+    // typed yourself names a bar, so it survives here like a built-in.
+    timeframe: isTimeframeId(s.timeframe) ? s.timeframe : d.timeframe,
     indicators: typeof s.indicators === "boolean" ? s.indicators : d.indicators,
     railPinned: typeof s.railPinned === "boolean" ? s.railPinned : d.railPinned,
     // Only the layouts that exist — an unknown id from a later version would
@@ -389,6 +486,9 @@ function readingPrefs(
     linkOn: typeof s.linkOn === "boolean" ? s.linkOn : d.linkOn,
     paneLinked: paneFlags(s.paneLinked, d.paneLinked),
     toolsPinned: typeof s.toolsPinned === "boolean" ? s.toolsPinned : d.toolsPinned,
+    // Same reason as every other `pick` here: a bucketing that is not one of the
+    // three offered would leave the toggle showing nothing selected.
+    presetBucket: pick(s.presetBucket, PRESET_BUCKET_IDS, d.presetBucket),
   };
 }
 
@@ -397,7 +497,12 @@ function readingPrefs(
  *  that returned the module's own DEFAULT_* objects would let a page edit the
  *  defaults for every later load. */
 function freshReading<T extends ChartReadingPrefs>(d: T): T {
-  return { ...d, eventTuning: { ...d.eventTuning }, modernVwap: { ...d.modernVwap } };
+  return {
+    ...d,
+    eventTuning: { ...d.eventTuning },
+    modernVwap: { ...d.modernVwap },
+    dynamicSwingVwap: { ...d.dynamicSwingVwap },
+  };
 }
 
 export function loadSimPrefs(): SimPrefs {
@@ -417,6 +522,8 @@ export function loadSimPrefs(): SimPrefs {
       // Zero is a real value here — the leg is off — so the floor is 0, not 1.
       stopTicks: int(s.stopTicks, 0, d.stopTicks),
       targetTicks: int(s.targetTicks, 0, d.targetTicks),
+      stopUsd: pin(s.stopUsd),
+      targetUsd: pin(s.targetUsd),
       // Zero is meaningful for all three: the trail off, the step defaulting to
       // one rung per trail distance, the first rung on the entry itself.
       trailTicks: int(s.trailTicks, 0, d.trailTicks),
@@ -424,8 +531,9 @@ export function loadSimPrefs(): SimPrefs {
       trailBeTicks: int(s.trailBeTicks, 0, d.trailBeTicks),
       trailBeOnly: typeof s.trailBeOnly === "boolean" ? s.trailBeOnly : d.trailBeOnly,
       orderType: ORDER_TYPES.includes(s.orderType as OrderType) ? (s.orderType as OrderType) : d.orderType,
+      reverseEntry: typeof s.reverseEntry === "boolean" ? s.reverseEntry : d.reverseEntry,
       blind: typeof s.blind === "boolean" ? s.blind : d.blind,
-      historyDays: pick(s.historyDays, HISTORY_DAY_OPTIONS, d.historyDays),
+      historyDaysByTf: sanitizeHistoryDayOverrides(s.historyDaysByTf),
       transportOpen: typeof s.transportOpen === "boolean" ? s.transportOpen : d.transportOpen,
     };
   } catch {
@@ -455,10 +563,11 @@ function legacyLayout(s: Record<string, unknown>, fallback: LayoutId): LayoutId 
  *  timeframe that has since been removed) falls back per pane rather than
  *  discarding the whole array. */
 function paneTfs(s: Record<string, unknown>, d: string[]): string[] {
-  const known = (v: unknown): v is string => TIMEFRAMES.some((t) => t.id === v);
   const stored = Array.isArray(s.paneTfs) ? (s.paneTfs as unknown[]) : [];
-  const out = Array.from({ length: MAX_PANES }, (_, i) => (known(stored[i]) ? stored[i] : d[i]));
-  if (!stored.length && known(s.paneTf)) out[1] = s.paneTf;
+  const out = Array.from({ length: MAX_PANES }, (_, i) =>
+    isTimeframeId(stored[i]) ? stored[i] : d[i],
+  );
+  if (!stored.length && isTimeframeId(s.paneTf)) out[1] = s.paneTf;
   return out;
 }
 
@@ -506,9 +615,13 @@ export const DEFAULT_LIVE_CHART_KNOBS: LiveChartKnobs = {
   composite: "balance",
   compositeSpan: "globex",
   modernVwap: { ...DEFAULT_MODERN_VWAP },
+  dynamicSwingVwap: { ...DEFAULT_DYNAMIC_SWING_VWAP },
   eventTuning: { ...DEFAULT_EVENT_TUNING },
   eventLabelSt: 1.5,
-  eventFill: 0.2,
+  eventFillSweep: 0.2,
+  eventFillAbsorb: 0.2,
+  eventFloorSweep: 1,
+  eventFloorAbsorb: 1,
   eventMarginal: true,
   // Tick bars, not the replay's 1m: live is watched print by print, and a tick
   // bar keeps moving on a quiet market where a minute bar would sit still.
@@ -526,6 +639,7 @@ export const DEFAULT_LIVE_CHART_KNOBS: LiveChartKnobs = {
   linkOn: true,
   paneLinked: [true, true, true, true],
   toolsPinned: true,
+  presetBucket: DEFAULT_PRESET_BUCKET,
 };
 
 export function loadLiveChartKnobs(): LiveChartKnobs {
@@ -563,18 +677,56 @@ export function saveLiveChartKnobs(k: LiveChartKnobs): void {
 // a decision, and re-typing a decision every reload is how it ends up wrong on
 // the reload you didn't check.
 
-export interface LiveTicket {
+/** Who moves the stop once the position is on.
+ *
+ *  `rithmic` hands the plant a trailing bracket: it survives a reload, a crash
+ *  and a machine going down, and in exchange it has exactly one free variable
+ *  (when it wakes up), rides at `stopTicks` by force, and refuses to be dragged.
+ *
+ *  `ladder` is the replay's own rule — four knobs, a grid, a breakeven rung, and
+ *  a stop you can still drag — run by this app off the live tape. It is the rule
+ *  the Simulator practises and the backtest engine trades, which is the whole
+ *  reason it exists here. It stops ratcheting if the app does. */
+export type TrailSource = "rithmic" | "ladder";
+
+export interface LiveTicket extends UsdBracket {
   size: number;
-  /** 0 means no stop. Both legs are optional, and both mean "not sent". */
+  /** 0 means no stop. Both legs are optional, and both mean "not sent".
+   *
+   *  Resolved through the dollar pin before the page hands this ticket to
+   *  anything — see `LiveChart`. What is stored here is what the leg falls back
+   *  to when there is no routed contract to price it in. */
   stopTicks: number;
   targetTicks: number;
-  /** Ticks of profit before Rithmic starts ratcheting the stop. 0 is off. Real
-   *  accounts only — the paper blotter does not imitate the ratchet. */
-  trailTicks: number;
+  /** Dollars the leg is pinned to, or `null` for ticks (lib/bracketUsd). Priced
+   *  on the **routed** contract, which is the one the money is actually at risk
+   *  in: routing can be pointed at the micro while the tape stays on the mini. */
+  stopUsd: number | null;
+  targetUsd: number | null;
+  /** Which of the two blocks below is live. The other is stored and ignored:
+   *  switching sources must not throw away numbers you spent time choosing. */
+  trailSource: TrailSource;
+  /** --- `rithmic` --------------------------------------------------------- */
+  /** Ticks of profit before Rithmic starts ratcheting the stop. 0 is off.
+   *
+   *  Named for what it is, unlike the replay ticket's `trailTicks` — which is a
+   *  ride *distance*. One name meaning two things across the two tickets on one
+   *  page is how a 25 meant as "wake at 25" ends up sent as "ride 25 behind". */
+  trailTriggerTicks: number;
   /** Ticks of profit before the breakeven jump fires. 0 is off. */
   beTicks: number;
   /** How much profit that jump locks in, always in the trade's favour. */
   beLock: number;
+  /** --- `ladder` ---------------------------------------------------------- */
+  /** How far behind the high the stop rides. 0 is off, and the master switch
+   *  for the three below. A real distance, independent of `stopTicks`. */
+  ladderTicks: number;
+  /** The grid the stop may rest on. 0 = one rung per `ladderTicks`. */
+  ladderStepTicks: number;
+  /** How far past the fill the first rung lands. */
+  ladderBeTicks: number;
+  /** Take the first rung and no other: a breakeven stop, not a trail. */
+  ladderBeOnly: boolean;
 }
 
 const LIVE_TICKET_KEY = "live.ticket";
@@ -591,9 +743,21 @@ export const DEFAULT_LIVE_TICKET: LiveTicket = {
   size: 1,
   stopTicks: 50,
   targetTicks: 120,
-  trailTicks: 0,
+  // Ticks, for the reason the replay's default is: the guard bounds drawn beside
+  // these boxes are tick bounds, and the presets set ticks.
+  stopUsd: null,
+  targetUsd: null,
+  // Rithmic's, because it is the one that survives this app not running. The
+  // ladder is the better rule and the worse default: choosing it should be an
+  // act, like choosing a real account is.
+  trailSource: "rithmic",
+  trailTriggerTicks: 0,
   beTicks: 0,
   beLock: 1,
+  ladderTicks: 0,
+  ladderStepTicks: 0,
+  ladderBeTicks: 0,
+  ladderBeOnly: false,
 };
 
 /** A stored number, or the default. Non-finite, negative and NaN all fall back
@@ -613,11 +777,24 @@ export function loadLiveTicket(): LiveTicket {
       size: tick(s.size, d.size, 1),
       stopTicks: tick(s.stopTicks, d.stopTicks),
       targetTicks: tick(s.targetTicks, d.targetTicks),
-      trailTicks: tick(s.trailTicks, d.trailTicks),
+      stopUsd: pin(s.stopUsd),
+      targetUsd: pin(s.targetUsd),
+      trailSource: s.trailSource === "ladder" ? "ladder" : d.trailSource,
+      // `trailTicks` was this field's name until the ladder arrived and made the
+      // collision with the replay ticket's `trailTicks` (a ride distance, not a
+      // trigger) worth ending. Read as a fallback so a stored ticket keeps the
+      // trigger somebody set rather than silently reverting it to off.
+      trailTriggerTicks: tick(
+        s.trailTriggerTicks ?? (s as { trailTicks?: unknown }).trailTicks,
+        d.trailTriggerTicks),
       beTicks: tick(s.beTicks, d.beTicks),
       // Never 0 with a trigger set: a 0 is a proto3 default and never reaches
       // the wire, so the server refuses the pair. See `OrderDraft.be_ticks`.
       beLock: tick(s.beLock, d.beLock, 1),
+      ladderTicks: tick(s.ladderTicks, d.ladderTicks),
+      ladderStepTicks: tick(s.ladderStepTicks, d.ladderStepTicks),
+      ladderBeTicks: tick(s.ladderBeTicks, d.ladderBeTicks),
+      ladderBeOnly: s.ladderBeOnly === true,
     };
   } catch {
     return { ...d };
@@ -634,10 +811,19 @@ export function saveLiveTicket(t: LiveTicket): void {
 
 const LIVE_CONTRACT_KEY = "live.contract";
 
-/** The front month when this was written, and only ever a starting point: the
- *  first successful connect stores what it connected to, so the quarterly roll
- *  is something you type once rather than a code edit. */
-export const DEFAULT_LIVE_CONTRACT = "NQU6";
+/** Cold-start seed only — the value used when nothing has been stored yet.
+ *
+ *  It is a literal on purpose: the roll rule has exactly one owner
+ *  (`journal.live.harvest.front_month`), and a second copy of the quarterly
+ *  calendar in TypeScript is the copy that would drift. So this is allowed to
+ *  go stale, and the server-computed `is_front` on `/live/recordings` is what
+ *  catches it — loudly, on the chart's own top bar.
+ *
+ *  That guard is why this being a literal is now safe. It was not before: on
+ *  2026-09-14 the stored value was `NQU6`, the market had rolled to `NQZ6`
+ *  eight days earlier, and the Live page autostarted a September tape with the
+ *  order plant open and nothing on screen saying so. */
+export const DEFAULT_LIVE_CONTRACT = "NQZ6";
 
 /**
  * The raw contract Live connects to, uppercase.

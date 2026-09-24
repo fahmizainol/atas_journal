@@ -13,7 +13,10 @@ import { launch, openChart } from "./lib.mjs";
 const { browser, page, errors } = await launch({ headed: false });
 
 try {
-  await openChart(page, "/charts/replay");
+  // The paper replay: the same page at the speed pref you set, where the funded
+  // one is pinned to 1× (`clockLocked` in Simulator.tsx) and would profile a
+  // frame budget nothing is actually spending.
+  await openChart(page, "/charts/replay/paper");
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Profiler.enable");
   await cdp.send("Profiler.setSamplingInterval", { interval: 100 }); // µs

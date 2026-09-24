@@ -22,10 +22,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ReplayChart, type ReplayChartHandle } from "../components/charts/ReplayChart";
+import {
+  ReplayChart,
+  type ReplayChartHandle,
+  type TicketDraft,
+} from "../components/charts/ReplayChart";
 import type { IndicatorSettingsMap } from "../components/charts/IndicatorLegend";
 import { buildChartKnobs } from "../components/charts/indicatorKnobs";
+import {
+  loadShelfParams,
+  saveShelfParams,
+  loadShelfField,
+  saveShelfField,
+} from "../lib/chartPrefs";
+import type { ShelfParams } from "../lib/volumeShelf";
+import type { ShelfField } from "../components/charts/VolumeShelfPrimitive";
 import type { ModernVwapParams } from "../lib/modernVwap";
+import type { DsvParams } from "../lib/dynamicSwingVwap";
 import { SimIndicators } from "../components/charts/SimIndicators";
 import { QuickDock } from "../components/charts/QuickDock";
 import { TimeframeControl } from "../components/charts/TimeframeControl";
@@ -33,13 +46,20 @@ import { StudyPicker } from "../components/charts/StudyPicker";
 import { loadStudies, saveStudies } from "../lib/chartPrefs";
 import type { StudySpec } from "../lib/studies";
 import type { LayerState } from "../components/charts/chartLayers";
+import { Blotter, TradeTally } from "../components/charts/Blotter";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import { GuardMeters } from "../components/charts/GuardMeters";
+import { PaceChip } from "../components/charts/PaceChip";
 import { LayoutPicker } from "../components/charts/LayoutPicker";
 import { LAYOUTS, MAX_PANES, clampPaneIndex, gridArea, gridTemplate } from "../lib/paneLayout";
 import { setLinkOn as setLinkModuleOn } from "../lib/paneLink";
 import { ChartToolRail } from "../components/charts/ChartToolRail";
+import { TicketCard, type PresetCtx } from "../components/charts/TicketCard";
 import { TicketKnobs } from "../components/charts/TicketKnobs";
+import { LegAmount, legEcho } from "../components/charts/LegAmount";
+import { legTicks, pinnedLeg, usdForTicks } from "../lib/bracketUsd";
+import { TurboChip } from "../components/charts/TurboChip";
+import type { SizerCtx } from "../components/charts/SizerGrid";
 import { EMPTY_TOOL_STATE, type ChartToolId, type ChartToolState } from "../lib/chartTools";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
 import {
@@ -53,20 +73,30 @@ import { useReplayAttempt } from "../hooks/useReplayAttempt";
 import { selectableModels, useModels } from "../hooks/useModels";
 import { useReplayAccount, useWriteCause } from "../hooks/useReplayAccount";
 import { isTypingTarget, usePaneKeys } from "../hooks/usePaneKeys";
+import { TURBO_MULT, useTurbo } from "../hooks/useTurbo";
 import { AccountChip, AccountNotice, AccountRecap } from "../components/charts/ReplayAccount";
+import { AccountSwitch } from "../components/charts/AccountSwitch";
 import { AutopsyCard } from "../components/charts/AutopsyCard";
 import {
   useFileReview,
+  useReviewVocab,
+  useTradeTags,
   useReplayAttemptDetail,
   useReplayAttempts,
   useReplayJournal,
-  useSaveRuleChecks,
+  useSaveTradeReview,
   type AttemptDetail,
+  type DrillTradeRow,
 } from "../hooks/useReplays";
 import { DrillReview } from "../components/charts/DrillReview";
 import { clearResume, loadResume, saveResume, type ResumePoint } from "../lib/replayResume";
 import { clearReview, loadReview, saveReview } from "../lib/replayReview";
 import { ReviewPanel } from "../components/charts/ReviewPanel";
+import {
+  answered as reviewAnswered,
+  seedAnswers,
+  type ReviewAnswers,
+} from "../components/charts/ReviewCard";
 import {
   concatTapes,
   ReplayEngine,
@@ -78,7 +108,13 @@ import {
   type Tape,
 } from "../lib/replayEngine";
 import { replaySource, type TapeSource } from "../lib/tapeSource";
-import { showsSeconds, timeframeById, TIMEFRAMES, TF_OPTIONS } from "../lib/timeframes";
+import { showsSeconds, timeframeById, useTimeframeOptions } from "../lib/timeframes";
+import {
+  HISTORY_DAY_OPTIONS,
+  defaultHistoryDays,
+  governingHistory,
+  withHistoryOverride,
+} from "../lib/contextDays";
 import {
   newLog,
   newSim,
@@ -94,9 +130,9 @@ import {
   type Position,
   type Side,
   type SimState,
-  type Trade,
 } from "../lib/replaySim";
 import {
+  blotterRow,
   fmtClock,
   fmtCountdown,
   fmtPts,
@@ -110,7 +146,6 @@ import {
 } from "../lib/simViews";
 import {
   DEFAULT_SIM_PREFS,
-  HISTORY_DAY_OPTIONS,
   loadSimPrefs,
   saveSimPrefs,
   clampSplit,
@@ -141,14 +176,28 @@ import { dayRead, VERDICT_LINE, type DayRead, type DayVerdict } from "../lib/day
 import {
   DEFAULT_GUARDS,
   accountRefusal,
-  accountStop,
+  accountBreach,
+  dayFlatten,
   dayRefusal,
   dayState,
-  equityStop,
   isReducing,
+  paceRefusal,
   shapeRefusal,
 } from "../lib/guardRules";
-import { fmtWait, remainingMs, type ReviewItem } from "../lib/replayAccount";
+import { liveAccount } from "../lib/replayAccount";
+import type { PresetBracket } from "../lib/orderPresets";
+import {
+  armAction,
+  armPurpose,
+  limitPlacement,
+  DEFAULT_THROUGH_TICKS,
+  type ArmAction,
+  type ArmShape,
+  type ArmableLevel,
+  type LevelArm,
+} from "../lib/levelArm";
+import { DEFAULT_MAX_LOSS } from "../lib/riskSizer";
+import type { VolRulerRead } from "../lib/volRuler";
 import { useGuardLevels } from "../hooks/useRouting";
 import { palette } from "../theme";
 
@@ -194,16 +243,19 @@ function dayNotes(d: SimDay): string {
 const GRAB_DISMISS_PX = 64;
 const RTH_OPEN_MIN = 9 * 60 + 30;
 
+/** **TEMPORARY (2026-08-20, user request): backtest reviews are not mandatory.**
+ *
+ *  The browser copy of `DRILL_REVIEW_REQUIRED` in api/routers/replays.py — flip
+ *  both together, and re-read that comment before you do. While it is `false`
+ *  the rep-end panel is still offered and every answer still saves; 🎲 simply
+ *  stops waiting for them, exactly as the server has stopped refusing. */
+const DRILL_REVIEW_REQUIRED = false;
+
 /** How often the resume bookmark is brought up to date with the clock. Bounds
  *  what a crash costs you in tape — a few seconds of scrolling back — against a
  *  localStorage write on a page that is already doing sixty frames a second. */
 const RESUME_SAVE_MS = 4_000;
 
-/** Both R's spelled out, for the row that only has room to show one. */
-const rTitle = (t: Trade) =>
-  t.rCash == null && t.r == null
-    ? "No stop was on when this opened, so there is no risk to measure against"
-    : `stake ${fmtR(t.rCash)} (of the money risked at open) · excursion ${fmtR(t.r)} (of the distance risked at open)`;
 const fmtPct = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(0)}%`);
 /** First index in a tape's (ascending) times at or after `ms`, or `n` if there
  *  is none. */
@@ -235,18 +287,43 @@ const EMPTY_LAYERS: LayerState[] = [];
 const endOf = (s: { session_end_ms: number; rth_close_ms: number }, drill: boolean) =>
   drill ? Math.min(s.session_end_ms, s.rth_close_ms) : s.session_end_ms;
 
-/** Which of the two replay-clock pages this is.
+/** Which of the replay-clock pages this is.
  *
- *  `replay` is the page you pick a day on. `drill` is backtest mode: one model
- *  bound for the whole sitting, a random RTH clock on a day you are not shown,
- *  and no account — see docs/backtest-mode-plan.md.
+ *  `replay` is the page you pick a day on. `paper` is the same page against the
+ *  paper account — identical rules, identical floor, and a death that costs a
+ *  sentence and a day on `replay` costs nothing here. `drill` is backtest mode:
+ *  one model bound for the whole sitting, a random RTH clock on a day you are
+ *  not shown, and no account at all — see docs/backtest-mode-plan.md.
  *
- *  It is a prop rather than page state because the mode is fixed for the whole
- *  of a sitting and the route is what fixes it. A switch you could flip mid-rep
- *  would be a switch that moved a finished sitting between two ledgers. */
-export type SimMode = "replay" | "drill";
+ *  The mode is also *which ledger the sitting lands on* — it rides on the create
+ *  and the server maps it to an account (`replay_account.BY_MODE`). It is a prop
+ *  rather than page state because the mode is fixed for the whole of a sitting
+ *  and the route is what fixes it. A switch you could flip mid-rep would be a
+ *  switch that moved a finished sitting between two ledgers. */
+/** The other one. Its own name because the reverse knob has to flip the side in
+ *  two places that must never disagree — the order that gets sent, and the label
+ *  on the button that sends it — and an inlined ternary in each is how a button
+ *  ends up saying BUY over a sell. */
+const otherSide = (s: Side): Side => (s === "long" ? "short" : "long");
 
-export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
+export type SimMode = "replay" | "paper" | "drill";
+
+export function Simulator({
+  mode = "replay",
+  /** Which account prices this page's sittings. Defaults from the mode so the
+   *  two built-in routes need not name it — `paper` prices the paper account
+   *  and everything else the funded one, which is exactly the mapping every
+   *  sitting already on disk was written under (`replays.account_id_of`). A
+   *  drill has none and passes null the whole way down. */
+  accountId,
+}: { mode?: SimMode; accountId?: string } = {}) {
+  const acctId =
+    mode === "drill" ? null : accountId ?? (mode === "paper" ? "paper" : "funded");
+  /** What this page's bookmark and review marker are filed under. The account,
+   *  because that is what a sitting belongs to — two LucidPro accounts keyed by
+   *  mode would fight over one bookmark and land you on the wrong day with the
+   *  wrong floor. A drill has no account and keeps its own scope. */
+  const scope = acctId ?? "drill";
   const drill = mode === "drill";
   // Read once, on mount: everything below seeds from it, and from then on the
   // React state is the truth and the store just trails it.
@@ -265,7 +342,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // that turns out not to fit the tape is spent rather than retried, so a bad
   // one can't follow you around. From then on it is write-only: `sel` and the
   // clock are the truth and the store trails them, the same shape as `prefs`.
-  const [pending, setPending] = useState(loadResume);
+  const [pending, setPending] = useState(() => loadResume(scope));
   const pendingRef = useRef<ResumePoint | null>(pending);
   pendingRef.current = pending;
   // The order log the bookmark names, fetched in parallel with the session it
@@ -290,48 +367,79 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // it happened on — so a stale marker, a sitting reviewed in another tab, or a
   // day picked by hand all drop the page back to an ordinary replay rather than
   // leaving it inertly read-only.
-  const [reviewMark, setReviewMark] = useState(loadReview);
+  const [reviewMark, setReviewMark] = useState(() => loadReview(scope));
   // Same query key as the resume fetch above when they name the same attempt,
   // so this is one request, not two.
   const reviewQ = useReplayAttemptDetail(reviewMark?.attemptId ?? null);
   const reviewDetail = reviewQ.data ?? null;
+  /** The reviewed sitting's record, for the tape build — which runs outside the
+   *  render and needs the *log* off it. Paired with `reviewSettled` below: the
+   *  build waits for this the same way it waits for the resume fetch, because a
+   *  review built without it is a review with an empty chart. */
+  const reviewDetailRef = useRef<AttemptDetail | null>(null);
+  reviewDetailRef.current = reviewQ.data ?? null;
+  const reviewSettled = !reviewMark?.attemptId || reviewQ.isSuccess || reviewQ.isError;
   const reviewFlags = reviewDetail?.flags ?? [];
+  // A sitting owes while it is `finished` with anything to answer for — a flag
+  // or, since the review revamp, any booked trade at all (every trade owes a
+  // model and tags now; docs/review-revamp-plan.md).
   const reviewing =
     !!reviewMark &&
     reviewDetail?.status === "finished" &&
-    reviewFlags.length > 0 &&
+    (reviewFlags.length > 0 || (reviewDetail?.trades?.length ?? 0) > 0) &&
     sel?.symbol === reviewDetail.symbol &&
     sel?.date === reviewDetail.date;
+  // Reviewing a backtest rep uses the same panel with nothing hidden: the model
+  // column was the one thing a drill suppressed (the rep's binding already is
+  // the model) and the review no longer has one. The way a drill gets here is
+  // the history page, the escape hatch for a rep-end panel lost to a reload
+  // (plan V9).
+  //
+  // The journal mirror's rows for the reviewed sitting — where the per-trade
+  // answers live and where the server reads them back from.
+  const reviewJournalQ = useReplayJournal(reviewing ? (reviewMark?.attemptId ?? null) : null);
   // Read inside the tape build and inside `placeOrder`, both of which run
   // outside the render that decided it.
   const reviewingRef = useRef(reviewing);
   reviewingRef.current = reviewing;
+  /** The reviewed sitting's id, for the callbacks that run outside the render.
+   *  A ref for the same reason `reviewingRef` is: `writeResume` is held by
+   *  effects with their own dependency lists, and re-creating it on every change
+   *  of the mark would re-run them. */
+  const reviewMarkRef = useRef(reviewMark);
+  reviewMarkRef.current = reviewMark;
 
   const navigate = useNavigate();
   const fileReview = useFileReview();
-  /** File the verdicts and leave.
+  /** File the review and leave.
    *
    *  Leaving is not tidiness. The reviewed sitting is `reviewed` now, and
    *  resuming into it would put it back to `active` — which withdraws the review
    *  that was just filed (see `journal.replays.save`). So the bookmark goes with
    *  the marker, and the way on from here is a new sitting. */
   const submitReview = useCallback(
-    (items: ReviewItem[]) => {
+    (note: string) => {
       const id = reviewMark?.attemptId;
       if (!id) return;
       fileReview.mutate(
-        { id, items },
+        // The sitting's own note travels with the status — one PATCH, one act.
+        { id, note },
         {
           onSuccess: () => {
-            clearReview();
+            clearReview(scope);
             setReviewMark(null);
-            clearResume();
-            navigate("/charts/replay/history");
+            clearResume(scope);
+            // A filed drill review is what unlocks 🎲, so the way on is the
+            // backtest page itself — reloaded, so the fresh mount draws the
+            // next rep. A sitting's review files into the ledger, so the
+            // history page.
+            if (drill) navigate(0);
+            else navigate("/charts/replay/history");
           },
         },
       );
     },
-    [fileReview, navigate, reviewMark],
+    [drill, fileReview, mode, navigate, reviewMark],
   );
 
   /** Start somewhere else on purpose — 🎲, or a day picked by hand. The
@@ -340,8 +448,8 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   const leaveResume = useCallback(() => {
     setPending(null);
     pendingRef.current = null;
-    clearResume();
-  }, []);
+    clearResume(scope);
+  }, [mode]);
 
   const sessionQ = useSimulatorSession(sel?.symbol ?? null, sel?.date ?? null, tz);
 
@@ -350,7 +458,13 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // — are on the chart instead of in your head. They are the same contract only:
   // a roll would splice two price series a hundred points apart, which is the
   // same rule the weekly anchor follows (journal.sim.weekly).
-  const [historyDays, setHistoryDays] = useState(prefs.historyDays);
+  // How many of them is a question about the *bar*, not about the page: an
+  // hourly with one day behind it has twenty-three candles on it, and a 1m with
+  // twenty has fourteen thousand it will never scroll to. So the count follows
+  // the bucketing (lib/contextDays) and this state is only what you have
+  // overridden that rule to, per bar. Resolved below, once the pane timeframes
+  // it also has to answer for have been declared.
+  const [histOverrides, setHistOverrides] = useState(prefs.historyDaysByTf);
   // What is made *of* those days: one composite profile over the auction they
   // belong to, frozen at the prior close (see lib/compositeProfile), the nodes
   // read off it, and the tape-event bands. All three are reading choices in the
@@ -368,6 +482,36 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     (patch: Partial<ModernVwapParams>) => setMvParams((p) => ({ ...p, ...patch })),
     [],
   );
+  // The Zeiierman line beside it, held and persisted the same way — a separate
+  // indicator, so separate state; see lib/dynamicSwingVwap.
+  const [dsvParams, setDsvParams] = useState(prefs.dynamicSwingVwap);
+  const patchDsv = useCallback(
+    (patch: Partial<DsvParams>) => setDsvParams((p) => ({ ...p, ...patch })),
+    [],
+  );
+  // Volume shelves. Sticky-global rather than part of the page's own prefs, like
+  // the surface and the band fills: how you read a shelf is a statement about
+  // shelves, not about this sitting — and it is the same setting the journal's
+  // charts offer.
+  const [shelfParams, setShelfParams] = useState(loadShelfParams);
+  // Which quantity the raster draws. Its own state, not a seventh shelf
+  // parameter: switching it re-reads nothing, and `ShelfParams` is mirrored
+  // by a Python module that draws nothing at all.
+  const [shelfField, setShelfField] = useState<ShelfField>(loadShelfField);
+  const patchShelfField = useCallback((f: ShelfField) => {
+    setShelfField(f);
+    saveShelfField(f);
+  }, []);
+  const patchShelf = useCallback(
+    (patch: Partial<ShelfParams>) =>
+      setShelfParams((p) => {
+        const next = { ...p, ...patch };
+        saveShelfParams(next);
+        return next;
+      }),
+    [],
+  );
+
   // The tape events, in two halves: what selects them (ten knobs the engine
   // detects by, so a change re-derives the tape) and how they draw (three that
   // are a repaint). Kept apart because the cost is different and the panels say
@@ -379,21 +523,15 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   const evTuningRef = useRef(evTuning);
   evTuningRef.current = evTuning;
   const [evLabelSt, setEvLabelSt] = useState(prefs.eventLabelSt);
-  const [evFill, setEvFill] = useState(prefs.eventFill);
+  const [evFillSweep, setEvFillSweep] = useState(prefs.eventFillSweep);
+  const [evFillAbsorb, setEvFillAbsorb] = useState(prefs.eventFillAbsorb);
+  const [evFloorSweep, setEvFloorSweep] = useState(prefs.eventFloorSweep);
+  const [evFloorAbsorb, setEvFloorAbsorb] = useState(prefs.eventFloorAbsorb);
   const [evMarginal, setEvMarginal] = useState(prefs.eventMarginal);
   // The day-scale indicator strip over the chart's foot (see SimIndicators): the
   // IB-width chip and the range-budget gauge. A reading choice like the bar size
   // and the big-trade threshold — it cannot move the clock or fill an order.
   const [indicators, setIndicators] = useState(prefs.indicators);
-  const histDates = useMemo(() => {
-    if (!sel || historyDays <= 0) return [];
-    return (daysQ.data?.days ?? [])
-      .filter((d) => d.symbol === sel.symbol && d.date < sel.date)
-      .map((d) => d.date)
-      .sort()
-      .slice(-historyDays);
-  }, [daysQ.data, historyDays, sel]);
-  const histQ = useSimulatorHistory(sel?.symbol ?? null, histDates, tz);
 
   // What this sitting is being recorded as. The recorder watches the published
   // simulation and writes it; nothing about trading goes through it, so a
@@ -407,7 +545,9 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     record: recordAttempt,
     noteRewind,
     finish: finishAttempt,
+    kill: killAttempt,
     setNote: setAttemptNote,
+    setReviewLater: setAttemptReviewLater,
   } = attemptRec;
 
   // Blind replay: which day this is stays hidden until the replay runs out, or
@@ -502,36 +642,9 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     [drill, leaveResume],
   );
 
-  // Which day the picker opens on. A sitting you were in the middle of wins:
-  // "carry on" is what you want far more often than "start again", and the tape
-  // you were half way through is by definition not one you can practise blind on
-  // any more anyway.
-  //
-  // Failing that it is a draw, on purpose — the replay is only practice while
-  // the tape is one you don't remember, and the newest session is the one you
-  // have most likely just been looking at. Pick another with the dropdown, or
-  // draw again with 🎲.
-  //
-  // A bookmarked day that isn't in the list falls through to the draw: the root
-  // is a preference saved next to it so the two normally agree, but a contract
-  // whose cache has since been cleared out is simply not there to go back to.
-  useEffect(() => {
-    const days = daysQ.data?.days;
-    if (sel || !days?.length) return;
-    // A drill always draws. Two reasons, and the second is a bug the first
-    // would have hidden: a rep you walked away from is not a cold read any
-    // more, so resuming one is not the favour it is on the replay page — and a
-    // resumed day arrives with no drop drawn, which would quietly fall back to
-    // the start time and land every such rep at 09:30.
-    if (!drill) {
-      const p = pendingRef.current;
-      if (p && days.some((d) => d.symbol === p.symbol && d.date === p.date)) {
-        setSel({ symbol: p.symbol, date: p.date });
-        return;
-      }
-    }
-    anyDay(days);
-  }, [anyDay, daysQ.data, drill, sel]);
+  // Which day the picker opens on is decided further down — see the day-pick
+  // effect. It lives there rather than here because what it consults (the
+  // bookmark's own attempt fetch, the review marker) is declared between the two.
 
   // --- imperative refs (not React state — the frame loop reads these) -------
   const chartRef = useRef<ReplayChartHandle>(null);
@@ -555,6 +668,8 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   const lastTsRef = useRef<number | null>(null);
   const playingRef = useRef(false);
   const speedRef = useRef(prefs.speed);
+  // Hold Ctrl to run ten times whatever the ladder is set to.
+  const turbo = useTurbo();
   const idRef = useRef(1);
 
   // The action log, and the simulation currently derived from it.
@@ -578,17 +693,27 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   const writeResume = useCallback(() => {
     const s = sessionRef.current;
     if (!s) return;
-    saveResume({
+    saveResume(scope, {
       symbol: s.symbol,
       date: s.date,
       clockMs: clockRef.current,
-      attemptId: attemptIdOf(),
+      // Whose sitting this is. Normally the recorder's — but the recorder is
+      // deliberately **unarmed in review mode**, so `attemptIdOf()` is null
+      // there, and writing that null was quietly fatal: the bookmark is what
+      // names the attempt whose log gets replayed onto the tape, and a bookmark
+      // with no id fails the `usable` test on the next load. The first visit to
+      // a review worked (the auto-open wrote the id itself) and every visit
+      // after it opened a review with an empty chart — cards on the right,
+      // no trades anywhere, at any clock.
+      attemptId: reviewingRef.current
+        ? (reviewMarkRef.current?.attemptId ?? null)
+        : attemptIdOf(),
       // The cursors in the stored log count from the start of the glued tape, so
       // what is glued in front of it right now is the number that makes them
       // readable again next time.
       contextTicks: histTapesRef.current.reduce((a, t) => a + t.n, 0),
     });
-  }, [attemptIdOf]);
+  }, [attemptIdOf, mode]);
 
   // --- display state --------------------------------------------------------
   const [ready, setReady] = useState(false);
@@ -604,12 +729,19 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // stamp is how those effects tell whose clock they are looking at.
   const [hud, setHud] = useState<{
     clockMs: number;
+    /** The mark, and the **only** part of the open position's value that is
+     *  sampled. What is *held* comes from `openPos` and the mark is applied to
+     *  it at render (`openNow`) — see there for why the two may not be sampled
+     *  together. */
     lastPrice: number;
-    openPnl: number;
+    /** The sitting's equity high-water, off `SimState`'s fold rather than off
+     *  this sample — an account's floor must not depend on which animation
+     *  frames landed. See `replayAccount.liveAccount`. */
+    peakUsd: number;
     gen: number;
     ib: IbBox | null;
     range: RangeBox | null;
-  }>({ clockMs: 0, lastPrice: NaN, openPnl: 0, gen: 0, ib: null, range: null });
+  }>({ clockMs: 0, lastPrice: NaN, peakUsd: 0, gen: 0, ib: null, range: null });
   const sessGenRef = useRef(0);
   // The session geometry the day-scale indicators read, as of the last step or
   // snapshot the engine produced. A ref rather than a fourth argument to
@@ -636,6 +768,22 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // `micro: true` carried onto a root without a micro would otherwise price the
   // session at a tenth of itself and name no contract for it.
   const onMicro = micro && microSym != null;
+  /** Which contract this page is *pointing at*, or `null` for "it isn't".
+   *
+   *  Null while reviewing, and that is the whole point of the distinction: a
+   *  review places nothing — the ticket is gone and every order path refuses —
+   *  so there is no routed contract for the chips to be priced in or for the
+   *  blotter to name a difference from. Left as the plain preference, a review
+   *  read with the ticket parked on the micro drew the sitting's own NQ
+   *  positions and orders at MNQ's $2 a point and badged the canvas "→ MNQ",
+   *  which is a claim about orders that cannot be sent.
+   *
+   *  Each position and order carries its own stamp (`Position.micro`, see
+   *  `posLine`/`orderView`), so with this null the overlays fall back to the
+   *  tape's own contract and anything actually traded as a micro still prices
+   *  as one. */
+  const routedMicro: boolean | null = reviewing ? null : onMicro;
+  const routedTo = routedMicro ? (microSym ?? undefined) : undefined;
   // What the account is charged, in the contract actually being traded: a micro
   // round turn is not billed at the mini's rate the setting was measured at
   // (lib/contracts — the same scaling the live broker applies).
@@ -651,11 +799,38 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // netting in `replaySim` from ever having to arbitrate between two contracts
   // in one position.
   const contractLocked = openPos != null || working.length > 0;
+  const tickSize = sessionRef.current?.tick_size ?? 0.25;
+  /** What a point is worth on the **tape's** contract — the mini, because they
+   *  are the mini's ticks. */
+  const tapePointValue = sessionRef.current?.point_value ?? 20;
+  // What a point is worth in the contract orders are going to *now*: the tape's
+  // figure, or a tenth of it while the ticket is pointed at the micro
+  // (lib/contracts). This prices the ticket and what the guardrails will accept
+  // — the order you are about to place — and nothing that has already happened.
+  // The tick *grid* is untouched either way: MNQ trades the same quarter point,
+  // so every price on this page is where it always was and only the money moves.
+  //
+  // Read up here, above the ticket, because a dollar-pinned leg is *derived*
+  // from it: the bracket cannot be resolved before the money that prices it is
+  // known.
+  const pointValue = tapePointValue / (onMicro ? MICRO_RATIO : 1);
+  const tickUsd = tickSize * pointValue;
   // Both bracket legs are optional: zero ticks means the leg isn't attached at
   // all, and an order can be placed with neither — the trade is then yours to
   // close by hand, or to bracket afterwards by dragging a level onto it.
-  const [stopTicks, setStopTicks] = useState(prefs.stopTicks);
-  const [targetTicks, setTargetTicks] = useState(prefs.targetTicks);
+  //
+  // A leg may also be pinned to a **dollar figure** instead (lib/bracketUsd), and
+  // then the tick distance below stops being the setting and becomes the last
+  // resolution of it — kept up to date at every pin so that a session with no
+  // tape loaded, where there is no tick money to divide by, still has a bracket
+  // to place. `stopTicks`/`targetTicks` further down are the resolved distances,
+  // and they are what every order path on this page reads.
+  const [stopTicksSet, setStopTicks] = useState(prefs.stopTicks);
+  const [targetTicksSet, setTargetTicks] = useState(prefs.targetTicks);
+  const [stopUsd, setStopUsd] = useState(prefs.stopUsd);
+  const [targetUsd, setTargetUsd] = useState(prefs.targetUsd);
+  const stopTicks = legTicks(stopTicksSet, stopUsd, tickUsd, size);
+  const targetTicks = legTicks(targetTicksSet, targetUsd, tickUsd, size);
   // The ladder. Off by default, and set per ticket rather than per session — it
   // rides on the order, so two trades in one replay can be managed differently.
   const [trailTicks, setTrailTicks] = useState(prefs.trailTicks);
@@ -663,10 +838,19 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   const [trailBeTicks, setTrailBeTicks] = useState(prefs.trailBeTicks);
   const [trailBeOnly, setTrailBeOnly] = useState(prefs.trailBeOnly);
   const [orderType, setOrderType] = useState<OrderType>(prefs.orderType);
+  // Trade the model backwards (lib/simPrefs `reverseEntry`). A setting rather
+  // than a modifier key: you drill a whole campaign inverted or you don't, and a
+  // held key is the wrong shape for something that has to still be true forty
+  // reps later.
+  const [reverseEntry, setReverseEntry] = useState(prefs.reverseEntry);
   const [limitPx, setLimitPx] = useState("");
   const lastHudRef = useRef(0);
   const [tfId, setTfId] = useState(prefs.timeframe);
   const tf = useMemo(() => timeframeById(tfId), [tfId]);
+  // The built-in bar sizes plus any you have typed into the picker. One list for
+  // the bar's control and for every pane legend's, so a bucketing added in one
+  // is on offer in the others immediately.
+  const tfOptions = useTimeframeOptions();
   // The session loader builds the engine and deliberately doesn't re-run on
   // anything but a new tape, so it reads the timeframe from here.
   const tfRef = useRef(tf);
@@ -687,6 +871,11 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     size,
     stopTicks,
     targetTicks,
+    // Whether the distances above were chosen or derived, and from what. A
+    // pinned leg is a different decision from the same distance typed — it goes
+    // on tracking the size — and the attempt should say which one was traded.
+    stopUsd,
+    targetUsd,
     trailTicks,
     trailStepTicks,
     trailBeTicks,
@@ -714,22 +903,66 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // Whether the tape running out has already closed this attempt. One shot per
   // session: reaching the end again after a rewind is not a second ending.
   const endedRef = useRef(false);
+  // The account's floor caught this sitting. Set the moment `accountStop`
+  // fires and never unset within the session — not by going flat, not by a
+  // rewind — because the one thing a blown account must not have is a next
+  // trade in the sitting that killed it. The refetched view catches the same
+  // state a beat later (`accountRefusal` outranks an open sitting when the
+  // account is dead); this ref is what closes the gap before it lands, and
+  // what survives the refetch coming back "live" when the floor was only
+  // grazed and the settled net recovered past it.
+  const sittingDeadRef = useRef(false);
 
   // What a leg switched back on goes back to. Turning a leg off is a trading
   // decision, not a reason to forget the distance you were using — so the last
   // live value is kept here and the toggle restores it.
   const lastStopRef = useRef(prefs.stopTicks || DEFAULT_SIM_PREFS.stopTicks);
   const lastTargetRef = useRef(prefs.targetTicks || DEFAULT_SIM_PREFS.targetTicks);
+  // Setting a distance **unpins** the leg, everywhere and without exception: a
+  // preset, a sizer cell, a knob, a typed box and a dragged level are all
+  // statements that this is the distance, and a pin left standing would put the
+  // money's answer back over the top of it on the next render. The two are one
+  // setting with two units, never two settings.
   const applyStop = useCallback((t: number) => {
     const v = Math.max(0, Math.floor(t) || 0);
     if (v > 0) lastStopRef.current = v;
+    setStopUsd(null);
     setStopTicks(v);
   }, []);
   const applyTarget = useCallback((t: number) => {
     const v = Math.max(0, Math.floor(t) || 0);
     if (v > 0) lastTargetRef.current = v;
+    setTargetUsd(null);
     setTargetTicks(v);
   }, []);
+  /** Pin a leg to a dollar figure, or (`null`) unpin it where it stands.
+   *
+   *  The distance is written alongside the pin rather than left to re-derive:
+   *  see `pinnedLeg` — it is what the leg falls back to when there is no tape
+   *  loaded to price it against, and a stale one there is a bracket nobody
+   *  chose. */
+  //  `atSize` is for the one edit that changes two things at once: the long-press
+  //  ticket can move the size and the pin in the same act, and resolving the new
+  //  money against the old size would leave the fallback distance describing a
+  //  ticket that never existed.
+  const pinStop = useCallback(
+    (usd: number | null, atSize = size) => {
+      const next = pinnedLeg(usd, stopTicks, tickUsd, atSize);
+      if (next.ticks > 0) lastStopRef.current = next.ticks;
+      setStopUsd(next.usd);
+      setStopTicks(next.ticks);
+    },
+    [size, stopTicks, tickUsd],
+  );
+  const pinTarget = useCallback(
+    (usd: number | null, atSize = size) => {
+      const next = pinnedLeg(usd, targetTicks, tickUsd, atSize);
+      if (next.ticks > 0) lastTargetRef.current = next.ticks;
+      setTargetUsd(next.usd);
+      setTargetTicks(next.ticks);
+    },
+    [size, targetTicks, tickUsd],
+  );
   // Same idea for the ladder. A trail switched off and back on is the same trail.
   const lastTrailRef = useRef(prefs.trailTicks || prefs.stopTicks || DEFAULT_SIM_PREFS.stopTicks);
   const applyTrail = useCallback((t: number) => {
@@ -742,6 +975,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // Declared up here with the other carried settings so the save effect below can
   // see it — see the rail section further down for what it does.
   const [railPinned, setRailPinned] = useState(prefs.railPinned);
+  const [presetBucket, setPresetBucket] = useState(prefs.presetBucket);
   // Whether the transport row is in flow. See simPrefs.transportOpen for why it
   // is a setting at all: every control on it has a key, so a reading session can
   // have the ~34px back.
@@ -757,6 +991,49 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   const [toolsPinned, setToolsPinned] = useState(prefs.toolsPinned);
   const [paneLinked, setPaneLinked] = useState(prefs.paneLinked);
   const paneCount = LAYOUTS[layout].panes;
+
+  // --- how far back the chart reaches -----------------------------------------
+  //
+  // Down here rather than beside the other context state because it is the first
+  // thing on the page that needs to know what is *drawn*: the answer depends on
+  // the bar, and in a split layout on every pane's bar at once.
+  //
+  // The bars on screen, main first. Pane 0's bucketing is the page's own `tfId`
+  // — it drives the engine the fills come out of — so `paneTfIds[0]` is never
+  // read, and panes past the layout's count are not drawn at all.
+  const drawnTfs = useMemo(
+    () => [tfId, ...paneTfIds.slice(1, paneCount)].map(timeframeById),
+    [tfId, paneTfIds, paneCount],
+  );
+  // Whichever of them asks for most history, and which one that was. There is
+  // one tape, so this cannot be per pane — an hourly beside a 1m pulls the
+  // hourly's days and the 1m draws them too, which costs it nothing.
+  const governingHist = useMemo(
+    () => governingHistory(drawnTfs, histOverrides),
+    [drawnTfs, histOverrides],
+  );
+  const historyDays = governingHist.days;
+  /** Whether the governing bar is on a number you chose rather than the rule's. */
+  const histOverridden = histOverrides[governingHist.tf.id] != null;
+  /** Set — or with null, forget — the governing bar's own count. Deliberately not
+   *  "the current bar's": the select shows the max across panes, so writing
+   *  anywhere else would be a control whose number ignored what you typed into
+   *  it. */
+  const setHistoryDays = useCallback(
+    (n: number | null) =>
+      setHistOverrides((o) => withHistoryOverride(o, governingHist.tf.id, n)),
+    [governingHist.tf.id],
+  );
+
+  const histDates = useMemo(() => {
+    if (!sel || historyDays <= 0) return [];
+    return (daysQ.data?.days ?? [])
+      .filter((d) => d.symbol === sel.symbol && d.date < sel.date)
+      .map((d) => d.date)
+      .sort()
+      .slice(-historyDays);
+  }, [daysQ.data, historyDays, sel]);
+  const histQ = useSimulatorHistory(sel?.symbol ?? null, histDates, tz);
 
   // The community studies and this chart's own layers, both per pane and both
   // driven from the topbar ƒ (see StudyPicker). Per pane because a pane is a
@@ -874,24 +1151,34 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       speed,
       size,
       micro,
-      stopTicks,
-      targetTicks,
+      // The distances as stored, not as resolved: a pinned leg's ticks are a
+      // reading of this session's tick money, and the next one may be a
+      // different contract.
+      stopTicks: stopTicksSet,
+      targetTicks: targetTicksSet,
+      stopUsd,
+      targetUsd,
       trailTicks,
       trailStepTicks,
       trailBeTicks,
       trailBeOnly,
       orderType,
+      reverseEntry,
       blind,
       timeframe: tfId,
       bigLots,
-      historyDays,
+      historyDaysByTf: histOverrides,
       composite,
       compositeSpan,
       nodeProm,
       modernVwap: mvParams,
+      dynamicSwingVwap: dsvParams,
       eventTuning: evTuning,
       eventLabelSt: evLabelSt,
-      eventFill: evFill,
+      eventFillSweep: evFillSweep,
+      eventFillAbsorb: evFillAbsorb,
+      eventFloorSweep: evFloorSweep,
+      eventFloorAbsorb: evFloorAbsorb,
       eventMarginal: evMarginal,
       indicators,
       railPinned,
@@ -903,6 +1190,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       linkOn,
       paneLinked,
       toolsPinned,
+      presetBucket,
     });
   }, [
     root,
@@ -910,24 +1198,31 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     speed,
     size,
     micro,
-    stopTicks,
-    targetTicks,
+    stopTicksSet,
+    targetTicksSet,
+    stopUsd,
+    targetUsd,
     trailTicks,
     trailStepTicks,
     trailBeTicks,
     trailBeOnly,
     orderType,
+    reverseEntry,
     blind,
     tfId,
     bigLots,
-    historyDays,
+    histOverrides,
     composite,
     compositeSpan,
     nodeProm,
     mvParams,
+    dsvParams,
     evTuning,
     evLabelSt,
-    evFill,
+    evFillSweep,
+    evFillAbsorb,
+    evFloorSweep,
+    evFloorAbsorb,
     evMarginal,
     indicators,
     railPinned,
@@ -939,6 +1234,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     linkOn,
     paneLinked,
     toolsPinned,
+    presetBucket,
   ]);
 
   // The global switch, into the module the chart handlers read at event time.
@@ -1003,26 +1299,31 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // two depending on width, and a guess is wrong on one of them.
   const footRef = useRef<HTMLDivElement>(null);
   const [foot, setFoot] = useState(0);
-  /** Is the transport actually in flow right now?
+  /** Is the transport actually in flow right now? Just the preference.
    *
-   *  Not simply `transportOpen`. **A position on takes it away**, whatever the
-   *  preference says, and that is the one piece of chrome on this page that
-   *  hides itself rather than being hidden.
-   *
-   *  The transport is for scrubbing, and scrubbing with size on is the single
-   *  gesture the replay cannot honestly support: a seek truncates the log, so
-   *  rewinding past your own entry un-happens the trade you are in the middle
-   *  of. The recorder counts that as a do-over and flags it, which is the right
-   *  bookkeeping and the wrong moment to be doing bookkeeping — the honest fix
-   *  is that the control is not there to reach for while you are holding
-   *  something.
-   *
-   *  It comes straight back when the position comes off; the preference is never
-   *  written, so the ▶▌ toggle still means what it always meant. The keys are
-   *  unaffected — k still plays and pauses, `,` and `.` still step. Nothing
-   *  about *running* the tape is being taken away, only the row you scrub on.
+   *  It used to take itself away whenever a position was on, to keep you from
+   *  scrubbing back through your own fill — a seek truncates the log, so a
+   *  rewind past the entry un-happens the trade you are in the middle of. But
+   *  holding is exactly when you want Play, the speed and the clock, and hiding
+   *  the whole row to prevent one illegal drag took four working controls away
+   *  to stop the fifth. The rewind is now refused where every backward move
+   *  already goes through (`seekTo`), and the scrubber's floor moves up to the
+   *  entry so the handle can't be dragged there in the first place.
    */
-  const transportShown = transportOpen && !openPos;
+  const transportShown = transportOpen;
+
+  /** Does the panel get its own column, or lay over the tape?
+   *
+   *  The preference, **and always while reviewing**. A review forces the panel
+   *  open, and unpinned that is 300px of overlay along the right edge — which is
+   *  precisely where a seek puts the playhead. The trades were on the chart the
+   *  whole time and behind the panel, which reads exactly like a review that
+   *  failed to load the sitting.
+   *
+   *  The preference is not written, like the transport's: this is the layout a
+   *  review needs, not a statement about how you want to trade. It comes back
+   *  the way you left it when the review is filed. */
+  const panelPinned = railPinned || reviewing;
 
   useEffect(() => {
     const el = footRef.current;
@@ -1099,17 +1400,6 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const tickSize = sessionRef.current?.tick_size ?? 0.25;
-  /** What a point is worth on the **tape's** contract — the mini, because they
-   *  are the mini's ticks. */
-  const tapePointValue = sessionRef.current?.point_value ?? 20;
-  // What a point is worth in the contract orders are going to *now*: the tape's
-  // figure, or a tenth of it while the ticket is pointed at the micro
-  // (lib/contracts). This prices the ticket and what the guardrails will accept
-  // — the order you are about to place — and nothing that has already happened.
-  // The tick *grid* is untouched either way: MNQ trades the same quarter point,
-  // so every price on this page is where it always was and only the money moves.
-  const pointValue = tapePointValue / (onMicro ? MICRO_RATIO : 1);
   // Everything a fill needs to be priced: what the instrument is worth, and what
   // the account is charged. Rebuilt when either changes, which is what makes
   // turning commission on re-derive the whole log at the new rules rather than
@@ -1143,21 +1433,133 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // The account, beside the levels — and unlike them, **not** subject to
   // `guardsOn`. The guardrails are rules under test, which is what the switch is
   // for; the account is the stakes, and stakes you can switch off are not
-  // stakes. `dataUpdatedAt` is when this arrived, which is all the countdowns
-  // use the local clock for (see `remainingMs`).
-  const accountQ = useReplayAccount();
+  // stakes.
+  //
+  // Which account is **the page's mode**, and the query is keyed by it: the
+  // funded one on `/charts/replay`, the paper one on `/charts/replay/paper`,
+  // and none at all in a drill (`null` fetches nothing). Keying it means a
+  // switch cannot show one account's equity against the other's floor for the
+  // frame before the refetch lands.
+  //
+  // **And by the tape day**, because that is the day the account counts — the
+  // one being replayed has not closed, so the floor under it does not move and
+  // the daily limit is its own (`replay_account.tape_day`). The drill passes no
+  // date as well as no mode: the query is disabled either way, but the date is
+  // the one fact backtest mode exists to withhold and it has no business in a
+  // cache key.
+  const accountQ = useReplayAccount(
+    acctId,
+    mode === "drill" ? null : sel?.date ?? null,
+  );
   const account = accountQ.data;
-  const accountAt = accountQ.dataUpdatedAt;
+  /** The account *as stakes* — undefined in a drill, which has none.
+   *
+   *  A drill is unpriced by design: the server files the attempt as invisible to
+   *  the account (routers/replays: no equity written, no epoch minted), and the
+   *  bar says so. Everything on this page that lets the account *act* — the
+   *  refusal before an entry, the flatten at the floor, the meters, the autopsy —
+   *  reads this rather than `account`, so the two halves cannot disagree about
+   *  whether a rep costs anything. A floor a rep never moves is not a floor that
+   *  gets to end it.
+   *
+   *  `account` itself stays for the things that are about the account rather than
+   *  about this sitting: the chip (already `!drill`) and the fetch the drill's own
+   *  rep counter shares.
+   *
+   *  **Undefined at `can_reset` too**, and that is not a hole in the gate — it is
+   *  the only honest reading. A resettable account is one whose epoch is *over*:
+   *  its equity and its floor describe a life that ended, and the sitting about to
+   *  open is on the next one, which does not exist until the create mints it
+   *  (`replay_account.ensure_epoch`, called from `POST /replays` — "the next
+   *  sitting is the reset"). Pricing the new sitting off the dead epoch's numbers
+   *  is not caution, it is a wrong number: on paper, where every death lands on
+   *  `can_reset` within the second, the first fill of the fresh account would be
+   *  measured against the floor the *last* one died on and auto-flattened before
+   *  it had a rep. Neither gate refuses this state — not `accountRefusal` here,
+   *  not `replay_account.refusal` on the server — so nothing is being got around;
+   *  the account simply has no numbers to enforce for the few hundred ms between
+   *  the fill that mints it and the refetch that reports it at $50,000.
+   *
+   *  A **passed** account is in exactly this position and reaches it the same
+   *  way, which is why the test is `can_reset` rather than a list of statuses:
+   *  the epoch is over, its floor belongs to the life that won, and the next
+   *  sitting is the next eval. */
+  const stakes = drill || account?.can_reset ? undefined : account;
+  /** Whether this sitting may drive its own clock.
+   *
+   *  An account that prices a real product has to cost what the day cost. A
+   *  step, a scrub and a speed ladder are all the same gesture — skip the part
+   *  you don't want to sit through — and sitting through it is the rep. So
+   *  those sittings run forward at real time or they are paused, and Pause is
+   *  the whole transport. Paper keeps the full set — it is the practice
+   *  surface — and a backtest is a measurement whose whole point is getting
+   *  through a session faster than it happened.
+   *
+   *  **Which accounts, read off the template and never off the id.** This was
+   *  `acctId === "funded"` until 2026-09-10, and the registry had long since
+   *  made that the wrong question: every LucidDaily account made from a
+   *  template kept the ladder, the scrub and the held-Ctrl turbo, so the one
+   *  account shape whose floor moves *under an open position* was the one you
+   *  could skip the day on. `rules.real_time` is the same fact `rules.trailing`
+   *  is — a property of the shape, stated by the server.
+   *
+   *  Locked while the view is still loading, which is the safe direction: the
+   *  transport appearing a moment late costs a click, and a rep begun at 30×
+   *  because a fetch had not landed costs the rep. `account` rather than
+   *  `stakes`, because a `can_reset` account's *next* sitting is on the same
+   *  template and is every bit as much a rep.
+   *
+   *  Locked is a property of the *rep*, not of the tape — `seekTo` still works,
+   *  and has to: the start-time picker uses it to choose where the rep begins,
+   *  and a review uses it to jump to a fill. Which is also why the lock lifts
+   *  the moment a review is up. The rep is over by then and the day is already
+   *  revealed; replaying your own decision is the point of being there. */
+  const clockLocked = mode === "replay" && !reviewing && (account?.rules.real_time ?? true);
+  // Read by the frame loop and by the two step callbacks, all of which run
+  // outside the render that decided it.
+  const clockLockedRef = useRef(clockLocked);
+  clockLockedRef.current = clockLocked;
+  /** The account as a *record* rather than as stakes — what it has done, as
+   *  against what it is currently pricing. Only a drill has neither, and it has
+   *  neither for the same reason: there is no account behind the rep at all.
+   *
+   *  The death band, the autopsy and the end-of-sitting recap all read this. They
+   *  are the three places that say what happened, and what happened does not stop
+   *  being true when the account becomes resettable — on paper that is a tenth of
+   *  a second later, so a death told through `stakes` would be a death told for no
+   *  time at all. */
+  const ledger = drill ? undefined : account;
 
   // --- the blown flow -------------------------------------------------------
   // Only fetched when there is something to autopsy. The card is composed
   // entirely from these rows — the epoch's equity curve is a cumulative sum over
   // them and its totals are `replayStats.pool` — so nothing new is stored and
   // the server is not asked to re-derive what the history page already draws.
-  const dead = !!account && account.status !== "live";
+  //
+  // Two questions, and conflating them is what wedged the paper account: *is
+  // there a death to look at* is not *can this page trade*. The card stands until
+  // the reset actually happens, because a blow-up you are never shown is a blow-up
+  // that taught nothing; the ticket comes back the moment the account stops
+  // refusing, because the reset **is** the next sitting and hiding the ticket is
+  // hiding the only way to take it. On the funded account they part for a day and
+  // the difference is easy to miss; on paper they part immediately, and while they
+  // were one flag the page offered a fresh $50,000 with no way to open it.
+  // Named after what it holds: an autopsy is about a *death*, so a passed
+  // account does not get one. Its ending is told by the notice band and counted
+  // in the record, and a card asking what killed it would be asking about a life
+  // that was not killed.
+  const autopsy =
+    !!ledger && (ledger.status === "blown" || ledger.status === "can_reset");
+  const dead = !!stakes && stakes.status !== "live";
   // The drill needs the same list for its rep counter, so the two conditions
   // share one fetch rather than the mode adding a second query on the same key.
-  const attemptsQ = useReplayAttempts({ enabled: dead || drill });
+  // `autopsy` is false in a drill whatever the account is doing, which is why the
+  // `|| drill` is load-bearing rather than belt-and-braces.
+  //
+  // There used to be a third condition — an *owed* sitting, which the page had
+  // to find before it could open into it. Gone with the auto-review on
+  // 2026-08-25: nothing opens by itself now, so nothing needs finding up front.
+  const attemptsQ = useReplayAttempts({ enabled: autopsy || drill });
   /** Reps finished today, for the counter on the bar.
    *
    *  Counted off the settled ones only: an `active` row is the rep you are in
@@ -1170,7 +1572,61 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // autosave, so mid-rep the keys are a moving target and any answer filed
   // against one would be filed against a row about to be replaced.
   const repJournalQ = useReplayJournal(drill && repOver ? attemptRec.attempt?.id ?? null : null);
-  const saveRules = useSaveRuleChecks(drillPrefs.modelId);
+  const saveTradeReview = useSaveTradeReview();
+  const tradeTagsQ = useTradeTags();
+  /** One card's answers: watched level, setup, discipline, tags, note.
+   *
+   *  `mutateAsync`, so a caller can wait for it: filing a review saves every
+   *  card that is still dirty first, and the server checks the *stored* rows —
+   *  so the writes have to have landed before the PATCH goes. Every caller
+   *  either awaits it or catches; an ignored rejection here would be an
+   *  unhandled one.
+   *
+   *  **One write.** It used to be two, because the thesis lived on its own table
+   *  so that `PUT /notes`'s whole-row overwrite could not blank it. The grade
+   *  and the watched level are partial fields on that same endpoint instead —
+   *  omitted means unchanged — so the hazard is handled at the door and the
+   *  review is a single request.
+   *
+   *  The setups, confluences and model on the notes row are still echoed
+   *  untouched. The review does not ask for them, but the Trades page and the
+   *  journal read them, and a review that quietly blanked taxonomy written
+   *  elsewhere would be destroying records to satisfy a form that stopped
+   *  caring about them. */
+  const saveTradeAnswers = useCallback(
+    async (
+      row: DrillTradeRow,
+      patch: ReviewAnswers & { modelId?: number | null; rulesMet?: number[] },
+    ) => {
+      await saveTradeReview.mutateAsync({
+        tradeKey: row.trade_key,
+        note: patch.note,
+        tags: patch.tags,
+        setups: row.setups,
+        confluences: row.confluences,
+        modelId: patch.modelId !== undefined ? patch.modelId : row.model_id,
+        rulesMet: patch.rulesMet ?? row.rules_met,
+        setup: patch.setup,
+        discipline: patch.discipline,
+        watchedLevels: patch.watchedLevels,
+      });
+    },
+    [saveTradeReview],
+  );
+  // Why 🎲 cannot draw *right now*, beyond the standing reasons: the rep on
+  // screen still has unreviewed trades. The server refuses the create the same
+  // way (409 `drill_review`), so a reload changes nothing — the way back into
+  // a lost rep-end panel is the history page's review button.
+  const repOwes =
+    DRILL_REVIEW_REQUIRED &&
+    drill &&
+    repOver &&
+    (repJournalQ.data?.trades ?? []).some((t) => !reviewAnswered(seedAnswers(t)));
+  const drillDrawBlocked =
+    drillBlocked ??
+    (repOwes
+      ? "Review every trade of this rep first — a level, a setup and a discipline call each, and the next draw opens."
+      : null);
   const repsToday = useMemo(() => {
     if (!drill) return 0;
     const midnight = new Date();
@@ -1182,7 +1638,9 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         new Date(a.created_at).getTime() >= midnight.getTime(),
     ).length;
   }, [attemptsQ.data, drill]);
-  const writeCause = useWriteCause();
+  // Never fires on paper (nothing there waits on a sentence) but it is keyed by
+  // mode anyway, so the answer lands on the same cache entry it was asked from.
+  const writeCause = useWriteCause(acctId ?? "funded");
 
   /** Open the death sitting in review mode.
    *
@@ -1195,7 +1653,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     (attemptId: string) => {
       const a = attemptsQ.data?.attempts.find((r) => r.id === attemptId);
       if (!a) return;
-      saveResume({
+      saveResume(scope, {
         symbol: a.symbol,
         date: a.date,
         clockMs: a.started_ms,
@@ -1203,15 +1661,224 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         // Unused in review mode — every cursor is rebased off its own timestamp.
         contextTicks: 0,
       });
-      saveReview({ attemptId: a.id });
+      saveReview(scope, { attemptId: a.id });
       navigate(0);
     },
-    [attemptsQ.data, navigate],
+    [attemptsQ.data, mode, navigate],
   );
-  const tickUsd = tickSize * pointValue;
+
+  /** The other account. What the chip does when you click its name.
+   *
+   *  A navigation, because the account is the route (see `SimMode` and the two
+   *  entries in `router.tsx`): the keyed element makes this a real unmount, so
+   *  the recorder cannot survive the switch still pointing at the ledger you
+   *  just left. Each side keeps its own bookmark and its own review marker, so
+   *  the sitting you were parked on is where you left it when you come back.
+   *
+   *  Offered only when this account is *clean* — no sitting open, no review
+   *  owed. The first is the rule the mode already lives by (fixed for the whole
+   *  of a sitting). The second is the same rule the review gate is: a review you
+   *  can walk away from by changing accounts is not a gate, it is a suggestion,
+   *  and the whole reason paper owes reviews at all is that it is not meant to
+   *  be the way out of one. */
+  //
+  //  It is no longer a toggle between two: `AccountSwitch` navigates, and this
+  //  is what it calls first so the bookmark for the account being left is
+  //  written before the unmount takes the page with it.
+  const switchAccount = useCallback(() => {
+    writeResume();
+  }, [writeResume]);
+
+  // Which day the picker opens on.
+  //
+  // **Nothing opens as a review any more.** Until 2026-08-25 an owed review came
+  // first: the page found the sitting the account was blocking on and landed in
+  // it, because trading a session the server would then refuse to record was
+  // worse than being made to answer. Reviewing is a choice now, so the page has
+  // no business choosing it — a review is entered from the end-of-sitting
+  // prompt or from the history page, both of which write the same marks this
+  // used to.
+  //
+  // What is left is two rules:
+  // 1. **A session you were in the middle of wins over a draw** — "carry on"
+  //    is what you want far more often than "start again", and the tape you
+  //    were halfway through is not one you can practise blind on anyway. Since
+  //    the mode split this holds for drills too, with one condition: the rep's
+  //    attempt must still be `active`. Resuming a settled one would flip it
+  //    back and withdraw the review it may already have filed.
+  // 2. **Failing that it is a draw**, on purpose — the replay is only practice
+  //    while the tape is one you don't remember. Pick another with the
+  //    dropdown, or draw again with 🎲.
+  //
+  // A bookmarked day that isn't in the list falls through to the draw: the
+  // root is a preference saved next to it so the two normally agree, but a
+  // contract whose cache has since been cleared out is not there to go back to.
+  useEffect(() => {
+    const days = daysQ.data?.days;
+    if (sel || !days?.length) return;
+    const p = pendingRef.current;
+    if (p && days.some((d) => d.symbol === p.symbol && d.date === p.date)) {
+      // A review entered from the history page arrives as marks plus a
+      // bookmark naming the same attempt; it is honoured whatever the
+      // attempt's status — review mode is read-only, so "active" is not a
+      // condition it needs.
+      const reviewingThis = !!reviewMark && p.attemptId === reviewMark.attemptId;
+      if (!drill || reviewingThis) {
+        setSel({ symbol: p.symbol, date: p.date });
+        return;
+      }
+      if (p.attemptId) {
+        if (!resumeSettled) return;
+        if (resumeDetailRef.current?.status === "active") {
+          setSel({ symbol: p.symbol, date: p.date });
+          return;
+        }
+      }
+      // A settled (or attempt-less) rep is not a place to go back to — spend
+      // the bookmark and draw.
+      leaveResume();
+    }
+    anyDay(days);
+  }, [anyDay, daysQ.data, drill, leaveResume, mode, resumeSettled, reviewMark, sel]);
   // Everything the rules and the behaviour strip need, re-derived whenever the
   // simulation is. Cheap: a couple of passes over a day's trades.
   const day = useMemo(() => dayState(guards, trades), [guards, trades]);
+  // Forward-looking, unlike `day` — a statement about the entry not yet placed
+  // rather than a median over the ones that were. Same input, so it rides the
+  // same re-derivation; `guardRules.paceRefusal` takes no clock, deliberately.
+  const pace = useMemo(() => paceRefusal(trades), [trades]);
+
+  /** What a position is worth at a price, in dollars. Zero when there is none.
+   *
+   *  **The position is an argument rather than a read of `openRef`**, and that
+   *  is the whole point of the function's shape. What is held and what has been
+   *  booked change together, in `publish`, on the frame a fill lands; the mark
+   *  is an 80ms sample. Reading the position from wherever this happens to be
+   *  called lets a caller pair a *booked* trade with the same trade still shown
+   *  as open — the loss counted twice, once realised and once unrealised.
+   *
+   *  That is not hypothetical. It ended two sittings on the 25K daily account on
+   *  2026-08-25 at −$240.50 and −$247.50 against a $300 daily limit, each within
+   *  a frame of the stop that booked them: `day.realized` had the loss, the HUD
+   *  sample still had the position, and `accountBreach` added the two together.
+   *
+   *  So: the caller says which position, and the only stale thing left is the
+   *  price — which is the documented "lands a beat late", and can only
+   *  under-report a live position, never invent a closed one. */
+  const markOpen = useCallback(
+    (p: Position | null, lastPrice: number): number => {
+      if (!p || !Number.isFinite(lastPrice)) return 0;
+      const dir = p.side === "long" ? 1 : -1;
+      // The position's contract, not the ticket's. They are the same until the
+      // ticket is re-pointed after a fill, and that is precisely the moment this
+      // number must not move: what is held is what is held.
+      const pv = tapePointValue / (p.micro ? MICRO_RATIO : 1);
+      return (lastPrice - p.entryPrice) * dir * pv * p.size;
+    },
+    [tapePointValue],
+  );
+
+  /** The open position's value **at one instant**, and the only figure any rule
+   *  or readout on this page may use for it.
+   *
+   *  `openPos` and `day.realized` are both published by `publish`, so they are
+   *  the same instant by construction: the frame a trade books, the position is
+   *  already null here and its loss is in `realized` exactly once. Only the
+   *  price is sampled — see `markOpen`. */
+  const openNow = markOpen(openPos, hud.lastPrice);
+
+  /** Is the *next* market click going to be flipped? The render-time twin of
+   *  the test in `placeMarket`, off the state rather than the ref because a
+   *  label has to repaint when the position appears — and the moment it does,
+   *  the knob stops applying and the buttons go back to saying what they do.
+   *  The two readings agree by construction: `openPos` and `openRef` are both
+   *  written by `publish`. */
+  const reversing = reverseEntry && openPos == null;
+
+  // The account plus the sitting on screen, worked out once. Both things that
+  // read a live equity — the floor meter and the auto-flatten — take this, so
+  // they cannot disagree about how much room is left, and neither of them
+  // assembles it from parts any more: whether this sitting is already in
+  // `equity` is a question only the account can answer (see `liveEquity`).
+  //
+  // `attempt.id` rather than `attemptIdOf()`: this has to re-derive when the
+  // recorder opens or adopts an attempt, and a ref does not tell React that.
+  //
+  // **A pair, not a figure.** On an intraday-trailing account the floor is a
+  // live number too and has the same `counted_ids` dependency the equity has;
+  // producing them apart would let the meter draw one sitting's equity against
+  // another's floor. `hud.peakUsd` is the sitting's own high-water off the
+  // simulation *fold*, never off this sampled tick — see `liveAccount`.
+  const live = liveAccount(
+    stakes,
+    attemptRec.attempt?.id ?? null,
+    day.realized,
+    openNow,
+    hud.peakUsd,
+  );
+  const equityNow = live?.equity ?? null;
+
+  // How close this sitting has come to the floor it was under **at the time**,
+  // and the one figure here that is a ratchet rather than a fold.
+  //
+  // That is the opposite rule to `SimState.peakUsd`, deliberately, and the
+  // difference is worth stating where both are in view. The peak is re-derived
+  // on every rewind, because an excursion inside a trade that has been
+  // un-happened must un-happen with it. This is a record of what the page was
+  // *told* at a moment — the account said "you have $40 of room" and the
+  // sitting went on — and re-deriving it after a rewind would forget a breach
+  // that was announced and acted on. A forgotten breach is the escape hatch the
+  // account exists to close, so this one only ever tightens.
+  const minRoomRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (live == null || reviewingRef.current) return;
+    const prev = minRoomRef.current;
+    if (prev == null || live.room < prev) minRoomRef.current = live.room;
+  }, [live]);
+
+  // --- The risk sizer -------------------------------------------------------
+  // The vol ruler's current reading, pushed up by the chart on every bar close
+  // (it computes whether or not the pane is drawn, so this keeps up with a
+  // collapsed pane). Null until enough bars have closed to say anything. The
+  // sizer's own number is not in here — it reads `volRead.preset` through
+  // `presetCtx` below, so Σ and A–D measure the same tape the same way.
+  const [volRead, setVolRead] = useState<VolRulerRead | null>(null);
+  // Only one account number reaches the sizer now, and it is the one that
+  // moves: room-to-the-floor, which the losers-to-death column divides, because
+  // counting down is that figure's entire job. The budgets are constants in the
+  // lib (`BUDGETS_USD`) — they were `rules.day_loss ÷ losers` here, and before
+  // that `day_loss_remaining ÷ losers`, which halved through a bad day. A drill
+  // has no account and falls back to the LucidPro floor it is practising for.
+  const sizerCtx = useMemo<SizerCtx | undefined>(() => {
+    if (!(tickUsd > 0)) return undefined;
+    const roomToFloor = equityNow != null && stakes ? equityNow - stakes.floor : null;
+    return {
+      // The *mini's* money and the mini's fee rate — the sizer derives the
+      // micro's itself, and would double-shrink a ticket already pointed at one.
+      tickUsd: onMicro ? tickUsd * MICRO_RATIO : tickUsd,
+      commissionPerSide: fills.commission,
+      maxLossUsd: roomToFloor != null && roomToFloor > 0 ? roomToFloor : DEFAULT_MAX_LOSS,
+      caps: { minis: stakes?.caps.minis ?? 4, micros: stakes?.caps.micros ?? 40 },
+      stopTicksMax: guards.stop_ticks_max,
+      root,
+      microRoot: microSym,
+      micro: onMicro,
+      canSwitchContract: !contractLocked,
+    };
+  }, [
+    contractLocked, equityNow, fills.commission, guards.stop_ticks_max, microSym,
+    onMicro, root, stakes, tickUsd,
+  ]);
+
+  // The presets' ruler and the bar it is read at. The reading carries all three
+  // bucketings at once (lib/volRuler), so the toggle is a pick out of a record
+  // rather than a re-measure — which is what lets it be a comparison you flick
+  // through rather than a setting you commit to.
+  const presetCtx = useMemo<PresetCtx | null>(
+    () =>
+      volRead ? { read: volRead.preset, bucket: presetBucket, onBucket: setPresetBucket } : null,
+    [volRead, presetBucket],
+  );
 
   // The day-type readout (lib/dayRead): TIDE and SWING off the trailing tape,
   // EXT off the last few entries. Quantised to 15s of tape so the HUD's ~80ms
@@ -1289,7 +1956,11 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     // Every path that changes the simulation ends here, which makes this the one
     // place the recorder has to be told. It writes nothing until a fill has
     // happened, and nothing again until something changes.
-    recordAttempt(logRef.current, st.trades, st.open != null, clock);
+    recordAttempt(logRef.current, st.trades, st.open != null, clock, {
+      peakUsd: st.peakUsd,
+      troughUsd: st.troughUsd,
+      minRoomUsd: minRoomRef.current,
+    });
     // And the one place the bookmark has to be moved. The timer alone would not
     // do: it samples the clock every few seconds, and a fill inside that window
     // would leave the bookmark sitting *before* a booked trade — so coming back
@@ -1337,30 +2008,47 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     clearRefusal();
   }, [attemptRefusal, clearRefusal]);
 
-  const openPnl = useCallback(
-    (lastPrice: number): number => {
-      const o = openRef.current;
-      if (!o || !Number.isFinite(lastPrice)) return 0;
-      const dir = o.side === "long" ? 1 : -1;
-      // The position's contract, not the ticket's. They are the same until the
-      // ticket is re-pointed after a fill, and that is precisely the moment this
-      // number must not move: what is held is what is held.
-      const pv = tapePointValue / (o.micro ? MICRO_RATIO : 1);
-      return (lastPrice - o.entryPrice) * dir * pv * o.size;
-    },
-    [tapePointValue],
-  );
-
   const pushHud = useCallback(
     (lastPrice: number, clockMs: number, force = false) => {
       const now = performance.now();
       if (!force && now - lastHudRef.current < 80) return;
       lastHudRef.current = now;
       const { ib, range } = geoRef.current;
-      setHud({ clockMs, lastPrice, openPnl: openPnl(lastPrice), gen: sessGenRef.current, ib, range });
+      // `peakUsd` is read off the simulation ref, which `stepSim` has already
+      // updated in place for this frame. The asymmetry with the mark is the
+      // point: the peak is a *fold* while the price is still an 80ms sample,
+      // and that is safe precisely because the peak is monotone within a
+      // sitting and the equity is not — a peak that spiked and retreated
+      // between two of these ticks is still in the fold, an equity that did the
+      // same is gone. Which is why the floor may be derived from one and the
+      // "lands a beat late" caveat still only applies to the other.
+      setHud({
+        clockMs, lastPrice,
+        peakUsd: simRef.current.peakUsd,
+        gen: sessGenRef.current, ib, range,
+      });
     },
-    [openPnl],
+    [],
   );
+
+  // --- armed levels ---------------------------------------------------------
+  // A level you asked to trade itself (lib/levelArm). `through` and `exit` stand
+  // here: a `bid` places its order the moment you ask for it and then has
+  // nothing left to wait for, so it never becomes state — cancel it the way you
+  // cancel any other resting order.
+  const [arms, setArms] = useState<LevelArm[]>([]);
+  const armsRef = useRef<LevelArm[]>([]);
+  armsRef.current = arms;
+  /** Race the standing arms: the first to fire cancels the others *of its own
+   *  purpose*. Off by default — arms firing independently is the plainer rule,
+   *  and the race is the one that quietly removes something you set up. */
+  const [armRace, setArmRace] = useState(false);
+  const armRaceRef = useRef(false);
+  armRaceRef.current = armRace;
+  /** Firing needs `placeAt` and `closeManual`, both declared with the order
+   *  plumbing far below — the same reason `mark` reaches its price lines through
+   *  a ref. */
+  const fireArmRef = useRef<(a: LevelArm, act: ArmAction) => void>(() => {});
 
   // Fold a played tick range into the running simulation, and only re-render the
   // panel on the step where something actually resolved.
@@ -1370,9 +2058,45 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       if (!tape) return;
       const st = simRef.current;
       stepSim(tape, logRef.current, st, from, to, clock, fillCfg);
+      // Armed levels, against the prints that just played.
+      //
+      // Here rather than in the chart's own `checkAlerts`, which is the other
+      // place a crossing is already detected, because that one hangs off `mark`
+      // — and `mark` is the funnel *every* path that moves the price goes
+      // through, a seek included. An alert firing on a rewind is a stray chime;
+      // an order placed on one is a trade you did not make. `advanceSim` has
+      // exactly two callers and both of them run the tape forwards.
+      //
+      // After `stepSim`, so an order an arm places cannot fill on the same
+      // prints that triggered it — it becomes fillable from the next range, and
+      // pays `latencyMs` from its own stamp like every other order.
+      const armed = armsRef.current;
+      if (armed.length && from > 0) {
+        const prev = tape.price[from - 1];
+        for (const a of armed) {
+          // Against `armsRef` rather than the `armed` snapshot: firing mutates
+          // the ref, and with the race on that is how the arms this one just
+          // cancelled are skipped instead of firing off the stale list.
+          if (!armsRef.current.includes(a)) continue;
+          const act = armAction(a, tape.price, from, to, prev, tape.tickSize);
+          if (act) fireArmRef.current(a, act);
+        }
+      }
       if (simSig(st) !== sigRef.current) publish(st, clock);
+      // The equity path moves on prints, not on fills, so it has to be offered
+      // on prints too — a runner that goes +800 and comes back flat changes
+      // nothing in `simSig` and would otherwise never be written, which is
+      // exactly the sitting the figures exist for. Cheap: `record` builds one
+      // string and compares it, returning immediately on every frame the
+      // quantised path did not cross a step.
+      else
+        recordAttempt(logRef.current, st.trades, st.open != null, clock, {
+          peakUsd: st.peakUsd,
+          troughUsd: st.troughUsd,
+          minRoomUsd: minRoomRef.current,
+        });
     },
-    [fillCfg, publish],
+    [fillCfg, publish, recordAttempt],
   );
 
   // --- the context pane -----------------------------------------------------
@@ -1467,9 +2191,13 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       // the same work whether the tape is a finished session or one still
       // arriving — which is why the seam is here and not inside ReplayEngine.
       const src = sourceRef.current;
-      const { clock, atEnd } = src.clockFor(
-        clockRef.current, dtReal, speedRef.current,
-      );
+      // A locked rep runs at the speed the day ran at, and this one expression
+      // is what makes that true — it takes the ladder, the `[`/`]` keys and the
+      // held-Ctrl turbo out in one place rather than in three. The stored speed
+      // pref is deliberately left alone: it belongs to the pages that still have
+      // a ladder, and forcing it to 1 here would reset theirs.
+      const rate = clockLockedRef.current ? 1 : speedRef.current * turbo.mult.current;
+      const { clock, atEnd } = src.clockFor(clockRef.current, dtReal, rate);
       const r = engineRef.current.advance(clock);
       chartRef.current?.applyStep(r);
       // Every extra pane advances every frame regardless — the engine step is
@@ -1520,18 +2248,36 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       // On a live tape the log is append-only, and "un-happening" a fill that
       // really occurred would be a lie about what the session did.
       if (!sourceRef.current.canSeek) return;
-      // **Forward only in a drill.** A rewound rep is a rep that already knew
-      // the answer, and the base rate this mode exists to measure cannot
-      // survive being pooled with those. Pausing, stepping forward and changing
-      // speed are all still yours — the refusal is specifically about going
-      // back over tape you have already traded through.
+      // A drill used to refuse every backward move here (plan D8, superseded
+      // 2026-08-21): a rewound rep is a rep that already knew the answer, and
+      // the base rate the mode exists to measure cannot survive being pooled
+      // with those *unmarked*. Marking turned out to be the cheaper half of
+      // that sentence — the rewind record below is written in every mode, so a
+      // rewound rep now arrives at the campaign carrying the fact, and
+      // `/replays/drills` counts it out loud rather than the transport refusing
+      // to let it exist. Everything else about the rep is unchanged.
       //
-      // Here rather than on the buttons because this is the one choke point
-      // every backward move goes through: ⏪, the `,` key, the transport's
-      // scrubber and the start-time jump. A guard on each of them is a guard
-      // that the next one added will not have.
-      if (drill && clockMs < clockRef.current) {
-        setRefused("Not in a drill — a rep only runs forwards.");
+      // **Not back past your own entry while you are holding.** The transport
+      // stays on the page with a position on — you want Play, the speed and the
+      // clock most while you are in something — but the one move it cannot
+      // honestly carry there is a rewind through the fill: the log truncates,
+      // the entry un-happens, and you are handed a do-over of a trade you were
+      // in the middle of. Everything else is allowed, including a rewind to
+      // somewhere after the entry, which only un-does a scale or a bracket drag.
+      //
+      // Same choke point as the drill rule above, for the same reason: the
+      // scrubber's `min` moves to the entry so the control looks like what it
+      // does, and this catches ⏪, `,` and the start-time jump.
+      //
+      // **Never in a review.** The whole hazard is the truncation, and a review
+      // does not truncate (above) — the position on screen is a replayed one,
+      // not size you are carrying, and nothing there can un-happen. Refusing
+      // would mean the cards stop being reachable the moment the tape plays into
+      // a fill: seek to the 09:42 trade, watch it fill, and every earlier card
+      // is refused until it closes. Every card, at any time, is the point.
+      const held = reviewingRef.current ? null : simRef.current.open;
+      if (held && clockMs < held.fillMs) {
+        setRefused("Flatten first — a rewind past your entry un-happens the trade you are in.");
         return;
       }
       stop();
@@ -1543,17 +2289,32 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       // Truncate the action log — everything after the new clock un-happens:
       // an order you hadn't placed is gone, a bracket you hadn't dragged is back
       // where it was, an order you hadn't cancelled is working again.
-      logRef.current = truncateLog(logRef.current, clamped);
+      //
+      // **Never in a review.** That rule is about a sitting you are *in*, where
+      // going back means the part you hadn't done yet hasn't been done. A review
+      // is a reading of a sitting that already finished: the log is the record,
+      // not a draft, and truncating it deleted the very trade the seek was
+      // aimed at — press "seek" on a card, watch its five seconds run past the
+      // entry, and nothing ever fills, because the order had been thrown away on
+      // the way there. (Every later trade with it: one seek to an early card
+      // wiped the rest of the sitting off the tape.) Nothing in review mode can
+      // write, so leaving the log whole costs nothing and is the only thing that
+      // makes "watch it again" mean anything.
+      if (!reviewingRef.current) logRef.current = truncateLog(logRef.current, clamped);
       const snap = eng.snapshotTo(clamped);
       // The view follows the clock at the zoom the user set: a seek is a move
       // through time, not a request to be put back at the default bar spacing.
       chartRef.current?.setSnapshot(snap, { reframe: "follow" });
+      // The clock must move before the panes resync: `resyncPane` snapshots the
+      // extra panes to `clockRef`, and their engines only step forward — a pane
+      // resynced to the pre-seek clock is stranded there until playback catches
+      // back up, frozen from the user's side.
+      clockRef.current = clamped;
       resyncPane("follow");
       // A rewind un-develops the day's range along with everything else: the
       // snapshot is re-derived from tick zero, so the extremes are whatever had
       // actually printed by the new clock.
       geoRef.current = { ib: snap.ib, range: snap.range };
-      clockRef.current = clamped;
       rebuild(clamped);
       // A seek is not something happening, it is a move to somewhere it already
       // happened — so the blotter on the other side of it is adopted in silence,
@@ -1567,13 +2328,16 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       // deterministic — so whatever is past that prefix is what un-happened. A
       // position rewound out of before it ever closed books no trade, and
       // counts just the same.
-      if (clamped < from) {
+      // Not while reviewing: nothing un-happened (the log is left whole above),
+      // and a review that recorded rewinds would be flagging the sitting for the
+      // act of looking at it.
+      if (clamped < from && !reviewingRef.current) {
         const dropped = had.slice(simRef.current.trades.length);
         if (dropped.length || (hadOpen && !simRef.current.open))
           noteRewind(from, clamped, dropped);
       }
     },
-    [drill, noteRewind, pushHud, rebuild, stop],
+    [noteRewind, pushHud, rebuild, stop],
   );
 
   // The chart's ⚓ tool moved. The anchored band develops from the tape like the
@@ -1591,20 +2355,89 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
    *  of the engine that draws it, so a ⚓ dropped on the 15-minute pane anchors
    *  the 15-minute VWAP and leaves every other pane alone — which is the only
    *  reading of the gesture that makes sense once there are four charts. */
-  const ticket = useMemo(
-    () => ({ size, stopTicks, targetTicks }),
-    [size, stopTicks, targetTicks],
+  const ticket = useMemo<TicketDraft>(
+    () => ({ size, stopTicks, targetTicks, stopUsd, targetUsd }),
+    [size, stopTicks, targetTicks, stopUsd, targetUsd],
   );
   /** The ticket, changed from a chart. One handler for every pane: size and the
    *  bracket belong to the page, so the number in a long-press ticket and the
-   *  number a dock button sends are the same number whichever chart you are on. */
+   *  number a dock button sends are the same number whichever chart you are on.
+   *
+   *  A leg arrives as one of two statements — a distance, or the money it is
+   *  pinned to — and each goes to the setter that means it. The distances on a
+   *  pinned leg are the page's own resolution coming back, so re-applying them
+   *  as distances would silently unpin every leg on every edit. */
   const changeTicket = useCallback(
-    (t: { size: number; stopTicks: number; targetTicks: number }) => {
+    (t: TicketDraft) => {
       setSize(t.size);
-      applyStop(t.stopTicks);
-      applyTarget(t.targetTicks);
+      if (t.stopUsd != null) pinStop(t.stopUsd, t.size);
+      else applyStop(t.stopTicks);
+      if (t.targetUsd != null) pinTarget(t.targetUsd, t.size);
+      else applyTarget(t.targetTicks);
     },
-    [applyStop, applyTarget],
+    [applyStop, applyTarget, pinStop, pinTarget],
+  );
+
+  // The ticket asks nothing before an order goes out. It briefly asked for a
+  // thesis; that vocabulary is gone (docs/trade-grading-plan.md, G1), and the
+  // grade that replaced it is a review-time question by decision G3 — a scale
+  // on the fast path is one that gets answered carelessly.
+  const vocab = useReviewVocab();
+
+  /**
+   * A preset cell on the risk sizer was clicked: take its stop and its size,
+   * and point the ticket at the contract the cell was quoting.
+   *
+   * The contract half is why this is here and not inside `TicketKnobs` — the
+   * mini/micro switch is the page's, and it is refused outright while there is
+   * a position or a working order (`contractLocked`: the two instruments do not
+   * net). All or nothing: a cell that moved the stop but not the size would
+   * leave a ticket nobody chose, which is worse than a cell that does nothing.
+   * The panel already greys the cells this could not honour (`canSwitchContract`),
+   * so reaching the guard here is the belt to that braces.
+   */
+  const applySizing = useCallback(
+    (a: { stopTicks: number; size: number; micro: boolean }) => {
+      if (a.micro !== micro) {
+        if (contractLocked) return;
+        setMicro(a.micro);
+      }
+      applyStop(a.stopTicks);
+      setSize(a.size);
+    },
+    [applyStop, contractLocked, micro],
+  );
+
+  /**
+   * A bracket preset was chosen: the whole shape, in one act.
+   *
+   * All five distances or none — that is what makes it a preset rather than five
+   * suggestions. Zero is a real value on every leg here (the target off for A,
+   * the first rung on the entry itself), so each one is set outright rather than
+   * merged into whatever the ticket was carrying: a preset that left yesterday's
+   * target standing would be a shape nobody chose, which is the failure this is
+   * for. Size is untouched — that is the Σ sizer's question.
+   */
+  const applyPreset = useCallback(
+    (b: PresetBracket) => {
+      applyStop(b.stopTicks);
+      applyTarget(b.targetTicks);
+      applyTrail(b.trailTicks);
+      setTrailStepTicks(b.trailStepTicks);
+      setTrailBeTicks(b.trailBeTicks);
+      setTrailBeOnly(b.trailBeOnly);
+    },
+    [applyStop, applyTarget, applyTrail],
+  );
+
+  /** The five distances the ticket is carrying now, in the shape a preset is
+   *  written in — so the card can light whichever preset equals it, and light
+   *  nothing once a knob has been nudged off one. Built here rather than in the
+   *  card because three of the six legs are this page's state and not the
+   *  ticket's. */
+  const activeBracket = useMemo<PresetBracket>(
+    () => ({ stopTicks, targetTicks, trailTicks, trailStepTicks, trailBeTicks, trailBeOnly }),
+    [stopTicks, targetTicks, trailTicks, trailStepTicks, trailBeTicks, trailBeOnly],
   );
 
   const setPaneAnchor = useCallback((i: number, barTime: number | null) => {
@@ -1713,8 +2546,14 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // how they draw. Its presence is what offers the layer at all — the Live chart
   // passes nothing and has no event rows.
   const eventOverlay = useMemo(
-    () => ({ tuning: evTuning, style: { labelSt: evLabelSt, fill: evFill }, marginal: evMarginal }),
-    [evTuning, evLabelSt, evFill, evMarginal],
+    () => ({
+      tuning: evTuning,
+      style: { labelSt: evLabelSt, fillSweep: evFillSweep, fillAbsorb: evFillAbsorb },
+      floorSweep: evFloorSweep,
+      floorAbsorb: evFloorAbsorb,
+      marginal: evMarginal,
+    }),
+    [evTuning, evLabelSt, evFillSweep, evFillAbsorb, evFloorSweep, evFloorAbsorb, evMarginal],
   );
 
   // The chart's own knobs, hung off the legend row each one tunes (rendered by
@@ -1741,19 +2580,34 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         nodeProm,
         onNodeProm: setNodeProm,
         modernVwap: { params: mvParams, onChange: patchMv },
-        composite,
-        onComposite: setComposite,
-        compositeSpan,
-        onCompositeSpan: setCompositeSpan,
-        compositeNote: `Built from the ${historyDays} prior session${historyDays === 1 ? "" : "s"} loaded — "Prior days" in the setup row, since each one is a whole tape to fetch.`,
+        dynamicSwingVwap: { params: dsvParams, onChange: patchDsv },
+        volumeShelf: {
+          params: shelfParams,
+          onChange: patchShelf,
+          field: shelfField,
+          onField: patchShelfField,
+        },
+        composite: {
+          rule: composite,
+          onRule: setComposite,
+          span: compositeSpan,
+          onSpan: setCompositeSpan,
+          note: `Built from the ${historyDays} prior session${historyDays === 1 ? "" : "s"} loaded — "Prior days" in the setup row, since each one is a whole tape to fetch.`,
+        },
         events: {
           tuning: evTuning,
           labelSt: evLabelSt,
-          fill: evFill,
+          fillSweep: evFillSweep,
+          fillAbsorb: evFillAbsorb,
+          floorSweep: evFloorSweep,
+          floorAbsorb: evFloorAbsorb,
           marginal: evMarginal,
           onTuning: changeEvTuning,
           onLabelSt: setEvLabelSt,
-          onFill: setEvFill,
+          onFillSweep: setEvFillSweep,
+          onFillAbsorb: setEvFillAbsorb,
+          onFloorSweep: setEvFloorSweep,
+          onFloorAbsorb: setEvFloorAbsorb,
           onMarginal: setEvMarginal,
         },
       }),
@@ -1763,14 +2617,23 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       changeEvTuning,
       composite,
       compositeSpan,
-      evFill,
+      evFillSweep,
+      evFillAbsorb,
+      evFloorSweep,
+      evFloorAbsorb,
       evLabelSt,
       evMarginal,
       evTuning,
       historyDays,
       mvParams,
+      dsvParams,
+      shelfParams,
+      shelfField,
       nodeProm,
       patchMv,
+      patchDsv,
+      patchShelf,
+      patchShelfField,
     ],
   );
 
@@ -1896,6 +2759,11 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     // has one. Hold off instead: the query settles either way, so this is a wait
     // and never a deadlock.
     if (fresh && pendingRef.current && !resumeSettled) return;
+    // Same wait for the review's own record. It is a *separate* fetch from the
+    // bookmark's whenever the two name different attempts — and one of the ways
+    // this page loses a sitting's trades is building the tape before it lands,
+    // since `reviewing` cannot even be true until it has.
+    if (fresh && reviewMarkRef.current?.attemptId && !reviewSettled) return;
     // A context change mid-replay is not a reason to stop watching: the clock
     // doesn't move, so playback picks up where the rebuild left it.
     const wasPlaying = playingRef.current;
@@ -1921,6 +2789,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       // belongs to this session, and the clock-keyed effects check the stamp.
       sessGenRef.current += 1;
       endedRef.current = false;
+      sittingDeadRef.current = false;
     }
     // The ⚓ is the user's, and it is placed on a bar time — which the context
     // days don't move. Carried across the rebuild rather than re-placed.
@@ -1944,7 +2813,20 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       // one to let go of, not one to keep trying.
       leaveResume();
       if (bookmark.symbol === data.symbol && bookmark.date === data.date) {
-        const d = resumeDetailRef.current;
+        // **Which sitting's log this is.** Reviewing, it is the one the review
+        // marker names, off the review's own fetch — not whatever the bookmark
+        // remembers. The bookmark is a record of where you were sitting, and in
+        // review mode there is no sitting: the recorder is unarmed, so what it
+        // used to write there was `attemptId: null`, and the id test below then
+        // failed on every visit after the first. Reading the id from the marker
+        // makes the review independent of it — including for a bookmark already
+        // written with the null, which is the state a browser that has been in a
+        // review before is in right now.
+        const reviewingNow = reviewingRef.current;
+        const wantId = reviewingNow
+          ? (reviewMarkRef.current?.attemptId ?? null)
+          : bookmark.attemptId;
+        const d = reviewingNow ? reviewDetailRef.current : resumeDetailRef.current;
         // The stored cursors only mean anything if the session under them is
         // still the tape it was — the tick cache is not immutable, and the
         // 16:00-17:00 gap fix re-fetched 352 sessions and moved every index in
@@ -1953,7 +2835,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         // where you left it and you carry on reading from there.
         const usable =
           d != null &&
-          d.id === bookmark.attemptId &&
+          d.id === wantId &&
           d.symbol === data.symbol &&
           d.date === data.date &&
           d.engine_version === SIM_ENGINE_VERSION &&
@@ -2076,20 +2958,30 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         prefs: () => ticketRef.current,
         startedMs: clock,
         mode,
+        accountId: acctId,
         modelId: drill ? drillRef.current.modelId : null,
         dropMs: drill ? clock : null,
         window: drill ? drillWindowRef.current : null,
       });
-      // And in a drill, open it here rather than waiting for a fill: a rep you
-      // looked at and passed on is the row this mode exists to write. After
-      // `arm`, which is what gives it a context to write against.
-      if (drill && !reviewingRef.current) openAttempt(logRef.current, clock);
       // A resumed sitting continues the attempt it came from rather than opening
       // a second one on the same day — which the history page would read,
       // correctly by its own rules and wrongly in fact, as a re-run of a session
       // you had already seen the end of.
       const d = reviewingRef.current ? null : resumed?.detail;
+      // And in a drill, open it here rather than waiting for a fill: a rep you
+      // looked at and passed on is the row this mode exists to write. After
+      // `arm`, which is what gives it a context to write against — and never
+      // over an adoptable record: `open`'s flush fires the create immediately,
+      // so a resumed rep opening first would mint a duplicate attempt that the
+      // adopt below could not take back.
+      if (drill && !reviewingRef.current && !d) openAttempt(logRef.current, clock);
       if (d) {
+        // A resumed rep's drop is put back for the title — the bookmark's
+        // clock outranks it for where the tape stands, but the drop is what
+        // names the question the rep was.
+        if (drill && d.drop_ms != null) {
+          setDrop(Math.round((d.drop_ms - data.rth_open_ms) / 60_000) + RTH_OPEN_MIN);
+        }
         adoptAttempt(d, {
           log: logRef.current,
           trades: d.trades,
@@ -2099,7 +2991,19 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           // the clock this one opened at.
           startedMs: d.started_ms,
           clockMs: clock,
+          // The equity path, and the two halves of it behave differently on a
+          // resume. `peakUsd`/`troughUsd` are folds: `rebuild` below re-derives
+          // them from the adopted log exactly, so seeding them from the stored
+          // summary would only be overwritten by the truth a moment later.
+          // `minRoomUsd` is not a fold — it was measured against the floors this
+          // sitting was under on its *previous* visit, which this page does not
+          // have and cannot recompute — so the stored figure is carried in, and
+          // `minRoomRef` keeps the lower of it and whatever this visit sees.
+          // A resumed sitting that quietly forgot a breach would be the escape
+          // hatch the account exists to close.
+          minRoomUsd: d.summary?.min_room_usd ?? null,
         });
+        minRoomRef.current = d.summary?.min_room_usd ?? null;
       }
     }
     // Re-publish what the log says: the position, the working orders and every
@@ -2122,7 +3026,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // `engineContext` is memoed off the same `contextDays` as `contextTapes`, so
     // it changes in lockstep and never adds a rebuild of its own.
-  }, [sessionQ.data, contextTapes, contextRanges, engineContext, resumeSettled]);
+  }, [sessionQ.data, contextTapes, contextRanges, engineContext, resumeSettled, reviewSettled]);
 
   // A change of span re-cuts the same days without touching the tape, so the
   // rebuild above sees nothing to do and returns early. Push the new spans on
@@ -2183,11 +3087,17 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   }, [fillCfg, ready, rebuild]);
 
   /** Place an order. `at` is the price its bracket is measured from — the mark
-   *  for a market order, the resting price for a limit or a stop. */
+   *  for a market order, the resting price for a limit or a stop.
+   *
+   *  Returns whether the order was actually logged. Every human path ignores the
+   *  answer — the refusal is already on screen, and a click that was refused has
+   *  nothing left to do. An *armed level* is the caller that needs it: it has to
+   *  disarm itself either way, or a rule it cannot satisfy would be re-attempted
+   *  on every print for the rest of the session. */
   const placeOrder = useCallback(
-    (type: OrderType, side: Side, price: number | null, at: number) => {
+    (type: OrderType, side: Side, price: number | null, at: number): boolean => {
       const eng = engineRef.current;
-      if (!eng) return;
+      if (!eng) return false;
       // The discipline layer, at the one gesture every order path funnels
       // through — the dock, q/w/s, space+click, the long-press ticket and the
       // ＋Order tool all land here, so there is no route around it and no
@@ -2207,24 +3117,35 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
             "here can add to them. File the verdicts and the next sitting opens.",
         );
         playCue("canceled");
-        return;
+        return false;
       }
       const reducing = isReducing(openRef.current, side, size);
       // The account comes first, and it comes *outside* `guardsOn`: the
       // guardrails are rules under test and the switch is what makes them
       // testable, but the account is the stakes. It only speaks when there is
       // no sitting open yet — resuming one you are in the middle of is free,
-      // and the thing being priced is starting another.
+      // and the thing being priced is starting another. Silent in a drill,
+      // which has no stakes to speak for (see `stakes`).
       if (!reducing) {
-        const no = accountRefusal(account, attemptIdOf() != null);
-        if (no) {
+        // The floor already ended this sitting. Refused here, off the page's
+        // own memory of the death, because the server only learns of it when
+        // the attempt settles and the view refetches — a beat during which
+        // "trade the account back" would otherwise still work. Which it did:
+        // the sitting that found this bug dived $109 through the floor,
+        // re-entered, and settled $2 alive.
+        if (sittingDeadRef.current) {
           setRefused(
-            no.until
-              ? `${no.message} (${fmtWait(remainingMs(account, no.until, accountAt))} to go)`
-              : no.message,
+            "the account died this sitting — the floor already closed it, and there is " +
+              "no version of a blown account you trade back from in the same session.",
           );
           playCue("canceled");
-          return;
+          return false;
+        }
+        const no = accountRefusal(stakes, attemptIdOf() != null);
+        if (no) {
+          setRefused(no.message);
+          playCue("canceled");
+          return false;
         }
       }
       if (!reducing && guardsOn) {
@@ -2234,7 +3155,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         if (why) {
           setRefused(why);
           playCue("canceled");
-          return;
+          return false;
         }
       }
       const dir = side === "long" ? 1 : -1;
@@ -2248,6 +3169,12 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         price,
         stop: stopTicks > 0 ? at - dir * stopTicks * tickSize : null,
         target: targetTicks > 0 ? at + dir * targetTicks * tickSize : null,
+        // ...and the same bracket as the ticket actually said it: distances.
+        // A market order's legs hang off the *fill* (see `OrderRec.stopTicks`),
+        // so the prices above are only what you were looking at when you
+        // clicked. A resting order carries no distances at all — its bracket
+        // belongs to the level it was drawn against.
+        ...(type === "market" ? { stopTicks, targetTicks } : {}),
         // Snapshotted, and resolved to prices here — the ticket is the last
         // place that thinks in ticks. Stamping it on the order is what lets a
         // rebuild reproduce the ladder: settings read live from React state
@@ -2270,6 +3197,10 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         // and an order that filled as a micro is worth what a micro is worth
         // whatever the picker says afterwards.
         micro: onMicro,
+        // And what you expect it to do — the same stamping rule with one extra
+        // reason: a claim is only worth grading if it was made before the
+        // outcome. Read off a ref rather than the state so the value is the one
+        // showing on the ticket at the instant the gesture fired.
       };
       // A market order is its own fill and the rebuild below will sound as one —
       // the tick and the chime a few milliseconds apart would read as one
@@ -2277,8 +3208,9 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       if (type !== "market") playCue("placed");
       const log = logRef.current;
       append({ ...log, orders: [...log.orders, rec] });
+      return true;
     },
-    [account, accountAt, append, attemptIdOf, day, guards, guardsOn, onMicro, size,
+    [stakes, append, attemptIdOf, day, guards, guardsOn, onMicro, size,
      stopTicks, targetTicks, tickSize, tickUsd, trailTicks, trailStepTicks,
      trailBeTicks, trailBeOnly],
   );
@@ -2288,23 +3220,36 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
       if (!ready) return;
       const px = markPrice();
       if (!Number.isFinite(px)) return;
-      placeOrder("market", side, null, px);
+      // The reverse knob, applied here and nowhere else.
+      //
+      // Here because this is the one path where the side is a *choice* — two
+      // buttons, either of which is placeable at the mark. The resting paths
+      // below it look like they take a side too, but `placeAt` reads one off
+      // which side of the mark you clicked and the long-press menu greys out
+      // the pairs that can't sit at that price; a flipped bid above the offer
+      // is not an order, and `placeResting` would only shove it back across.
+      //
+      // Read off the ref, not the state: the flip has to be decided against
+      // the position as it stands at the instant of the click, and a render
+      // behind is a doubled position.
+      const flipped = reverseEntry && openRef.current == null;
+      placeOrder("market", flipped ? otherSide(side) : side, null, px);
     },
-    [markPrice, placeOrder, ready],
+    [markPrice, placeOrder, ready, reverseEntry],
   );
 
   /** Rest an order at a price, held one tick clear of the mark on the side its
    *  type belongs on — a marketable resting order would fill on the next print
    *  at a price better than the market, which is not a thing the tape can do. */
   const placeResting = useCallback(
-    (price: number, side: Side, type: "limit" | "stop") => {
-      if (!ready) return;
+    (price: number, side: Side, type: "limit" | "stop"): boolean => {
+      if (!ready) return false;
       const mk = markPrice();
-      if (!Number.isFinite(mk) || !Number.isFinite(price)) return;
+      if (!Number.isFinite(mk) || !Number.isFinite(price)) return false;
       const px = Math.round(price / tickSize) * tickSize;
       const above = type === "stop" ? side === "long" : side === "short";
       const rest = above ? Math.max(px, mk + tickSize) : Math.min(px, mk - tickSize);
-      placeOrder(type, side, rest, rest);
+      return placeOrder(type, side, rest, rest);
     },
     [markPrice, placeOrder, ready, tickSize],
   );
@@ -2321,15 +3266,65 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
    * order that has to be.
    */
   const placeAt = useCallback(
-    (price: number, button: "left" | "right") => {
+    (price: number, button: "left" | "right"): boolean => {
       const mk = markPrice();
-      if (!Number.isFinite(mk)) return;
+      if (!Number.isFinite(mk)) return false;
       const below = price < mk;
       const passive = button === "left";
       const side: Side = passive === below ? "long" : "short";
-      placeResting(price, side, passive ? "limit" : "stop");
+      return placeResting(price, side, passive ? "limit" : "stop");
     },
     [markPrice, placeResting],
+  );
+
+  /** Arm a level, or disarm it.
+   *
+   *  `bid` is not an arm at all — it places its order now and there is nothing
+   *  left to stand. `through` and `exit` are, because both are waiting for a
+   *  crossing that has not happened.
+   *
+   *  Deliberately not persisted, unlike the drawings the lines come from: an arm
+   *  is a price, and a price means nothing on another day's tape. A `sim.prefs`
+   *  arm restored onto tomorrow's random session would be a standing order at a
+   *  number that is now the middle of nowhere. */
+  const armToggle = useCallback(
+    (level: ArmableLevel, shape: ArmShape | null) => {
+      if (shape === "limit") {
+        // Through `limitPlacement` rather than a literal "left" here: which
+        // button a shape means is the module's answer, and a second copy of it
+        // in the page is how the two shapes drift apart.
+        const p = limitPlacement({
+          key: level.key,
+          label: level.label,
+          shape,
+          price: level.price,
+          throughTicks: DEFAULT_THROUGH_TICKS,
+        });
+        placeAt(p.price, p.button);
+        return;
+      }
+      setArms((prev) => {
+        const rest = prev.filter((a) => a.key !== level.key);
+        return shape == null
+          ? rest
+          : [
+              ...rest,
+              {
+                key: level.key,
+                label: level.label,
+                shape,
+                // Snapped to the grid here rather than at placement, so the
+                // number the panel shows you standing is the number the order
+                // will rest at. A VWAP is not on the tick grid and reads as
+                // 19527.820770232105 otherwise — which is not a price anything
+                // can be bought at, and not the one this arm is going to use.
+                price: Math.round(level.price / tickSize) * tickSize,
+                throughTicks: DEFAULT_THROUGH_TICKS,
+              },
+            ];
+      });
+    },
+    [placeAt, tickSize],
   );
 
   /**
@@ -2439,14 +3434,74 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     pushHud(markPrice(), ms, true);
   }, [append, markPrice, pushHud]);
 
+  /** An arm reached its level: spend it, and do what it said.
+   *
+   *  Declared down here rather than beside `armToggle` because it needs
+   *  `closeManual`, and a `useCallback` naming it in its deps above the line it
+   *  is defined on is a temporal-dead-zone throw at render — `fireArmRef` is how
+   *  `advanceSim` reaches it from further up.
+   *
+   *  Spent whether or not anything happened. A refusal is a rule this ticket
+   *  cannot satisfy right now — the day's stop, a shape the guards won't take, a
+   *  dead account — and re-attempting it on the next print, and the one after,
+   *  would turn one refused order into a refusal on every tick for the rest of
+   *  the session. The same rule covers an `exit` that fires while flat: it took
+   *  nothing off because there was nothing on, and it does not stay standing
+   *  waiting for a position to protect. `placeOrder` has already put any reason
+   *  on screen, and the arm visibly leaving the panel is the rest of the answer.
+   *
+   *  With the race on, firing also cancels the other standing arms *of the same
+   *  purpose* — see `armPurpose`. Entries race entries, exits race exits, so a
+   *  level-based bracket survives a level-based entry firing under it. */
+  const fireArm = useCallback(
+    (a: LevelArm, act: ArmAction) => {
+      const purpose = armPurpose(a.shape);
+      const keep = (x: LevelArm) =>
+        x.key !== a.key && !(armRaceRef.current && armPurpose(x.shape) === purpose);
+      // The ref as well as the state: `advanceSim` reads the ref inside the
+      // frame, and React has not re-rendered yet, so an arm left standing here
+      // could fire twice inside one range — and with the race on, a cancelled
+      // one could still fire once.
+      armsRef.current = armsRef.current.filter(keep);
+      setArms((prev) => prev.filter(keep));
+      if (act.kind === "close") closeManual();
+      else placeAt(act.price, act.button);
+    },
+    [closeManual, placeAt],
+  );
+  fireArmRef.current = fireArm;
+
   /** End the sitting by hand. Anything still on comes off at the last print
    *  first: an attempt whose net leaves out what you were carrying is not the
-   *  sitting you had. Trading on afterwards simply reopens it. */
+   *  sitting you had. Trading on afterwards simply reopens it.
+   *
+   *  **Ending is all it does.** Until 2026-08-25 a traded sitting went straight
+   *  into review mode on the way out, because every booked trade owed a review
+   *  and the account would not open another sitting until it got one. Reviewing
+   *  is a choice now, and a page that lands you in the thing you may not want is
+   *  the same coercion with a friendlier name. The offer is on the recap card
+   *  instead — Review now, or Review later, or neither. */
   const endAttempt = useCallback(() => {
     endedRef.current = true;
     if (openRef.current) closeManual();
     void finishAttempt();
   }, [closeManual, finishAttempt]);
+
+  /** Open the sitting just ended in review mode, against its own tape.
+   *
+   *  Through a reload, exactly as `openReview` does and for the same reason:
+   *  review mode has to come back with the recorder *unarmed*, and a fresh
+   *  mount is the only thing that guarantees it. The marks are on disk before
+   *  the navigate, and `writeResume` is what puts the bookmark beside them —
+   *  the attempt does not have to be looked up because the page is already
+   *  standing on it. */
+  const reviewThisSitting = useCallback(() => {
+    const id = attemptIdOf();
+    if (!id) return;
+    writeResume();
+    saveReview(scope, { attemptId: id });
+    navigate(0);
+  }, [attemptIdOf, mode, navigate, writeResume]);
 
   /** End the rep by hand — the drill's version of the same thing.
    *
@@ -2461,48 +3516,82 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     setRepOver(true);
   }, [endAttempt, stop]);
 
-  // The daily stop, acting rather than refusing.
+  // The daily stop, acting rather than refusing — and the account's three
+  // limits, which end the sitting rather than the position.
   //
-  // Watches equity — realised plus what the open position is currently down —
-  // because the account's drawdown does not wait for a loss to be booked. It
-  // closes the position the way `closeManual` does, by appending to the log, so
-  // a rewind un-does it like any other action and the sim stays a pure fold over
-  // what happened.
+  // The daily stop watches **booked** P&L (`guardRules.dayFlatten` says why),
+  // so it can only be reached the moment a trade closes, and the only case it
+  // acts on is size still on after that close: a scale-out that took the day
+  // past the line and left a runner. It closes that runner the way `closeManual`
+  // does, by appending to the log, so a rewind un-does it like any other action
+  // and the sim stays a pure fold over what happened.
   //
   // Fires once per crossing: `openRef` going null is the reset, so a position
   // re-opened after the stop can be closed again if it also breaches. Nothing
   // stops that entry being placed, because the day lock already refuses it.
   //
-  // It lands a beat late. `hud.openPnl` arrives on the throttled ~80ms tick,
-  // which at speed 30 is a couple of seconds of market time — fine to rehearse
-  // against, not a number to quote.
+  // The account's limits below it still read equity and still land a beat late:
+  // `openNow` marks the position against `hud.lastPrice`, which arrives on the
+  // throttled ~80ms tick — at speed 30 a couple of seconds of market time. Fine
+  // to rehearse against, not a number to quote. Late is the only error there;
+  // what is *held* comes from the same publish as what has been booked, so a
+  // trade can never be counted as both (see `markOpen`).
   const autoClosedRef = useRef(false);
   useEffect(() => {
+    // The account's floor first, and always — it is not under the `guardsOn`
+    // switch, and unlike the daily stop it does not lift tomorrow. Hitting it
+    // does not just close the position: the sitting is over, because an account
+    // that has reached its floor has no next trade to take. Never in a drill:
+    // `stakes` is undefined there and this returns null, because a rep the
+    // account never sees is not a rep the account gets to end.
+    //
+    // Checked *before* the position gate below, because the floor does not
+    // need one: a stop-out can book its way through the floor and be flat
+    // again before this effect ever runs, and a death that waits for the next
+    // position is a death you trade in front of. "A sitting is in progress"
+    // is read off the simulation itself — a position on or a trade booked —
+    // rather than off the recorder's attempt id, which only exists once the
+    // *debounced* first save lands and would leave exactly the stop-out case
+    // unwatched. So a page merely looking at an account cannot end a sitting
+    // that never opened — and never in a review, which replays a sitting the
+    // account has already priced.
+    if (
+      !sittingDeadRef.current &&
+      !reviewingRef.current &&
+      (openRef.current != null || day.trades > 0)
+    ) {
+      // Three limits, not one: the drawdown floor, the daily loss limit and the
+      // day's goal once it has been made. All of them end the day and none of
+      // them is under `guardsOn` — the account's rules are the ones you do not
+      // get to argue with, which is what makes rehearsing against them worth
+      // anything. Only the floor ends the *account*; `endAttempt` closing the
+      // sitting is what the other two cost.
+      const breach = accountBreach(stakes, live, openRef.current != null);
+      const dead = breach?.reason;
+      if (dead) {
+        sittingDeadRef.current = true;
+        // Before the flatten inside `endAttempt`, so even the death's own
+        // writes go out already sealed.
+        killAttempt();
+        setRefused(dead);
+        playCue("canceled");
+        endAttempt();
+        return;
+      }
+    }
     if (!openRef.current) {
       autoClosedRef.current = false;
       return;
     }
     if (autoClosedRef.current) return;
-    // The account's floor first, and always — it is not under the `guardsOn`
-    // switch, and unlike the daily stop it does not lift tomorrow. Hitting it
-    // does not just close the position: the sitting is over, because an account
-    // that has reached its floor has no next trade to take.
-    const dead = accountStop(account, day, hud.openPnl, true);
-    if (dead) {
-      autoClosedRef.current = true;
-      setRefused(dead);
-      playCue("canceled");
-      endAttempt();
-      return;
-    }
     if (!guardsOn) return;
-    const why = equityStop(guards, day, hud.openPnl, true);
+    const why = dayFlatten(guards, day, true);
     if (!why) return;
     autoClosedRef.current = true;
     setRefused(why);
     playCue("canceled");
     closeManual();
-  }, [account, closeManual, day, endAttempt, guards, guardsOn, hud.openPnl]);
+  }, [stakes, closeManual, day, endAttempt, live, guards, guardsOn, openNow, killAttempt]);
 
   // Running out of tape ends the replay, and the answer comes with it. Keyed on
   // the clock rather than wired into the playback loop so it holds however the
@@ -2530,6 +3619,10 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     // nextBarClockMs() reads forward on a tick timeframe — it needs the print
     // that will complete the bar, which on a live tape has not happened yet.
     if (!sourceRef.current.canStepBar) return;
+    // Gated here rather than only on the button, because the button is not the
+    // only way in: `.` reaches the same callback. Same for `stepBack` and
+    // `nudgeSpeed` below.
+    if (clockLockedRef.current) return;
     stop();
     const clock = Math.min(s.session_end_ms, eng.nextBarClockMs());
     const r = eng.advance(clock);
@@ -2547,12 +3640,14 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   const stepBack = useCallback(() => {
     const eng = engineRef.current;
     if (!eng || !sourceRef.current.canSeek) return;
+    if (clockLockedRef.current) return;
     seekTo(eng.prevBarClockMs());
   }, [seekTo]);
 
   /** Step the speed along the offered ladder — the keyboard's version of the
    *  transport's <select>. */
   const nudgeSpeed = useCallback((d: 1 | -1) => {
+    if (clockLockedRef.current) return;
     const i = SIM_SPEEDS.indexOf(speedRef.current);
     const j = Math.max(0, Math.min(SIM_SPEEDS.length - 1, (i < 0 ? 0 : i) + d));
     speedRef.current = SIM_SPEEDS[j];
@@ -2569,11 +3664,18 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
   // autorepeat (a held w must not machine-gun market orders).
   //
   // The transport rides the same guards: k play/pause, , and . step a bar back
-  // and forward, [ and ] walk the speed ladder, 1–8 pick the bar size. Video
+  // and forward, [ and ] walk the speed ladder, 1–8 pick the bar size. All but
+  // k and the bar sizes stand down on a locked rep — in the callbacks they
+  // reach rather than here, so the button and the key die together. Video
   // keys rather than invented ones — a replay is a video of the tape, and k/,/.
   // are what every scrubbing tool binds. Space is deliberately NOT play/pause:
   // it is the order modifier on the chart, and a focused button's trigger
   // everywhere else.
+  //
+  // Held Ctrl — ten times the ladder, for the dead stretch between setups — is
+  // hooks/useTurbo and not here, because it is a modifier being *read* rather
+  // than a key being taken, and because these bindings all stand down while a
+  // chord is up (`isTypingTarget`), which is exactly when it applies.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e)) return;
@@ -2640,7 +3742,33 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
 
   // --- derived display values ----------------------------------------------
   const realized = useMemo(() => trades.reduce((a, t) => a + t.pnl, 0), [trades]);
-  const wins = trades.filter((t) => t.pnl > 0).length;
+  // Per **position**, to agree with the count beside it: a scale-out books a
+  // row per portion, and a position that took a partial at +2 and the rest at
+  // the stop is one trade with one verdict, not a win and a loss. Summed over
+  // the portions of each open, which is what the account actually collected.
+  const wins = useMemo(() => {
+    const byOpen = new Map<number, number>();
+    for (const t of trades) byOpen.set(t.entryMs, (byOpen.get(t.entryMs) ?? 0) + t.pnl);
+    return [...byOpen.values()].filter((pnl) => pnl > 0).length;
+  }, [trades]);
+  // The blotter's rows. The contract badge is decided here rather than in the
+  // card because only this page knows what the ticket is pointed at — and in a
+  // review it is pointed nowhere (`routedMicro` is null), where badging every
+  // row would say each one differs from a selection that isn't being offered.
+  const blotterRows = useMemo(
+    () =>
+      trades.map((t) =>
+        blotterRow(
+          t,
+          microSym && routedMicro !== null && t.micro !== routedMicro
+            ? t.micro
+              ? microSym
+              : root
+            : null,
+        ),
+      ),
+    [microSym, root, routedMicro, trades],
+  );
   const sess = sessionRef.current;
   const scrubMin = sess?.session_start_ms ?? 0;
   const scrubMax = sess ? endOf(sess, drill) : 1;
@@ -2697,18 +3825,36 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
     key: "stop" | "target",
     label: string,
     ticks: number,
+    pin: number | null,
     apply: (t: number) => void,
+    onPin: (usd: number | null) => void,
     remembered: React.RefObject<number>,
   ) => {
     const on = ticks > 0;
+    // The bound the guardrails refuse outside of, and — while the leg is priced
+    // in money — what this leg currently comes to. Both in the caption, because
+    // the box can only ever show one of the two units and the other one is the
+    // one being checked against the rule.
+    const echo = legEcho(ticks, pin, tickUsd, size);
     return (
-      <div style={{ fontSize: 11, color: palette.muted }}>
+      // `minWidth: 0` because this is a grid cell holding a text box: without it
+      // the column sizes to the box's intrinsic width, and the three columns
+      // (size, stop, target) stop being thirds — the Size box collapsed to 22px
+      // and the two legs took 211px each, overflowing a 300px panel.
+      <div style={{ fontSize: 11, color: palette.muted, minWidth: 0 }}>
         <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <input
             id={`sim-${key}-on`}
             type="checkbox"
             checked={on}
-            onChange={(e) => apply(e.target.checked ? remembered.current : 0)}
+            // Switching a leg back on restores the distance it had, in the unit
+            // it is being set in — a pinned leg comes back as money, not as the
+            // ticks that money happened to resolve to.
+            onChange={(e) => {
+              if (!e.target.checked) return pin != null ? onPin(0) : apply(0);
+              if (pin != null) onPin(Math.round(usdForTicks(remembered.current, tickUsd, size)));
+              else apply(remembered.current);
+            }}
             style={{ margin: 0 }}
             title={`Trade with ${key === "stop" ? "a stop" : "a target"}`}
           />
@@ -2716,18 +3862,21 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           {/* The bound the guardrails will refuse outside of, on the control
               that sets it — a rule you only meet by being refused is one you
               read as the app being broken. */}
-          {on && legBound(key) && (
-            <span style={{ fontSize: 9, marginLeft: "auto" }}>{legBound(key)}</span>
+          {on && (legBound(key) || echo) && (
+            <span style={{ fontSize: 9, marginLeft: "auto" }}>
+              {[legBound(key), echo].filter(Boolean).join(" · ")}
+            </span>
           )}
         </span>
-        <input
+        <LegAmount
           id={`sim-${key}`}
-          type="number"
-          min={1}
-          value={on ? ticks : ""}
-          placeholder="none"
+          ticks={ticks}
+          pin={pin}
+          tickUsd={tickUsd}
+          size={size}
+          onTicks={apply}
+          onPin={onPin}
           disabled={!on}
-          onChange={(e) => apply(Number(e.target.value))}
           style={{ width: "100%" }}
         />
       </div>
@@ -2757,7 +3906,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
 
   return (
     <div
-      className={`sim-page${railPinned ? " pinned" : ""}`}
+      className={`sim-page${panelPinned ? " pinned" : ""}`}
       style={
         {
           "--chart-floor": `${floor}px`,
@@ -2798,8 +3947,16 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                 Not in a drill: reps are unpriced, so there is no equity, no
                 floor and nothing that could end one early. A chip reading
                 $50,000 all session on a page it has no authority over would be
-                the worst of both — it would look like stakes. */}
-            {!drill && <AccountChip view={account} receivedAt={accountAt} />}
+                the worst of both — it would look like stakes.
+
+                Its name is also the switch to the other account, and it is only
+                offered while this one is clean: no sitting open, the mode being
+                fixed for the whole of one. (It also waited on an owed review
+                until 2026-08-25, so the review could not be stepped around by
+                changing accounts. Nothing to step around now.) */}
+            {!drill && (
+              <AccountChip view={account} onSwitch={null} />
+            )}
             {drill && (
               <>
                 <span
@@ -2819,6 +3976,11 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                 </button>
               </>
             )}
+            {/* How fast the entries are coming, on the bar for the reason the
+                account chip is: `GuardMeters` says it in full, but the panel it
+                lives in opens to 0x0 until asked for, and a warning you have to
+                go looking for is one that arrives after the trade. */}
+            {pace && <PaceChip reason={pace} />}
             <Link to="/charts/replay/history" className="sim-topbar-link" title="Every attempt you've recorded">
               History →
             </Link>
@@ -2848,7 +4010,7 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
               onClick={() => setTransportOpen((o) => !o)}
               aria-pressed={transportOpen}
               title={
-                openPos
+                openPos && !drill
                   ? "Away while a position is on — scrubbing with size on would rewind past your own entry. k still plays and pauses, , and . still step."
                   : transportOpen
                     ? "Hide the transport — k still plays and pauses, , and . still step"
@@ -2866,11 +4028,14 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           // to need a copy on every canvas.
           value={focusedPane === 0 ? tfId : paneTfIds[focusedPane]}
           onChange={(id) => changePaneTimeframe(focusedPane, id)}
-          options={TIMEFRAMES.map((t) => ({ key: t.id, label: t.label }))}
+          options={tfOptions}
           // The tick bar (unique to a tape-driven chart), the default, and the
           // two the research vocabulary is written in. 30s/2m/3m/1h go behind ⋯.
           primary={["500t", "1m", "5m", "15m"]}
           compact
+          // Every bar here is built from prints in the browser, so the eight are
+          // a starting point rather than the set: type 45s or 1500t behind the ⋯.
+          custom
         />
         {/* The community indicator catalogue, next to the bucketing because both
             answer "what am I reading this tape through". Page-level on purpose:
@@ -2981,12 +4146,12 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                 />
               </span>
             </label>
-            {drillBlocked && (
+            {drillDrawBlocked && (
               <span
                 className="neg"
                 style={{ fontSize: 11, alignSelf: "end", paddingBottom: 6, maxWidth: 220 }}
               >
-                {drillBlocked}
+                {drillDrawBlocked}
               </span>
             )}
           </>
@@ -3057,9 +4222,9 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           type="button"
           style={{ ...btn(palette.bg2), alignSelf: "end", padding: "6px 10px" }}
           onClick={() => daysQ.data?.days.length && anyDay(daysQ.data.days)}
-          disabled={!daysQ.data?.days.length || !!drillBlocked}
+          disabled={!daysQ.data?.days.length || !!drillDrawBlocked}
           title={
-            drillBlocked ??
+            drillDrawBlocked ??
             (drill
               ? "Draw the next rep — a new day and a new hour of it"
               : "Draw another session at random")
@@ -3093,18 +4258,47 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
             rest of the chart's settings moved onto the legend rows they tune.
             It is also what decides the composite row exists at all, and a knob
             that can delete its own panel can't live inside it. */}
+        {/* Per bar, which is why it carries the bar's name under it: the number
+            you see belongs to `governingHist.tf` and not to the page, and a
+            control that silently changed meaning when you pressed 1h would be
+            the quiet kind of wrong. ↺ puts that bar back on the rule. */}
         <label
           style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}
-          title="Draw this many prior sessions to the left of the replay. Real ticks, so they candle on any bar size and profile like the session does — but nothing develops over them, and they can't be traded."
+          title={`Draw this many prior sessions to the left of the replay. Real ticks, so they candle on any bar size and profile like the session does — but nothing develops over them, and they can't be traded.\n\nSet per bar size: this is the ${governingHist.tf.label}'s, and it opens on ${defaultHistoryDays(governingHist.tf)} because that is roughly what a ${governingHist.tf.label} needs to have a readable chart behind it.`}
         >
           Prior days
-          <select value={historyDays} onChange={(e) => setHistoryDays(Number(e.target.value))}>
-            {HISTORY_DAY_OPTIONS.map((n) => (
-              <option key={n} value={n}>
-                {n === 0 ? "none" : `${n} day${n === 1 ? "" : "s"}`}
-              </option>
-            ))}
-          </select>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <select value={historyDays} onChange={(e) => setHistoryDays(Number(e.target.value))}>
+              {HISTORY_DAY_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n === 0 ? "none" : `${n} day${n === 1 ? "" : "s"}`}
+                </option>
+              ))}
+            </select>
+            {histOverridden && (
+              <button
+                type="button"
+                onClick={() => setHistoryDays(null)}
+                title={`Back to ${defaultHistoryDays(governingHist.tf)} — what the ${governingHist.tf.label} asks for on its own`}
+                aria-label={`Reset the ${governingHist.tf.label}'s prior days`}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: palette.muted,
+                  cursor: "pointer",
+                  padding: 0,
+                  fontSize: 13,
+                  lineHeight: 1,
+                }}
+              >
+                ↺
+              </button>
+            )}
+          </span>
+          <span style={{ fontSize: 11, opacity: 0.7 }}>
+            {governingHist.tf.label}
+            {histOverridden ? ` · default ${defaultHistoryDays(governingHist.tf)}` : ""}
+          </span>
         </label>
         {/* What is made of those days, how big a hump has to be to be a node,
             and how much size an event band needs — all three used to sit here,
@@ -3215,18 +4409,26 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
         >
           {isPerfect(fills) ? "Charge fills" : "Perfect fills"}
         </button>
-        <button
-          type="button"
-          style={btn(palette.accent)}
-          onClick={() => {
-            const [h, m] = startTime.split(":").map((x) => parseInt(x, 10));
-            const off = (Number.isFinite(h) ? h * 60 + m : RTH_OPEN_MIN) - RTH_OPEN_MIN;
-            if (sess) seekTo(sess.rth_open_ms + off * 60_000);
-          }}
-          disabled={!ready}
-        >
-          Go to start
-        </button>
+        {/* Not on a locked rep. The start time itself stays — it is where a
+            *new* sitting begins, and the tape build honours it on every fresh
+            session — but this button re-seeks the session already running, so
+            on the funded replay it is the scrubber with an extra step: set
+            15:00, press it, and you have skipped the day. Pick the day again to
+            start it somewhere else. */}
+        {!clockLocked && (
+          <button
+            type="button"
+            style={btn(palette.accent)}
+            onClick={() => {
+              const [h, m] = startTime.split(":").map((x) => parseInt(x, 10));
+              const off = (Number.isFinite(h) ? h * 60 + m : RTH_OPEN_MIN) - RTH_OPEN_MIN;
+              if (sess) seekTo(sess.rth_open_ms + off * 60_000);
+            }}
+            disabled={!ready}
+          >
+            Go to start
+          </button>
+        )}
         {sessionQ.isFetching && <span style={{ color: palette.muted, fontSize: 12 }}>loading tape…</span>}
         {/* The replay is playable while these land — they are context, so they
             simply appear to the left when they arrive. */}
@@ -3249,7 +4451,10 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           account's cause of death are both things you are meant to be unable to
           work around, and a floating badge is exactly the shape of a thing you
           learn to look past. Renders nothing at all on a healthy first account. */}
-      <AccountNotice view={account} receivedAt={accountAt} />
+      {/* `ledger`, not `stakes`: a resettable account has no stakes to speak of
+          and still has a death worth saying out loud — which on paper is every
+          death it will ever have. */}
+      <AccountNotice view={ledger} />
 
       <div className="sim-body">
         <div className="sim-chart-card">
@@ -3290,14 +4495,26 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
               }
               onFocus={() => setFocus(0)}
               onToolsChange={(s) => reportTools(0, s)}
+              // The near-price levels panel, on the trading pane only: a context
+              // pane exists to be glanced at, and this is a box of rows in the
+              // axis gutter of a chart that is already half the width.
+              levelPanel
+              // Arming, on the same pane and for the same reason. Offered only
+              // where the ticket is: a pane that cannot place an order has no
+              // business showing a control that places one.
+              arms={arms}
+              onArmToggle={armToggle}
+              armRace={armRace}
+              onArmRace={() => setArmRace((v) => !v)}
               // The legend's identity line. Blind replay masks the date, not the
               // instrument — you are told what you are trading, never when.
               symbol={sel ? (hidden ? root : sel.symbol) : root}
+              tapeContract={sel && !hidden ? sel.symbol : undefined}
               tfLabel={tf.label}
               // The label is the picker. Every bucketing, not the bar's short
               // list — there is no width to run out of in a popup, and the ⋯ on
               // the bar exists only because a 36px row has an end.
-              tfOptions={TF_OPTIONS}
+              tfOptions={tfOptions}
               onTfChange={(id) => changePaneTimeframe(0, id)}
               onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
@@ -3309,11 +4526,17 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
               // Where a click on this canvas actually sends, and what it is
               // worth there. Both omitted on the mini, where the tape's own
               // contract is the one being traded and saying so twice would be
-              // a badge that never turns off.
-              routedTo={onMicro ? microSym : undefined}
-              pointValue={onMicro ? pointValue : undefined}
+              // a badge that never turns off — and omitted in a review, which
+              // sends nowhere at all (`routedMicro`).
+              routedTo={routedTo}
+              pointValue={routedMicro ? pointValue : undefined}
               ticket={ticket}
               onTicketChange={changeTicket}
+              // Only the main chart feeds the sizer. The extra panes draw the
+              // same tape on other timeframes, and a ruler that changed its
+              // mind depending on which pane closed a bar last is a ruler that
+              // sizes a ticket at random.
+              onVolRuler={setVolRead}
               mark={hud.lastPrice}
               canPlaceOrders={ready}
               hideDates={hidden}
@@ -3321,7 +4544,10 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
               bigLots={bigLots}
               composite={historyDays > 0 ? composite : "off"}
               nodeProm={nodeProm}
+              shelfParams={shelfParams}
+              shelfField={shelfField}
               modernVwap={mvParams}
+              dynamicSwingVwap={dsvParams}
               studies={studies[0] ?? EMPTY_SPECS}
               onStudiesChange={(next) => setPaneStudies(0, next)}
               onLayers={(l) => reportLayers(0, l)}
@@ -3367,7 +4593,21 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                   is a ticket split across two surfaces — and under 1100px the
                   panel gets no column at all, so this is the only order entry
                   there is. See TicketKnobs. */}
-              <TicketKnobs ticket={ticket} onChange={changeTicket} tickUsd={tickUsd} />
+              <TicketKnobs
+                ticket={ticket}
+                onChange={changeTicket}
+                tickUsd={tickUsd}
+                sizer={sizerCtx}
+                onApplySizing={applySizing}
+                preset={presetCtx ?? undefined}
+                onApplyPreset={applyPreset}
+                activeBracket={activeBracket}
+                reverse={{
+                  on: reverseEntry,
+                  applying: reversing,
+                  onToggle: () => setReverseEntry((v) => !v),
+                }}
+              />
               {openPos && (
                 <>
                   <span className="sim-quick-pos">
@@ -3375,8 +4615,8 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                       {openPos.side === "long" ? "LONG" : "SHORT"} ×{openPos.size}
                     </span>
                     <span style={{ color: palette.muted }}>@ {fmtPts(openPos.entryPrice)}</span>
-                    <b style={{ color: hud.openPnl >= 0 ? palette.green : palette.red }}>
-                      {fmtUsd(hud.openPnl)}
+                    <b style={{ color: openNow >= 0 ? palette.green : palette.red }}>
+                      {fmtUsd(openNow)}
                     </b>
                   </span>
                   <button
@@ -3389,34 +4629,47 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                   </button>
                 </>
               )}
-              <button
-                type="button"
-                className="sim-quick-btn sell"
-                onClick={() => placeMarket("short")}
-                disabled={!ready}
-                title={
-                  openPos?.side === "long"
-                    ? `Sell ${size} at market (s) — takes size off the long`
-                    : "Sell at market (s)"
-                }
-              >
-                <span>SELL</span>
-                <b>{Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}</b>
-              </button>
-              <button
-                type="button"
-                className="sim-quick-btn buy"
-                onClick={() => placeMarket("long")}
-                disabled={!ready}
-                title={
-                  openPos?.side === "short"
-                    ? `Buy ${size} at market (w) — takes size off the short`
-                    : "Buy at market (w)"
-                }
-              >
-                <span>BUY</span>
-                <b>{Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}</b>
-              </button>
+              {/* Both market buttons off one list, because reversed they are
+                  each other and two hand-written copies is how one of them ends
+                  up green over a sell. `gesture` is the button you press — the
+                  key it answers to and the side it has always meant — and
+                  `sent` is what leaves the ticket; everything you can see is
+                  the second one, so the label is never a claim the order
+                  contradicts. Reversed and flat, that swaps the pair: the green
+                  BUY is on the left, which is the signal that the knob is on. */}
+              {([
+                { gesture: "short" as Side, key: "s" },
+                { gesture: "long" as Side, key: "w" },
+              ]).map(({ gesture, key }) => {
+                const sent = reversing ? otherSide(gesture) : gesture;
+                const long = sent === "long";
+                const verb = long ? "Buy" : "Sell";
+                // Which position this click would eat into, if any — the
+                // tooltip the dock has always shown, now asked about the side
+                // actually going out.
+                const off = openPos && openPos.side !== sent ? openPos.side : null;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`sim-quick-btn ${long ? "buy" : "sell"}`}
+                    onClick={() => placeMarket(gesture)}
+                    disabled={!ready}
+                    title={
+                      off
+                        ? `${verb} ${size} at market (${key}) — takes size off the ${off}`
+                        : reversing
+                          ? `${verb} at market (${key}) — reversed: ${key} has always meant ` +
+                            `${gesture === "long" ? "buy" : "sell"}, and the knob sends the other one ` +
+                            `until you have size on`
+                          : `${verb} at market (${key})`
+                    }
+                  >
+                    <span>{long ? "BUY" : "SELL"}</span>
+                    <b>{Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}</b>
+                  </button>
+                );
+              })}
             </QuickDock>
             </div>
             {/* The dividers. Read off the layout rather than counted here:
@@ -3472,8 +4725,9 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                     onFocus={() => setFocus(i)}
                     onToolsChange={(s) => reportTools(i, s)}
                     symbol={sel ? (hidden ? root : sel.symbol) : root}
+                    tapeContract={sel && !hidden ? sel.symbol : undefined}
                     tfLabel={paneTfsRef.current[i].label}
-                    tfOptions={TF_OPTIONS}
+                    tfOptions={tfOptions}
                     onTfChange={(id) => changePaneTimeframe(i, id)}
                     onAnchorChange={(t) => setPaneAnchor(i, t)}
                     onBracketChange={moveBracket}
@@ -3482,8 +4736,8 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                     onOrderCancel={cancelOrder}
                     onPlaceOrder={placeAt}
                     onPlaceTyped={placeTyped}
-                    routedTo={onMicro ? microSym : undefined}
-                    pointValue={onMicro ? pointValue : undefined}
+                    routedTo={routedTo}
+                    pointValue={routedMicro ? pointValue : undefined}
                     ticket={ticket}
                     onTicketChange={changeTicket}
                     mark={hud.lastPrice}
@@ -3493,7 +4747,10 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                     bigLots={bigLots}
                     composite={historyDays > 0 ? composite : "off"}
                     nodeProm={nodeProm}
+                    shelfParams={shelfParams}
+                    shelfField={shelfField}
                     modernVwap={mvParams}
+                    dynamicSwingVwap={dsvParams}
                     studies={studies[i] ?? EMPTY_SPECS}
                     onStudiesChange={(next) => setPaneStudies(i, next)}
                     onLayers={(l) => reportLayers(i, l)}
@@ -3532,54 +4789,68 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
               >
                 {playing ? "❚❚ Pause" : "▶ Play"}
               </button>
-              <button
-                type="button"
-                style={btn(palette.card)}
-                onClick={stepBack}
-                disabled={!ready || drill}
-                title={
-                  drill
-                    ? "Not in a drill — a rep only runs forwards, or its base rate is measuring your hindsight"
-                    : "One bar back (,) — a rewind: anything done inside the un-happened bar un-happens"
-                }
-              >
-                ⏮
-              </button>
-              <button
-                type="button"
-                style={btn(palette.card)}
-                onClick={stepBar}
-                disabled={!ready || playing}
-                title="One bar forward (.)"
-              >
-                ⏭ Step {tf.label}
-              </button>
-              <label style={{ fontSize: 12, color: palette.muted }} title="Replay speed">
-                {/* The word goes on a short viewport; "30×" says what it is. */}
-                <span className="sim-lbl">Speed</span>
-                <select value={speed} onChange={(e) => onSpeed(Number(e.target.value))} style={{ marginLeft: 6 }}>
-                  {SIM_SPEEDS.map((s) => (
-                    <option key={s} value={s}>
-                      {s}×
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <input
-                type="range"
-                // In a drill the floor is where you already are — which is the
-                // high-water mark, since the clock never goes back. `seekTo`
-                // refuses a backward drag anyway; this is so the control looks
-                // like what it does rather than flashing a refusal at every
-                // grab of the handle.
-                min={drill ? hud.clockMs : scrubMin}
-                max={scrubMax}
-                step={1000}
-                value={hud.clockMs}
-                onChange={(e) => seekTo(Number(e.target.value))}
-                disabled={!ready}
-                className="sim-scrub"
-              />
+              {/* Everything between Pause and the clock is a way to not sit
+                  through the tape, so a locked rep has none of it — no dead
+                  controls either, because a greyed scrubber is still a scrubber
+                  you keep reaching for. See `clockLocked`. */}
+              {!clockLocked && (
+                <>
+                  <button
+                    type="button"
+                    style={btn(palette.card)}
+                    onClick={stepBack}
+                    disabled={!ready}
+                    title="One bar back (,) — a rewind: anything done inside the un-happened bar un-happens"
+                  >
+                    ⏮
+                  </button>
+                  <button
+                    type="button"
+                    style={btn(palette.card)}
+                    onClick={stepBar}
+                    disabled={!ready || playing}
+                    title="One bar forward (.)"
+                  >
+                    ⏭ Step {tf.label}
+                  </button>
+                  <label
+                    style={{ fontSize: 12, color: palette.muted }}
+                    title={`Replay speed — [ and ] walk the ladder, hold Ctrl for ${TURBO_MULT}×`}
+                  >
+                    {/* The word goes on a short viewport; "30×" says what it is. */}
+                    <span className="sim-lbl">Speed</span>
+                    <select value={speed} onChange={(e) => onSpeed(Number(e.target.value))} style={{ marginLeft: 6 }}>
+                      {SIM_SPEEDS.map((s) => (
+                        <option key={s} value={s}>
+                          {s}×
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {/* The <select> still reads 30 while Ctrl is held, so the tape
+                      running at 300 has to say so somewhere. */}
+                  <TurboChip on={turbo.on} speed={speed} />
+                  <input
+                    type="range"
+                    // Holding a position, the floor is the fill that opened it:
+                    // back past there the trade un-happens. `seekTo` refuses that
+                    // drag anyway; this is so the control looks like what it does
+                    // rather than flashing a refusal at every grab of the handle.
+                    // A drill carried a second floor here — the high-water mark,
+                    // since its clock never went back — and lost it with D8.
+                    //
+                    // A review has neither floor: the whole session is reachable at
+                    // any moment, replayed position on the screen or not.
+                    min={openPos && !reviewing ? openPos.fillMs : scrubMin}
+                    max={scrubMax}
+                    step={1000}
+                    value={hud.clockMs}
+                    onChange={(e) => seekTo(Number(e.target.value))}
+                    disabled={!ready}
+                    className="sim-scrub"
+                  />
+                </>
+              )}
               <span className="sim-clock" style={{ fontFamily: "monospace", color: palette.text, minWidth: 78 }}>
                 {fmtClock(hud.clockMs)}
                 {countdownMs != null && (
@@ -3606,8 +4877,10 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           {/* The ▤ opener moved to the top bar — see ChartTopBar's `right` slot.
               What is left here reports rather than summons. */}
           {/* Only offered once the panel is out: pinning something you cannot
-              see is a setting with no visible effect. */}
-          {sheetOpen && (
+              see is a setting with no visible effect. Not during a review
+              either — the column is forced there (see `panelPinned`), so the
+              button would be a toggle that changes nothing while claiming to. */}
+          {sheetOpen && !reviewing && (
             <button
               type="button"
               className={`sim-rail-btn${railPinned ? " on" : ""}`}
@@ -3648,8 +4921,20 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
             opener now, and the market buttons already quote the last price. */}
         {/* Open by force while reviewing — the panel *is* the review, and a
             page that opened to make you look at something should not open with
-            it hidden behind a button. */}
-        <div ref={panelRef} className={`sim-panel${sheetOpen || reviewing || dead ? " open" : ""}`}>
+            it hidden behind a button. A drill's rep-end review counts: the tags
+            are forced now, and a lock whose key is behind a closed sheet reads
+            as a broken page. */}
+        <div
+          ref={panelRef}
+          className={
+            `sim-panel${sheetOpen || reviewing || autopsy || (drill && repOver) ? " open" : ""}` +
+            // A review owns the whole dock and is the one card that can be taller
+            // than it — seventeen trades is seventeen cards. The class hands the
+            // scrolling to the card list so the panel's own feet (the session
+            // note, File review) stay put; see the rule in index.css.
+            `${reviewing ? " reviewing" : ""}`
+          }
+        >
           {/* Sticky, so it stays grabbable however far the ticket below it has
               been scrolled. Hidden when pinned — a column in normal flow has
               nowhere to be dragged to. */}
@@ -3672,11 +4957,13 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
             <span />
           </div>
           {/* The autopsy. Ahead of everything else in the panel, because while it
-              is up there is nothing else on this page worth reading. */}
-          {dead && account && (
+              is up there is nothing else on this page worth reading — but *above*
+              the ticket rather than instead of it once the account is resettable,
+              since from that moment the thing to do about the death is take the
+              next sitting. */}
+          {autopsy && ledger && (
             <AutopsyCard
-              view={account}
-              receivedAt={accountAt}
+              view={ledger}
               rows={attemptsQ.data?.attempts ?? []}
               onWriteCause={(t) => writeCause.mutate(t)}
               writing={writeCause.isPending}
@@ -3692,37 +4979,77 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
           {reviewing && reviewMark && (
             <ReviewPanel
               attemptId={reviewMark.attemptId}
-              flags={reviewFlags}
+              trades={reviewDetail?.trades ?? []}
+              journal={reviewJournalQ.data?.trades ?? []}
+              vocab={vocab.data ?? null}
+              tagSuggestions={tradeTagsQ.data?.tags ?? []}
+              // What the sitting already carries, so filing re-states it rather
+              // than erasing it. `reviewing` is false until this fetch lands, so
+              // the panel never mounts against a missing note.
+              sessionNote={reviewDetail?.note ?? ""}
               onSeek={(ms) => {
-                // 1x, because the sixty seconds in front of a flagged decision
-                // are the whole content of looking at it again. At 30x they are
-                // two seconds and there is nothing to see.
-                setSpeed(1);
+                // **The transport's speed, not 1×.** This used to force 1× on
+                // every card press, on the grounds that the seconds in front of
+                // a decision are the whole content of looking at it again. True
+                // of the first card and wrong by the fourth: a review is a dozen
+                // seeks, and re-setting the speed after each one is a control
+                // fighting you. The speed is a setting; the transport owns it,
+                // and it is one keystroke away when a card does want slowing
+                // down.
                 seekTo(ms);
+                // And run it. `seekTo` stops the tape — every other caller is a
+                // scrub, where stopping is the point — but a review seek is a
+                // request to *watch* something, and landing paused five seconds
+                // short of the entry looks exactly like a chart with none of
+                // your trades on it. You press seek, the decision plays.
+                play();
               }}
+              // Both modes ask the same four things now: the model column was
+              // the only thing a drill hid, and there is no model column.
+              onSaveTrade={saveTradeAnswers}
+              saving={saveTradeReview.isPending}
               onFile={submitReview}
               filing={fileReview.isPending}
-              error={fileReview.error instanceof Error ? fileReview.error.message : null}
+              error={
+                fileReview.error instanceof Error
+                  ? fileReview.error.message
+                  : saveTradeReview.error instanceof Error
+                    ? saveTradeReview.error.message
+                    : null
+              }
             />
           )}
 
-          {/* Backtest mode's own review, offered when the rep is over and never
-              forced — 🎲 is live either side of it. Above the ticket rather than
-              replacing it: the rep is finished, but the ticket is what the next
-              draw arrives into, and a panel that hid it would make "next rep"
-              feel like leaving the page. */}
+          {/* Backtest mode's own review, opened when the rep is over. The
+              answers are forced — 🎲 stays locked while any trade owes, here and
+              at the server — but the panel still sits above the ticket rather
+              than replacing it: the rep is finished, and the ticket is what the
+              next draw arrives into. */}
           {drill && repOver && (
             <DrillReview
               modelName={boundModel?.name ?? "this model"}
               rules={boundModel?.rules ?? []}
               trades={repJournalQ.data?.trades ?? []}
-              saving={saveRules.isPending}
-              error={saveRules.error instanceof Error ? saveRules.error.message : null}
-              onSave={(key, rulesMet) =>
-                saveRules.mutate({ tradeKey: key, rulesMet })
-              }
+              vocab={vocab.data ?? null}
+              tagSuggestions={tradeTagsQ.data?.tags ?? []}
+              saving={saveTradeReview.isPending}
+              error={saveTradeReview.error instanceof Error ? saveTradeReview.error.message : null}
+              onSave={(row, patch) => {
+                // Caught here rather than awaited — this panel's Save is one
+                // card at a time and the failure is already on screen through
+                // `error`; what the catch prevents is an unhandled rejection.
+                //
+                // The rule ticks and the model ride along explicitly: they are
+                // the drill's, these rows were journaled under its binding, and
+                // `PUT /notes` rewrites the whole row — leaving them out would
+                // blank them.
+                void saveTradeAnswers(row, {
+                  ...patch,
+                  modelId: row.model_id ?? drillPrefs.modelId,
+                }).catch(() => {});
+              }}
               onDraw={() => daysQ.data?.days.length && anyDay(daysQ.data.days)}
-              drawBlocked={drillBlocked}
+              drawBlocked={drillDrawBlocked}
             />
           )}
 
@@ -3780,8 +5107,9 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                   <option value="micro">{microSym}</option>
                 </select>
                 {/* The money, because that is the only reason to touch this
-                    control — and because every box under it is in ticks. */}
-                <span title="Dollars per tick on the routed contract. The stop and target below are distances in ticks, so this is what turns the geometry into risk.">
+                    control — and because it is the rate every box under it is
+                    read through, whichever unit that box is in. */}
+                <span title="Dollars per tick on the routed contract. It is what turns the stop and target below into risk — and, on a leg pinned to dollars, what turns the money back into a distance.">
                   ${tickUsd % 1 === 0 ? tickUsd.toFixed(0) : tickUsd.toFixed(2)}/tick
                 </span>
                 {onMicro && (
@@ -3806,22 +5134,71 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                 The floor comes off the account and the day off the simulation,
                 which is exactly the join phase 10 made possible — `equity` here
                 is the same live figure `accountStop` fires on, so the meter and
-                the auto-flatten cannot disagree about how much room is left. */}
+                the auto-flatten cannot disagree about how much room is left.
+                Both read `stakes`, so in a drill both go quiet together: the
+                floor meter simply does not draw, which is the case GuardMeters
+                was already written for. The day's own rules still show — those
+                are rules under test, and a drill is where you test them. */}
+            {/* Which account this sitting is priced on, in the same control
+                Live uses and in the same place: at the top of the ticket, above
+                the meters it decides the numbers of. Refused while a sitting is
+                open or a review is on screen — an attempt's account is stamped
+                when it opens and can never be moved, so the switch has to be a
+                thing you do *between* sittings. (It used to be refused on an
+                owed review too, so the review could not be walked around by
+                changing accounts; there is nothing to walk around now.) */}
+            {!drill && acctId && (
+              <div style={{ marginBottom: 8 }}>
+                <AccountSwitch
+                  accountId={acctId}
+                  onSwitch={!attemptRec.attempt && !reviewing ? switchAccount : null}
+                />
+              </div>
+            )}
             <GuardMeters
               feed={{
                 on: guardsOn,
                 levels: guards,
                 realized: day.realized,
                 trades: day.trades,
+                legs: day.legs,
                 locked: day.locked,
                 slow: day.slow,
-                equity: account ? account.equity + day.realized + hud.openPnl : null,
-                floor: account?.floor ?? null,
+                equity: equityNow,
+                // The *live* floor, not the view's — on an intraday-trailing
+                // account they differ by whatever this sitting has been up, and
+                // the meter must read the same number the auto-flatten fires on.
+                floor: live?.floor ?? null,
+                floorTotal: stakes?.rules.max_loss ?? null,
+                trailing: stakes?.rules.trailing ?? null,
+                // The account's own daily limit, counted against the tape day —
+                // not the session's realised, and not the switchable personal
+                // stop. `dayTotal` counts the open position because that is what
+                // the limit is enforced on: a position that would take the day
+                // through it is closed rather than noticed afterwards.
+                dayLimit: stakes?.rules.day_loss ?? null,
+                dayLeft:
+                  stakes && live
+                    ? Math.max(0, stakes.rules.day_loss + Math.min(0, live.dayTotal))
+                    : null,
+                // The goal arms on *booked* P&L — a runner through the number
+                // has not made the day — so this counts `dayRealized`.
+                goal: stakes?.rules.day_goal ?? null,
+                goalLeft:
+                  stakes?.rules.day_goal && live
+                    ? Math.max(0, stakes.rules.day_goal - live.dayRealized)
+                    : null,
+                goalArmed: !!(
+                  stakes?.rules.day_goal &&
+                  live &&
+                  live.dayRealized >= stakes.rules.day_goal
+                ),
                 size: openPos?.size ?? 0,
-                cap: onMicro ? (account?.caps.micros ?? 40) : (account?.caps.minis ?? 4),
+                cap: onMicro ? (stakes?.caps.micros ?? 40) : (stakes?.caps.minis ?? 4),
                 fastShare: day.fastShare,
                 medianGapS: day.medianGapS,
                 tradedInTheHole: day.tradedInTheHole,
+                pace,
                 refused,
               }}
             />
@@ -3843,8 +5220,16 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                 Size
                 <input type="number" min={1} value={size} onChange={(e) => setSize(Math.max(1, Number(e.target.value)))} style={{ width: "100%" }} />
               </label>
-              {legField("stop", "Stop (t)", stopTicks, applyStop, lastStopRef)}
-              {legField("target", "Target (t)", targetTicks, applyTarget, lastTargetRef)}
+              {legField("stop", "Stop", stopTicks, stopUsd, applyStop, pinStop, lastStopRef)}
+              {legField(
+                "target",
+                "Target",
+                targetTicks,
+                targetUsd,
+                applyTarget,
+                pinTarget,
+                lastTargetRef,
+              )}
             </div>
             {/* The ladder. Collapsed to its switch until it's on: three more
                 distance boxes are a lot of ticket for something most replays
@@ -3915,6 +5300,26 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                 </div>
               )}
             </div>
+            {/* The whole card the dock's A–D chip offers — shapes and sizer
+                both — open here because this is where the fields they fill are
+                sitting: the grid above, the ladder above that, the size at the
+                top. Under them rather than over them on purpose: you read what
+                the ticket currently is, then the shortcut that would replace it.
+                It was on the blotter for a day and belongs here, next to the
+                fields, not next to the record of what the fields already did. */}
+            {presetCtx && (
+              <div className="sim-preset-block">
+                <TicketCard
+                  preset={presetCtx}
+                  size={size}
+                  tickUsd={tickUsd}
+                  onApply={applyPreset}
+                  active={activeBracket}
+                  sizer={sizerCtx}
+                  onApplySizing={applySizing}
+                />
+              </div>
+            )}
             <div className="sim-kinds" style={{ marginTop: 10 }}>
               {(["market", "limit", "stop"] as OrderType[]).map((t) => (
                 <button
@@ -3950,37 +5355,89 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                 </div>
               </label>
             )}
+            {/* Reverse, beside the buttons it rewrites rather than up with the
+                distances: it is not a property of the bracket, and the two
+                things it needs to be read against — the type row above and the
+                pair below — are both right here. The dock draws the same
+                setting as a chip; one state, two surfaces, so they cannot
+                disagree. */}
+            <label
+              style={{
+                fontSize: 11,
+                color: palette.muted,
+                marginTop: 10,
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                opacity: resting ? 0.5 : 1,
+              }}
+              title={
+                resting
+                  ? "Market orders only — a resting order's side is decided by which side of the market it sits on, and there is no bid above the offer to flip it into."
+                  : "Send the opposite side of the button you press, so a model can be traded backwards without doing the flip in your head. Opening only: with size on, adds and exits mean what they say."
+              }
+            >
+              <input
+                type="checkbox"
+                checked={reverseEntry}
+                onChange={(e) => setReverseEntry(e.target.checked)}
+                style={{ margin: 0 }}
+              />
+              Reverse entries
+              {reverseEntry && !resting && (
+                <b style={{ marginLeft: "auto", color: reversing ? palette.gold : palette.muted }}>
+                  {reversing ? "swapped" : "stands down — position on"}
+                </b>
+              )}
+            </label>
+            {/* The same pair as the dock's, and mapped for the same reason —
+                except that here only the market half reverses. A resting
+                order's side is the price's to decide, so `sent` collapses to
+                the gesture the moment the ticket is on limit or stop, and the
+                geometry refusals below go on naming the order you asked for. */}
             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-              <button
-                type="button"
-                style={{ ...btn(palette.green), flex: 1, opacity: canLong ? 1 : 0.4 }}
-                onClick={() => submit("long")}
-                disabled={!ready || !canLong}
-                title={
-                  resting && !canLong
-                    ? wantsAbove
-                      ? "A buy stop has to sit above the market"
-                      : "A bid has to rest below the market"
-                    : undefined
-                }
-              >
-                {resting ? (wantsAbove ? "Buy stop" : "Buy limit") : "Buy"}
-              </button>
-              <button
-                type="button"
-                style={{ ...btn(palette.red), flex: 1, opacity: canShort ? 1 : 0.4 }}
-                onClick={() => submit("short")}
-                disabled={!ready || !canShort}
-                title={
-                  resting && !canShort
-                    ? wantsAbove
-                      ? "A sell stop has to sit below the market"
-                      : "An offer has to rest above the market"
-                    : undefined
-                }
-              >
-                {resting ? (wantsAbove ? "Sell stop" : "Sell limit") : "Sell"}
-              </button>
+              {([
+                { gesture: "long" as Side, can: canLong },
+                { gesture: "short" as Side, can: canShort },
+              ]).map(({ gesture, can }) => {
+                const sent = reversing && !resting ? otherSide(gesture) : gesture;
+                const long = sent === "long";
+                return (
+                  <button
+                    key={gesture}
+                    type="button"
+                    style={{ ...btn(long ? palette.green : palette.red), flex: 1, opacity: can ? 1 : 0.4 }}
+                    onClick={() => submit(gesture)}
+                    disabled={!ready || !can}
+                    title={
+                      resting && !can
+                        ? long
+                          ? wantsAbove
+                            ? "A buy stop has to sit above the market"
+                            : "A bid has to rest below the market"
+                          : wantsAbove
+                            ? "A sell stop has to sit below the market"
+                            : "An offer has to rest above the market"
+                        : reversing && !resting
+                          ? `Sends a ${long ? "buy" : "sell"} — the reverse knob is on, and it stops ` +
+                            `applying once you have size on`
+                          : undefined
+                    }
+                  >
+                    {resting
+                      ? long
+                        ? wantsAbove
+                          ? "Buy stop"
+                          : "Buy limit"
+                        : wantsAbove
+                          ? "Sell stop"
+                          : "Sell limit"
+                      : long
+                        ? "Buy"
+                        : "Sell"}
+                  </button>
+                );
+              })}
             </div>
             {/* The gesture that does all of this without the ticket. Said here
                 because it is the only place a modifier can be advertised — you
@@ -3992,7 +5449,14 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
               <b>press and hold</b> (right-click) a price for the full ticket.
               <br />
               Keys: <b>w</b> buy · <b>s</b> sell · <b>q</b> flatten and cancel everything ·{" "}
-              <b>k</b> play/pause · <b>,</b>/<b>.</b> bar back/forward · <b>[</b>/<b>]</b> speed ·{" "}
+              <b>k</b> play/pause ·{" "}
+              {/* The transport keys are only advertised where they do anything:
+                  a hint listing a key that no-ops is worse than no hint. */}
+              {!clockLocked && (
+                <>
+                  <b>,</b>/<b>.</b> bar back/forward · <b>[</b>/<b>]</b> speed ·{" "}
+                </>
+              )}
               <b>1–8</b> bar size.
             </div>
             {openPos && (
@@ -4006,8 +5470,8 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                     </span>
                   )}
                 </div>
-                <div style={{ fontSize: 20, fontFamily: "monospace", color: hud.openPnl >= 0 ? palette.green : palette.red }}>
-                  {fmtUsd(hud.openPnl)}
+                <div style={{ fontSize: 20, fontFamily: "monospace", color: openNow >= 0 ? palette.green : palette.red }}>
+                  {fmtUsd(openNow)}
                 </div>
                 {/* The live bracket, not the one placed at entry — dragging the
                     chart's SL/TP lines is what moves it. One stop and one target
@@ -4229,7 +5693,60 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
                         its own terms. The two are different questions — a
                         +$400 session that took the floor from $900 away to $500
                         away is a good sitting and a worse account. */}
-                    <AccountRecap view={account} />
+                    <AccountRecap view={ledger} />
+                    {/* The review, offered. This is the whole of what replaced
+                        the mandatory one on 2026-08-25: ending a traded sitting
+                        used to drop you into review mode with the account
+                        refusing the next sitting until you filed, and what that
+                        produced was a form you filled in to get back to
+                        trading.
+
+                        Two doors and no wrong answer. **Review now** goes to the
+                        tape while the sitting is still in your head, which is
+                        where a review is worth anything. **Review later** marks
+                        it and lets you carry on — the mark is the only thing an
+                        unreviewed sitting carries now, and the history page is
+                        where it is read back. Pressing neither is also an
+                        answer, and the commonest one.
+
+                        Not for drills: the rep-end panel is the drill's own
+                        review and it is already on screen. */}
+                    {!drill && s.trades > 0 && (
+                      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                        <button
+                          type="button"
+                          data-review-now
+                          onClick={reviewThisSitting}
+                          style={{ flex: 1, padding: "5px 0", fontSize: 12, cursor: "pointer" }}
+                          title="Reopen this sitting on its own tape, read-only, with the trades to answer for"
+                        >
+                          Review now
+                        </button>
+                        <button
+                          type="button"
+                          data-review-later
+                          onClick={() =>
+                            void setAttemptReviewLater(!attemptRec.attempt?.review_later)
+                          }
+                          style={{
+                            flex: 1,
+                            padding: "5px 0",
+                            fontSize: 12,
+                            cursor: "pointer",
+                            color: attemptRec.attempt?.review_later
+                              ? palette.orange
+                              : undefined,
+                          }}
+                          title={
+                            attemptRec.attempt?.review_later
+                              ? "Marked. It is on the history page under Flagged — press again to unmark it."
+                              : "Mark it to come back to. Nothing waits on it; it just stops the sitting getting lost."
+                          }
+                        >
+                          {attemptRec.attempt?.review_later ? "🚩 Flagged" : "Review later"}
+                        </button>
+                      </div>
+                    )}
                     <textarea
                       // Keyed by attempt so a new sitting never inherits the
                       // last one's note into an uncontrolled box.
@@ -4246,92 +5763,36 @@ export function Simulator({ mode = "replay" }: { mode?: SimMode } = {}) {
             </div>
           )}
 
-          <div className="sim-card sim-blotter">
-            <div className="sim-sec-t" style={{ flex: "none" }}>
-              Blotter
-              <span className="r">
-                {trades.length} trades · {wins}W
-              </span>
-              {/* Only once there is something to end. Ending is explicit here
-                  and automatic at the end of the tape — both close the sitting
-                  the same way, position and all. */}
-              {trades.length > 0 && attemptRec.status !== "finished" && (
-                <button
-                  type="button"
-                  onClick={endAttempt}
-                  className="sim-cancel"
-                  style={{ ...btn(palette.bg2), color: palette.muted, padding: "2px 8px", fontSize: 11, fontWeight: 500 }}
-                  title="Close anything still open at the last print and file this attempt"
-                >
-                  End attempt
-                </button>
-              )}
-              {attemptRec.error && (
-                <span style={{ color: palette.red, fontSize: 11 }} title={attemptRec.error}>
-                  ⚠ not saved
+          <Blotter
+            rows={blotterRows}
+            total={realized}
+            head={
+              <>
+                <span className="r">
+                  <TradeTally rows={blotterRows} /> · {wins}W
                 </span>
-              )}
-              <span style={{ fontFamily: "monospace", fontWeight: 700, marginLeft: "auto", color: realized >= 0 ? palette.green : palette.red }}>
-                {fmtUsd(realized)}
-              </span>
-            </div>
-            <div className="sim-blotter-list" style={{ flex: 1, minHeight: 0, overflowY: "auto", fontSize: 12 }}>
-              {trades.length === 0 && <div style={{ color: palette.muted }}>No trades yet.</div>}
-              {trades
-                .slice()
-                .reverse()
-                .map((t) => (
-                  <div
-                    key={t.id}
-                    style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: `1px solid ${palette.cardBorder}` }}
+                {/* Only once there is something to end. Ending is explicit here
+                    and automatic at the end of the tape — both close the sitting
+                    the same way, position and all. */}
+                {trades.length > 0 && attemptRec.status !== "finished" && (
+                  <button
+                    type="button"
+                    onClick={endAttempt}
+                    className="sim-cancel"
+                    style={{ ...btn(palette.bg2), color: palette.muted, padding: "2px 8px", fontSize: 11, fontWeight: 500 }}
+                    title="Close anything still open at the last print and file this attempt"
                   >
-                    <span style={{ color: t.side === "long" ? palette.green : palette.red }}>
-                      {t.side === "long" ? "L" : "S"}×{t.size}
-                      {/* Named only when this row is not in the contract the
-                          ticket is pointed at now — which is the only time the
-                          head of the panel doesn't already say it, and the only
-                          time two rows of "×1" mean different money. */}
-                      {microSym && t.micro !== onMicro && (
-                        <span
-                          style={{ color: palette.muted, fontSize: 10, marginLeft: 4 }}
-                          title={`Traded as ${t.micro ? microSym : root} — the contract the order was sent to, not the one selected now.`}
-                        >
-                          {t.micro ? microSym : root}
-                        </span>
-                      )}
-                    </span>
-                    <span style={{ color: palette.muted }}>
-                      {t.openType === "market" ? "" : `${t.openType === "stop" ? "stp" : "lmt"}→`}
-                      {t.reason}
-                    </span>
-                    {/* Stake R leads — it is the one that says what the account
-                        did. Excursion R only earns its own column when the two
-                        disagree, which is to say when size changed mid-trade;
-                        on an ordinary one-clip trade they are the same number
-                        and printing it twice would just be noise. */}
-                    <span style={{ color: palette.muted }} title={rTitle(t)}>
-                      {fmtR(t.rCash)}
-                      {t.r != null && t.rCash != null && Math.abs(t.r - t.rCash) > 0.005 && (
-                        <span style={{ opacity: 0.6 }}> · {fmtR(t.r)}e</span>
-                      )}
-                    </span>
-                    {/* Net, like everything else on this page — the gross and
-                        the fee are in the tooltip, where the difference is
-                        worth seeing without the column having to carry it. */}
-                    <span
-                      style={{ fontFamily: "monospace", color: t.pnl >= 0 ? palette.green : palette.red }}
-                      title={
-                        t.fees > 0
-                          ? `${fmtUsd(t.pnl + t.fees)} gross − ${fmtUsd(t.fees)} commission · in ${t.entryPrice} out ${t.exitPrice}`
-                          : `in ${t.entryPrice} out ${t.exitPrice}`
-                      }
-                    >
-                      {fmtUsd(t.pnl)}
-                    </span>
-                  </div>
-                ))}
-            </div>
-          </div>
+                    End attempt
+                  </button>
+                )}
+                {attemptRec.error && (
+                  <span style={{ color: palette.red, fontSize: 11 }} title={attemptRec.error}>
+                    ⚠ not saved
+                  </span>
+                )}
+              </>
+            }
+          />
         </div>
       </div>
     </div>

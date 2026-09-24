@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends
 from journal import db, metrics
 
 from .. import deps
-from ..scope import Scope, resolve_scope
+from ..scope import Scope, resolve_scope, text_cell
 from ..serialize import sanitize
 
 router = APIRouter()
@@ -80,8 +80,8 @@ def confluence_stats(scope: Scope = Depends(resolve_scope)) -> dict:
     conf_map: dict[str, list[str]] = {}
     if not notes_df.empty:
         for _, r in notes_df.iterrows():
-            setup_map[r["trade_key"]] = json.loads(r["setups_json"] or "[]")
-            conf_map[r["trade_key"]] = json.loads(r["confluences_json"] or "[]")
+            setup_map[r["trade_key"]] = json.loads(text_cell(r["setups_json"]) or "[]")
+            conf_map[r["trade_key"]] = json.loads(text_cell(r["confluences_json"]) or "[]")
 
     # Baseline: every in-scope trade, the yardstick that lift is measured against.
     baseline = metrics.compute_metrics(df)

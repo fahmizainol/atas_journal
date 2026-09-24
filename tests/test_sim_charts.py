@@ -4,6 +4,11 @@ The profile is only trustworthy if the footprint conserves volume: every tick
 lands in exactly one bar, at exactly one price level. These assert that, since a
 mis-mapped tick would silently shift the POC rather than fail loudly.
 
+Each level also carries its signed aggressor delta, which the chart colours the
+profile's rows by — so the same conservation has to hold for the sign, and
+against the per-bar delta the CVD pane is built from: two readings of one tape
+that disagree are worse than one reading.
+
 Run directly:  ``.venv/bin/python tests/test_sim_charts.py``
 """
 
@@ -19,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
+from api.session_chart import _per_bar_delta  # noqa: E402
 from api.sim_charts import _footprint  # noqa: E402
 from journal.sim import bars as barmod  # noqa: E402
 
@@ -26,14 +32,18 @@ TICK = 0.25
 PER_BAR = 500
 
 
-def _synth(n: int, seed: int = 7) -> pd.DataFrame:
-    """Ticks on the real 0.25 grid, deliberately not a whole number of bars."""
+def _synth(n: int, seed: int = 7, sides: str | None = "A") -> pd.DataFrame:
+    """Ticks on the real 0.25 grid, deliberately not a whole number of bars.
+
+    ``sides`` is the aggressor tag: one letter for a one-sided tape, None for a
+    two-sided one, and ``"N"`` for a feed that tagged nothing.
+    """
     rng = np.random.default_rng(seed)
     return pd.DataFrame({
         "ts_utc": pd.date_range("2025-10-13 13:30", periods=n, freq="100ms", tz="UTC"),
         "price": np.round((20000 + rng.normal(0, 5, n)) * 4) / 4,
         "size": rng.integers(1, 20, n).astype("float64"),
-        "side": "A",
+        "side": sides if sides else rng.choice(["B", "A", "N"], n, p=[0.45, 0.45, 0.1]),
     })
 
 
@@ -44,7 +54,7 @@ def test_footprint_conserves_bar_volume():
 
     assert len(fp) == len(b)
     for i in range(len(b)):
-        assert sum(size for _, size in fp[i]) == float(b["volume"].iloc[i])
+        assert sum(row[1] for row in fp[i]) == float(b["volume"].iloc[i])
 
 
 def test_footprint_prices_stay_inside_their_bar():
@@ -54,8 +64,8 @@ def test_footprint_prices_stay_inside_their_bar():
 
     for i in range(len(b)):
         lo, hi = float(b["low"].iloc[i]), float(b["high"].iloc[i])
-        for price, _ in fp[i]:
-            assert lo <= price <= hi
+        for row in fp[i]:
+            assert lo <= row[0] <= hi
 
 
 def test_footprint_levels_are_unique_and_on_the_tick_grid():
@@ -63,10 +73,55 @@ def test_footprint_levels_are_unique_and_on_the_tick_grid():
     fp = _footprint(t, barmod.tick_bars(t, PER_BAR), TICK)
 
     for rows in fp:
-        prices = [p for p, _ in rows]
+        prices = [r[0] for r in rows]
         assert len(prices) == len(set(prices))  # one entry per level, not per tick
         for p in prices:
             assert abs(round(p / TICK) - p / TICK) < 1e-9
+
+
+def test_footprint_delta_agrees_with_the_per_bar_delta():
+    """The rows the profile is tinted by and the series the CVD pane accumulates
+    are one quantity cut two ways. Summing a bar's levels has to give back that
+    bar's delta exactly — a sign convention that drifted between the two would
+    paint a profile that argues with the pane under it."""
+    t = _synth(2537, sides=None)
+    b = barmod.tick_bars(t, PER_BAR)
+    fp = _footprint(t, b, TICK)
+    per_bar = _per_bar_delta(t, b)
+
+    assert per_bar is not None
+    for i in range(len(b)):
+        assert sum(row[2] for row in fp[i]) == per_bar[i]
+    # And the sign is the app's, not its opposite: a tape of nothing but lifted
+    # offers can only come back positive.
+    lifted = _synth(600, sides="B")
+    buys = _footprint(lifted, barmod.tick_bars(lifted, PER_BAR), TICK)
+    assert all(row[2] > 0 for rows in buys for row in rows)
+
+
+def test_footprint_levels_never_claim_more_delta_than_they_traded():
+    """|delta| <= volume per level, which is what makes the tint's saturation a
+    share of the row rather than an unbounded ratio."""
+    t = _synth(2537, sides=None)
+    fp = _footprint(t, barmod.tick_bars(t, PER_BAR), TICK)
+
+    for rows in fp:
+        for price, size, delta in rows:
+            assert abs(delta) <= size, f"level {price} signed more than it traded"
+
+
+def test_footprint_omits_delta_when_the_feed_tagged_nothing():
+    """An untagged tape has no flow reading, and zeros would be a lie: a level of
+    zero delta means the two sides cancelled there, which is a fact this tape
+    cannot support. The row is two long instead, and the chart's knob reads the
+    length to know the tint has nothing to draw."""
+    t = _synth(2537, sides="N")
+    fp = _footprint(t, barmod.tick_bars(t, PER_BAR), TICK)
+
+    assert any(rows for rows in fp), "the synth traded nothing"
+    for rows in fp:
+        for row in rows:
+            assert len(row) == 2
 
 
 def test_footprint_drops_ticks_past_the_last_full_bar():
@@ -77,7 +132,7 @@ def test_footprint_drops_ticks_past_the_last_full_bar():
     b = barmod.tick_bars(t, PER_BAR)
     fp = _footprint(t, b, TICK)
 
-    covered = sum(size for rows in fp for _, size in rows)
+    covered = sum(row[1] for rows in fp for row in rows)
     last_tick = int(b["end_idx"].iloc[-1])
     assert last_tick == len(b) * PER_BAR - 1 < n  # there IS a trailing remainder
     assert covered == float(t["size"].iloc[: last_tick + 1].sum())

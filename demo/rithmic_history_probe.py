@@ -79,7 +79,8 @@ except ImportError:  # pragma: no cover - dependency is Phase-5 only
     sys.exit("async_rithmic is not installed. Run: uv pip install async_rithmic")
 
 from journal.config import ET_TZ  # noqa: E402
-from journal.live.rithmic import credentials, install_redaction  # noqa: E402
+from journal.live.rithmic import (  # noqa: E402
+    credentials, install_redaction, new_client)
 from journal.sim import ticks as tickmod  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -168,7 +169,10 @@ async def _replay(client: RithmicClient, symbol: str, start: datetime,
 
 async def probe_a_login(creds: dict) -> RithmicClient | None:
     print("\nA. HISTORY_PLANT login")
-    client = RithmicClient(**creds)
+    # Through the factory so the probe characterises the tape the feed would
+    # actually get: RITHMIC_AGGREGATED_QUOTES changes what a bar means, and a
+    # probe that ignored it would report num_trades for the wrong connection.
+    client = new_client(creds)
     try:
         # TICKER too: probe D needs a live subscription, and probe B's contract
         # sanity check is cheaper than a failed replay. ORDER stays shut.

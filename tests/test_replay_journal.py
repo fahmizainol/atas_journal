@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from fastapi import BackgroundTasks
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -85,10 +86,19 @@ def _trade(**over) -> dict:
 
 
 def _save(attempt: dict, trades: list[dict], **over) -> dict:
+    """Drive the handler directly, with a real (but never run) task queue.
+
+    ``BackgroundTasks`` is a plain collector until a response runs it, so the
+    level measurement a finished sitting schedules is *recorded* here and not
+    executed — which is what these tests want: they are about the mirror, and
+    the measurement needs cached ticks they do not have. ``last_background``
+    lets a test assert the scheduling anyway.
+    """
     body = dict(log=LOG, trades=trades, summary={}, discarded=[], rewinds=None,
                 clock_ms=float(EXIT_MS), status="active")
     body.update(over)
-    return router.save_replay(attempt["id"], router.SaveIn(**body))
+    _save.last_background = bg = BackgroundTasks()
+    return router.save_replay(attempt["id"], router.SaveIn(**body), bg)
 
 
 def _rows(**kw) -> list[dict]:

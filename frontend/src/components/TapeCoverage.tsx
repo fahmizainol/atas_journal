@@ -1,9 +1,8 @@
 // What the live store actually holds, and how long the holes stay fillable.
 //
-// Named for the tape rather than "recordings" because this repo already has a
-// `RecordingsCard` and it is about screen-recorded video on the Calendar page.
-// These are recorded *sessions* — `data/live/ticks/`, written by the Rithmic
-// feed and by the harvest sweep behind it.
+// Named for the tape rather than "recordings" because these are recorded
+// *sessions* — `data/live/ticks/`, written by the Rithmic feed and by the
+// harvest sweep behind it.
 //
 // THE ONE DEADLINE. Rithmic replays a *listed* contract back about 120 days and
 // an **expired** one not at all, at any depth. So there are two ceilings and only

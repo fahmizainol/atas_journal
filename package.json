@@ -4,8 +4,10 @@
   "version": "0.1.0",
   "scripts": {
     "dev": "concurrently --names \"api,web\" --prefix-colors \"yellow,cyan\" --kill-others-on-fail \"pnpm dev:api\" \"pnpm dev:web\"",
-    "dev:api": "uv run uvicorn api.main:app --reload --port 8000",
+    "dev:api": "uv run uvicorn api.main:app --reload --reload-dir api --reload-dir src --port 8000",
     "dev:web": "pnpm --dir frontend dev",
+    "dev:phone": "pnpm --dir frontend build && concurrently --names \"api,build\" --prefix-colors \"yellow,magenta\" --kill-others-on-fail \"pnpm dev:api\" \"pnpm build:watch\"",
+    "build:watch": "pnpm --dir frontend exec vite build --watch",
     "smoke": "node tools/browser/smoke.mjs"
   },
   "devDependencies": {

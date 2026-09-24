@@ -1,0 +1,623 @@
+<title>Lucid drawdown simulator — watch the floor move</title>
+
+<style>
+  /* Dark is the default here: this renders in an iframe inside the Lab, which
+     never passes its theme down, and every other research page is dark. Light
+     is opt-in via the OS preference. */
+  :root {
+    --ground: #0F1314;
+    --panel: #171C1D;
+    --ink: #E7EDED;
+    --muted: #98A4A8;
+    --faint: #6C787C;
+    --rule: #2A3234;
+    --carpet: #D2894C;
+    --carpet-soft: #33261C;
+    --ice: #5FB2D2;
+    --ice-soft: #14262F;
+    --accent: #58A9A3;
+    --dead: #C9563F;
+
+    --serif: ui-serif, Georgia, "Times New Roman", serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ground: #F1F4F4; --panel: #FBFCFC; --ink: #14181A; --muted: #5A666B;
+      --faint: #8A9498; --rule: #D5DCDC; --carpet: #A85D2B; --carpet-soft: #EBDDD0;
+      --ice: #2B7E9E; --ice-soft: #D6E7EF; --accent: #1F5F5B; --dead: #A93B26;
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #F1F4F4; --panel: #FBFCFC; --ink: #14181A; --muted: #5A666B;
+    --faint: #8A9498; --rule: #D5DCDC; --carpet: #A85D2B; --carpet-soft: #EBDDD0;
+    --ice: #2B7E9E; --ice-soft: #D6E7EF; --accent: #1F5F5B; --dead: #A93B26;
+  }
+  :root[data-theme="dark"] {
+    --ground: #0F1314; --panel: #171C1D; --ink: #E7EDED; --muted: #98A4A8;
+    --faint: #6C787C; --rule: #2A3234; --carpet: #D2894C; --carpet-soft: #33261C;
+    --ice: #5FB2D2; --ice-soft: #14262F; --accent: #58A9A3; --dead: #C9563F;
+  }
+
+  body {
+    background: var(--ground); color: var(--ink); font-family: var(--sans);
+    font-size: 16px; line-height: 1.6; margin: 0; padding: 2.5rem 1.25rem 4rem;
+  }
+  .wrap { max-width: 68rem; margin: 0 auto; display: flex; flex-direction: column; gap: 2rem; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--faint); margin: 0 0 0.75rem;
+  }
+  h1 {
+    font-family: var(--serif); font-size: clamp(1.9rem, 4.5vw, 2.7rem); font-weight: 600;
+    line-height: 1.12; letter-spacing: -0.015em; text-wrap: balance; margin: 0 0 0.9rem;
+  }
+  h2 { font-family: var(--serif); font-size: 1.25rem; font-weight: 600; margin: 0 0 0.4rem; }
+  .lede { font-size: 1.06rem; color: var(--muted); max-width: 52ch; margin: 0; }
+  p { margin: 0 0 0.9rem; max-width: 68ch; }
+  p:last-child { margin-bottom: 0; }
+  section { display: flex; flex-direction: column; gap: 1rem; }
+  code { font-family: var(--mono); font-size: 0.88em; color: var(--carpet); }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 3px;
+    padding: 1.1rem 1.2rem;
+  }
+
+  /* ---- controls ---- */
+  .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.9rem 1.1rem; }
+  .ctl { display: flex; flex-direction: column; gap: 0.3rem; }
+  .ctl > label {
+    font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--faint);
+  }
+  .seg { display: flex; border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; }
+  .seg button {
+    flex: 1; background: transparent; color: var(--muted); border: 0; cursor: pointer;
+    font-family: var(--sans); font-size: 0.82rem; padding: 0.4rem 0.3rem; line-height: 1.2;
+  }
+  .seg button + button { border-left: 1px solid var(--rule); }
+  .seg button[aria-pressed="true"] { background: var(--carpet-soft); color: var(--ink); font-weight: 600; }
+  .seg button:hover:not([aria-pressed="true"]) { color: var(--ink); }
+
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  input[type="number"] {
+    background: var(--ground); color: var(--ink); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 0.3rem 0.45rem; font-family: var(--mono); font-size: 0.86rem; width: 100%;
+  }
+  .val { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
+  .check { display: flex; align-items: center; gap: 0.45rem; font-size: 0.86rem; color: var(--muted); }
+  .check input { accent-color: var(--accent); }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.2rem; }
+  .actions button {
+    background: var(--ground); color: var(--ink); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 0.45rem 0.85rem; cursor: pointer;
+    font-family: var(--sans); font-size: 0.86rem;
+  }
+  .actions button:hover { border-color: var(--carpet); color: var(--carpet); }
+  .actions button.primary { background: var(--carpet-soft); border-color: var(--carpet); color: var(--ink); font-weight: 600; }
+  .actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ---- readout ---- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 0.9rem; }
+  .stat { display: flex; flex-direction: column; gap: 0.1rem; }
+  .stat .k {
+    font-family: var(--mono); font-size: 0.63rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--faint);
+  }
+  .stat .v { font-family: var(--mono); font-size: 1.18rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .s { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+  .v.good { color: var(--accent); } .v.bad { color: var(--dead); } .v.warn { color: var(--carpet); }
+
+  .banner {
+    border-radius: 3px; padding: 0.55rem 0.8rem; font-size: 0.9rem;
+    font-family: var(--mono); display: none;
+  }
+  .banner.show { display: block; }
+  .banner.dead { background: var(--carpet-soft); border: 1px solid var(--dead); color: var(--ink); }
+  .banner.pass { background: var(--ice-soft); border: 1px solid var(--ice); color: var(--ink); }
+
+  canvas { width: 100%; height: 340px; display: block; border-radius: 3px; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 1rem; font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+  .legend i { display: inline-block; width: 1.5rem; height: 0; border-top-width: 2px; border-top-style: solid; vertical-align: middle; margin-right: 0.35rem; }
+
+  /* ---- ledger ---- */
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 0.78rem; }
+  th, td { text-align: right; padding: 0.32rem 0.5rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  th {
+    color: var(--faint); font-weight: 500; font-size: 0.64rem; letter-spacing: 0.08em;
+    text-transform: uppercase; border-bottom: 1px solid var(--rule);
+  }
+  td:first-child, th:first-child { text-align: left; }
+  tbody tr:nth-child(even) { background: rgba(127, 127, 127, 0.05); }
+  tbody tr.dead td { color: var(--dead); }
+  .neg { color: var(--dead); } .pos { color: var(--accent); }
+  .empty { color: var(--faint); font-style: italic; font-family: var(--sans); font-size: 0.9rem; }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Prop account mechanics · toy</p>
+    <h1>Watch the floor move</h1>
+    <p class="lede">
+      The same random trades, run against the two Lucid drawdown rules. One floor steps
+      once a day. The other follows you up in real time and keeps what you touched.
+    </p>
+  </header>
+
+  <section class="panel">
+    <div class="controls">
+      <div class="ctl">
+        <label>Plan — your account</label>
+        <div class="seg" id="seg-plan">
+          <button data-v="eod" aria-pressed="false">LucidPro · EOD</button>
+          <button data-v="intraday" aria-pressed="true">LucidDaily · intraday</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <label>Account size</label>
+        <div class="seg" id="seg-acct">
+          <button data-v="25K" aria-pressed="false">25K</button>
+          <button data-v="50K" aria-pressed="true">50K</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <label>Contract</label>
+        <div class="seg" id="seg-size">
+          <button data-v="1 NQ" aria-pressed="true">1 NQ</button>
+          <button data-v="5 MNQ" aria-pressed="false">5 MNQ</button>
+          <button data-v="7 MNQ" aria-pressed="false">7 MNQ</button>
+          <button data-v="10 MNQ" aria-pressed="false">10 MNQ</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <label>Win rate</label>
+        <input type="range" id="win" min="20" max="70" step="1" value="40">
+        <span class="val" id="win-v">40%</span>
+      </div>
+      <div class="ctl">
+        <label>Stop (ticks)</label>
+        <input type="range" id="stop" min="8" max="120" step="2" value="50">
+        <span class="val" id="stop-v">50 tk · $0</span>
+      </div>
+      <div class="ctl">
+        <label>Target (R)</label>
+        <input type="range" id="rr" min="0.5" max="4" step="0.25" value="1.5">
+        <span class="val" id="rr-v">1.5R</span>
+      </div>
+      <div class="ctl">
+        <label>Trades per day</label>
+        <input type="range" id="tpd" min="1" max="12" step="1" value="4">
+        <span class="val" id="tpd-v">4</span>
+      </div>
+      <div class="ctl">
+        <label>Seed</label>
+        <input type="number" id="seed" value="7">
+        <span class="val">same seed = same trades</span>
+      </div>
+      <div class="ctl">
+        <label>Options</label>
+        <label class="check"><input type="checkbox" id="dll"> daily loss limit</label>
+        <label class="check"><input type="checkbox" id="ghost" checked> show other floor</label>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="b-trade">Step 1 trade</button>
+      <button id="b-day" class="primary">Run a day</button>
+      <button id="b-week">Run a week</button>
+      <button id="b-end">Run to the end</button>
+      <button id="b-reset">Reset</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="stats" id="stats"></div>
+    <div class="banner" id="banner"></div>
+  </section>
+
+  <section>
+    <canvas id="chart"></canvas>
+    <div class="legend">
+      <span><i style="border-color: var(--accent)"></i>equity (open)</span>
+      <span><i style="border-color: var(--carpet)"></i>your floor</span>
+      <span><i style="border-color: var(--faint); border-top-style: dashed"></i>the other floor</span>
+      <span><i style="border-color: var(--ice); border-top-style: dotted"></i>profit target</span>
+      <span><i style="border-color: var(--faint); border-top-style: dotted"></i>lock (floor stops here)</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Day ledger</h2>
+    <div class="scroll" id="ledger"><p class="empty">Run a day.</p></div>
+  </section>
+
+  <section>
+    <h2>What you are looking at</h2>
+    <p>
+      Both accounts carry the same <strong>Maximum Loss Limit</strong> — $1,000 on the 25K,
+      $2,000 on the 50K — and the same lock: once the balance clears the initial trail
+      balance, the floor freezes at start + $100 and never moves again.
+    </p>
+    <p>
+      The only difference is <em>when the floor is allowed to move</em>. LucidPro steps it
+      once, at the daily close. LucidDaily tracks your running peak — including money that
+      is only open profit. That gap is the <strong>tax</strong> in the ledger: the deepest
+      drop below your running peak, minus the deepest drop below where the day started. It
+      is exactly the profit you touched and gave back, and it is zero on a day you were
+      never green.
+    </p>
+    <p>
+      Trades here are synthetic: an outcome is drawn against the win-rate slider, then a
+      random path is generated to it, so an open position wanders before it resolves. That
+      wandering is the whole point — a floor that only watched closed balances would never
+      see it. Commission is charged as a round turn at entry ($3.50/side on NQ, $0.50/side
+      per micro), matching <code>data/research/replay-trail/intraday_dd.py</code>.
+    </p>
+  </section>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- the two account tables -------------------------------------------
+  const ACCOUNTS = {
+    "25K": { start: 25000, mll: 1000, cap: 26100, target: 1250, dll: 600 },
+    "50K": { start: 50000, mll: 2000, cap: 52100, target: 3000, dll: 1200 },
+  };
+  // label -> [$ per point, $ per side]. Micros are $1.00/RT per contract.
+  const SIZES = {
+    "1 NQ":   [20, 3.50],
+    "5 MNQ":  [10, 2.50],
+    "7 MNQ":  [14, 3.50],
+    "10 MNQ": [20, 5.00],
+  };
+  const TICK = 0.25;                       // NQ tick, in points
+
+  const ui = {
+    plan: "intraday", acct: "50K", size: "1 NQ",
+    win: 40, stop: 50, rr: 1.5, tpd: 4, seed: 7, dll: false, ghost: true,
+  };
+
+  // ---- seeded PRNG so a run can be replayed under the other plan --------
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  let S = null;   // simulation state
+
+  function reset() {
+    const a = ACCOUNTS[ui.acct];
+    S = {
+      rng: mulberry32(ui.seed >>> 0),
+      eq: a.start,                 // realized balance
+      peakClose: a.start,          // EOD regime: high water of daily closes
+      peakRun: a.start,            // intraday regime: high water of open equity
+      day: 0, dayOpen: a.start, dayRealized: 0,
+      dayPeak: a.start, dayTrough: a.start, dayLocked: false,
+      dayFloor: Math.min(a.start, a.cap) - a.mll,   // the floor the day opened on
+      dayRoom: Infinity,                            // closest equity came to it
+      pts: [],                     // {eq, fEod, fItd, day} per step
+      days: [],                    // ledger rows
+      dead: null,                  // {regime, day}
+      passed: null,
+      tax: 0,
+      worstRoom: Infinity,         // closest equity ever came to the live floor
+    };
+    push(a.start);
+    render();
+  }
+
+  const acct = () => ACCOUNTS[ui.acct];
+  const floors = () => {
+    const a = acct();
+    return {
+      eod: Math.min(S.peakClose, a.cap) - a.mll,
+      itd: Math.min(S.peakRun, a.cap) - a.mll,
+    };
+  };
+  const myFloor = () => (ui.plan === "eod" ? floors().eod : floors().itd);
+
+  /** Record one marked-to-market step and test the live floor against it.
+   *
+   *  The peak is taken on every step under both regimes — what differs is only
+   *  which peak the floor is allowed to read (`floors()`), so the ghost line
+   *  stays honest whether or not it is the account of record. */
+  function push(eq) {
+    S.peakRun = Math.max(S.peakRun, eq);
+    const f = floors();
+    S.pts.push({ eq, fEod: f.eod, fItd: f.itd, day: S.day });
+    S.dayPeak = Math.max(S.dayPeak, eq);
+    S.dayTrough = Math.min(S.dayTrough, eq);
+    // Room is measured against the floor AS IT STOOD at each moment — under the
+    // intraday rule it has usually moved since the day opened.
+    const mine = ui.plan === "eod" ? f.eod : f.itd;
+    S.dayRoom = Math.min(S.dayRoom, eq - mine);
+    S.worstRoom = Math.min(S.worstRoom, eq - mine);
+    if (S.dead === null && eq <= mine) S.dead = { regime: ui.plan, day: S.day + 1 };
+  }
+
+  /** A Brownian bridge from 0 to the decided outcome, in ticks. */
+  function tradePath(rng, win, stopTk, targetTk) {
+    const n = 18 + Math.floor(rng() * 55);
+    const end = win ? targetTk : -stopTk;
+    const raw = [];
+    let w = 0;
+    for (let i = 0; i < n; i++) { w += rng() * 2 - 1; raw.push(w); }
+    const drift = raw[n - 1];
+    const amp = Math.max(stopTk, targetTk) * 0.7 / Math.sqrt(n);
+    const hi = targetTk - 0.5, lo = -stopTk + 0.5;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const u = (i + 1) / n;
+      if (i === n - 1) { out.push(end); break; }
+      const bridge = raw[i] - drift * u;
+      out.push(Math.min(hi, Math.max(lo, end * u + bridge * amp)));
+    }
+    return out;
+  }
+
+  function stepTrade() {
+    if (S.dead || S.passed) return false;
+    const a = acct(), [pv, side] = SIZES[ui.size];
+    const tickUsd = pv * TICK, rt = 2 * side;
+    if (ui.dll && S.dayRealized <= -a.dll) { S.dayLocked = true; return false; }
+
+    const stopTk = ui.stop, targetTk = Math.max(1, Math.round(ui.stop * ui.rr));
+    const win = S.rng() < ui.win / 100;
+    const path = tradePath(S.rng, win, stopTk, targetTk);
+    for (const v of path) {
+      push(S.eq + v * tickUsd - rt);
+      if (S.dead) return false;
+    }
+    const net = path[path.length - 1] * tickUsd - rt;
+    S.eq += net;
+    S.dayRealized += net;
+    return true;
+  }
+
+  function endDay() {
+    const a = acct();
+    // The tax: deepest drop below the running peak, less the deepest drop
+    // below where the day opened. Zero on a day that only ever went down.
+    const fromPeak = S.dayPeak - S.dayTrough;
+    const fromOpen = Math.max(0, S.dayOpen - S.dayTrough);
+    const tax = Math.max(0, fromPeak - fromOpen);
+    S.tax += tax;
+    S.days.push({
+      n: S.day + 1, open: S.dayOpen, peak: S.dayPeak, trough: S.dayTrough,
+      close: S.eq, floor: S.dayFloor, tax,
+      room: S.dayRoom === Infinity ? 0 : S.dayRoom,
+      dead: !!S.dead, locked: S.dayLocked,
+    });
+    S.peakClose = Math.max(S.peakClose, S.eq);
+    S.peakRun = Math.max(S.peakRun, S.eq);
+    // The target is measured on settled balance, so it is a close-of-day test.
+    if (S.passed === null && S.dead === null && S.eq >= a.start + a.target) {
+      S.passed = { day: S.day + 1 };
+    }
+    S.day += 1;
+    S.dayOpen = S.eq; S.dayRealized = 0; S.dayPeak = S.eq; S.dayTrough = S.eq;
+    S.dayLocked = false;
+    S.dayFloor = myFloor(); S.dayRoom = Infinity;
+  }
+
+  function runDay() {
+    if (S.dead || S.passed) return false;
+    for (let i = 0; i < ui.tpd; i++) {
+      if (!stepTrade()) break;
+    }
+    endDay();
+    return !S.dead && !S.passed;
+  }
+
+  // ---- rendering ---------------------------------------------------------
+  const $ = (id) => document.getElementById(id);
+  const money = (v) => (v < 0 ? "-$" : "$") + Math.abs(Math.round(v)).toLocaleString();
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+  function drawChart() {
+    const cv = $("chart"), dpr = window.devicePixelRatio || 1;
+    const W = cv.clientWidth, H = cv.clientHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    const g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    g.fillStyle = css("--panel"); g.fillRect(0, 0, W, H);
+
+    const a = acct(), pts = S.pts;
+    const padL = 62, padR = 10, padT = 12, padB = 18;
+    const lo0 = a.cap - a.mll, tgt = a.start + a.target;
+    let lo = Math.min(lo0, tgt), hi = Math.max(lo0, tgt);
+    for (const p of pts) {
+      lo = Math.min(lo, p.eq, p.fEod, p.fItd);
+      hi = Math.max(hi, p.eq, p.fEod, p.fItd);
+    }
+    const span = Math.max(200, hi - lo);
+    lo -= span * 0.08; hi += span * 0.08;
+    const X = (i) => padL + (i / Math.max(1, pts.length - 1)) * (W - padL - padR);
+    const Y = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+
+    // grid + axis
+    g.font = "11px " + css("--mono");
+    g.textAlign = "right"; g.textBaseline = "middle";
+    for (let i = 0; i <= 4; i++) {
+      const v = lo + ((hi - lo) * i) / 4, y = Y(v);
+      g.strokeStyle = css("--rule"); g.lineWidth = 1;
+      g.beginPath(); g.moveTo(padL, y); g.lineTo(W - padR, y); g.stroke();
+      g.fillStyle = css("--faint"); g.fillText(money(v), padL - 6, y);
+    }
+
+    // day separators
+    g.strokeStyle = css("--rule");
+    let prev = 0;
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i].day !== pts[prev].day) {
+        g.globalAlpha = 0.6; g.beginPath();
+        g.moveTo(X(i), padT); g.lineTo(X(i), H - padB); g.stroke(); g.globalAlpha = 1;
+      }
+      prev = i;
+    }
+
+    const hline = (v, color, dash) => {
+      g.save(); g.setLineDash(dash); g.strokeStyle = color; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(padL, Y(v)); g.lineTo(W - padR, Y(v)); g.stroke(); g.restore();
+    };
+    hline(tgt, css("--ice"), [2, 3]);
+    hline(lo0, css("--faint"), [1, 4]);
+
+    if (pts.length > 1) {
+      const line = (key, color, width, dash) => {
+        g.save(); g.setLineDash(dash || []); g.strokeStyle = color; g.lineWidth = width;
+        g.beginPath();
+        for (let i = 0; i < pts.length; i++) {
+          const x = X(i), y = Y(pts[i][key]);
+          i ? g.lineTo(x, y) : g.moveTo(x, y);
+        }
+        g.stroke(); g.restore();
+      };
+      const mine = ui.plan === "eod" ? "fEod" : "fItd";
+      const other = ui.plan === "eod" ? "fItd" : "fEod";
+      if (ui.ghost) line(other, css("--faint"), 1, [4, 3]);
+      line("eq", css("--accent"), 1.5);
+      line(mine, css("--carpet"), 2);
+    }
+
+    if (S.dead) {
+      g.fillStyle = css("--dead"); g.globalAlpha = 0.12;
+      g.fillRect(padL, padT, W - padL - padR, H - padT - padB); g.globalAlpha = 1;
+    }
+  }
+
+  function render() {
+    const a = acct(), [pv, side] = SIZES[ui.size];
+    const f = floors(), mine = ui.plan === "eod" ? f.eod : f.itd;
+    const room = S.eq - mine;
+    const oneLoss = ui.stop * pv * TICK + 2 * side;
+
+    $("stats").innerHTML = [
+      ["Equity", money(S.eq), (S.eq - a.start >= 0 ? "+" : "") + money(S.eq - a.start) + " net",
+       S.eq >= a.start ? "good" : "bad"],
+      ["Your floor", money(mine), ui.plan === "eod" ? "steps at the close" : "follows the peak", "warn"],
+      // Once dead, the closing gap is meaningless — the account was already
+      // gone at its worst moment, which is the number that killed it.
+      S.dead
+        ? ["Room", money(S.worstRoom), "at the moment it breached", "bad"]
+        : ["Room", money(room), (room / oneLoss).toFixed(1) + " losses left", ""],
+      ["Peak held", money(ui.plan === "eod" ? S.peakClose : S.peakRun),
+       ui.plan === "eod" ? "best close" : "best moment", ""],
+      // On Daily this is money the floor actually took. On Pro the same figure
+      // is counterfactual — what Daily would have charged for the same path —
+      // so it must not read as something this account paid.
+      ui.plan === "intraday"
+        ? ["Tax paid", money(S.tax), "touched, not banked", S.tax > 0 ? "warn" : ""]
+        : ["Daily would cost", money(S.tax), "this path, on the other plan", ""],
+      ["Days", String(S.day), (a.start + a.target - S.eq > 0
+        ? money(a.start + a.target - S.eq) + " to target" : "target cleared"), ""],
+    ].map(([k, v, s, cls]) =>
+      `<div class="stat"><span class="k">${k}</span>` +
+      `<span class="v ${cls || ""}">${v}</span><span class="s">${s}</span></div>`).join("");
+
+    const b = $("banner");
+    if (S.dead) {
+      b.className = "banner dead show";
+      b.textContent = `BREACHED on day ${S.dead.day} — ${ui.plan === "eod"
+        ? "the end-of-day floor" : "the intraday floor"} caught the account.`;
+    } else if (S.passed) {
+      b.className = "banner pass show";
+      b.textContent = `Target cleared on day ${S.passed.day} at ${money(S.eq)}.`;
+    } else { b.className = "banner"; b.textContent = ""; }
+
+    const rows = S.days.slice(-25);
+    $("ledger").innerHTML = rows.length === 0
+      ? '<p class="empty">Run a day.</p>'
+      : "<table><thead><tr>" +
+        ["day", "open", "peak", "trough", "close", "P/L", "floor", "room@worst", "tax"]
+          .map((h) => `<th>${h}</th>`).join("") +
+        "</tr></thead><tbody>" +
+        rows.map((r) => {
+          const pl = r.close - r.open;
+          return `<tr class="${r.dead ? "dead" : ""}"><td>${r.n}${r.locked ? " ·dll" : ""}</td>` +
+            `<td>${money(r.open)}</td><td>${money(r.peak)}</td><td>${money(r.trough)}</td>` +
+            `<td>${money(r.close)}</td><td class="${pl < 0 ? "neg" : "pos"}">${pl >= 0 ? "+" : ""}${money(pl)}</td>` +
+            `<td>${money(r.floor)}</td><td class="${r.room <= 0 ? "neg" : ""}">${money(r.room)}</td>` +
+            `<td>${r.tax > 0 ? money(r.tax) : "—"}</td></tr>`;
+        }).join("") + "</tbody></table>";
+
+    $("b-trade").disabled = $("b-day").disabled = $("b-week").disabled =
+      $("b-end").disabled = !!(S.dead || S.passed);
+
+    drawChart();
+  }
+
+  // ---- wiring ------------------------------------------------------------
+  function seg(id, key, after) {
+    $(id).addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+      ui[key] = btn.dataset.v;
+      [...$(id).querySelectorAll("button")]
+        .forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+      if (after) after();
+      reset();
+    });
+  }
+
+  function slider(id, key, fmt) {
+    const el = $(id);
+    const sync = () => {
+      ui[key] = parseFloat(el.value);
+      $(id + "-v").textContent = fmt();
+    };
+    el.addEventListener("input", () => { sync(); reset(); });
+    return sync;
+  }
+  const syncWin = slider("win", "win", () => ui.win + "%");
+  const syncStop = slider("stop", "stop", () => {
+    const [pv, side] = SIZES[ui.size];
+    return ui.stop + " tk · " + money(ui.stop * pv * TICK + 2 * side);
+  });
+  const syncRr = slider("rr", "rr", () => ui.rr + "R");
+  const syncTpd = slider("tpd", "tpd", () => String(ui.tpd));
+
+  $("seed").addEventListener("change", () => {
+    ui.seed = parseInt($("seed").value, 10) || 0; reset();
+  });
+  $("dll").addEventListener("change", () => { ui.dll = $("dll").checked; reset(); });
+  $("ghost").addEventListener("change", () => { ui.ghost = $("ghost").checked; render(); });
+
+  $("b-trade").addEventListener("click", () => { stepTrade(); render(); });
+  $("b-day").addEventListener("click", () => { runDay(); render(); });
+  $("b-week").addEventListener("click", () => {
+    for (let i = 0; i < 5 && runDay(); i++);
+    render();
+  });
+  $("b-end").addEventListener("click", () => {
+    for (let i = 0; i < 250 && runDay(); i++);
+    render();
+  });
+  $("b-reset").addEventListener("click", reset);
+  window.addEventListener("resize", drawChart);
+
+  seg("seg-plan", "plan");
+  seg("seg-acct", "acct");
+  // The stop readout is priced in dollars, so it re-labels when the contract changes.
+  seg("seg-size", "size", () => syncStop());
+
+  syncWin(); syncStop(); syncRr(); syncTpd();
+  reset();
+})();
+</script>

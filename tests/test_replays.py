@@ -14,6 +14,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from fastapi import BackgroundTasks
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
@@ -279,15 +281,19 @@ def test_router_round_trip():
     router.save_replay(
         created["id"],
         router.SaveIn(log=LOG, trades=[_trade(200)], summary={"trades": 1, "net_usd": 200.0}, status="finished"),
+        # A finished sitting schedules its level measurement here; the queue is a
+        # plain collector until a response runs it, so nothing fires in-test.
+        BackgroundTasks(),
     )
     # Called directly, so the Query(...) defaults have to be passed by hand —
     # the same wrinkle tests/helpers.py works around for resolve_scope.
     listing = dict(limit=500, status=None, symbol=None, date=None)
     listed = router.list_replays(**listing)["attempts"]
-    # `reviewed`, not `finished`: the trade above breaks no rule, and a clean
-    # sitting passes the account's review gate without a ceremony. See
+    # `finished`, not `reviewed`: the trade breaks no rule, but since the
+    # review revamp every booked trade owes a review (model + tags), so a
+    # traded sitting parks at `finished` until it is answered for. See
     # tests/test_replay_account.py for the gate itself.
-    assert len(listed) == 1 and listed[0]["status"] == "reviewed"
+    assert len(listed) == 1 and listed[0]["status"] == "finished"
     assert router.get_replay(created["id"])["summary"]["net_usd"] == 200.0
     router.delete_replay(created["id"])
     assert router.list_replays(**listing)["attempts"] == []
@@ -325,3 +331,47 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} passed")
+
+
+@_tmp
+def test_a_save_that_changed_nothing_cannot_un_end_a_sitting():
+    """The bug that filed 23 ended sittings as ``abandoned``.
+
+    A resumed sitting keeps writing — the excursion is re-marked, the clock
+    moves, a bracket leg cancels after the flatten — and every one of those
+    saves used to carry ``status="active"``. That un-ended the sitting, and an
+    hour later ``replay_account.sweep_stale_actives`` found it open and called
+    it abandoned. Same orders, same trades: nothing was traded on, so nothing
+    reopens.
+    """
+    a = _open()
+    replays.save(a["id"], log=LOG, trades=[_trade(10)], summary={}, status="finished")
+    first = replays.read(a["id"])["finished_at"]
+
+    # The summary moved (a wider excursion is exactly what makes the recorder
+    # write) but the log and the trades did not.
+    replays.save(
+        a["id"], log=LOG, trades=[_trade(10)],
+        summary={"peak_usd": 800.0}, status="active",
+    )
+    got = replays.read(a["id"])
+    assert got["status"] == "finished"
+    assert got["finished_at"] == first
+    assert got["summary"]["peak_usd"] == 800.0
+
+
+@_tmp
+def test_a_reviewed_sitting_keeps_its_review_through_a_no_op_save():
+    a = _open()
+    replays.save(a["id"], log=LOG, trades=[_trade(10)], summary={}, status="finished")
+    replays.patch(a["id"], status="reviewed")
+
+    replays.save(a["id"], log=LOG, trades=[_trade(10)], summary={}, status="active")
+    assert replays.read(a["id"])["status"] == "reviewed"
+
+    # Trading on still reopens it, and still drops the answer given about the
+    # sitting that no longer exists.
+    replays.save(
+        a["id"], log=LOG, trades=[_trade(10), _trade(20, 2)], summary={}, status="active",
+    )
+    assert replays.read(a["id"])["status"] == "active"

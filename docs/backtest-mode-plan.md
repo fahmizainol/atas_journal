@@ -50,7 +50,7 @@ from inside the tape.
 ▸ BACKTEST · Drift-touch fade                     [ End rep ]
   ▨▨▨▨ · 13:47 ET · to close 2h13m                rep 9 · +$220
 
-  ⏵ ⏸  ▸▸ 30×  · step ›       ⏪ dimmed — "not in a drill"
+  ⏵ ⏸  ▸▸ 30×  · step ›       ⏪ live since D8 was superseded — and counted
 ```
 
 Bind a model, press 🎲, land at 13:47 on a day you are not told the date of, with
@@ -121,6 +121,25 @@ answer, and pooling it with cold ones is what the base rate cannot survive.
 `attempt.rewinds` is therefore always `[]` in this mode, and phase 10's
 `rewind-used` flag can never fire on a drill.
 
+> **Superseded 2026-08-21.** The drill transport goes backwards like the
+> Replay's: ⏮, `,` and the scrubber all reach tape already played, and the
+> scrubber's drill floor (the high-water mark) is gone with them. The rest of
+> `seekTo` is untouched, so the one backward move still refused is the one
+> through your own fill while holding — a rewind that would un-happen the trade
+> you are in the middle of.
+>
+> The load-bearing half of the original reason was *pooling*, not the rewind,
+> and marking is cheaper than refusing. `noteRewind` was already mode-agnostic,
+> so a drill's rewinds record themselves; `GET /replays/drills` counts the reps
+> that have any as **`rewound_reps`** and the Backtests card shows it as a
+> **Rewound** column beside the base rate. Such a rep stays *inside* `reps`,
+> `traded_reps` and the rate — excluding it would shrink a campaign for a reason
+> the card never displayed — so the number is unchanged and the hindsight in it
+> is now named rather than invisible.
+>
+> `rewind-used` can now fire on a drill. It changes nothing: drills are filtered
+> out of `epoch_attempts`, so no account ever reads the flag.
+
 **D9 — the attempt opens at the drop, not on the first fill.** This reverses
 `replays.create`'s stated contract ("a session you watched without trading leaves
 nothing behind", `replays.py:152`) **for this mode only**. It has to: a rep where
@@ -161,6 +180,12 @@ the checklist ready; 🎲 stays live whether you fill it in or not. Skipping cos
 the data point and nothing else — `_compliance_split` puts a trade with no
 recorded checks in **`unscored`**, explicitly not `broke`, because "counting it
 as 'broke' would slander it" (`models.py:180`).
+
+> **Superseded 2026-08-17** for the *tags* half only
+> (`docs/review-revamp-plan.md`, decision V6): every drill trade now owes ≥1
+> tag before 🎲 draws the next rep, enforced by the server on the create. The
+> rules-met checklist stays exactly as D12 describes — optional, `unscored`
+> not `broke`.
 
 **D13 — the campaign is read on the Backtests model card.** That is where the
 model's numbers already live. `ReplayHistory` lists individual drill attempts for
@@ -246,9 +271,9 @@ rules. The review panel posts to it.
 - **`lib/workspaces.ts`** — a third Charts tab, `/charts/backtest`, after Live.
 - **`Simulator.tsx` parameterised by mode**, not a new page. It is ~3,000 lines
   of tape, engine, panes, fill model and recorder, all of which this mode wants
-  unchanged. The mode gates four things: the draw (random clock), the transport's
-  rewind, when `armAttempt` fires, and which prefs key the drill-only settings
-  come from.
+  unchanged. The mode gates three things: the draw (random clock), when
+  `armAttempt` fires, and which prefs key the drill-only settings come from.
+  (It gated the transport's rewind too, until D8 was superseded.)
 - **`lib/drillPrefs.ts`** (or a field on the existing blob) — bound model id and
   drop window. Everything else — ticket, speed, bar size, layouts, indicators,
   fill model, commissions, latency — shares `sim.prefs`, because a drill is the

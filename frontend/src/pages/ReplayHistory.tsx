@@ -21,12 +21,20 @@ import { Link, useNavigate } from "react-router-dom";
 import { KpiGrid } from "../components/KpiGrid";
 import {
   useDeleteReplayAttempt,
+  usePatchReplayAttempt,
   useReplayAttemptDetail,
   useReplayAttempts,
   type AttemptRow,
 } from "../hooks/useReplays";
 import { MIN_SAMPLE, pool } from "../lib/replayStats";
 import { saveResume } from "../lib/replayResume";
+import { accountIdOf } from "../lib/replayAccount";
+import { pathOfAccount } from "../components/charts/AccountSwitch";
+
+/** The history page's tabs. Still the three *worlds* rather than the account
+ *  list: a drill belongs to none of them and the two built-ins are what the
+ *  stored `mode` says. Kept local now that a resume scope is an account id. */
+type HistoryTab = "replay" | "paper" | "drill";
 import { saveReview } from "../lib/replayReview";
 import { palette, toneOf } from "../theme";
 
@@ -46,38 +54,6 @@ const fmtWhen = (iso: string) => {
 
 const isClean = (a: AttemptRow) => !a.rewinds?.length;
 
-/**
- * Cumulative net across the sample, oldest first.
- *
- * A hand-rolled polyline rather than a charting library: it is one series of a
- * few dozen points with no axes to speak of, and the one library this app has
- * loaded draws price on a time scale — which this is not (the x axis here is
- * attempt order, not time).
- */
-function EquityLine({ values }: { values: number[] }) {
-  if (values.length < 2) return null;
-  const w = 640;
-  const h = 90;
-  const lo = Math.min(0, ...values);
-  const hi = Math.max(0, ...values);
-  const span = hi - lo || 1;
-  const x = (i: number) => (i / (values.length - 1)) * w;
-  const y = (v: number) => h - ((v - lo) / span) * h;
-  const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
-  const last = values[values.length - 1];
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: "100%", height: 90 }}>
-      <line x1={0} x2={w} y1={y(0)} y2={y(0)} stroke={palette.grid} strokeWidth={1} />
-      <polyline
-        points={pts}
-        fill="none"
-        stroke={last >= 0 ? palette.green : palette.red}
-        strokeWidth={2}
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
-  );
-}
 
 /** One attempt's trades, opened from the table. Fetched on demand — the list
  *  endpoint carries summaries only, and a year of blotters is not a payload the
@@ -136,15 +112,60 @@ function AttemptTrades({ id }: { id: string }) {
   );
 }
 
+const isDrill = (a: AttemptRow) => (a.mode ?? "replay") === "drill";
+
+/** A row's mode, narrowed to the three the app keys on. Anything else — an
+ *  attempt written by a future version, say — reads as a plain replay, which is
+ *  the one that owns the unmarked page. */
+const modeOf = (a: AttemptRow): HistoryTab => {
+  const m = a.mode ?? "replay";
+  return m === "drill" || m === "paper" ? m : "replay";
+};
+
+/** The page each mode is traded on. Paper is a route under Replay rather than
+ *  beside it; see the comment on it in `router.tsx`. */
+const PAGE_OF: Record<HistoryTab, string> = {
+  replay: "/charts/replay",
+  paper: "/charts/replay/paper",
+  drill: "/charts/backtest",
+};
+
+const TAB_LABEL: Record<HistoryTab, string> = {
+  replay: "Replay",
+  paper: "Paper",
+  drill: "Backtest",
+};
+
 export function ReplayHistory() {
   const q = useReplayAttempts();
   const del = useDeleteReplayAttempt();
+  const patch = usePatchReplayAttempt();
   const navigate = useNavigate();
   const [cleanOnly, setCleanOnly] = useState(false);
   const [includeUnfinished, setIncludeUnfinished] = useState(false);
+  // Show only the sittings marked to come back to. Unlike the two above it is a
+  // filter on the *table* and not on the KPI sample: the numbers on this page
+  // are a track record, and a track record of the sittings you happened to flag
+  // is a number about nothing. This one answers "where did I put that one".
+  const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
+  // Which world the page shows. Replay sittings and backtest reps are records
+  // of different kinds — one is priced against the account, the other is
+  // deliberately unpriced — and pooling them made every number on this page a
+  // number about neither. One list at a time; the KPIs, the equity line and
+  // the empty state all follow the tab.
+  //
+  // Paper is a third for the same reason rather than a variant of the first:
+  // it *is* priced, and identically, but against an account whose deaths cost
+  // nothing. A track record that averages the sittings you can afford to lose
+  // with the ones you cannot is a flattering number about neither.
+  const [tab, setTab] = useState<HistoryTab>("replay");
+  const drillTab = tab === "drill";
 
-  const all = useMemo(() => q.data?.attempts ?? [], [q.data]);
+  const all = useMemo(
+    () => (q.data?.attempts ?? []).filter((a) => modeOf(a) === tab),
+    [tab, q.data],
+  );
 
   const sample = useMemo(
     () =>
@@ -161,6 +182,12 @@ export function ReplayHistory() {
   );
 
   const sampleIds = useMemo(() => new Set(sample.map((a) => a.id)), [sample]);
+  /** What the table draws. `all` unless you asked for the flagged ones only. */
+  const rows = useMemo(
+    () => (flaggedOnly ? all.filter((a) => a.review_later) : all),
+    [all, flaggedOnly],
+  );
+  const flaggedCount = useMemo(() => all.filter((a) => a.review_later).length, [all]);
   const totals = useMemo(() => pool(sample.map((a) => a.summary ?? {})), [sample]);
   // Oldest first: a track record reads forward.
   const equity = useMemo(() => {
@@ -182,7 +209,7 @@ export function ReplayHistory() {
       // attempts recorded under a zeroed fill model, and every attempt from
       // before there was one, total nothing here and shouldn't claim a row.
       sub:
-        `${sample.length} attempt${sample.length === 1 ? "" : "s"} · ${totals.trades} trades` +
+        `${sample.length} ${drillTab ? "rep" : "attempt"}${sample.length === 1 ? "" : "s"} · ${totals.trades} trades` +
         (totals.fees_usd > 0 ? ` · ${fmtUsd(totals.fees_usd)} fees` : ""),
       hero: true,
     },
@@ -222,9 +249,31 @@ export function ReplayHistory() {
     <div className="page">
       <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
         <h2 className="section-title" style={{ margin: 0 }}>
-          Replay history
+          Practice history
         </h2>
-        <Link to="/charts/replay" style={{ color: palette.muted, fontSize: 13 }}>
+        {(["replay", "paper", "drill"] as const).map((t) => (
+          <button
+            key={t}
+            type="button"
+            data-history-tab={t}
+            onClick={() => {
+              setTab(t);
+              setOpen(null);
+            }}
+            style={{
+              background: "none",
+              border: "none",
+              padding: 0,
+              fontSize: 13,
+              cursor: "pointer",
+              color: tab === t ? palette.text : palette.muted,
+              textDecoration: tab === t ? "underline" : "none",
+            }}
+          >
+            {TAB_LABEL[t]}
+          </button>
+        ))}
+        <Link to={PAGE_OF[tab]} style={{ color: palette.muted, fontSize: 13 }}>
           ← Simulator
         </Link>
         <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: palette.muted }}>
@@ -244,13 +293,40 @@ export function ReplayHistory() {
             Include unfinished
           </span>
         </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: palette.muted }}>
+          <input
+            type="checkbox"
+            data-flagged-only
+            checked={flaggedOnly}
+            onChange={(e) => setFlaggedOnly(e.target.checked)}
+            style={{ margin: 0 }}
+          />
+          <span title="Only the sittings you marked to review later. This hides table rows and leaves the numbers above alone — they are the whole track record either way.">
+            🚩 Flagged{flaggedCount > 0 ? ` (${flaggedCount})` : ""}
+          </span>
+        </label>
       </div>
 
       {q.isLoading && <div style={{ color: palette.muted }}>loading…</div>}
       {!q.isLoading && !all.length && (
         <div style={{ color: palette.muted }}>
-          Nothing recorded yet. An attempt is written from your first fill in the{" "}
-          <Link to="/charts/replay">Simulator</Link>.
+          {drillTab ? (
+            <>
+              No reps yet. A rep is written the moment 🎲 drops you into a day on the{" "}
+              <Link to="/charts/backtest">Backtest page</Link>.
+            </>
+          ) : tab === "paper" ? (
+            <>
+              Nothing on paper yet. Switch the account chip in the{" "}
+              <Link to="/charts/replay/paper">Simulator</Link> and trade — same rules, same
+              floor, and a death that costs nothing but the sitting.
+            </>
+          ) : (
+            <>
+              Nothing recorded yet. An attempt is written from your first fill in the{" "}
+              <Link to="/charts/replay">Simulator</Link>.
+            </>
+          )}
         </div>
       )}
 
@@ -264,12 +340,15 @@ export function ReplayHistory() {
             </div>
           )}
 
-          {equity.length > 1 && (
-            <div className="panel" style={{ marginTop: 12 }}>
-              <div style={{ color: palette.muted, fontSize: 12, marginBottom: 4 }}>
-                Cumulative net, attempt by attempt
-              </div>
-              <EquityLine values={equity} />
+          {/* The curve over sittings lives on the account now, where it is a
+              curve of an *account's* equity against its own floor rather than a
+              running net over whatever this tab happens to be showing. A drill
+              still has none by design — it is unpriced, and a curve over reps
+              would read as money that was never at stake. */}
+          {!drillTab && equity.length > 1 && (
+            <div style={{ color: palette.muted, fontSize: 12, margin: "8px 0" }}>
+              The lives this pool bought, and the brackets that would have changed them, are on{" "}
+              <Link to="/accounts">Accounts</Link>.
             </div>
           )}
 
@@ -288,7 +367,7 @@ export function ReplayHistory() {
               </tr>
             </thead>
             <tbody>
-              {all.map((a) => {
+              {rows.map((a) => {
                 const s = a.summary ?? {};
                 const inSample = sampleIds.has(a.id);
                 return (
@@ -302,20 +381,35 @@ export function ReplayHistory() {
                         {a.date} · {a.symbol}
                       </td>
                       <td style={{ whiteSpace: "nowrap", fontSize: 11 }}>
-                        {a.status === "finished" && (a.flags?.length ?? 0) > 0 ? (
+                        {isDrill(a) && (
+                          <span style={{ color: palette.muted }} title="A backtest rep — unpriced, blind drop">
+                            🎲{" "}
+                          </span>
+                        )}
+                        {/* You marked this one to come back to. It replaced the
+                            orange "review owed" on 2026-08-25, and the swap is
+                            the whole change in miniature: that badge appeared on
+                            every traded sitting and meant the account was
+                            refusing the next one, so it was on almost every row
+                            and said nothing. This one is on a row because you
+                            put it there. */}
+                        {a.review_later && (
                           <span
                             style={{ color: palette.orange }}
-                            title={`${a.flags!.length} flag(s) still to answer. The account will not open another sitting until they are.`}
+                            title={
+                              "Marked to review later. Nothing is waiting on it — press review to go back in." +
+                              ((a.flags?.length ?? 0) > 0
+                                ? ` It also tripped ${a.flags!.length} account rule(s).`
+                                : "")
+                            }
                           >
-                            review owed{" "}
+                            🚩{" "}
                           </span>
-                        ) : (
-                          a.status !== "finished" &&
-                          a.status !== "reviewed" && (
-                            <span style={{ color: palette.muted }} title="Never ended — the tail is missing">
-                              {a.status}{" "}
-                            </span>
-                          )
+                        )}
+                        {a.status !== "finished" && a.status !== "reviewed" && (
+                          <span style={{ color: palette.muted }} title="Never ended — the tail is missing">
+                            {a.status}{" "}
+                          </span>
                         )}
                         {!isClean(a) && (
                           <span
@@ -349,18 +443,68 @@ export function ReplayHistory() {
                         {a.note}
                       </td>
                       <td style={{ whiteSpace: "nowrap" }}>
-                        {/* The way into the forced review. It hands the
-                            Simulator a bookmark and a marker (lib/replayReview)
-                            and gets out of the way — the review itself happens
-                            against the tape, which is the only place the levels
-                            that were on the chart at the time still exist. */}
-                        {a.status === "finished" && (a.flags?.length ?? 0) > 0 && (
+                        {/* Mark it, or take the mark off, without going in. The
+                            page you flag a sitting from is usually the one you
+                            ended it on; this is the other door, and it is the
+                            only way to *clear* a flag short of filing the
+                            review (which clears it server-side — see
+                            `journal.replays.patch`). */}
+                        {a.status === "finished" && (a.summary?.trades ?? 0) > 0 && (
+                          <button
+                            type="button"
+                            data-review-flag={a.id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              patch.mutate({ id: a.id, review_later: !a.review_later });
+                            }}
+                            title={
+                              a.review_later
+                                ? "Marked to review later — press to unmark"
+                                : "Mark to review later"
+                            }
+                            style={{
+                              fontSize: 11,
+                              marginRight: 6,
+                              cursor: "pointer",
+                              opacity: a.review_later ? 1 : 0.45,
+                            }}
+                          >
+                            🚩
+                          </button>
+                        )}
+                        {/* The way into the review. It hands the Simulator a
+                            bookmark and a marker (lib/replayReview) and gets out
+                            of the way — the review itself happens against the
+                            tape, which is the only place the levels that were on
+                            the chart at the time still exist. */}
+                        {/* Drills come through here too — this button is the
+                            escape hatch for a rep-end panel lost to a reload
+                            (plan V9): the drill gate reads the same tags the
+                            in-tape review writes. */}
+                        {a.status === "finished" &&
+                          ((a.flags?.length ?? 0) > 0 || (a.summary?.trades ?? 0) > 0) && (
                           <button
                             type="button"
                             data-review-open={a.id}
                             onClick={(e) => {
                               e.stopPropagation();
-                              saveResume({
+                              // Marks scoped to — and the page routed by — the
+                              // attempt's own mode: a drill's review belongs on
+                              // the backtest page, where the recorder, the
+                              // panel and the 🎲 gate all live, and a paper
+                              // sitting's on the paper account, whose chip is
+                              // the only place its equity means anything.
+                              // Scoped to — and routed by — the attempt's own
+                              // **account**, not its mode. A drill has none and
+                              // belongs on the backtest page, where the
+                              // recorder, the panel and the 🎲 gate all live;
+                              // everything else opens on the account that
+                              // priced it, because a review of a sitting whose
+                              // equity means nothing on the page you land on is
+                              // a review of somebody else's day.
+                              const m = modeOf(a);
+                              const scope = accountIdOf(a) ?? "drill";
+                              saveResume(scope, {
                                 symbol: a.symbol,
                                 date: a.date,
                                 // From the top of the sitting. The panel seeks to
@@ -373,10 +517,10 @@ export function ReplayHistory() {
                                 // replaySim.rebaseLog).
                                 contextTicks: 0,
                               });
-                              saveReview({ attemptId: a.id });
-                              navigate("/charts/replay");
+                              saveReview(scope, { attemptId: a.id });
+                              navigate(m === "drill" ? PAGE_OF.drill : pathOfAccount(scope));
                             }}
-                            title={`Review this sitting — ${a.flags!.length} flag(s) to answer`}
+                            title="Review this sitting — every trade to answer for, against the tape"
                             style={{ fontSize: 11, marginRight: 6, cursor: "pointer" }}
                           >
                             review

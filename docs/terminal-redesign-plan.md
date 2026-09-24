@@ -38,6 +38,8 @@ all of them.
 | 9 | Follow-ups — legend bucketing picker, readout flicker, order-pad minimise, rail pin | **Built** |
 | 10 | The replay account, the sitting lifecycle, the blown-account protocol | **Built** — `04051dc`…`02769ab` |
 | 11 | Design-language parity — one guard readout, one refusal, one prefs shape, one keymap | **Built** — `716f3c7`…`86ce1ce` |
+| 12 | The community indicator picker — ƒ on the topbar | **Built** (Live half unverified) |
+| 13 | One catalogue, one legend — app layers in the ƒ, studies on the legend | **Built** (Live half unverified) |
 
 Branch: `feat/terminal-redesign`, **not pushed**. Master is at `ea97845`.
 
@@ -335,7 +337,7 @@ move, not a build — except where noted.
 | ━ price line | ~ in-canvas | **6** |
 | 🔔 alert | ~ price lines already chime on cross; no separate tool | **6** |
 | ✎ drawings flyout | ✗ (prototype marks it unbuilt too) | later |
-| ƒ indicators picker | ~ the legend is the picker; no rail entry | **6** |
+| ƒ indicators picker | ✓ **ƒ on the topbar**, not the rail — see phase 12 | **12** |
 | 🧹 clear / 🗑 delete | ~ in-canvas, appears with what it removes | **6** |
 | ⚙ appearance | ~ on the legend header | **6** |
 
@@ -389,7 +391,7 @@ move, not a build — except where noted.
 | Prototype | App | Phase |
 |---|---|---|
 | Layout modal | ✓ popover instead of modal — better, keep | — |
-| Indicator picker modal | ~ the legend does it inline | **6** |
+| Indicator picker modal | ✓ a popover off the topbar's ƒ (phase 12) | **12** |
 | Session setup behind the title | ✓ `.sim-setup` | — |
 
 ### Responsive
@@ -552,6 +554,20 @@ review is **scoped** (the death sitting in full, plus flagged trades — not eve
 trade ever), there is **no probation or escalating penalty**, and the cause of death
 is **pinned into the next epoch** where it can be read all the way through it.
 
+> **Superseded 2026-08-17** (`docs/review-revamp-plan.md`): the review is no
+> longer scoped — **every trade owes** one — and with that, the **hour gate was
+> removed at the user's request**: the forced review is the pause between
+> sittings now, spent on the tape instead of on a countdown.
+>
+> **Superseded again 2026-08-24** (user request): the **24-hour blow-up cooldown
+> is gone too**, and with it both of the policy numbers above. Same reasoning
+> one step further — mandatory reviews are the discipline now, and a timer only
+> ever knew how long you waited. `COOLDOWN_S`, the `cooldown` status, the
+> `cooldown_until` field and the refusal's `until` are all removed; a funded
+> death runs `blown` → `can_reset`, and what gates it is the write-up alone.
+> Everything else below about the account — the floor, the epochs, the pinned
+> cause of death — stands as written.
+
 ### The nine decisions
 
 - **D1 — no stored balance.** Equity is `$50,000 + Σ net_usd` over settled attempts
@@ -590,9 +606,11 @@ is **pinned into the next epoch** where it can be read all the way through it.
 - **D8 — the day boundary for the daily loss limit** is the America/New_York date of
   `created_at`, because that is the day the prop firm counts.
 - **D9 — live equity** is server settled equity + `dayState.realized` + open P&L,
-  joined **client-side**, in the one place that already joins those two
-  (`guardRules.equityStop`). The floor is EOD-trailing, so it is constant for the
-  whole of a sitting — which is what makes this join safe to do in the browser.
+  joined **client-side**, in the one place that already joins those two. The floor
+  is EOD-trailing, so it is constant for the whole of a sitting — which is what
+  makes this join safe to do in the browser. (Written against `guardRules.equityStop`,
+  which was the join at the time; the personal daily stop has since moved onto
+  booked P&L and become `dayFlatten`, and `accountStop` is the equity join now.)
 
 > **The timestamp rule — the one correctness trap in this phase.** There are two
 > unrelated time families here. Replay `entryMs`/`exitMs` are *display-zone wall
@@ -612,9 +630,12 @@ under its own floor; status runs `blown` (until a cause is written) → `cooldow
 
 **`GET /replays/account`** returns the whole view: `now`, `equity`, `floor`,
 `peak_close`, `status`, `day_net`, `day_loss_remaining`, `target_remaining`,
-`next_sitting_at`, `cooldown_until`, `can_reset`, `review_block`, `epoch`,
-`last_death`, `caps`. `now` is in there so every countdown on the client runs off
-the server's clock rather than the browser's.
+`next_sitting_at`, `counted_ids`, `cooldown_until`, `can_reset`, `review_block`,
+`epoch`, `last_death`, `caps`. `now` is in there so every countdown on the client
+runs off the server's clock rather than the browser's, and `counted_ids` is there
+so the client can tell whether the sitting on screen is already inside `equity` —
+it adds the running P&L of one that is not, and the sweep settles a stale sitting
+without the page hearing about it (`lib/replayAccount.liveEquity`).
 
 **API changes** in `api/routers/replays.py`, all new routes declared **above**
 `/replays/{attempt_id}` — the path-swallow trap already documented on
@@ -633,7 +654,9 @@ the server's clock rather than the browser's.
 invalidated wherever `["replays"]` already is. `guardRules.ts` gains `accountStop`
 (floor breach on live equity) and `accountRefusal` (why no *new* sitting may open —
 null while an attempt is open, because resuming is free), both always-on, sitting
-beside `equityStop`. The Simulator prepends `accountRefusal` to the entry-refusal
+beside the personal daily stop (`equityStop` then, `dayFlatten` now — it reads
+booked P&L; the account's limits still read equity). The Simulator prepends
+`accountRefusal` to the entry-refusal
 chain ahead of the `guardsOn` branch, fires the existing auto-flatten effect on
 `accountStop` and force-finishes after it, and grows an account row on the recap,
 a countdown chip, and a pinned cause-of-death strip that sits above the pane grid
@@ -667,8 +690,12 @@ terminals are one design rather than two that resemble each other.
 - **One keymap.** A `usePaneKeys` hook; `LiveChart`'s three keys (q/w/s) widen to the
   replay's 1–8 bar sizes and Shift+1–4 focus. The transport keys stay replay-only —
   there is no clock to drive on a live tape.
-- **The transport auto-hides while a position is open.** The row is for scrubbing,
-  and scrubbing is the one thing that must not happen with size on.
+- ~~**The transport auto-hides while a position is open.**~~ Built, then reversed on
+  2026-08-17: holding is exactly when you want Play, the speed and the clock, and
+  hiding the row took four working controls away to stop the fifth. The row now stays,
+  and the illegal move alone is refused — `seekTo` blocks a rewind past the open fill
+  (the choke point every backward move already goes through), and the scrubber's `min`
+  rises to that fill so the handle cannot be dragged there.
 
 ### The commit sequence
 
@@ -688,7 +715,8 @@ Each of these is shippable on its own:
 11. parity: `GuardMeters` + `RefusalFlash` on Live
 12. parity: the shared prefs shape and loader
 13. parity: the hotkeys
-14. parity: transport auto-hide in position
+14. ~~parity: transport auto-hide in position~~ — shipped, then reversed (see above);
+    the transport stays and only the rewind-past-entry is refused
 
 Backend commits carry pytest. Replay-UI commits carry `typecheck && build` plus a
 browser check. **Commits 11 and 13 touch `/charts/live`, which is manual-test-only by
@@ -712,6 +740,154 @@ scripted.
    that reports it.
 7. The equity walk is O(attempts) per call. Fine at this scale; memoise on directory
    mtime only if it ever shows up.
+
+---
+
+## Phase 12 — the community indicator picker
+
+The last prototype affordance with no app behind it. `docs/research/lwc-addons.html`
+evaluated four community packages against our own tape; `lightweight-charts-indicators`
+was the one worth adopting, and this is the adoption — 415 studies reachable from
+`/charts`, on both clocks.
+
+**The ƒ is on the topbar, not the tool rail.** The rail is hand tools: things you arm
+and then use *on* the canvas. A study is not armed, it is added. And it is not a legend
+row either — the legend is the chart's own layers, each with a hand-written row, a knob
+panel and a measured reason to exist. These are borrowed studies the app has no opinion
+about, so they live behind one button next to the timeframe and the layout: the two
+other controls that answer "what am I looking at".
+
+**Four files, one seam.**
+
+| | |
+|---|---|
+| `lib/studies.ts` | the catalogue. Nothing else imports the package; the metadata types are our own structural mirrors, because every module is validated at runtime anyway. `loadCatalogue()` is a shared dynamic `import()` — 1.8 MB of ESM, so it lands on first open, not with the page. |
+| `charts/StudyLayer.ts` | one chart's studies. `setSpecs` is structural (series and panes appear); `setBars` is arithmetic (recompute, `setData`, no churn). `remount()` is the third case and belongs to the chart. |
+| `charts/StudyPicker.tsx` | the ƒ. Active list on top, catalogue searched underneath, settings generated from each study's own `inputConfig` — six input types cover all 415, which is why one form serves them. |
+| `chartPrefs.loadStudies` | one list across both chart pages, the same reasoning as the shared visibility map. |
+
+**Page-level, not per-pane.** The page holds the specs and hands the same list to every
+pane, so a split layout is four bucketings of the same studies — an RSI on the 5m and
+the 1h at once, off one pick. Per-pane study lists would be a second picker to find and
+a second place to set the same thing differently.
+
+**Panes are positional, so the studies always mount last.** A non-overlay study claims
+`chart.panes().length` at build time, which puts it under CVD and the vol ruler. Those
+two come and go on their own (CVD when the tape's first tagged tick arrives, the ruler
+with its toggle), and a pane vanishing renumbers every pane above it — so both mount
+paths call `remountStudies()`, and `syncVrMount` gates its call on the pane actually
+having changed. Rebuilding once a bar to discover nothing moved is how you make a
+picked indicator flicker.
+
+**Cadence: on snapshot and on bar close**, beside `refreshVr` and `refreshMv`, for the
+same reason — every value one of these emits is a fact about a closed bar. Measured at
+1–5 ms per study over 4000 bars (RSI 4.6, EMA 3.8, MACD 1.1, ADX 1.2), so the worst
+realistic layout — three studies across four panes — is a ~36 ms hitch once a bar. Per
+tick it would be the one layer on the chart that made the tape stutter.
+
+**A study that drew nothing reports it.** 14 modules in the catalogue emit only markers,
+some are event-driven and correctly silent, and a transpiled one can throw on our bars.
+All three look identical on a canvas — like a study you never added — so `StudyLayer`
+hands back a per-spec report and the picker marks the row. The chart keeps drawing
+either way; a broken indicator is a fact about that indicator.
+
+**Nothing downstream reads this.** It is a reading surface: the sim, the strategy engine
+and every study in `docs/research/` are untouched. Read the lwc-addons page before
+trading off one — 317 of these are machine ports of community Pine, and the scoreboard
+is already 1 pass per 12 fails without help from a bad EMA.
+
+*Verified* with `tools/browser/studycheck.tmp.mjs` on the dev server (StrictMode): the
+catalogue loads, RSI claims a pane and EMA stays an overlay, the EMA's own blue goes
+0 → 289 px on the price canvas, the generated form re-tunes and relabels, both survive a
+reload, removing one gives the pane back, playback keeps them, and a two-pane split
+draws them twice. The seven replay-side `smoke.mjs` checks still pass. **The Live half is
+code-identical and unverified** — loading `/charts/live` auto-connects a routed session,
+so that page is tested by hand.
+
+---
+
+## Phase 13 — one catalogue, one legend
+
+Phase 12 shipped the community studies behind their own topbar popover, which left the
+app with **two indicator surfaces that did not know about each other**: ours on the
+chart's legend, theirs in a list on the bar. This collapses them into the split
+TradingView uses and the app was already half-way to.
+
+**The ƒ is a catalogue. The legend is the manage surface.** Add and remove happen in
+one place, everything else — what's on, what it's set to, what it drew — happens on the
+pane that draws it. A community study is now a legend row with the same eye, the same
+"…" and the same panel as a VWAP, plus an × that a layer of ours has no use for.
+
+**Everything the ƒ does acts on the focused pane**, the rule `TimeframeControl` already
+follows. That made the model *simpler*, not harder: one sentence covers both kinds
+instead of one each.
+
+| Decision | Call |
+|---|---|
+| Study visibility | **Per pane**, specs and all. A pane is a question; the study you want on the 5m is rarely the one you want on the hourly. Pane 0 keeps the key it already wrote (`paneKey`), so nobody's list resets. |
+| App layers in the ƒ | **Yes**, their own section, **first**. Add = switch on for this pane; remove = switch off. There is nothing to delete. |
+| Sections | Two, labelled, never interleaved. Searched together. |
+| ƒ badge | **Dropped.** The legend header already prints `shown/total` per pane, and `ƒ21` by default is noise. |
+| All-panes gesture | **Not in v1.** Add it four times, and find out whether that is actually annoying before inventing a mode. |
+| On but not drawable | The catalogue says `nothing to draw yet`. The legend still shows no row — that gating is right; the silence is what needed explaining. |
+| Crosshair values on study rows | **Later.** Would have to be written imperatively like the OHLC readout. |
+
+**What it cost, in order of interest.**
+
+1. **`chartLayers.ts` — the names, once.** The app's twenty-one layers only had names
+   *inside* interpolated legend labels, which cannot serve a catalogue that has to list
+   a layer before its data exists. So `LAYER_NAME` holds the name, the push site holds
+   the readout, and the label is built from both. Drift is now impossible.
+2. **The label block became one `rows` array with an `available` flag** rather than
+   ~140 lines of guarded pushes. The legend filters it; the catalogue takes all of it.
+   Guarding the push made the second list impossible without writing every condition
+   out twice.
+3. **`SettingField` became a discriminated union.** Widening `onChange` to accept
+   booleans broke all thirty existing knobs at once — a handler taking `string | number`
+   is not one taking `string | number | boolean`. A field with no `kind` is exactly the
+   select it always was; the app's own knobs are untouched, and the selects-only
+   convention survives as a convention rather than a limitation.
+4. **Publish-up, handle-down.** Visibility lives *inside* each chart (`vis`), so the
+   page is told what a pane is drawing (`onLayers`, like `onToolsChange`) and reaches
+   back through `setLayer` on the handle. The page never holds a second copy of state
+   the chart owns, so the two cannot disagree — asserted in the harness by toggling in
+   one surface and reading the other.
+5. **The report got shorter.** `onStudyReport` is gone: the legend showing it lives
+   inside `ReplayChart`, so what a study drew never leaves the component.
+6. **A hidden study is not computed.** The eye on a study row is the one switch on this
+   chart that is also a performance switch — the fixed layers keep computing while
+   hidden, because the engine pays for them anyway.
+
+*Verified* with `tools/browser/studycheck.tmp.mjs` on the dev server (StrictMode), 24
+assertions: two sections with all 21 of ours listed, one search hitting both sides
+(`vwap` → 6 ours, 2 theirs), the waiting rule matching the legend exactly, an app layer
+toggled in the ƒ and switched back off from the legend (the two surfaces are one state),
+RSI claiming a pane and EMA staying an overlay (0 → 300 px of its own blue), study rows
+under the community rule each with an ×, the eye dropping and restoring the pane, the
+generated form re-tuning and relabelling, a reload, removal, and pane 2 coming up empty
+while pane 1 carries an EMA. **The Live half is code-identical and unverified.**
+
+### Harness note — `smoke.mjs appearance` is sitting-flaky
+
+Found while regression-checking this, and it is not a regression: across six runs of the
+*same build*, `visible range survives the recolour` came back ok twice and FAIL four
+times, and on two of those runs the surface probe read `#542e17` — the composite wash,
+not the background. The sitting `/charts/replay` opens varies between runs, and both
+failures follow from that:
+
+- **The modal-colour probe measures the wash** when a sitting's composite covers most of
+  the canvas, so `bg` is not the surface at all and every assertion built on it is
+  meaningless for that run.
+- **The silhouette comparison crosses two changes at once.** The check switches surface
+  *and* candle scheme, then compares silhouettes; different candle colours move the
+  first/last non-background row wherever candles are the outermost ink. It passes only
+  when the silhouette happens to be dominated by things that did not change colour.
+
+The range genuinely does survive — `round-trip returns to the original` (same colours
+both sides) and `light`'s own range assertion pass on every run. Worth fixing by pinning
+the sitting and by separating the surface swap from the candle swap, but deliberately
+left alone here: quietly weakening an assertion to make your own run green is how a
+harness stops being worth running.
 
 ---
 

@@ -207,6 +207,94 @@ def credentials(**overrides) -> dict:
     return creds
 
 
+_AGG_ENV = "RITHMIC_AGGREGATED_QUOTES"
+
+
+def aggregated_quotes() -> bool:
+    """Whether logins should ask Rithmic for aggregated quotes. Off unless set.
+
+    Aggregated quotes are a property of the *login*, not of a subscription:
+    Rithmic decides at ``RequestLogin`` whether the connection is fed print for
+    print or in coalesced batches, and it cannot be changed under a live socket.
+    Off is the default here because everything downstream reads the tape as
+    prints — big-lot detection, the fill model's queue estimate, the per-fill
+    parquet — and an aggregate is one row standing for several trades.
+
+    Turn it on to cut CPU on a machine that only needs candles, or to match a
+    R|Trader Pro session that has it on (ATAS and R|Trader must agree; the same
+    is true of any two connections whose tapes you intend to compare).
+    """
+    from ..config import load_env
+
+    load_env()
+    return os.environ.get(_AGG_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# The market-data logins, and the only ones the flag is applied to. It is a
+# statement about how quotes are delivered, so it has no meaning on the ORDER or
+# PNL plant — and a routing login is the one that must not be refused for a
+# reason that was never about orders.
+_AGG_PLANTS = ("ticker", "history")
+
+
+def _ask_for_aggregated_quotes(client) -> None:
+    """Set ``aggregated_quotes`` on the login the market-data plants send.
+
+    ``async_rithmic`` never sets the field (``plants/base.py::_login`` does not
+    list it), so proto3 leaves it false and there is no constructor argument to
+    reach it. Rather than reimplement the login, this wraps the one choke point
+    every request passes through — ``_build_request`` — and stamps the flag on
+    the login message alone.
+
+    Wrapping by message name rather than template id: the id lives in a table
+    that a library upgrade could renumber, whereas ``RequestLogin`` is Rithmic's
+    own name for the message and is what the field is declared in.
+    """
+    from async_rithmic.protocol_buffers.request_login_pb2 import RequestLogin
+
+    if "aggregated_quotes" not in RequestLogin.DESCRIPTOR.fields_by_name:
+        raise RuntimeError(
+            f"{_AGG_ENV} is set, but this async_rithmic's RequestLogin has no "
+            "aggregated_quotes field — unset the variable, or teach this "
+            "function the new shape")
+
+    for name in _AGG_PLANTS:
+        plant = client.plants[name]
+        plant._build_request = _aggregating_builder(plant)
+
+
+def _aggregating_builder(plant):
+    """``plant._build_request``, with the login flag set on the way out."""
+    inner = plant._build_request
+
+    def build(**kwargs):
+        request = inner(**kwargs)
+        if request.DESCRIPTOR.name == "RequestLogin":
+            request.aggregated_quotes = True
+        return request
+
+    return build
+
+
+def new_client(creds: dict | None = None, aggregated: bool | None = None):
+    """The ``RithmicClient`` every connection in this package is built from.
+
+    One factory because the aggregated-quotes flag has to be applied *before*
+    connect and is easy to forget: a feed and a harvest sweep that disagreed
+    about it would splice two differently-shaped tapes into the same day.
+
+    ``aggregated=None`` reads the environment. A caller passes it explicitly
+    when it decided earlier — the feed settles the question once, so that an
+    edited ``.env`` cannot change the shape of the tape under a reconnect.
+    """
+    from async_rithmic import RithmicClient
+
+    client = RithmicClient(**(creds or credentials()))
+    if aggregated_quotes() if aggregated is None else aggregated:
+        _ask_for_aggregated_quotes(client)
+    return client
+
+
 def _aggressor_map() -> dict[int, str]:
     """Rithmic's aggressor enum -> the engine's side letter, read off the schema.
 
@@ -456,6 +544,10 @@ class RithmicFeed:
         self.symbol = symbol
         self.exchange = exchange
         self._creds = creds or credentials()
+        # Settled here, not at each connect: the answer decides whether the tape
+        # is prints or batches, and a reconnect that came back in the other shape
+        # would leave one session's parquet holding both.
+        self._aggregated = aggregated_quotes()
         # A `journal.live.broker.Broker`, or None for the ordinary shadow feed.
         # Its presence is what decides whether ORDER_PLANT is ever opened, and
         # it is settled at construction on purpose: routing is not a mode that
@@ -566,6 +658,10 @@ class RithmicFeed:
             "system": self._creds["system_name"],
             "connected": self.connected,
             "running": self.running,
+            # What the tape IS, not a preference: true and every row may stand
+            # for several trades, which is worth knowing before reading a size
+            # distribution off a session recorded this way.
+            "aggregated_quotes": self._aggregated,
             "backfilling": self.backfilling,
             "error": self.error,
             "stats": dict(self.stats),
@@ -654,9 +750,9 @@ class RithmicFeed:
             pass
 
     async def _connected_session(self) -> None:
-        from async_rithmic import DataType, RithmicClient, SysInfraType
+        from async_rithmic import DataType, SysInfraType
 
-        client = RithmicClient(**self._creds)
+        client = new_client(self._creds, self._aggregated)
         client.on_tick += self._on_tick
         # Market data plants only, unless a broker was handed in. The default
         # opens all four, including ORDER. HISTORY is opened only when there is a
@@ -688,7 +784,7 @@ class RithmicFeed:
             print(f"[live-rithmic] history plant refused ({type(e).__name__}: {e}) "
                   "— connecting for live ticks only, without the backfill",
                   flush=True)
-            client = RithmicClient(**self._creds)
+            client = new_client(self._creds, self._aggregated)
             client.on_tick += self._on_tick
             await client.connect(plants=[SysInfraType.TICKER_PLANT])
             self._from_ns = None
@@ -1069,6 +1165,18 @@ class RithmicFeed:
         now = time.monotonic()
         self._lag_us.extend(int((now - r[4]) * 1_000_000) for r in rows)
         self._hop_us.extend(r[5] for r in rows if r[5] is not None)
+        # The ladder is offered the batch *before* it is routed, because routing
+        # is an executor hop and a trailing stop should not wait on the recorder
+        # to reach the wire. Only here, and deliberately not in `_backfill` or
+        # `_replay_range`: those replay rows that already happened, and a ladder
+        # fed yesterday's highs would ratchet a live stop onto a level the market
+        # is nowhere near.
+        if self.broker is not None:
+            try:
+                self.broker.on_ticks(frame)
+            except Exception as e:  # noqa: BLE001 — a bad mark is not a dead feed
+                self.stats["ladder_errors"] = self.stats.get("ladder_errors", 0) + 1
+                self.error = f"ladder: {type(e).__name__}: {e}"
         loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(None, self.route, frame)

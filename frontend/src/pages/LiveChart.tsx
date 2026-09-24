@@ -50,14 +50,36 @@ import { Link } from "react-router-dom";
 import { ReplayChart, type ReplayChartHandle } from "../components/charts/ReplayChart";
 import type { IndicatorSettingsMap } from "../components/charts/IndicatorLegend";
 import { buildChartKnobs } from "../components/charts/indicatorKnobs";
+import {
+  loadShelfParams,
+  saveShelfParams,
+  loadShelfField,
+  saveShelfField,
+} from "../lib/chartPrefs";
+import type { ShelfParams } from "../lib/volumeShelf";
+import type { ShelfField } from "../components/charts/VolumeShelfPrimitive";
 import type { ModernVwapParams } from "../lib/modernVwap";
+import type { DsvParams } from "../lib/dynamicSwingVwap";
 import { TimeframeControl } from "../components/charts/TimeframeControl";
+import { StudyPicker } from "../components/charts/StudyPicker";
+import type { StudySpec } from "../lib/studies";
+import type { LayerState } from "../components/charts/chartLayers";
 import { ChartTopBar } from "../components/charts/ChartTopBar";
 import { SimIndicators } from "../components/charts/SimIndicators";
+import { Blotter, TradeTally } from "../components/charts/Blotter";
 import { QuickDock } from "../components/charts/QuickDock";
 import { LayoutPicker } from "../components/charts/LayoutPicker";
 import { ChartToolRail } from "../components/charts/ChartToolRail";
+import { TicketCard, type PresetCtx } from "../components/charts/TicketCard";
 import { TicketKnobs } from "../components/charts/TicketKnobs";
+import { LegAmount, legEcho } from "../components/charts/LegAmount";
+import type { SizerCtx } from "../components/charts/SizerGrid";
+import { microOf, rootOf } from "../lib/contracts";
+import { DEFAULT_GUARDS, paceRefusal } from "../lib/guardRules";
+import { PaceChip } from "../components/charts/PaceChip";
+import type { PresetBracket } from "../lib/orderPresets";
+import { DEFAULT_MAX_LOSS } from "../lib/riskSizer";
+import type { VolRulerRead } from "../lib/volRuler";
 import {
   LAYOUTS,
   MAX_PANES,
@@ -81,6 +103,7 @@ import {
 } from "../hooks/useRouting";
 import {
   BasketIds,
+  blotterRows as brokerBlotterRows,
   bracketOf,
   brokerSig,
   positionLine,
@@ -91,7 +114,7 @@ import { useOrderIntent } from "../hooks/useOrderIntent";
 import { isTypingTarget, usePaneKeys } from "../hooks/usePaneKeys";
 import { OrderConfirm, OrderFlash } from "../components/OrderConfirm";
 import { brokerMark, FillCues, playCue, simMark } from "../lib/orderSound";
-import { loadLiveHistoryDays, saveLiveHistoryDays } from "../lib/chartPrefs";
+import { loadLiveHistoryDays, loadStudies, saveLiveHistoryDays, saveStudies } from "../lib/chartPrefs";
 import type {
   BrokerOrder,
   BrokerPosition,
@@ -106,14 +129,16 @@ import {
   stopFeed,
   useLiveHeader,
   useLiveHistoryDays,
+  useLiveRecordings,
   useLiveSignals,
   useLiveStatus,
   useLiveTape,
 } from "../hooks/useLive";
-import { useTapeHistory } from "../hooks/useTapeHistory";
+import { useTapeHistory, type HistDay } from "../hooks/useTapeHistory";
 import type { TapeRange } from "../lib/volumeProfile";
 import type { CompositeRule } from "../lib/compositeProfile";
-import type { LiveTicket } from "../lib/simPrefs";
+import { legTicks, pinnedLeg, resolveBracketUsd, type UsdBracket } from "../lib/bracketUsd";
+import type { LiveTicket, TrailSource } from "../lib/simPrefs";
 import {
   loadLiveChartKnobs,
   loadLiveContract,
@@ -133,7 +158,14 @@ import {
 import { ReplayEngine, type EventTuning, type IbBox, type RangeBox, type Tape } from "../lib/replayEngine";
 import { loadFillModel, type FillCfg } from "../lib/fillModel";
 import { liveSource } from "../lib/tapeSource";
-import { showsSeconds, timeframeById, TIMEFRAMES, TF_OPTIONS } from "../lib/timeframes";
+import { showsSeconds, timeframeById, useTimeframeOptions } from "../lib/timeframes";
+import {
+  HISTORY_DAY_OPTIONS,
+  defaultHistoryDays,
+  governingHistory,
+  withHistoryOverride,
+  type HistoryDayOverrides,
+} from "../lib/contextDays";
 import {
   newLog,
   newSim,
@@ -147,8 +179,10 @@ import {
   type Side,
   type SimState,
   type Trade,
+  type TrailCfg,
 } from "../lib/replaySim";
 import {
+  blotterRow,
   fmtClock,
   fmtCountdown,
   fmtPts,
@@ -159,22 +193,20 @@ import {
   tradeMark,
 } from "../lib/simViews";
 import { palette } from "../theme";
+import { gexAt, useGexRegime, type GexRegime } from "../hooks/useGex";
 
 const TZ = "New York";
 const SPEEDS = [1, 5, 15, 60, 300, 900];
 
-/** The prior-session counts offered behind the live one. The default, and where
- *  the choice is kept, are in `lib/chartPrefs` — it sticks across reloads.
- *
- *  A week to start with. It is the span the levels you trade off are actually
- *  made of — the shelf the week has been sat on, Monday's high — and a live
- *  chart that starts at the Globex open has none of them on it.
- *
- *  It costs something, which is why it is a control and not a constant: each day
- *  is a whole tape to fetch, ~0.5M prints and a few megabytes, and they are
- *  fetched before the session's own tape starts (see `useLiveTape`). Cold, that
- *  is seconds per day; warm, nothing at all. */
-const HISTORY_DAY_OPTIONS = [0, 1, 2, 3, 5, 10];
+// The prior-session counts offered behind the live one, the rule that picks one
+// per bar size, and where your overrides of it are kept: `lib/contextDays` and
+// `lib/chartPrefs` respectively. Both shared with the Simulator, which draws the
+// same context off the same store.
+//
+// It costs something, which is why it is a control and not a constant: each day
+// is a whole tape to fetch, ~0.5M prints and a few megabytes, and they are
+// fetched before the session's own tape starts (see `useLiveTape`). Cold, that
+// is seconds per day; warm, nothing at all.
 
 /** How often an extra pane may repaint, in ms. The Simulator's number and the
  *  same argument: the engine step is ~0.006ms so every pane advances every
@@ -218,6 +250,23 @@ const geoSig = (h: LiveHeader): string =>
     h.weekly_seed ? h.weekly_seed.join(",") : "-",
   ].join("|");
 
+/** The context a running blotter is pinned to: how many prior days are drawn,
+ *  and what each recorded day was at when those orders were indexed against it.
+ *  Both can move on their own — the day count when you change the bar, a day's
+ *  own bytes when the harvest sweep fills in the hours you were disconnected
+ *  for — and either one re-seeds the tape from row zero, which renumbers the
+ *  tick indices a paper order is. So they are held, and released, together. */
+interface ContextPin {
+  days: number;
+  versions: Record<string, string | null>;
+}
+
+/** Stable empties for a pane the layout doesn't currently have — a fresh `[]`
+ *  per render would make the picker's memos churn and the chart rebuild its
+ *  studies every frame. */
+const EMPTY_SPECS: StudySpec[] = [];
+const EMPTY_LAYERS: LayerState[] = [];
+
 export function LiveChart() {
   const statusQ = useLiveStatus();
   const status = statusQ.data;
@@ -238,27 +287,104 @@ export function LiveChart() {
   // has long stretches with nothing recorded, and gluing across one would draw a
   // continuous chart out of a discontinuous week.
   // Remembered, because it is the page's biggest opening cost and not a taste —
-  // see `loadLiveHistoryDays`. A reload that went back to five was five tapes
-  // to fetch and decode before the live one could start, however few you asked
-  // for last time.
-  const [historyDays, setHistoryDaysState] = useState(loadLiveHistoryDays);
-  const setHistoryDays = useCallback((n: number) => {
-    setHistoryDaysState(n);
-    saveLiveHistoryDays(n);
+  // see `loadLiveHistoryDays`. A reload that went back to a fixed default was
+  // that many tapes to fetch and decode before the live one could start,
+  // however few you asked for last time.
+  //
+  // How many is a question about the *bar*: an hourly with one day behind it has
+  // twenty-three candles on it. So the count follows the bucketing
+  // (lib/contextDays), the stored map is only what you have overridden that rule
+  // to, and the bar has to be decided before the fetch — which is why the
+  // timeframe and the pane grid are declared here, well above the chrome that
+  // draws them.
+  const [knobs] = useState(loadLiveChartKnobs);
+  const [tfId, setTfId] = useState(knobs.timeframe);
+  const tf = useMemo(() => timeframeById(tfId), [tfId]);
+  const [layout, setLayout] = useState(knobs.layout);
+  const [paneTfIds, setPaneTfIds] = useState(knobs.paneTfs);
+  const paneCount = LAYOUTS[layout].panes;
+  // The bars on screen, main first — pane 0's bucketing is the page's own `tfId`,
+  // so `paneTfIds[0]` is never read, and panes past the layout's count are not
+  // drawn at all.
+  const drawnTfs = useMemo(
+    () => [tfId, ...paneTfIds.slice(1, paneCount)].map(timeframeById),
+    [tfId, paneTfIds, paneCount],
+  );
+  const [histOverrides, setHistOverridesState] = useState(loadLiveHistoryDays);
+  const setHistOverrides = useCallback((next: HistoryDayOverrides) => {
+    setHistOverridesState(next);
+    saveLiveHistoryDays(next);
   }, []);
+  const governingHist = useMemo(
+    () => governingHistory(drawnTfs, histOverrides),
+    [drawnTfs, histOverrides],
+  );
+
+  // What the bar *asks* for, and what it actually gets.
+  //
+  // The two differ only while the blotter has something in it, and they have to:
+  // changing the context re-seeds the tape from row zero, and every order on the
+  // blotter is a tick index into the tape that would stop existing. The bar is
+  // still free to change — it is the one setting you change while watching — so
+  // a switch to 1h with a position open moves the candles and leaves the context
+  // where it is, and says so rather than silently dropping the difference.
+  //
+  // Frozen at the value in force when the blotter filled, not recomputed while
+  // locked: the point is that the tape underneath does not move.
+  // What each recorded day is *at* right now, by date. A finished day is not
+  // immutable: the harvest sweep fills in the hours you were disconnected for on
+  // your next connect, which lands a minute or so after this page loads. That is
+  // half a session's volume on a bad day, and the day's whole share of the
+  // weekly anchor with it — so the context has to re-read itself when the
+  // manifest moves rather than draw the truncated tape it fetched first.
+  // `/live/recordings` is already polled once a minute; this is its other use.
+  const recordingsQ = useLiveRecordings(header?.symbol ?? undefined);
+  // Whether the contract on screen is still the one the market trades.
+  //
+  // A feed does not notice a roll: the subscription was made at connect and the
+  // stored symbol outlives the quarter it was typed in. Meanwhile the *order*
+  // path resolves the front month every time it attaches, so the two drift
+  // apart silently — on 2026-09-14 the tape was NQU6 and the orders were going
+  // to MNQZ6, 290 points away, with the chart reading normally the whole time.
+  // `is_front` is `false` only when the server is sure; `null` (no opinion)
+  // draws nothing.
+  const staleContract = useMemo(() => {
+    const want = header?.symbol;
+    const row = (recordingsQ.data?.contracts ?? []).find((c) => c.symbol === want);
+    return row && row.is_front === false && row.front_month ? row : null;
+  }, [recordingsQ.data, header?.symbol]);
+  const dayVersions = useMemo(() => {
+    const out: Record<string, string | null> = {};
+    for (const r of recordingsQ.data?.recordings ?? []) out[r.date] = r.updated_at;
+    return out;
+  }, [recordingsQ.data]);
+
+  const wantedDays = governingHist.days;
+  const wantedRef = useRef({ days: wantedDays, versions: dayVersions });
+  wantedRef.current = { days: wantedDays, versions: dayVersions };
+  // The context the blotter's orders were indexed against — both halves of it,
+  // because a re-harvested day re-seeds the tape exactly as a changed day count
+  // does, and an order's `idx` would stop meaning what it meant.
+  const [pinned, setPinned] = useState<ContextPin | null>(null);
+  const historyDays = pinned?.days ?? wantedDays;
+  const histVersions = pinned?.versions ?? dayVersions;
+  /** The bar is asking for a context the open blotter won't let it have. */
+  const histFrozen = pinned != null && pinned.days !== wantedDays;
+
   const histDaysQ = useLiveHistoryDays(header?.symbol ?? null, header?.date ?? null, historyDays);
   const histDates = useMemo(
     () => (histDaysQ.data?.days ?? []).map((d) => d.date),
     [histDaysQ.data],
   );
-  const histQ = useTapeHistory("/live/history/session", header?.symbol ?? null, histDates, TZ);
+  const histQ = useTapeHistory(
+    "/live/history/session", header?.symbol ?? null, histDates, TZ, histVersions);
 
   // The chart's reading knobs — the same set the Simulator hangs off its legend
   // rows, persisted in their own store (see lib/simPrefs, loadLiveChartKnobs).
   // All of them are reading choices: none can move the clock, fill an order, or
   // reach a broker. Declared up here because the composite span cuts the
-  // context ranges below.
-  const [knobs] = useState(loadLiveChartKnobs);
+  // context ranges below. (`knobs` itself is read at the top of the component,
+  // with the timeframe the context count depends on.)
   const [bigLots, setBigLotsState] = useState(knobs.bigLots);
   const bigLotsRef = useRef(bigLots);
   bigLotsRef.current = bigLots;
@@ -271,13 +397,45 @@ export function LiveChart() {
     (patch: Partial<ModernVwapParams>) => setMvParams((p) => ({ ...p, ...patch })),
     [],
   );
+  // The Zeiierman line beside it, held and persisted the same way — a separate
+  // indicator, so separate state; see lib/dynamicSwingVwap.
+  const [dsvParams, setDsvParams] = useState(knobs.dynamicSwingVwap);
+  const patchDsv = useCallback(
+    (patch: Partial<DsvParams>) => setDsvParams((p) => ({ ...p, ...patch })),
+    [],
+  );
+  // Volume shelves. Sticky-global rather than part of the page's own prefs, like
+  // the surface and the band fills: how you read a shelf is a statement about
+  // shelves, not about this sitting — and it is the same setting the journal's
+  // charts offer.
+  const [shelfParams, setShelfParams] = useState(loadShelfParams);
+  // Which quantity the raster draws. Its own state, not a seventh shelf
+  // parameter: switching it re-reads nothing, and `ShelfParams` is mirrored
+  // by a Python module that draws nothing at all.
+  const [shelfField, setShelfField] = useState<ShelfField>(loadShelfField);
+  const patchShelfField = useCallback((f: ShelfField) => {
+    setShelfField(f);
+    saveShelfField(f);
+  }, []);
+  const patchShelf = useCallback(
+    (patch: Partial<ShelfParams>) =>
+      setShelfParams((p) => {
+        const next = { ...p, ...patch };
+        saveShelfParams(next);
+        return next;
+      }),
+    [],
+  );
   const [compositeRule, setCompositeRule] = useState(knobs.composite);
   const [compositeSpan, setCompositeSpan] = useState(knobs.compositeSpan);
   const [evTuning, setEvTuning] = useState(knobs.eventTuning);
   const evTuningRef = useRef(evTuning);
   evTuningRef.current = evTuning;
   const [evLabelSt, setEvLabelSt] = useState(knobs.eventLabelSt);
-  const [evFill, setEvFill] = useState(knobs.eventFill);
+  const [evFillSweep, setEvFillSweep] = useState(knobs.eventFillSweep);
+  const [evFillAbsorb, setEvFillAbsorb] = useState(knobs.eventFillAbsorb);
+  const [evFloorSweep, setEvFloorSweep] = useState(knobs.eventFloorSweep);
+  const [evFloorAbsorb, setEvFloorAbsorb] = useState(knobs.eventFloorAbsorb);
   const [evMarginal, setEvMarginal] = useState(knobs.eventMarginal);
   // The store is written wholesale further down, once the page posture it also
   // carries (timeframe, indicator strip, rail pin) has been declared.
@@ -291,17 +449,27 @@ export function LiveChart() {
   // version of this: every day here is a strictly earlier *date* than the one
   // running, and a session's tape begins at the 18:00 open of its own eve. The
   // ordering guard is the whole check.
-  const contextTapes = useMemo(() => {
-    const out: Tape[] = [];
+  // Kept as days rather than bare tapes: the weekly anchor reaches back over
+  // this stretch and needs each day's own seed to do it (see
+  // `ReplayEngine.historyWeeklyBand`), and the seed only travels with the day.
+  const contextDays = useMemo(() => {
+    const out: HistDay[] = [];
     let prevEnd = -Infinity;
     for (const d of histQ.days) {
       const t = d.tape;
       if (t.n === 0 || t.t[0] <= prevEnd) continue;
-      out.push(t);
+      out.push(d);
       prevEnd = t.t[t.n - 1];
     }
     return out;
   }, [histQ.days]);
+  const contextTapes = useMemo(() => contextDays.map((d) => d.tape), [contextDays]);
+  const engineContext = useMemo(
+    () => contextDays.map((d) => ({ ticks: d.tape.n, weeklySeed: d.weeklySeed })),
+    [contextDays],
+  );
+  const engineContextRef = useRef(engineContext);
+  engineContextRef.current = engineContext;
 
   // Where each context day sits on the seeded tape — the spans the composite is
   // built over, and the only thing it is built over. The live session is
@@ -364,7 +532,18 @@ export function LiveChart() {
   // copy, so react-query asks once either way.
   const routingQ = useRoutingStatus(!!status?.routing || status?.running === false);
   const brokerState = routingQ.data?.broker ?? null;
+  /** Can the ladder run at all? `use_instrument` lets orders be routed to MNQ
+   *  while the tape stays on NQ, and the ladder measures the high off the tape
+   *  this app can see — so on a split it would be trailing the wrong contract.
+   *  The server refuses that pair; this greys the option rather than letting the
+   *  refusal arrive on the send. */
+  const ladderBlocked =
+    !!brokerState && !!brokerState.feed_symbol
+    && brokerState.symbol !== brokerState.feed_symbol;
   const intent = useOrderIntent(brokerState, () => void routingQ.refetch());
+  // Once per session — the curve is fixed for the day (OI is frozen pre-open),
+  // so the per-tick half is an interpolation, not a request.
+  const gexQ = useGexRegime(status?.symbol ?? null, status?.date ?? null);
 
   // --- opening the page opens the session -----------------------------------
   // There is no landing screen any more. Arriving at /charts/live with nothing
@@ -433,8 +612,12 @@ export function LiveChart() {
     })();
   }, [autoSymbol, refetchStatus, rs, rsFailed, status?.running, statusOk]);
 
-  const [tfId, setTfId] = useState(knobs.timeframe);
-  const tf = useMemo(() => timeframeById(tfId), [tfId]);
+  // The built-in bar sizes plus any you have typed into the picker — the same
+  // list the Simulator's bar reads, and the same store behind it. (`tfId` and
+  // the pane grid it belongs to are declared at the top of the component: how
+  // many days of context to fetch depends on what is drawn, and that decision
+  // has to be made before the tape can start.)
+  const tfOptions = useTimeframeOptions();
   const tfRef = useRef(tf);
   tfRef.current = tf;
 
@@ -589,20 +772,43 @@ export function LiveChart() {
   // otherwise stack in the unpinned overlay and fight over the same column when
   // pinned, and the layout rules for that are a second set to keep in step for
   // no gain. Coverage is something you consult, not something you watch.
-  const [railView, setRailView] = useState<"signals" | "coverage" | "routing" | null>(null);
+  const [railView, setRailView] = useState<
+    "signals" | "coverage" | "routing" | "blotter" | null
+  >(null);
   const signalsOpen = railView === "signals";
   const [railPinned, setRailPinned] = useState(knobs.railPinned);
   const [indicators, setIndicators] = useState(knobs.indicators);
-  // The pane grid, exactly as the Simulator carries it — same layout model, same
-  // link, same per-pane bucketings, its own store. See lib/paneLayout.
-  const [layout, setLayout] = useState(knobs.layout);
-  const [paneTfIds, setPaneTfIds] = useState(knobs.paneTfs);
+  // The rest of the pane grid, exactly as the Simulator carries it — same layout
+  // model, same link, same per-pane bucketings, its own store. See lib/paneLayout.
+  // `layout` and `paneTfIds` themselves are up with the timeframe, for the reason
+  // given there.
   const [splitPct, setSplitPct] = useState(knobs.splitPct);
   const [splitPctY, setSplitPctY] = useState(knobs.splitPctY);
   const [linkOn, setLinkOn] = useState(knobs.linkOn);
   const [toolsPinned, setToolsPinned] = useState(knobs.toolsPinned);
+  const [presetBucket, setPresetBucket] = useState(knobs.presetBucket);
   const [paneLinked, setPaneLinked] = useState(knobs.paneLinked);
-  const paneCount = LAYOUTS[layout].panes;
+  // The community studies and this chart's own layers, both per pane and both
+  // driven from the topbar ƒ (see StudyPicker). Per pane because a pane is a
+  // question: the study you want on the 5m is usually not the one you want on
+  // the hourly beside it, which is the same reason the visibility map splits.
+  //
+  // The specs are the page's because the page persists them; the *layers* are
+  // each chart's own and only reported here, so the catalogue can show what the
+  // focused pane is drawing without anyone holding a second copy of that state.
+  const [studies, setStudies] = useState<StudySpec[][]>(() =>
+    Array.from({ length: MAX_PANES }, (_, i) => loadStudies(i === 0 ? undefined : `p${i}`)),
+  );
+  const [paneLayers, setPaneLayers] = useState<LayerState[][]>(() =>
+    Array.from({ length: MAX_PANES }, () => []),
+  );
+  const setPaneStudies = useCallback((pane: number, specs: StudySpec[]) => {
+    setStudies((prev) => prev.map((s, i) => (i === pane ? specs : s)));
+    saveStudies(specs, pane === 0 ? undefined : `p${pane}`);
+  }, []);
+  const reportLayers = useCallback((pane: number, next: LayerState[]) => {
+    setPaneLayers((prev) => prev.map((l, i) => (i === pane ? next : l)));
+  }, []);
   const paneCountRef = useRef(paneCount);
   paneCountRef.current = paneCount;
   const paneTfKey = paneTfIds.join(",");
@@ -624,9 +830,13 @@ export function LiveChart() {
       compositeSpan,
       eventTuning: evTuning,
       eventLabelSt: evLabelSt,
-      eventFill: evFill,
+      eventFillSweep: evFillSweep,
+      eventFillAbsorb: evFillAbsorb,
+      eventFloorSweep: evFloorSweep,
+      eventFloorAbsorb: evFloorAbsorb,
       eventMarginal: evMarginal,
       modernVwap: mvParams,
+      dynamicSwingVwap: dsvParams,
       timeframe: tfId,
       indicators,
       railPinned,
@@ -637,8 +847,9 @@ export function LiveChart() {
       linkOn,
       paneLinked,
       toolsPinned,
+      presetBucket,
     });
-  }, [bigLots, nodeProm, compositeRule, compositeSpan, evTuning, evLabelSt, evFill, evMarginal, mvParams, tfId, indicators, railPinned, layout, paneTfIds, splitPct, splitPctY, linkOn, paneLinked, toolsPinned]);
+  }, [bigLots, nodeProm, compositeRule, compositeSpan, evTuning, evLabelSt, evFillSweep, evFillAbsorb, evFloorSweep, evFloorAbsorb, evMarginal, mvParams, dsvParams, tfId, indicators, railPinned, layout, paneTfIds, splitPct, splitPctY, linkOn, paneLinked, toolsPinned, presetBucket]);
   // THE ticket — one object, and the page owns it. Size and the bracket that
   // every origination point on this page measures its order with: the setup
   // drawer below, the chart's own long-press ticket, and the routing panel's
@@ -647,16 +858,89 @@ export function LiveChart() {
   //
   // Defaults and the validators are in `lib/simPrefs` (DEFAULT_LIVE_TICKET), and
   // it is loaded from there rather than hard-coded: what you set last time is
-  // what the page opens on. `trailTicks`/`beTicks` are real accounts only — the
-  // paper blotter deliberately does not imitate the ratchet, see `draftFor`.
-  const [ticket, setTicket] = useState(loadLiveTicket);
-  const { size, stopTicks, targetTicks, trailTicks, beTicks, beLock } = ticket;
-  useEffect(() => saveLiveTicket(ticket), [ticket]);
-  /** One field of the ticket, changed. Everything that edits it comes here. */
+  // what the page opens on. `trailTriggerTicks`/`beTicks` are Rithmic's fields
+  // and reach real accounts only; the `ladder*` four are this app's own and run
+  // on paper too, because it is the same rule either way — see `draftFor`.
+  const [rawTicket, setTicket] = useState(loadLiveTicket);
+  const tickSize = header?.tick_size ?? 0.25;
+  const pointValue = header?.point_value ?? 20;
+  // **The contract orders actually go to**, which is not always the one on
+  // screen: routing can be pointed at the mini's micro while the tape stays on
+  // the mini, because one login is one socket and the subscription was made at
+  // connect. Everything drawn from broker state is measured with this rather
+  // than with the tape's, or the chips price an MNQ position at NQ's $20 a
+  // point and read ten times the money that is on. Both numbers come down on
+  // the routing poll and follow `broker.symbol` (see routingTypes).
+  const routedTick = brokerState?.tick_size ?? tickSize;
+  const routedPoint = brokerState?.point_value ?? pointValue;
+  /** What one tick of one contract costs on the instrument this ticket's orders
+   *  would actually reach — the routed one where they reach an exchange, the
+   *  tape's on paper, which trades what it draws. This is what a dollar-pinned
+   *  leg is divided by, and it is the reason the pin is worth having: pointing
+   *  routing at the micro re-derives a $250 stop into the micro's distance
+   *  instead of leaving ten times the risk on a bracket that looks unchanged. */
+  const orderTickUsd = intent.real ? routedTick * routedPoint : tickSize * pointValue;
+  /** The ticket as every order path must read it: with a dollar-pinned leg
+   *  resolved to the distance it comes to right now (lib/bracketUsd). Resolved
+   *  here, once, at the top — the pin is a rule about what `stopTicks` *is*, and
+   *  a surface reading the stored value instead would be showing a bracket that
+   *  is not the one about to be sent. */
+  const ticket = useMemo(() => resolveBracketUsd(rawTicket, orderTickUsd), [rawTicket, orderTickUsd]);
+  const {
+    size, stopTicks, targetTicks, trailSource, trailTriggerTicks, beTicks,
+    beLock, ladderTicks, ladderStepTicks, ladderBeTicks, ladderBeOnly,
+  } = ticket;
+  // Stored raw: what a leg falls back to is the distance somebody set, not this
+  // session's resolution of a pin.
+  useEffect(() => saveLiveTicket(rawTicket), [rawTicket]);
+  /** One field of the ticket, changed. Everything that edits it comes here —
+   *  including the two `*Usd` pins, because a leg's unit and its distance are
+   *  one setting and the two must never be written apart.
+   *
+   *  Setting a **distance** unpins that leg: typing 60 into the stop box is a
+   *  statement that 60 is the stop, and a pin left standing would re-derive over
+   *  the top of it on the next render, so the box would appear to reject what
+   *  was typed.
+   *
+   *  Setting a **pin** writes the distance it comes to as well (`pinnedLeg`) —
+   *  that stored figure is what the leg falls back to when there is no routed
+   *  contract to price it in, and a stale one there is a bracket nobody chose. */
   const setTicketField = useCallback(
     <K extends keyof LiveTicket>(key: K, v: LiveTicket[K]) =>
-      setTicket((t) => (t[key] === v ? t : { ...t, [key]: v })),
-    [],
+      setTicket((t) => {
+        if (key === "stopUsd" || key === "targetUsd") {
+          const leg = key === "stopUsd" ? "stop" : "target";
+          const at = legTicks(t[`${leg}Ticks`], t[`${leg}Usd`], orderTickUsd, t.size);
+          const next = pinnedLeg(v as number | null, at, orderTickUsd, t.size);
+          return { ...t, [`${leg}Usd`]: next.usd, [`${leg}Ticks`]: next.ticks };
+        }
+        const unpin =
+          key === "stopTicks" ? { stopUsd: null } : key === "targetTicks" ? { targetUsd: null } : null;
+        if (t[key] === v && !unpin) return t;
+        return { ...t, [key]: v, ...unpin };
+      }),
+    [orderTickUsd],
+  );
+  /** A whole bracket edited somewhere that holds one — a chart's long-press
+   *  ticket, the floating knobs. Both legs arrive as either a distance or the
+   *  money they are pinned to, and the pinned ones are re-resolved against the
+   *  size in the same edit rather than the one that was on screen when it
+   *  started. */
+  const changeTicket = useCallback(
+    (t: UsdBracket) =>
+      setTicket((p) => {
+        const stop = pinnedLeg(t.stopUsd, t.stopTicks, orderTickUsd, t.size);
+        const target = pinnedLeg(t.targetUsd, t.targetTicks, orderTickUsd, t.size);
+        return {
+          ...p,
+          size: t.size,
+          stopTicks: stop.ticks,
+          stopUsd: stop.usd,
+          targetTicks: target.ticks,
+          targetUsd: target.usd,
+        };
+      }),
+    [orderTickUsd],
   );
   // The IB/range boxes ride along so the day-scale indicator strip can read
   // them: they are already tracked in geoRef for the chart's own overlays, and
@@ -679,8 +963,6 @@ export function LiveChart() {
   // the chart — floated, it claims no floor at all.
   const [floor, setFloor] = useState(0);
 
-  const tickSize = header?.tick_size ?? 0.25;
-  const pointValue = header?.point_value ?? 20;
   // What the paper side charges a fill, read from the same store the Simulator
   // writes (lib/fillModel) — the shadow account and the practice account are one
   // engine, so they are one set of costs. Read once, on mount: the model is set
@@ -690,6 +972,30 @@ export function LiveChart() {
   const fillCfg = useMemo<FillCfg>(
     () => ({ ...fillsRef.current, pointValue, tickSize }),
     [pointValue, tickSize],
+  );
+
+  /** The ladder the ticket is set to, as prices, or null when it is off.
+   *
+   *  Built once here and used by both halves of the page: the paper blotter runs
+   *  it locally through `replaySim`, and a real order hands the same four
+   *  numbers to the server, which runs the Python port of the same rule
+   *  (`journal/live/ladder.py`, held to this one by a fixture). Ticks become
+   *  prices at exactly one place, which is this one.
+   *
+   *  Null without a stop, because the ladder has no leg to move without one —
+   *  the server refuses that pair, and a draft that reliably 422s is a bug in
+   *  here rather than a message worth showing. */
+  const ladderCfg = useMemo<TrailCfg | null>(
+    () =>
+      trailSource === "ladder" && ladderTicks > 0 && stopTicks > 0
+        ? {
+            dist: ladderTicks * tickSize,
+            step: ladderStepTicks * tickSize,
+            be: ladderBeTicks * tickSize,
+            beOnly: ladderBeOnly,
+          }
+        : null,
+    [trailSource, ladderTicks, ladderStepTicks, ladderBeTicks, ladderBeOnly, stopTicks, tickSize],
   );
 
   // --- helpers --------------------------------------------------------------
@@ -891,7 +1197,7 @@ export function LiveChart() {
       // position opened — this process attached to one already running — the
       // honest fallback is the session's own start rather than an invented bar.
       sessionStartRef.current = tape.t[tape.ctx];
-      const eng = new ReplayEngine(tape as Tape, payload, tfRef.current);
+      const eng = new ReplayEngine(tape as Tape, payload, tfRef.current, engineContextRef.current);
       eng.setBigLots(bigLotsRef.current);
       eng.setEventTuning(evTuningRef.current);
       engineRef.current = eng;
@@ -942,7 +1248,7 @@ export function LiveChart() {
       if (only != null && only !== i) continue;
       const chart = extraCharts.current[i];
       if (!chart) continue;
-      const e = new ReplayEngine(tape as Tape, payload, paneTfsRef.current[i]);
+      const e = new ReplayEngine(tape as Tape, payload, paneTfsRef.current[i], engineContextRef.current);
       e.setBigLots(bigLotsRef.current);
       e.setEventTuning(evTuningRef.current);
       extraEngines.current[i] = e;
@@ -1016,15 +1322,128 @@ export function LiveChart() {
   const brokerRecent = brokerState?.recent;
   brokerOrdersRef.current = brokerOrders ?? null;
   brokerPosRef.current = brokerPos;
-  // **The contract orders actually go to**, which is not always the one on
-  // screen: routing can be pointed at the mini's micro while the tape stays on
-  // the mini, because one login is one socket and the subscription was made at
-  // connect. Everything drawn from broker state is measured with this rather
-  // than with the tape's, or the chips price an MNQ position at NQ's $20 a
-  // point and read ten times the money that is on. Both numbers come down on
-  // the routing poll and follow `broker.symbol` (see routingTypes).
-  const routedTick = brokerState?.tick_size ?? tickSize;
-  const routedPoint = brokerState?.point_value ?? pointValue;
+  // --- The risk sizer -------------------------------------------------------
+  // The levels the live router itself enforces, falling back to the same
+  // constants `guardRules` does when routing has not answered.
+  const guards = routingQ.data?.guards ?? DEFAULT_GUARDS;
+  // The vol ruler's reading, pushed up by the main chart on every bar close.
+  const [volRead, setVolRead] = useState<VolRulerRead | null>(null);
+  /** Whether orders are actually going to the micro. Measured off the money
+   *  rather than off the symbol: routing carries the point value it resolved,
+   *  and a tenth of the tape's is what "micro" means here. */
+  const routedIsMicro = intent.real && routedPoint > 0 && routedPoint < pointValue;
+  // The presets' ruler and the bar it is read at. All three bucketings arrive on
+  // one reading (lib/volRuler), so the toggle picks out of a record rather than
+  // re-measuring the tape.
+  const presetCtx = useMemo<PresetCtx | null>(
+    () =>
+      volRead ? { read: volRead.preset, bucket: presetBucket, onBucket: setPresetBucket } : null,
+    [volRead, presetBucket],
+  );
+
+  const sizerCtx = useMemo<SizerCtx | undefined>(() => {
+    const mini = tickSize * pointValue;
+    if (!(mini > 0)) return undefined;
+    const root = rootOf(brokerState?.feed_symbol ?? status?.symbol ?? "");
+    if (!root) return undefined;
+    return {
+      // The tape is always the mini here — there is no MNQ tick store (see
+      // lib/contracts) — so the tape's own tick money is the mini's, whatever
+      // routing is pointed at. That is exactly what the sizer wants.
+      tickUsd: mini,
+      commissionPerSide: guards.commission_per_side,
+      // The budgets are constants in the lib and this page has no account view
+      // to offer a floor, so the only limit passed is the fallback one the
+      // losers-to-death column divides. `guards.daily_loss_stop` used to anchor
+      // the budgets here; it stops the day's trading, it no longer sizes it.
+      maxLossUsd: DEFAULT_MAX_LOSS,
+      caps: { minis: 4, micros: 40 },
+      stopTicksMax: guards.stop_ticks_max,
+      root,
+      microRoot: microOf(root),
+      micro: routedIsMicro,
+      // The routed instrument belongs to routing, not to this ticket. Cells for
+      // the other contract go dead rather than silently re-routing an order.
+      canSwitchContract: false,
+    };
+  }, [
+    brokerState?.feed_symbol, guards.commission_per_side,
+    guards.stop_ticks_max, pointValue, routedIsMicro, status?.symbol, tickSize,
+  ]);
+  /** Stop and size only — see `canSwitchContract`. */
+  const applySizing = useCallback(
+    (a: { stopTicks: number; size: number; micro: boolean }) => {
+      if (a.micro !== routedIsMicro) return;
+      setTicket((p) => ({ ...p, stopTicks: a.stopTicks, size: a.size }));
+    },
+    [routedIsMicro, setTicket],
+  );
+  /**
+   * A bracket preset (lib/orderPresets), applied to this page's ticket.
+   *
+   * It lands on the **ladder** and switches `trailSource` to it, because that is
+   * the only one of the two trails that can hold the shape: a preset says how
+   * far behind the stop rides, on what grid, and where its first rung goes, and
+   * Rithmic's native bracket has no vocabulary for any of that — it takes a wake
+   * -up trigger and a lock, rides at `stopTicks` by force, and refuses to be
+   * dragged. Translating a preset into it would be sending a bracket nobody
+   * described.
+   *
+   * The cost is stated rather than hidden: the ladder is run by this app off the
+   * live tape, so it stops ratcheting if the app does. That is the trade the
+   * user made deliberately — the ladder is the rule the replay practises and the
+   * backtest trades, and a preset that meant something different on this page
+   * than in practice would be worth less than no preset. The panel's own
+   * `trailSource` control still says which one is live, and switching back to
+   * Rithmic keeps the ladder's numbers stored.
+   */
+  const applyPreset = useCallback(
+    (b: PresetBracket) => {
+      setTicket((p) => ({
+        ...p,
+        stopTicks: b.stopTicks,
+        targetTicks: b.targetTicks,
+        trailSource: "ladder",
+        ladderTicks: b.trailTicks,
+        ladderStepTicks: b.trailStepTicks,
+        ladderBeTicks: b.trailBeTicks,
+        ladderBeOnly: b.trailBeOnly,
+      }));
+    },
+    [setTicket],
+  );
+  /** The five distances the ticket is carrying now, in the shape a preset is
+   *  written in, so the card can light whichever preset equals it.
+   *
+   *  Null unless the **ladder** is the live trail: `trailSource` picks between
+   *  this app's ladder and Rithmic's own native trail, and a preset always throws
+   *  it to the ladder (see `applyPreset`). On Rithmic's the ladder fields are
+   *  still sitting there holding their last values, and lighting a preset off
+   *  numbers that are not managing the trade would be the card claiming a shape
+   *  the account is not carrying. Nothing lit is the honest answer.  */
+  const activeBracket = useMemo<PresetBracket | null>(
+    () =>
+      ticket.trailSource === "ladder"
+        ? {
+            stopTicks: ticket.stopTicks,
+            targetTicks: ticket.targetTicks,
+            trailTicks: ticket.ladderTicks,
+            trailStepTicks: ticket.ladderStepTicks,
+            trailBeTicks: ticket.ladderBeTicks,
+            trailBeOnly: ticket.ladderBeOnly,
+          }
+        : null,
+    [
+      ticket.trailSource,
+      ticket.stopTicks,
+      ticket.targetTicks,
+      ticket.ladderTicks,
+      ticket.ladderStepTicks,
+      ticket.ladderBeTicks,
+      ticket.ladderBeOnly,
+    ],
+  );
+
   /** The contract a click on any pane would actually reach, when that is not the
    *  one the tape is drawing — the panes wear it as a badge. Undefined when the
    *  two agree, which is the ordinary case and wants no chrome at all: a badge
@@ -1194,6 +1613,7 @@ export function LiveChart() {
       tape as Tape,
       sessionPayloadFor(header, tape.t[tape.ctx]),
       tfRef.current,
+      engineContextRef.current,
     );
     eng.setBigLots(bigLotsRef.current);
     eng.setEventTuning(evTuningRef.current);
@@ -1285,8 +1705,14 @@ export function LiveChart() {
   // layer at all, and this page now offers it: the engine has always been
   // detecting, the bands just never reached the canvas here.
   const eventOverlay = useMemo(
-    () => ({ tuning: evTuning, style: { labelSt: evLabelSt, fill: evFill }, marginal: evMarginal }),
-    [evTuning, evLabelSt, evFill, evMarginal],
+    () => ({
+      tuning: evTuning,
+      style: { labelSt: evLabelSt, fillSweep: evFillSweep, fillAbsorb: evFillAbsorb },
+      floorSweep: evFloorSweep,
+      floorAbsorb: evFloorAbsorb,
+      marginal: evMarginal,
+    }),
+    [evTuning, evLabelSt, evFillSweep, evFillAbsorb, evFloorSweep, evFloorAbsorb, evMarginal],
   );
 
   const indicatorSettings = useMemo<IndicatorSettingsMap>(
@@ -1297,19 +1723,34 @@ export function LiveChart() {
         nodeProm,
         onNodeProm: setNodeProm,
         modernVwap: { params: mvParams, onChange: patchMv },
-        composite: compositeRule,
-        onComposite: setCompositeRule,
-        compositeSpan,
-        onCompositeSpan: setCompositeSpan,
-        compositeNote: `Built from the ${contextTapes.length} prior session${contextTapes.length === 1 ? "" : "s"} drawn — "Prior days" in the ticket panel, since each one is a whole tape to fetch.`,
+        dynamicSwingVwap: { params: dsvParams, onChange: patchDsv },
+        volumeShelf: {
+          params: shelfParams,
+          onChange: patchShelf,
+          field: shelfField,
+          onField: patchShelfField,
+        },
+        composite: {
+          rule: compositeRule,
+          onRule: setCompositeRule,
+          span: compositeSpan,
+          onSpan: setCompositeSpan,
+          note: `Built from the ${contextTapes.length} prior session${contextTapes.length === 1 ? "" : "s"} drawn — "Prior days" in the ticket panel, since each one is a whole tape to fetch.`,
+        },
         events: {
           tuning: evTuning,
           labelSt: evLabelSt,
-          fill: evFill,
+          fillSweep: evFillSweep,
+          fillAbsorb: evFillAbsorb,
+          floorSweep: evFloorSweep,
+          floorAbsorb: evFloorAbsorb,
           marginal: evMarginal,
           onTuning: changeEvTuning,
           onLabelSt: setEvLabelSt,
-          onFill: setEvFill,
+          onFillSweep: setEvFillSweep,
+          onFillAbsorb: setEvFillAbsorb,
+          onFloorSweep: setEvFloorSweep,
+          onFloorAbsorb: setEvFloorAbsorb,
           onMarginal: setEvMarginal,
         },
       }),
@@ -1320,13 +1761,22 @@ export function LiveChart() {
       compositeRule,
       compositeSpan,
       contextTapes.length,
-      evFill,
+      evFillSweep,
+      evFillAbsorb,
+      evFloorSweep,
+      evFloorAbsorb,
       evLabelSt,
       evMarginal,
       evTuning,
       mvParams,
+      dsvParams,
+      shelfParams,
+      shelfField,
       nodeProm,
       patchMv,
+      patchDsv,
+      patchShelf,
+      patchShelfField,
     ],
   );
 
@@ -1356,9 +1806,19 @@ export function LiveChart() {
         price,
         stop: stopTicks > 0 ? at - dir * stopTicks * tickSize : null,
         target: targetTicks > 0 ? at + dir * targetTicks * tickSize : null,
-        // No ladder on this surface: the trail is a replay-practice knob, and a
-        // live ticket has enough on it.
-        trail: null,
+        // ...and the distances, which is what a market order's bracket really
+        // is (see `OrderRec.stopTicks`). Paper matters more than the replay
+        // here, not less: a real order on this same page sends `stop_ticks` and
+        // Rithmic hangs the legs off the fill, so a paper blotter measuring from
+        // the click would be the one place the two halves of this page disagree.
+        ...(type === "market" ? { stopTicks, targetTicks } : {}),
+        // The ladder the ticket is set to, and the same one a real order would
+        // get. This used to be a hard `null` on the argument that paper must not
+        // imitate Rithmic's server-side ratchet — true while Rithmic owned the
+        // trail, and dead now that the ladder is ours: paper runs the rule here,
+        // a real account runs the Python port of it, and a fixture holds the two
+        // together. Practising the exit you actually trade is the point.
+        trail: ladderCfg,
         edits: [],
         cancelMs: null,
       };
@@ -1370,39 +1830,51 @@ export function LiveChart() {
       const log = logRef.current;
       append({ ...log, orders: [...log.orders, rec] });
     },
-    [append, size, stopTicks, targetTicks, tickSize],
+    [append, size, stopTicks, targetTicks, tickSize, ladderCfg],
   );
 
   /** The bracket the ticket is set to, as the broker wants it: ticks, not
    *  prices. The paper path measures its own from the fill; a real order carries
    *  the distances and Rithmic attaches the legs.
    *
-   *  The trail is the one asymmetry, and it is deliberate: a real order hands
-   *  Rithmic a trailing bracket that ratchets server-side, while `placeOrder`
-   *  keeps `trail: null` on paper. Making the paper blotter imitate it would be
-   *  the wrong kind of faithful — the replay's ladder measures tick by tick off
-   *  the local tape, Rithmic's rides off its own last-trade feed, and a blotter
-   *  that quietly disagreed with the broker by a rung would be worse than one
-   *  that plainly does not trail. Practise the trail in the Simulator, where the
-   *  ladder is the point; run it here, where Rithmic owns it. */
+   *  **One trail source or the other, never both.** The two blocks below are
+   *  mutually exclusive at the wire and the server refuses the pair outright —
+   *  Rithmic re-derives a managed stop absolutely on every new extreme, so a
+   *  ladder running against it would spend the session being overwritten. The
+   *  ticket keeps both sets of numbers because switching sources should not throw
+   *  away settings; this is where only one of them becomes an order.
+   *
+   *  The asymmetry that used to live here is gone. `placeOrder` now gives paper
+   *  the same ladder, because the rule is ours on both sides: the blotter runs
+   *  `replaySim`'s and the server runs the Python port, held together by
+   *  `tests/test_live_ladder.py`. Rithmic's own trail is still the one thing
+   *  paper cannot imitate, and still the one that survives this app dying. */
   const draftFor = useCallback(
-    (side: Side, type: "market" | "limit" | "stop", price: number | null): OrderDraft => ({
-      // The chart speaks long/short (a position), the broker speaks buy/sell (an
-      // instruction). Translated here rather than anywhere else, so there is one
-      // place where the two vocabularies meet.
-      side: side === "long" ? "buy" : "sell",
-      qty: size,
-      type,
-      price,
-      stop_ticks: stopTicks,
-      target_ticks: targetTicks,
-      trail_trigger_ticks: stopTicks ? trailTicks : 0,
-      be_trigger_ticks: stopTicks ? beTicks : 0,
-      // Never sent without its trigger, and never sent as 0 with one: the
-      // server refuses both, and a draft that reliably 422s is a bug in here.
-      be_ticks: stopTicks && beTicks ? Math.max(1, beLock) : 0,
-    }),
-    [size, stopTicks, targetTicks, trailTicks, beTicks, beLock],
+    (side: Side, type: "market" | "limit" | "stop", price: number | null): OrderDraft => {
+      const ladder = trailSource === "ladder" && stopTicks > 0;
+      return {
+        // The chart speaks long/short (a position), the broker speaks buy/sell
+        // (an instruction). Translated here rather than anywhere else, so there
+        // is one place where the two vocabularies meet.
+        side: side === "long" ? "buy" : "sell",
+        qty: size,
+        type,
+        price,
+        stop_ticks: stopTicks,
+        target_ticks: targetTicks,
+        trail_trigger_ticks: !ladder && stopTicks ? trailTriggerTicks : 0,
+        be_trigger_ticks: !ladder && stopTicks ? beTicks : 0,
+        // Never sent without its trigger, and never sent as 0 with one: the
+        // server refuses both, and a draft that reliably 422s is a bug in here.
+        be_ticks: !ladder && stopTicks && beTicks ? Math.max(1, beLock) : 0,
+        ladder_dist_ticks: ladder ? ladderTicks : 0,
+        ladder_step_ticks: ladder ? ladderStepTicks : 0,
+        ladder_be_ticks: ladder ? ladderBeTicks : 0,
+        ladder_be_only: ladder ? ladderBeOnly : false,
+      };
+    },
+    [size, stopTicks, targetTicks, trailSource, trailTriggerTicks, beTicks, beLock,
+     ladderTicks, ladderStepTicks, ladderBeTicks, ladderBeOnly],
   );
 
   const placeMarket = useCallback(
@@ -1538,9 +2010,14 @@ export function LiveChart() {
     (b: { stop: number | null; target: number | null }) => {
       // The open position's stop or target, dragged. On a real account those
       // legs are separate orders at Rithmic, so the drag becomes a modify on
-      // whichever leg moved — and **only** the one that moved: Rithmic refuses
-      // two bracket operations at once ('Atomic order operation in progress'),
-      // and sending an unchanged leg alongside the changed one would trip it.
+      // whichever leg moved — and only that leg, never both at once: Rithmic
+      // refuses two bracket operations on one order ('Atomic order operation in
+      // progress'), and sending an unchanged leg alongside the changed one would
+      // trip it. One *basket* is addressed here even when the leg is several
+      // orders — a partially-filled bracket entry gets a leg pair per fill — and
+      // the broker fans the move out to the siblings (`_sibling_legs`), because
+      // which orders make up this position's stop is its question, not the
+      // chart's.
       if (drawBrokerRef.current) {
         const pos = brokerPosRef.current;
         const orders = brokerOrdersRef.current;
@@ -1690,12 +2167,37 @@ export function LiveChart() {
     disabled: useCallback(() => !!intent.pending, [intent.pending]),
   });
 
-  // The running total behind the title, for whichever account is active. The
-  // paper simulation keeps running underneath a real account, so this has to
-  // pick rather than sum — showing paper's total while a real account is live
-  // would be a number that means nothing about the money at risk.
-  const shownTrades = intent.real ? (brokerState?.trades ?? []) : trades;
-  const net = shownTrades.reduce((a, t) => a + t.pnl, 0);
+  // The blotter's rows, off whichever record this page is showing — the same
+  // card the replay draws, from the same view type (lib/simViews, BlotterRow).
+  //
+  // Everything the header says about the day is counted off these, including
+  // the running total and the trade count behind the title: the paper
+  // simulation keeps running underneath a real account, so this has to *pick*
+  // rather than sum — paper's figures while a real account is live would be
+  // numbers that mean nothing about the money at risk.
+  //
+  // Paper rows carry no contract badge: unlike the replay, nothing on this page
+  // can point the *simulation* at the micro (routing can, but that is the other
+  // branch), so every paper row is in the tape's own contract and a badge would
+  // be noise on all of them.
+  const blotterRows = useMemo(
+    () =>
+      intent.real
+        ? brokerBlotterRows(brokerTrades ?? [], brokerState?.symbol)
+        : trades.map((t) => blotterRow(t)),
+    [brokerState?.symbol, brokerTrades, intent.real, trades],
+  );
+  // Summed off the rows rather than off the raw trades, because the broker
+  // records `pnl` gross and charges the commission into the day's total
+  // separately — so this used to be a gross figure sitting under a guard panel
+  // reading net. `blotterRows` is where the subtraction happens.
+  const net = blotterRows.reduce((a, r) => a + r.pnl, 0);
+  // Off the same rows, and off `openStamps` inside `paceRefusal` rather than the
+  // row count — a Rithmic bracket is attached per *partial fill*, so a single
+  // entry that filled in three parts is three rows seconds apart and would fire
+  // this on every entry of the day. The blotter has been bitten by that once
+  // already; see `TradeTally`.
+  const pace = useMemo(() => paceRefusal(blotterRows), [blotterRows]);
   // Is there anything on the blotter that re-seeding the tape would take with
   // it? A closed trade counts: the session's record is the point of the page,
   // and "net" above is read off it.
@@ -1703,6 +2205,14 @@ export function LiveChart() {
   // indices, and those are what a paper order's `idx` is. A broker order does
   // not have one, so a real account's working list is no reason to lock this.
   const blotterBusy = trades.length > 0 || openPos != null;
+  // Pin the context while it is. Set on the way in rather than read on the way
+  // out, so what gets held is the context the blotter's orders were indexed
+  // against — recomputing it here would defeat the whole point. Cleared as soon
+  // as there is nothing left to lose, at which point the bar's own answer takes
+  // over and the tape re-seeds once.
+  useEffect(() => {
+    setPinned(blotterBusy ? (f) => f ?? wantedRef.current : null);
+  }, [blotterBusy]);
   // Time left in the bar now forming, for the top-bar clock to carry. Time bars
   // only — a tick bar closes on a count the wall clock knows nothing about.
   // Anchored at the bell like the engine's own boundaries.
@@ -1742,6 +2252,34 @@ export function LiveChart() {
         titleOpen={setupOpen}
         right={
           <>
+            {/* The contract rolled and this feed did not. First in the row and
+                loud, because every other number on this page is measured off a
+                tape that is no longer the market's — and unlike a stale price,
+                a stale *contract* reads as perfectly normal. */}
+            {staleContract && (
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: palette.red,
+                  border: `1px solid ${palette.red}`,
+                  borderRadius: 4,
+                  padding: "1px 6px",
+                  whiteSpace: "nowrap",
+                }}
+                title={
+                  `This tape is ${staleContract.symbol}, but ${staleContract.front_month} ` +
+                  "is the contract this root is trading in now — the volume rolled " +
+                  "eight days before expiry and the feed's subscription was made at " +
+                  "connect, so it cannot follow.\n\n" +
+                  "Orders resolve the front month independently, so they may already " +
+                  "be going somewhere this chart cannot see. Reconnect the feed to " +
+                  `${staleContract.front_month} before reading another level off it.`
+                }
+              >
+                ⚠ {staleContract.symbol} rolled → {staleContract.front_month}
+              </span>
+            )}
             {/* Which account the chart's gestures go to, in the one place that
                 is always on screen. The routing panel can be closed, pinned or
                 unmounted; "am I about to trade real money" must not depend on
@@ -1756,6 +2294,11 @@ export function LiveChart() {
             {status.routing && brokerState && !brokerState.paper && (
               <GuardChip guard={brokerState.guard} />
             )}
+            {/* And how fast the entries are coming, in the same always-on-screen
+                place and for the same reason — `GuardMeters` says it too, but
+                that lives in the routing panel, which can be closed. Not gated
+                on `paper`: this is about the habit, and a paper entry is one. */}
+            {pace && <PaceChip reason={pace} />}
             <span className="sim-topbar-num" title="Session clock">
               {fmtClock(hud.clockMs)}
               {countdownMs != null && (
@@ -1770,6 +2313,12 @@ export function LiveChart() {
             <span className="sim-topbar-num" title="Last print">
               {Number.isFinite(hud.lastPrice) ? fmtPts(hud.lastPrice) : "—"}
             </span>
+            {/* Which gamma regime the day is in, beside the price it is read
+                against. Draws nothing at all when no book is banked, when the
+                collector missed the day badly enough to be useless, or when
+                price is off the book's ±6% grid — a gamma badge that guesses is
+                worse than no gamma badge. */}
+            {gexQ.data && <GexChip gex={gexQ.data} price={hud.lastPrice} />}
           </>
         }
       >
@@ -1782,11 +2331,23 @@ export function LiveChart() {
               ? setTfId(id)
               : setPaneTfIds((prev) => prev.map((t, j) => (j === focusedPane ? id : t)))
           }
-          options={TIMEFRAMES.map((t) => ({ key: t.id, label: t.label }))}
+          options={tfOptions}
           // The tick bar (unique to a tape-driven chart), the default, and the
           // two the research vocabulary is written in. 30s/2m/3m/1h go behind ⋯.
           primary={["500t", "1m", "5m", "15m"]}
           compact
+          // Same as Replay's: the live tape is bucketed here too, so a typed
+          // bucketing is drawable and the list they share holds it.
+          custom
+        />
+        {/* The community indicator catalogue, in the same place the replay keeps
+            it — one bar, one picker, whichever clock you are on. */}
+        <StudyPicker
+          layers={paneLayers[focusedPane] ?? EMPTY_LAYERS}
+          onLayer={(key, on) => paneChart(focusedPane)?.setLayer(key, on)}
+          specs={studies[focusedPane] ?? EMPTY_SPECS}
+          onSpecs={(next) => setPaneStudies(focusedPane, next)}
+          paneLabel={paneCount > 1 ? String(focusedPane + 1) : undefined}
         />
         {paneCount > 1 && (
           <span className="chart-focus-note" title="Point at a pane to act on it">
@@ -1835,38 +2396,93 @@ export function LiveChart() {
             style={{ width: 72 }}
           />
         </label>
+        {/* The two distances, in ticks or in the money they are worth — the
+            button on the end of each box says which, and pinned to money the
+            distance follows the size and the routed contract (lib/bracketUsd).
+            The caption carries whichever unit the box isn't in. */}
         <label style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}>
-          Stop (ticks)
-          <input
-            type="number"
-            min={0}
-            value={stopTicks}
-            onChange={(e) => setTicketField("stopTicks", Math.max(0, Number(e.target.value) || 0))}
-            style={{ width: 72 }}
+          Stop <i style={{ fontSize: 10 }}>{legEcho(stopTicks, ticket.stopUsd, orderTickUsd, size)}</i>
+          <LegAmount
+            ticks={stopTicks}
+            pin={ticket.stopUsd}
+            tickUsd={orderTickUsd}
+            size={size}
+            onTicks={(t) => setTicketField("stopTicks", t)}
+            onPin={(usd) => setTicketField("stopUsd", usd)}
+            style={{ width: 96 }}
           />
         </label>
         <label style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}>
-          Target (ticks)
-          <input
-            type="number"
-            min={0}
-            value={targetTicks}
-            onChange={(e) => setTicketField("targetTicks", Math.max(0, Number(e.target.value) || 0))}
-            style={{ width: 72 }}
+          Target{" "}
+          <i style={{ fontSize: 10 }}>{legEcho(targetTicks, ticket.targetUsd, orderTickUsd, size)}</i>
+          <LegAmount
+            ticks={targetTicks}
+            pin={ticket.targetUsd}
+            tickUsd={orderTickUsd}
+            size={size}
+            onTicks={(t) => setTicketField("targetTicks", t)}
+            onPin={(usd) => setTicketField("targetUsd", usd)}
+            style={{ width: 96 }}
           />
         </label>
-        {/* Real accounts only, and shown only there — on paper it would be a
-            control with no effect, since the blotter does not imitate the
-            ratchet (see `draftFor`). One number because Rithmic's trail has one
-            free variable: it rides at the stop above, so the choice is when it
-            wakes up, not how far back it sits. */}
-        {status.routing && brokerState && !brokerState.paper && (
+        {/* Who moves the stop. The two blocks below are mutually exclusive at
+            the wire — a managed Rithmic stop is re-derived absolutely on every
+            new extreme, so a ladder running against it would spend the trade
+            being overwritten — and the server refuses the pair rather than
+            picking one. Both sets of numbers stay in the ticket either way:
+            switching source should not throw away settings.
+
+            Shown on paper too, because the ladder is the one of the two paper
+            can actually run. */}
+        {stopTicks > 0 && (
           <label
             style={{
               display: "flex",
               flexDirection: "column",
               fontSize: 12,
-              color: trailTicks && stopTicks ? palette.orange : palette.muted,
+              // Loud when the ticket is asking for a ladder that cannot run.
+              // The send would refuse with this same reason; saying it here is
+              // the difference between a setting and a surprise.
+              color:
+                ladderBlocked && trailSource === "ladder" ? palette.red : palette.muted,
+            }}
+            title={
+              ladderBlocked
+                ? `Orders are routed to ${brokerState?.symbol} but the tape is ` +
+                  `${brokerState?.feed_symbol}. The ladder measures the high off ` +
+                  `the tape this app can see, so it cannot trail a position in ` +
+                  `another contract — Rithmic's own trail rides its own feed and can.`
+                : "Rithmic's trail survives this app closing and cannot be dragged. " +
+                  "The ladder is the Simulator's own rule — a grid, a breakeven " +
+                  "rung, and a stop you can still drag — run here off the live " +
+                  "tape, and it stops ratcheting if this app does."
+            }
+          >
+            Trail by
+            <select
+              value={trailSource}
+              onChange={(e) => setTicketField("trailSource", e.target.value as TrailSource)}
+              style={{ width: 110 }}
+            >
+              <option value="rithmic">Rithmic</option>
+              <option value="ladder" disabled={ladderBlocked}>
+                Ladder
+              </option>
+            </select>
+          </label>
+        )}
+        {/* Real accounts only, and shown only there — on paper it would be a
+            control with no effect, since Rithmic is not holding a paper
+            position. One number because Rithmic's trail has one free variable:
+            it rides at the stop above, so the choice is when it wakes up, not
+            how far back it sits. */}
+        {trailSource === "rithmic" && status.routing && brokerState && !brokerState.paper && (
+          <label
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              fontSize: 12,
+              color: trailTriggerTicks && stopTicks ? palette.orange : palette.muted,
               opacity: stopTicks ? 1 : 0.5,
             }}
             title={
@@ -1883,8 +2499,10 @@ export function LiveChart() {
               type="number"
               min={0}
               disabled={!stopTicks}
-              value={trailTicks}
-              onChange={(e) => setTicketField("trailTicks", Math.max(0, Number(e.target.value) || 0))}
+              value={trailTriggerTicks}
+              onChange={(e) =>
+                setTicketField("trailTriggerTicks", Math.max(0, Number(e.target.value) || 0))
+              }
               style={{ width: 72 }}
             />
           </label>
@@ -1893,7 +2511,7 @@ export function LiveChart() {
             of it: this fires once and stops, the trail keeps going. They can be
             armed together — though that combination has not been measured
             against Rithmic, only each alone. */}
-        {status.routing && brokerState && !brokerState.paper && (
+        {trailSource === "rithmic" && status.routing && brokerState && !brokerState.paper && (
           <label
             style={{
               display: "flex",
@@ -1923,7 +2541,8 @@ export function LiveChart() {
         {/* Revealed only once breakeven is on — a lock with no trigger never
             fires, and the server says so rather than sending it. Minimum 1:
             "exactly at the fill" is a proto3 zero and never reaches Rithmic. */}
-        {status.routing && brokerState && !brokerState.paper && beTicks > 0 && stopTicks > 0 && (
+        {trailSource === "rithmic" && status.routing && brokerState && !brokerState.paper
+          && beTicks > 0 && stopTicks > 0 && (
           <label
             style={{
               display: "flex",
@@ -1948,6 +2567,140 @@ export function LiveChart() {
             />
           </label>
         )}
+        {/* The ladder — the same four knobs the Simulator trails by and the
+            backtest engine trades, which is the whole reason it is here: what
+            you practise and what you trade were two different rules until now.
+            Shown on paper as well as on a real account, because the rule is the
+            same on both — the blotter runs it locally, the API runs the Python
+            port, and a fixture holds the two together. */}
+        {trailSource === "ladder" && stopTicks > 0 && (
+          <>
+            <label
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                fontSize: 12,
+                color: ladderTicks ? palette.orange : palette.muted,
+              }}
+              title={
+                "How far behind the best price the stop rides. A real distance, " +
+                "unlike Rithmic's trail — it does not have to match the stop " +
+                "above. 0 is off, and it is the master switch for the three " +
+                "below. THIS APP moves the stop: if it stops running, the stop " +
+                "stays where it last got to."
+              }
+            >
+              Ladder (t)
+              <input
+                type="number"
+                min={0}
+                value={ladderTicks}
+                onChange={(e) =>
+                  setTicketField("ladderTicks", Math.max(0, Number(e.target.value) || 0))
+                }
+                style={{ width: 72 }}
+              />
+            </label>
+            {ladderTicks > 0 && (
+              <label
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  fontSize: 12,
+                  color: palette.orange,
+                  opacity: ladderBeOnly ? 0.5 : 1,
+                }}
+                title={
+                  "The grid the stop is allowed to rest on. 0 means one rung per " +
+                  "ladder width. A step wider than the ladder is refused: the " +
+                  "stop would never reach a second rung."
+                }
+              >
+                …step (t)
+                <input
+                  type="number"
+                  min={0}
+                  max={ladderTicks}
+                  disabled={ladderBeOnly}
+                  value={ladderStepTicks}
+                  onChange={(e) =>
+                    setTicketField("ladderStepTicks", Math.max(0, Number(e.target.value) || 0))
+                  }
+                  style={{ width: 72 }}
+                />
+              </label>
+            )}
+            {ladderTicks > 0 && (
+              <label
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  fontSize: 12,
+                  color: palette.orange,
+                }}
+                title={
+                  "How far past the fill the first rung lands. Zero is breakeven " +
+                  "gross — the round turn still owes commission, so a few ticks " +
+                  "here is what makes a scratch really a scratch."
+                }
+              >
+                …from (t)
+                <input
+                  type="number"
+                  min={0}
+                  max={Math.max(0, ladderTicks - 1)}
+                  value={ladderBeTicks}
+                  onChange={(e) =>
+                    setTicketField("ladderBeTicks", Math.max(0, Number(e.target.value) || 0))
+                  }
+                  style={{ width: 72 }}
+                />
+              </label>
+            )}
+            {ladderTicks > 0 && (
+              <label
+                style={{
+                  display: "flex",
+                  gap: 6,
+                  alignItems: "center",
+                  fontSize: 12,
+                  color: ladderBeOnly ? palette.orange : palette.muted,
+                }}
+                title={
+                  "Take the first rung and no other — a breakeven stop rather " +
+                  "than a trail. Its own rule, not a mode: a trail hands back " +
+                  "open profit on every pullback, which is exactly what this " +
+                  "refuses to do."
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={ladderBeOnly}
+                  onChange={(e) => setTicketField("ladderBeOnly", e.target.checked)}
+                />
+                First rung only
+              </label>
+            )}
+          </>
+        )}
+        {/* The shapes the dock's A–D chip offers, open here beside the
+            fields they fill — this drawer is the "set once" surface, which is
+            exactly what a preset is. Applying one throws `trailSource` to the
+            ladder (see `applyPreset`), so it lands on the block above rather
+            than on Rithmic's, whichever was showing. */}
+        {presetCtx && (
+          <div className="sim-preset-block">
+            <TicketCard
+              preset={presetCtx}
+              size={size}
+              tickUsd={intent.real ? routedTick * routedPoint : tickSize * pointValue}
+              onApply={applyPreset}
+              active={activeBracket}
+              sizer={sizerCtx}
+              onApplySizing={applySizing}
+            />
+          </div>
+        )}
         {/* The days behind this one. Here rather than in the bar because it is
             set once and because it costs something — each day is a whole tape,
             and changing it restarts the session's own tape from row zero (the
@@ -1960,27 +2713,70 @@ export function LiveChart() {
             reading choice — which is exactly the kind of quiet wrongness this
             surface exists not to do — the control locks once there is anything
             to lose. Choose the context before you start, or flatten and clear. */}
+        {/* Per bar, which is why it carries the bar's name under it: the number
+            you see belongs to `governingHist.tf`, not to the page. ↺ puts that
+            bar back on the rule. While the blotter is busy the whole control is
+            read-only and shows what is actually seeded — which, if you have
+            since changed the bar, is not what the bar is asking for. */}
         <label
           style={{ display: "flex", flexDirection: "column", fontSize: 12, color: palette.muted }}
           title={
             blotterBusy
               ? "Locked while the blotter has something in it: changing the context re-seeds the tape from row zero, and every order on it is a tick index into the tape that would stop existing."
-              : "Draw this many prior sessions to the left of the live one. Real ticks, so they candle on any bar size and profile like the session does — but nothing develops over them, and they can't be traded."
+              : `Draw this many prior sessions to the left of the live one. Real ticks, so they candle on any bar size and profile like the session does — but nothing develops over them, and they can't be traded.\n\nSet per bar size: this is the ${governingHist.tf.label}'s, and it opens on ${defaultHistoryDays(governingHist.tf)} because that is roughly what a ${governingHist.tf.label} needs to have a readable chart behind it.`
           }
         >
           Prior days
-          <select
-            value={historyDays}
-            onChange={(e) => setHistoryDays(Number(e.target.value))}
-            disabled={blotterBusy}
-            style={{ width: 96 }}
-          >
-            {HISTORY_DAY_OPTIONS.map((n) => (
-              <option key={n} value={n}>
-                {n === 0 ? "none" : `${n} day${n === 1 ? "" : "s"}`}
-              </option>
-            ))}
-          </select>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <select
+              value={historyDays}
+              onChange={(e) =>
+                setHistOverrides(
+                  withHistoryOverride(histOverrides, governingHist.tf.id, Number(e.target.value)),
+                )
+              }
+              disabled={blotterBusy}
+              style={{ width: 96 }}
+            >
+              {HISTORY_DAY_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n === 0 ? "none" : `${n} day${n === 1 ? "" : "s"}`}
+                </option>
+              ))}
+            </select>
+            {!blotterBusy && histOverrides[governingHist.tf.id] != null && (
+              <button
+                type="button"
+                onClick={() =>
+                  setHistOverrides(withHistoryOverride(histOverrides, governingHist.tf.id, null))
+                }
+                title={`Back to ${defaultHistoryDays(governingHist.tf)} — what the ${governingHist.tf.label} asks for on its own`}
+                aria-label={`Reset the ${governingHist.tf.label}'s prior days`}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: palette.muted,
+                  cursor: "pointer",
+                  padding: 0,
+                  fontSize: 13,
+                  lineHeight: 1,
+                }}
+              >
+                ↺
+              </button>
+            )}
+          </span>
+          {/* The mismatch, named. Without this a 1h chart sitting on one day of
+              context looks like the rule failing, when it is the lock holding. */}
+          <span style={{ fontSize: 11, opacity: 0.7, color: histFrozen ? palette.orange : undefined }}>
+            {histFrozen
+              ? `${governingHist.tf.label} wants ${wantedDays} — flatten and clear`
+              : `${governingHist.tf.label}${
+                  histOverrides[governingHist.tf.id] != null
+                    ? ` · default ${defaultHistoryDays(governingHist.tf)}`
+                    : ""
+                }`}
+          </span>
         </label>
         {historyDays > 0 && (
           <span style={{ alignSelf: "flex-end", paddingBottom: 6, fontSize: 12, color: palette.muted }}>
@@ -2011,7 +2807,7 @@ export function LiveChart() {
         )}
         <span style={{ alignSelf: "flex-end", paddingBottom: 6, fontSize: 12, color: palette.muted }}>
           {intent.real ? `${brokerState?.account_id} · ` : "paper · "}
-          {shownTrades.length} closed · net {fmtUsd(net)}
+          <TradeTally rows={blotterRows} /> · net {fmtUsd(net)}
           {intent.real
             ? brokerPos && brokerPos.net !== 0 && brokerPos.open_pnl != null
               ? ` · open ${fmtUsd(brokerPos.open_pnl)}`
@@ -2053,10 +2849,13 @@ export function LiveChart() {
               }
               onFocus={() => setFocus(0)}
               onToolsChange={(s) => reportTools(0, s)}
+              // Trading pane only — see the Simulator's.
+              levelPanel
               routedTo={routedSymbol}
               symbol={header?.symbol ?? status.symbol ?? undefined}
+              tapeContract={header?.symbol ?? status.symbol ?? undefined}
               tfLabel={tf.label}
-              tfOptions={TF_OPTIONS}
+              tfOptions={tfOptions}
               onTfChange={setTfId}
               onAnchorChange={setAnchor}
               onBracketChange={moveBracket}
@@ -2067,16 +2866,12 @@ export function LiveChart() {
               onOrderCancel={cancelOrder}
               onPlaceOrder={placeAt}
               onPlaceTyped={(o) => placeResting(o.price, o.side, o.type, "ticket")}
-              ticket={{ size, stopTicks, targetTicks }}
-              onTicketChange={(t) =>
-                setTicket((p) => ({
-                  ...p,
-                  size: t.size,
-                  stopTicks: t.stopTicks,
-                  targetTicks: t.targetTicks,
-                }))
-              }
+              ticket={ticket}
+              onTicketChange={changeTicket}
               mark={hud.lastPrice}
+              // Only the main chart feeds the sizer — the extra panes draw the
+              // same tape on other timeframes.
+              onVolRuler={setVolRead}
               // The ticket prices its SL/TP boxes in money, so it needs the
               // contract the order would actually go to — the routed one while
               // this is going to the broker, the tape's while it is paper.
@@ -2086,7 +2881,13 @@ export function LiveChart() {
               bigLots={bigLots}
               composite={composite}
               nodeProm={nodeProm}
+              shelfParams={shelfParams}
+              shelfField={shelfField}
               modernVwap={mvParams}
+              dynamicSwingVwap={dsvParams}
+              studies={studies[0] ?? EMPTY_SPECS}
+              onStudiesChange={(next) => setPaneStudies(0, next)}
+              onLayers={(l) => reportLayers(0, l)}
               events={eventOverlay}
               indicatorSettings={indicatorSettings}
               drawingsKey={header ? `${header.symbol}|${header.date}` : undefined}
@@ -2123,16 +2924,14 @@ export function LiveChart() {
                   reason the money is worth printing here: an MNQ stop read at
                   NQ's $20 a point is ten times the risk that is on. */}
               <TicketKnobs
-                ticket={{ size, stopTicks, targetTicks }}
-                onChange={(t) =>
-                  setTicket((p) => ({
-                    ...p,
-                    size: t.size,
-                    stopTicks: t.stopTicks,
-                    targetTicks: t.targetTicks,
-                  }))
-                }
-                tickUsd={intent.real ? routedTick * routedPoint : tickSize * pointValue}
+                ticket={ticket}
+                onChange={changeTicket}
+                tickUsd={orderTickUsd}
+                sizer={sizerCtx}
+                onApplySizing={applySizing}
+                preset={presetCtx ?? undefined}
+                onApplyPreset={applyPreset}
+                activeBracket={activeBracket}
               />
               {openPos && (
                 <button type="button" className="sim-quick-btn flat" onClick={closeAll} title="Flatten (q)">
@@ -2213,8 +3012,9 @@ export function LiveChart() {
                     onToolsChange={(s) => reportTools(i, s)}
                     routedTo={routedSymbol}
                     symbol={header?.symbol ?? status.symbol ?? undefined}
+                    tapeContract={header?.symbol ?? status.symbol ?? undefined}
                     tfLabel={paneTfsRef.current[i].label}
-                    tfOptions={TF_OPTIONS}
+                    tfOptions={tfOptions}
                     onTfChange={(id) =>
                       setPaneTfIds((prev) => prev.map((t, j) => (j === i ? id : t)))
                     }
@@ -2227,15 +3027,8 @@ export function LiveChart() {
                     onOrderCancel={cancelOrder}
                     onPlaceOrder={placeAt}
                     onPlaceTyped={(o) => placeResting(o.price, o.side, o.type, "ticket")}
-                    ticket={{ size, stopTicks, targetTicks }}
-                    onTicketChange={(t) =>
-                      setTicket((p) => ({
-                        ...p,
-                        size: t.size,
-                        stopTicks: t.stopTicks,
-                        targetTicks: t.targetTicks,
-                      }))
-                    }
+                    ticket={ticket}
+                    onTicketChange={changeTicket}
                     mark={hud.lastPrice}
                     pointValue={intent.real ? routedPoint : pointValue}
                     canPlaceOrders={ready}
@@ -2243,7 +3036,13 @@ export function LiveChart() {
                     bigLots={bigLots}
                     composite={composite}
                     nodeProm={nodeProm}
+                    shelfParams={shelfParams}
+                    shelfField={shelfField}
                     modernVwap={mvParams}
+                    dynamicSwingVwap={dsvParams}
+                    studies={studies[i] ?? EMPTY_SPECS}
+                    onStudiesChange={(next) => setPaneStudies(i, next)}
+                    onLayers={(l) => reportLayers(i, l)}
                     events={eventOverlay}
                     indicatorSettings={indicatorSettings}
                     drawingsKey={header ? `${header.symbol}|${header.date}` : undefined}
@@ -2260,6 +3059,19 @@ export function LiveChart() {
         {/* The same rail the replay carries, doing the same job: open the panel,
             and pin it to a column when you want the width spent on it. */}
         <div className="sim-rail">
+          {/* What has been traded today, the card the replay carries. Unlike
+              the two below it this is not mounted-while-open — the trades are
+              already in hand off the routing poll (or, on paper, out of the
+              simulation), so there is nothing behind it that would run. */}
+          <button
+            type="button"
+            className={`sim-rail-btn${railView === "blotter" ? " on" : ""}`}
+            onClick={() => setRailView((v) => (v === "blotter" ? null : "blotter"))}
+            aria-pressed={railView === "blotter"}
+            title="Blotter — every closed round trip today, what it staked and what it paid"
+          >
+            ▥
+          </button>
           <button
             type="button"
             className={`sim-rail-btn${signalsOpen ? " on" : ""}`}
@@ -2320,7 +3132,25 @@ export function LiveChart() {
             coverage read is mounted only while it is showing — it is a directory
             walk on the server, and there is no reason for it to run behind a
             panel nobody has opened. */}
-        {railView === "coverage" ? (
+        {railView === "blotter" ? (
+          <div className="sim-panel open">
+            <Blotter
+              rows={blotterRows}
+              total={net}
+              head={
+                <span className="r">
+                  <TradeTally rows={blotterRows} />
+                  {intent.real ? ` · ${brokerState?.account_id}` : " · paper"}
+                </span>
+              }
+              empty={
+                intent.real
+                  ? "Nothing closed on this account today."
+                  : "No paper trades yet."
+              }
+            />
+          </div>
+        ) : railView === "coverage" ? (
           <div className="sim-panel open">
             <div className="panel" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
               <TapeCoverage symbol={status.symbol} compact />
@@ -2340,6 +3170,9 @@ export function LiveChart() {
               tickSize={tickSize}
               ticket={ticket}
               onTicket={setTicketField}
+              preset={presetCtx}
+              onPreset={applyPreset}
+              pace={pace}
             />
           </div>
         ) : (
@@ -2463,6 +3296,85 @@ function AccountChip({ broker, routes }: { broker: BrokerState; routes: boolean 
  * enforced on, which is not always the broker's own day P&L — the panel shows
  * both and flags the gap.
  */
+/**
+ * Dealer gamma regime, read against the last print.
+ *
+ * Deliberately a regime and not a level. The Black-Scholes recompute behind this
+ * lands 4.6% (QQQ) / 8.8% (NDX) off Cboe's own greeks, and the two books disagree
+ * by ~0.5% on where the flip sits — fine for "which side of the flip are we on",
+ * not fine for trading the walls. So the chip shows the side and the distance,
+ * and the walls stay in the tooltip where they read as context.
+ *
+ * NOTHING HERE IS VALIDATED. No historical GEX exists in this repo, so no A/B has
+ * been run and none can be until the collector has banked ~6 months. The tooltip
+ * says so, because a number on a trading screen that looks like every other
+ * number on that screen will be read as one that earned its place.
+ */
+function GexChip({ gex, price }: { gex: GexRegime; price: number }) {
+  if (!gex.available || !Number.isFinite(price)) return null;
+  const g = gexAt(gex.book.curve, price, gex.px_ref);
+  const flip = gex.flip_px;
+  const stale = gex.stale_days;
+
+  // Off the ±6% grid, or the anchor is unusable. Say nothing rather than guess.
+  if (g == null) return null;
+
+  const long = g > 0;
+  const c = stale > 3 ? palette.muted : long ? palette.green : palette.orange;
+  const dist = flip ? (price / flip - 1) * 100 : null;
+
+  const lines = [
+    `Dealer gamma: ${long ? "LONG (dampening — moves get sold into, ranges hold)" : "SHORT (amplifying — moves get chased, trends extend)"}.`,
+    `Net GEX ${g >= 0 ? "+" : ""}${g.toFixed(2)}B at ${fmtPts(price)}, from the ${gex.book.sym} book of ${gex.book.book_date}.`,
+    flip ? `Gamma flip ~${fmtPts(flip)} (${dist! >= 0 ? "+" : ""}${dist!.toFixed(2)}% away) — below it the regime inverts.` : "No flip inside the ±6% grid.",
+    gex.call_wall_px && gex.put_wall_px
+      ? `Call wall ~${fmtPts(gex.call_wall_px)}, put wall ~${fmtPts(gex.put_wall_px)}. Context only — do NOT trade these levels; the recompute is ~5-9% off the feed's own greeks and level-bounce geometry is nulled four times over here.`
+      : "",
+    `Mapped from ${gex.book.sym} via prior closes (${gex.px_ref_date}, ${gex.px_ref_source} store): NQ ${fmtPts(gex.px_ref)} vs ${gex.book.sym} ${gex.book.ref.toLocaleString()}, implied carry ${gex.implied_basis >= 0 ? "+" : ""}${gex.implied_basis.toFixed(0)}pt (${gex.implied_basis_pct >= 0 ? "+" : ""}${gex.implied_basis_pct.toFixed(2)}%).`,
+    stale > 0
+      ? `⚠ The book is ${stale} session${stale === 1 ? "" : "s"} old — the collector did not run for this date. This is last-known positioning, not today's.`
+      : "",
+    !gex.book.is_pre_open
+      ? "⚠ Book was banked after the cash open, so its reference is a moving quote rather than a close and the price mapping is approximate."
+      : "",
+    "UNVALIDATED — no historical GEX here, so this has never been A/B'd against anything. Context read, not a signal.",
+  ].filter(Boolean);
+
+  return (
+    <span
+      title={lines.join("\n\n")}
+      style={{
+        fontSize: 10,
+        letterSpacing: 0.4,
+        padding: "1px 6px",
+        borderRadius: 10,
+        border: `1px solid ${c}`,
+        color: c,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {long ? "⊕" : "⊖"} {g >= 0 ? "+" : ""}
+      {g.toFixed(1)}B
+      {dist != null && (
+        <span style={{ opacity: 0.7 }}>
+          {" "}
+          flip {dist >= 0 ? "+" : ""}
+          {dist.toFixed(1)}%
+        </span>
+      )}
+      {stale > 0 && <span style={{ opacity: 0.7 }}> · {stale}d old</span>}
+    </span>
+  );
+}
+
+/** Equity, for the chip's tooltip. Blank while flat, where it is just the booked
+ *  figure said twice. Named separately because it is no longer what any rule
+ *  fires on — only what the account's own floor would be marked against. */
+function openLine(guard: GuardState): string {
+  if (!guard.open_pnl) return "";
+  return ` Open ${fmtUsd(guard.open_pnl)}, so equity is ${fmtUsd(guard.equity)} — what the firm's floor marks, not what the stop reads.`;
+}
+
 function GuardChip({ guard }: { guard: GuardState }) {
   const lv = guard.levels;
   const spec = !guard.on
@@ -2481,13 +3393,17 @@ function GuardChip({ guard }: { guard: GuardState }) {
       : guard.slow
         ? {
             c: palette.orange,
-            t: `SLOW ${fmtUsd(guard.equity)}`,
-            title: `Past ${fmtUsd(-lv.slow_down_at)} down — entries go no closer than ${Math.round(lv.min_gap_s)}s apart. Daily stop at ${fmtUsd(-lv.daily_loss_stop)}.`,
+            t: `SLOW ${fmtUsd(guard.realized)}`,
+            title: `Past ${fmtUsd(-lv.slow_down_at)} booked down — entries go no closer than ${Math.round(lv.min_gap_s)}s apart. Daily stop at ${fmtUsd(-lv.daily_loss_stop)}.${openLine(guard)}`,
           }
         : {
             c: palette.muted,
-            t: `🛡 ${fmtUsd(guard.equity)}`,
-            title: `Guarded. Realised today net of commission, plus the open position — the equity figure the daily stop fires on. Slow-down at ${fmtUsd(-lv.slow_down_at)}, daily stop at ${fmtUsd(-lv.daily_loss_stop)}${lv.daily_profit_lock > 0 ? `, profit lock at ${fmtUsd(lv.daily_profit_lock)}` : ""}.`,
+            t: `🛡 ${fmtUsd(guard.realized)}`,
+            // The figure the rules are actually enforced on, which since the
+            // daily stop moved off equity is the booked one at every level.
+            // Equity is still worth reading — it is what the *firm's* floor
+            // marks — so it goes in the tooltip rather than on the chip.
+            title: `Guarded. Booked today, net of commission — the figure the daily stop fires on. Slow-down at ${fmtUsd(-lv.slow_down_at)}, daily stop at ${fmtUsd(-lv.daily_loss_stop)}${lv.daily_profit_lock > 0 ? `, profit lock at ${fmtUsd(lv.daily_profit_lock)}` : ""}.${openLine(guard)}`,
           };
   return (
     <span

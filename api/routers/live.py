@@ -64,6 +64,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
+from journal import gex as gexmod
 from journal import live as livemod
 from journal.config import DEFAULT_DISPLAY_TZ, ET_TZ, contract_spec, root_symbol
 from journal.live import harvest as harvestmod
@@ -497,6 +498,26 @@ def live_history_session(
     spec = contract_spec(symbol)
     tape = encode_ticks(frame, zone, float(spec["tick_size"]))
     t_ms = local_ms(frame["ts_utc"], zone)
+    rth_open_ms = _wall_ms(day, RTH_OPEN, zone)
+
+    # This day's own weekly seed — the week already behind *its* Globex open.
+    #
+    # A context day needs one because the weekly anchor is the only indicator
+    # that reaches back across these days: the client seeds one accumulator per
+    # context day and runs that day's ticks through it, so the line spans the
+    # week instead of starting at the session seam. Per day and not one seed for
+    # the stretch because each seed already contains every day before it, and
+    # because the anchor resets at a week boundary and at a roll.
+    #
+    # Same honesty rule as the two sibling endpoints, for the same reason: no
+    # seed without the night. The client accumulates from this tape's first
+    # tick, so a day whose overnight is missing would start the day's share of
+    # the accumulation at the bell and draw a line short a whole session. Tested
+    # on the tape rather than by a second read of the store — what matters is
+    # what the client will actually accumulate over, and that is this frame.
+    has_night = int(t_ms[0]) < rth_open_ms
+    seed = weeklymod.weekly_seed(symbol, day) if has_night else None
+
     return {
         "symbol": symbol,
         "root": root_symbol(symbol),
@@ -510,9 +531,25 @@ def live_history_session(
         **tape,
         "session_start_ms": int(t_ms[0]),
         "session_end_ms": int(t_ms[-1]),
-        "rth_open_ms": _wall_ms(day, RTH_OPEN, zone),
+        "rth_open_ms": rth_open_ms,
         "rth_close_ms": _wall_ms(day, RTH_CLOSE, zone),
+        # Null when the week behind this day has a hole in it, or when the night
+        # above is missing. The client drops that day's stretch of weekly line
+        # and draws the days either side of it.
+        "weekly_seed": list(seed) if seed is not None else None,
+        "weekly_hist_seed": _weekly_hist_field(
+            symbol, day, float(spec["tick_size"]), has_night),
     }
+
+
+def _weekly_hist_field(symbol: str, day, tick: float, gate: bool) -> dict | None:
+    """The weekly volume-at-price seed as its payload field — same gate and
+    honesty rule as ``weekly_seed`` beside it (no night, no seed; a hole in the
+    week, no seed)."""
+    if not gate:
+        return None
+    h = weeklymod.weekly_hist_seed(symbol, day, tick)
+    return {"min": h[0], "counts": h[1]} if h is not None else None
 
 
 @router.get("/live/session")
@@ -571,6 +608,8 @@ def live_session(tz: str | None = Query(None)) -> dict:
         "globex_open_ms": _wall_ms(s.day - timedelta(days=1), tickmod.GLOBEX_OPEN, zone),
         "globex_anchor_ms": globex_anchor_ms,
         "weekly_seed": list(seed) if seed is not None else None,
+        "weekly_hist_seed": _weekly_hist_field(
+            s.symbol, s.day, float(spec["tick_size"]), on is not None),
         "has_overnight": on is not None,
         "context": {
             "adr14": adr["adr14"],
@@ -787,3 +826,176 @@ def live_signals() -> dict:
     honest to run one under otherwise.
     """
     return _running().shadow.snapshot()
+
+
+def _prior_rth_close(symbol: str, day: date) -> tuple[float, date, str] | None:
+    """(close, that day, which store) for the last cash session before ``day``.
+
+    Walks back over weekends and holes the same way ``/live/history/days`` does,
+    and through the same two-store resolver, so the number the badge anchors on
+    is the number the chart would draw for that day.
+    """
+    probe = day
+    for _ in range(HISTORY_LOOKBACK):
+        probe -= timedelta(days=1)
+        if probe.weekday() >= 5:
+            continue
+        src = _history_source(symbol, probe)
+        if src is None:
+            continue
+        if src == "cache":
+            frame = tickmod.cached_rth(symbol, probe)
+        else:
+            frame = tickmod.live_day_ticks(symbol, probe)
+            if frame is not None and not frame.empty:
+                # The live store keeps the night and the post hour in the same
+                # recording, so RTH has to be cut out by hand. 16:00 exactly is
+                # the close; the post-hour prints after it are not it.
+                ts = pd.to_datetime(frame["ts_utc"], utc=True).dt.tz_convert(ET_TZ)
+                lo = pd.Timestamp(datetime.combine(probe, RTH_OPEN), tz=ET_TZ)
+                hi = pd.Timestamp(datetime.combine(probe, RTH_CLOSE), tz=ET_TZ)
+                frame = frame[(ts >= lo) & (ts <= hi)]
+        if frame is not None and not frame.empty:
+            return float(frame.iloc[-1]["price"]), probe, src
+    return None
+
+
+def _price_at(symbol: str, when_et: datetime) -> tuple[float, date, str] | None:
+    """(futures price, its session, which store) at a naive-ET instant — the last
+    print at or before it, through the same two-store resolver the chart draws
+    from. None when no store holds that session, or it has no print within five
+    minutes of the instant (a hole in the recording is not an anchor)."""
+    at = pd.Timestamp(when_et, tz=ET_TZ)
+    session = (at + pd.Timedelta(hours=6)).date()  # 18:00 opens the next session
+    got = _anchor_frame(symbol, session)
+    if got is None:
+        return None
+    frame, ts, src = got
+    at_utc = at.tz_convert("UTC")
+    upto = frame[ts <= at_utc]
+    if upto.empty or at_utc - ts[upto.index[-1]] > pd.Timedelta(minutes=5):
+        return None
+    return float(upto.iloc[-1]["price"]), session, src
+
+
+_ANCHOR_FRAMES: dict[tuple[str, date], tuple] = {}
+
+
+def _anchor_frame(symbol: str, session: date):
+    """(ticks, their UTC times, store) for one session, through the chart's own
+    resolver. Finished sessions are cached (a stepped GEX session anchors once per
+    update); the session in progress is re-read, since it is still growing."""
+    key = (symbol, session)
+    if key in _ANCHOR_FRAMES:
+        return _ANCHOR_FRAMES[key]
+    src = _history_source(symbol, session)
+    if src is None:
+        return None
+    if src == "cache":
+        parts = [f for f in (tickmod.cached_overnight(symbol, session),
+                             tickmod.cached_rth(symbol, session),
+                             tickmod.cached_post(symbol, session)) if f is not None]
+        frame = pd.concat(parts, ignore_index=True) if parts else None
+    else:
+        frame = tickmod.live_day_ticks(symbol, session)
+    if frame is None or frame.empty:
+        return None
+    out = (frame, pd.to_datetime(frame["ts_utc"], utc=True), src)
+    finished = pd.Timestamp.now(tz=ET_TZ) > pd.Timestamp(datetime.combine(session, time(17, 0)), tz=ET_TZ)
+    if finished:
+        if len(_ANCHOR_FRAMES) >= 8:
+            _ANCHOR_FRAMES.pop(next(iter(_ANCHOR_FRAMES)))
+        _ANCHOR_FRAMES[key] = out
+    return out
+
+
+def gex_anchor(symbol: str, quote_et: str | None) -> tuple[float, date, str] | None:
+    """The futures price a GEX book's ratio curve is read against: the futures at
+    the instant the book's index/ETF price was quoted (``journal.gex.quote_time``).
+    Same instant on both sides of the ratio, so basis cancels exactly — including
+    on a midday snapshot, which is what the collector actually banks."""
+    if not quote_et:
+        return None
+    return _price_at(symbol, datetime.fromisoformat(quote_et))
+
+
+@router.get("/live/gex")
+def live_gex(
+    symbol: str | None = Query(None, description="Futures contract; defaults to the running session"),
+    date_: str | None = Query(None, alias="date"),
+    book: str = Query("NDX", pattern="^(NDX|QQQ)$"),
+) -> dict:
+    """The dealer-gamma regime for this session, ready to look up against price.
+
+    **Answered once per session, not per tick.** Open interest is published by the
+    OCC pre-open and then frozen, so the whole net-GEX-vs-spot curve is knowable
+    at 08:00 and the client interpolates it in the browser as price moves. That is
+    the entire reason a live gamma badge needs no options feed.
+
+    ``curve`` is in ratio space — net GEX against *spot as a fraction of the
+    book's reference close*. The client converts with its own instrument's ratio:
+
+        r = last_price / nq_ref     ->     gex = interpolate(curve, r)
+
+    which is why no basis constant appears anywhere in this repo. NQ = NDX +
+    carry, carry drifts, and there is no live NDX quote here to measure it
+    against; taking each instrument against its own prior close cancels it.
+
+    Defaults to the NDX book because NQ tracks NDX directly. QQQ is offered
+    because it is the deeper chain, and the two disagree by ~0.5% on where the
+    flip sits — which is itself the argument for reading this as a regime and not
+    as a level.
+
+    **Fails soft, always.** A missing book, a missing prior session or a cron that
+    did not run returns ``available: false`` and a reason. The Live chart must not
+    break because a machine rebooted overnight; the badge just does not draw.
+    """
+    if symbol is None or date_ is None:
+        live = livemod.current()
+        if live is None:
+            return {"available": False, "reason": "no live session and no symbol given"}
+        symbol = symbol or live.session.symbol
+        day = date.fromisoformat(date_) if date_ else live.session.day
+    else:
+        day = date.fromisoformat(date_)
+
+    # The book a trader could have read before this session opened — picked by
+    # its Cboe stamp, not the file's banked date (see gex.book_for_session), so a
+    # past session reads its own book rather than whatever was banked last.
+    pick = gexmod.book_for_session(book, day)
+    reg = gexmod.regime_at(pick, day) if pick else None
+    if reg is None:
+        return {"available": False, "reason": f"no {book} book banked before {day}"}
+
+    anchor = gex_anchor(symbol, reg["quote_et"])
+    if anchor is None:
+        return {"available": False, "reason": f"no prior session with tape behind {day}",
+                "book": reg}
+    px_ref, ref_day, ref_src = anchor
+
+    def to_px(r: float | None) -> float | None:
+        return round(px_ref * r, 2) if r else None
+
+    stale = (day - pick.stamp.date()).days
+    return {
+        "available": True,
+        "symbol": symbol,
+        "date": day.isoformat(),
+        "book": reg,
+        # Everything the badge needs to speak in the chart's own units.
+        "px_ref": round(px_ref, 2),
+        "px_ref_date": ref_day.isoformat(),
+        "px_ref_source": ref_src,
+        "flip_px": to_px(reg["flip_r"]),
+        "call_wall_px": to_px(reg["call_wall_r"]),
+        "put_wall_px": to_px(reg["put_wall_r"]),
+        # Implied carry. Not used in the mapping — it cancels — but shipped so a
+        # wrong anchor is visible as an absurd basis instead of a plausible flip.
+        "implied_basis": round(px_ref - reg["ref"], 2),
+        "implied_basis_pct": round(100 * (px_ref / reg["ref"] - 1), 3),
+        # Days between the book and the session it is being read against. The
+        # collector runs hourly on a box that reboots unpredictably, so a stale
+        # book is an ordinary outcome and the badge says so rather than implying
+        # today's positioning.
+        "stale_days": stale,
+    }

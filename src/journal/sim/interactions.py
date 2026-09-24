@@ -172,7 +172,7 @@ class InteractionConfig:
 class _Series:
     """One touchable level as it develops across the RTH minutes."""
 
-    source: str          # "ny" | "globex" | "ref"
+    source: str          # "ny" | "globex" | "weekly" | "ref"
     kind: str            # "VAH" | "VAL" | "POC" | "VWAP" | "±1σ/±2σ" | a ref name
     values: np.ndarray   # (n_min,), price per RTH minute (NaN before it exists)
     is_va: bool          # value-area boundary (can VA-snap) vs a VWAP band
@@ -182,7 +182,8 @@ class _Series:
     def label(self) -> str:
         if self.source == "ref":
             return self.kind  # "ONH", "pd POC", "Open" — self-describing
-        return f"{'NY' if self.source == 'ny' else 'Globex'} {self.kind}"
+        prefix = {"ny": "NY", "globex": "Globex", "weekly": "Weekly"}[self.source]
+        return f"{prefix} {self.kind}"
 
 
 @dataclass
@@ -266,6 +267,21 @@ def _minute_delta(rth: pd.DataFrame) -> pd.Series:
     signed = np.where(side == "A", size, np.where(side == "B", -size, 0.0))
     tmp = pd.DataFrame({"_m": rth["ts_utc"].dt.floor("1min"), "d": signed})
     return tmp.groupby("_m")["d"].sum()
+
+
+def _weekly_hist_prices(symbol: str, day: date) -> tuple[np.ndarray, np.ndarray] | None:
+    """The week-behind-this-session volume-at-price as (prices, sizes) arrays —
+    ``developing_profile``'s seed shape. None when the week cannot be honestly
+    built (weekly.weekly_hist_seed's rules); empty arrays on the week's first
+    session, where the weekly profile IS the session's own."""
+    tick = tick_size(root_symbol(symbol))
+    seed = weeklymod.weekly_hist_seed(symbol, day, tick)
+    if seed is None:
+        return None
+    lo, counts = seed
+    c = np.asarray(counts, dtype="float64")
+    nz = np.flatnonzero(c)
+    return (nz + lo) * tick, c[nz]
 
 
 def _build_session(
@@ -373,6 +389,34 @@ def _build_session(
         )
         if "vwap_bands" in cfg.sources:
             sess.series.append(_Series("globex", "VWAP", sess.gx_mid, False, gx_t0))
+
+    if "weekly" in cfg.sources:
+        # The developing *weekly* value area: the session's Globex accumulation
+        # seeded with the week behind it (journal.sim.weekly's histogram seed).
+        # Same honesty rules as the weekly VWAP — a hole in the week, or a roll
+        # mid-week, and this session simply emits no weekly levels rather than
+        # levels off a profile pretending to be the week's.
+        wseed = _weekly_hist_prices(contract, day)
+        if wseed is not None:
+            glob_wk = pd.concat([on, rth], ignore_index=True) if on is not None else rth
+            bars_wk = minute_bars(glob_wk)
+            prof_wk = profmod.developing_profile(
+                glob_wk, bars_wk, cfg.bin_size, cfg.va_pct, seed=wseed,
+            )
+            wk_ts = bars_wk["ts_utc"].astype("int64") // 1_000_000_000
+            wk = pd.DataFrame({
+                "ts_utc": wk_ts,
+                "VAH": prof_wk.vah, "VAL": prof_wk.val, "POC": prof_wk.poc,
+            }).set_index("ts_utc").reindex(minute_utc)
+            # The anchor is the week's open — Sunday 18:00 ET — which is what
+            # makes a weekly level read as days old to the age cut, as it is.
+            wk_t0 = int(
+                (pd.Timestamp(weeklymod.week_start(day), tz=ET_TZ)
+                 - pd.Timedelta(hours=6)).timestamp()
+            )
+            for kind in ("VAH", "VAL", "POC"):
+                sess.series.append(
+                    _Series("weekly", kind, wk[kind].to_numpy(), True, wk_t0))
 
     # This session's closing reference levels, for the next session's `pd *`
     # series. The final developing-profile bar IS the day's finished profile.
@@ -1319,6 +1363,7 @@ def _day_chart_tickbars(
         "vwap_globex": [],
         "profile_globex": [],
         "vwap_weekly": [],
+        "profile_weekly": [],
         # Initial Balance — same window as the IB study, so the drawn lines are
         # the levels its break/extension stats were measured against.
         "ib": ibmod.chart_overlay(rth, day, b_all["ts_utc"], times),
@@ -1354,6 +1399,13 @@ def _day_chart_tickbars(
         if wk_seed is not None:
             result["vwap_weekly"] = _vwap_pos_rows(
                 vwapmod.vwap_bands(full, seed=wk_seed), bar_pos, times)
+    # The weekly *profile*, unlike the weekly VWAP, follows the sources toggle —
+    # three more level lines are a study overlay, not ambient context.
+    if "weekly" in sources and rth_i0 > 0:
+        wh = _weekly_hist_prices(symbol, day)
+        if wh is not None:
+            result["profile_weekly"] = _profile_pos_rows(
+                profmod.developing_profile(full, b_all, binsz, va_pct, seed=wh), times)
 
     # 9/20 EMA on the 1-minute grid — *not* the tick-bar grid: the convention is
     # a 1-minute moving average, so it is computed over minute bars of the same
@@ -1475,6 +1527,7 @@ def day_chart(
         "vwap_globex": [],
         "profile_globex": [],
         "vwap_weekly": [],
+        "profile_weekly": [],
         # Initial Balance — same window as the IB study, so the drawn lines are
         # the levels its break/extension stats were measured against.
         "ib": ibmod.chart_overlay(rth, day, bars_draw["ts_utc"], t_draw),
@@ -1499,6 +1552,12 @@ def day_chart(
         if wk_seed is not None:
             result["vwap_weekly"] = vwap_rows(
                 _sample_bands(vwapmod.vwap_bands(glob, seed=wk_seed), bars_draw), t_draw)
+    # The weekly *profile* follows the sources toggle (see the tick-bar path).
+    if "weekly" in sources and has_on:
+        wh = _weekly_hist_prices(symbol, day)
+        if wh is not None:
+            result["profile_weekly"] = prof_rows(
+                profmod.developing_profile(glob, bars_draw, binsz, va_pct, seed=wh), t_draw)
 
     # 9/20 EMA on the 1-minute grid of the overnight+RTH stream — the institutional
     # day-trading convention is a 1-minute moving average, so it is *not* recomputed

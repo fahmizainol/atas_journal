@@ -11,7 +11,7 @@ about it".
 is *derived at read time* from `atas_journal` — a table of matched lots — by
 ``journal.trades.build_logical_trades``, funnelled through ``api.scope``. So a
 row inserted here reaches the Trades page, the Calendar, Statistics, the AI
-review, notes, setups, models and video bookmarks with **nothing else to change**.
+review, notes, setups and models with **nothing else to change**.
 The whole feature is: build the row correctly, and register the session it
 belongs to.
 
@@ -89,7 +89,7 @@ def source_file_for(account: str, session_date: date) -> str:
     """The sitting a trade belongs to: one per account per session date.
 
     Mirrors what an ATAS export is — one file, one sitting — so everything keyed
-    on `source_file` (session mode, notes, videos, `db.delete_attempt`) works on
+    on `source_file` (session mode, notes, `db.delete_attempt`) works on
     a live day without knowing it is one.
     """
     return f"{LIVE_PREFIX}/{account}/{session_date.isoformat()}"
@@ -131,7 +131,7 @@ def _iso(
 
 def journal_row(*, account: str, instrument: str, source_file: str,
                 trade: dict, wall_zone: ZoneInfo | None = None,
-                tag: str = "live") -> dict:
+                tag: str = "live", lot: str | None = None) -> dict:
     """One closed round trip as an ``atas_journal`` row — all sixteen columns.
 
     Every column is supplied even where the value is None, and that is not
@@ -164,8 +164,10 @@ def journal_row(*, account: str, instrument: str, source_file: str,
         "open_volume": size if long else -size,
         "close_price": exit_px,
         # The closing side, mirroring the open. ATAS exports it the same way and
-        # `_finalize` takes its absolute value, so only the open's sign is read —
-        # but a row that disagreed with itself would be a trap for a later reader.
+        # `build_logical_trades` weights on absolute volume, so only the open's
+        # sign is read for direction — but a row that disagreed with itself would
+        # be a trap for a later reader. The *signed* value is read: it is what the
+        # running position nets against to find the flat->flat boundary.
         "close_volume": -size if long else size,
         # Points, not currency — `price_pnl` is the raw price difference.
         "price_pnl": round(float(trade.get("pts", exit_px - entry)), PRICE_DP),
@@ -173,6 +175,15 @@ def journal_row(*, account: str, instrument: str, source_file: str,
         # is honest and the column is nullable. `pnl` is what statistics use.
         "profit_ticks": None,
         "pnl": pnl,
+        # Commission both sides, as the broker charged it. ``pnl`` stays gross —
+        # it always was — and this is the number anything showing net subtracts,
+        # which is the whole of what made a live day disagree with the broker's
+        # own statement. None for a source that never reported one (an ATAS
+        # export, a paper trade, a replayed attempt): that reads downstream as
+        # no commission known, which is true of them and is what they did before
+        # the column existed.
+        "fees": (None if trade.get("fees") is None
+                 else round(float(trade["fees"]), MONEY_DP)),
         # Where the trade came from and why it closed, in the one free-text
         # column the schema has. Read by nobody, but it is the difference
         # between a mystery row and an explained one a year from now.
@@ -183,7 +194,13 @@ def journal_row(*, account: str, instrument: str, source_file: str,
     # the same trade collapse to one. Not expected to happen (the two sources are
     # disjoint by decision) but the alternative — a second hash recipe — would
     # guarantee they never could.
-    row["dedupe_key"] = _journal_key(row)
+    #
+    # ``lot`` is what stops a scale-out eating itself. The importer's seven parts
+    # do not separate the portions of one position closed by a single sweep —
+    # same frozen open stamp, same exit price, same per-lot P&L — so without a
+    # discriminator they hash alike and INSERT OR IGNORE keeps exactly one.
+    # Passing None reproduces the importer's hash exactly; see `_journal_key`.
+    row["dedupe_key"] = _journal_key(row, lot)
     return row
 
 
@@ -206,8 +223,12 @@ def book_trade(conn: sqlite3.Connection, *, account: str, instrument: str,
     """
     src = source_file_for(account, session_date)
     db.upsert_session(conn, src, mode, account)
+    # The broker's own per-lot id, which is the only field that tells two
+    # portions of one scale-out apart. Without it a position closed in four
+    # equal lots reached the journal as one, and the day's P&L was short three
+    # lots with nothing anywhere saying so.
     row = journal_row(account=account, instrument=instrument,
-                      source_file=src, trade=trade)
+                      source_file=src, trade=trade, lot=trade.get("id"))
     return db.insert_journal(conn, [row]) > 0
 
 
@@ -294,10 +315,10 @@ def day_trades(conn: sqlite3.Connection, *, account: str, session_date: date,
 
     Shaped as ``Broker._emit_trade`` shapes a round trip, because the two feed
     the same places: the day record, the panel's blotter and the chart's trade
-    marks. Two fields cannot come back and are None rather than guessed —
-    ``r`` (the journal has no risk column, and inventing a denominator would
-    put a number on the panel that no stop ever justified) and the fill-level
-    detail behind a scale-out, which was already one row per closed lot.
+    marks. What cannot come back is None rather than guessed — everything
+    measured against the opening stop (``r``, ``r_cash``, ``risk_usd``), the
+    commission and the opening order's type, and the fill-level detail behind a
+    scale-out, which was already one row per closed lot.
 
     ``symbol`` filters to one contract, matched against the instrument's symbol
     half — the blotter is per contract, while a day's money is not.
@@ -331,7 +352,18 @@ def day_trades(conn: sqlite3.Connection, *, account: str, session_date: date,
             "exit_ms": _ms(r[2]),
             "pts": float(r[6] or 0.0),
             "pnl": float(r[7] or 0.0),
+            # The journal has no risk column, so everything measured against
+            # the stop the position opened with comes back None rather than
+            # guessed — a denominator no stop ever justified would put an R and
+            # a dollar stake on the blotter that nothing backs. The commission
+            # is a different kind of missing: it is recoverable (the rebuild
+            # recomputes it per contract in `_rebuild_day`), it is just not on
+            # the row, so a restored row's `pnl` is read as gross like any other.
             "r": None,
+            "r_cash": None,
+            "risk_usd": None,
+            "fees": None,
+            "open_type": None,
             "reason": comment.split(":", 1)[1] if ":" in comment else "manual",
             "symbol": sym,
             "instrument": instrument,
@@ -341,6 +373,30 @@ def day_trades(conn: sqlite3.Connection, *, account: str, session_date: date,
             "restored": True,
         })
     return out
+
+
+def position_key(trade: dict) -> object:
+    """Which **position** a closed lot came out of.
+
+    A scale-out books one row per portion, and every one of them carries the
+    position's own open stamp: ``Broker._open_state`` freezes ``opened_ms`` when
+    the position comes off flat, no scale-in re-bases it, and ``day_trades``
+    reads it straight back off ``open_ts_utc``. So grouping lots by this key
+    groups them by the *decision* that opened them.
+
+    Which is the same grouping ``journal.trades.build_logical_trades`` walks the
+    journal into by netting the position to flat — the two are the same fact,
+    and they agree on every live day on disk (8 out of 12 lots on 2026-09-09,
+    12 out of 24 on 2026-09-08, 8 out of 15 on 2026-08-26, equality wherever
+    nothing was scaled out of). **That agreement is the point**: the day's trade
+    count is shown next to figures the journal is the record of, and counting
+    lots there made the page disagree with the ledger behind it.
+
+    A row whose stamp did not parse falls back to its own id, so unstamped rows
+    stay separate trades rather than collapsing into one phantom.
+    """
+    ms = trade.get("entry_ms")
+    return ms if ms is not None else ("unstamped", trade.get("id"))
 
 
 def _ms(iso: str | None) -> int | None:
@@ -382,6 +438,20 @@ def source_file_for_attempt(attempt_id: str) -> str:
     here would merge a cold read with a re-run that already knew the answer.
     """
     return f"{REPLAY_PREFIX}/{attempt_id}"
+
+
+def attempt_id_for_source(source_file: str) -> str | None:
+    """The sitting a ``source_file`` names, or None when it names none.
+
+    The inverse of :func:`source_file_for_attempt`, for the readers that hold a
+    journal row and want the attempt behind it — the mirrored row keeps nothing
+    else of where it came from. None covers every other kind of row (an imported
+    broker export, a live account's day), which is not an error: most of the
+    journal was never a sitting.
+    """
+    prefix = f"{REPLAY_PREFIX}/"
+    src = str(source_file or "")
+    return src[len(prefix):] if src.startswith(prefix) else None
 
 
 def _sitting_stamp(created_at: str | None) -> str | None:
@@ -523,7 +593,12 @@ def book_attempt(conn: sqlite3.Connection, *, attempt: dict,
             account=REPLAY_ACCOUNT,
             instrument=micro_instrument if t.get("micro") else instrument,
             source_file=src, trade=norm, wall_zone=zone,
-            tag="drill" if drill else "replay",
+            # The sitting's own mode, so a paper rep says `paper:` in the comment
+            # rather than passing itself off as a funded one. It shares the
+            # Replay arena row either way — the mirror records the trade, and
+            # which account it cost is `journal.replay_account`'s question, not
+            # the journal's.
+            tag=replays.mode_of(attempt),
         ))
     return db.replace_journal(conn, src, rows)
 

@@ -8,6 +8,16 @@
 // of the pane and over the candles, because a composite level is only worth
 // drawing where today's price can reach it.
 //
+// "Over the candles" and no further: the level half is `normal`, not `top`. A
+// `top` view is painted on the overlay canvas after every *series* in the pane,
+// so a dozen full-width rose rules — and their opaque label chips — were landing
+// on top of the VWAP anchors, and the weekly in particular went missing under
+// them. `normal` still draws after the candlesticks (the primitive's view is
+// appended to the same source, behind the series view), but the anchors, which
+// are line series added later, now come back over it. Which is the right way
+// round: the composite is the backdrop, and a band you are reading against it is
+// the thing in front.
+//
 // It is frozen by construction rather than by rule. The composite is built from
 // the history stretch alone, and the engine gives that stretch nothing (see
 // `concatTapes`) — so today cannot feed the level today is being read against.
@@ -32,9 +42,19 @@ export interface CompositeData {
   profile: VolumeProfile;
   /** Null when the node reader is switched off. */
   nodes: ProfileNodes | null;
-  /** Bar times bounding the context stretch the composite was measured over. */
-  from: number;
-  to: number;
+  /** Bar times bounding the context stretch the composite was measured over —
+   *  the days themselves, when they are drawn on this chart.
+   *
+   *  Null when they are not. A journal chart draws one session; its prior days
+   *  exist only as the histograms they were collapsed to (see
+   *  api/session_chart's `context_profiles`), and there is no stretch of tape to
+   *  pin the shape to. Shading the overnight leg instead would be a claim that
+   *  those candles built the level, which is the one thing about a composite
+   *  that must never be ambiguous — it is frozen at the *prior* close. So the
+   *  histogram moves into its own gutter, beside the session's, and the levels
+   *  carry on running the full width as they always do. */
+  from: number | null;
+  to: number | null;
   /** How many prior sessions went into it, for the labels. */
   days: number;
 }
@@ -77,10 +97,25 @@ interface Ctx {
   nodesOn: () => boolean;
 }
 
+/** The gutter the histogram falls back to when the context days aren't on the
+ *  chart: the third column in from the right edge, after the viewport profile's
+ *  (VolumeProfilePrimitive.MAX_WIDTH_FRAC) and the developing session's. Same
+ *  width as both, so the three read as one row of gutters rather than three
+ *  competing panels. Rows grow rightward from `x1`, as they do over a context
+ *  stretch — the direction is the fixed-range tool's convention and doesn't
+ *  change with where the shape is hung. */
+const GUTTER_FRAC = 0.11;
+const GUTTER_GAP_PX = 7;
+
 // Pixel span of the context stretch. Null when either edge can't be resolved —
 // the history is scrolled off, and there is nowhere to hang the histogram. The
 // levels are drawn either way.
-function span(c: Ctx, d: CompositeData): { x1: number; x2: number } | null {
+function span(c: Ctx, d: CompositeData, paneW: number): { x1: number; x2: number } | null {
+  if (d.from == null || d.to == null) {
+    const w = paneW * GUTTER_FRAC;
+    const x2 = paneW - (paneW * GUTTER_FRAC * 2 + GUTTER_GAP_PX * 2);
+    return x2 - w < 0 ? null : { x1: x2 - w, x2 };
+  }
   const ts = c.chart.timeScale();
   const a = ts.timeToCoordinate(d.from as Time);
   const b = ts.timeToCoordinate(d.to as Time);
@@ -99,19 +134,24 @@ class FillRenderer {
     if (!d || !this.c.profileOn()) return;
     const p = d.profile;
     if (p.maxVolume <= 0) return;
-    const s = span(this.c, d);
-    if (!s) return;
     target.useMediaCoordinateSpace((scope: any) => {
       const ctx: CanvasRenderingContext2D = scope.context;
+      const s = span(this.c, d, scope.mediaSize.width);
+      if (!s) return;
       const { x1, x2 } = s;
       const h = hues();
       // The shade marks the days the composite was measured over, so it covers
       // the whole stretch; the histogram over it is the narrower thing, because
       // several days of context bars is a very wide box to run a POC row across.
+      // In the gutter there are no days on screen to mark and no room to spare,
+      // so the shade goes and the rows take the whole column.
+      const gutter = d.from == null || d.to == null;
       const width = x2 - x1;
-      const histW = width * ROW_SPAN;
-      ctx.fillStyle = h.shade;
-      ctx.fillRect(x1, 0, width, scope.mediaSize.height);
+      const histW = gutter ? width : width * ROW_SPAN;
+      if (!gutter) {
+        ctx.fillStyle = h.shade;
+        ctx.fillRect(x1, 0, width, scope.mediaSize.height);
+      }
 
       // Rows grow rightward from the left edge of the context stretch — the
       // fixed-range tool's convention, so a composite reads like any other
@@ -250,7 +290,7 @@ class View {
   private _r: FillRenderer | OverlayRenderer;
   constructor(
     c: Ctx,
-    private _z: "bottom" | "top",
+    private _z: "bottom" | "normal",
   ) {
     this._r = _z === "bottom" ? new FillRenderer(c) : new OverlayRenderer(c);
   }
@@ -303,7 +343,7 @@ export class CompositeProfilePrimitive {
       profileOn: () => this._profileOn,
       nodesOn: () => this._nodesOn,
     };
-    this.views = [new View(ctx, "bottom"), new View(ctx, "top")];
+    this.views = [new View(ctx, "bottom"), new View(ctx, "normal")];
     this.requestUpdate?.();
   }
 

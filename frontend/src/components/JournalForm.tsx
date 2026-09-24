@@ -3,7 +3,10 @@ import { useSaveNote } from "../hooks/useTrades";
 import { useFilters } from "../hooks/useFilters";
 import { useFiltersData } from "../hooks/useMeta";
 import { selectableModels, useModels } from "../hooks/useModels";
+import { useReviewVocab } from "../hooks/useReplays";
 import { BadgeInput, BadgeList } from "./BadgeInput";
+import { AxisRow, DISCIPLINE_LABEL, LevelRow, SETUP_LABEL } from "./charts/ReviewCard";
+import type { LevelCandidate } from "../hooks/useReplays";
 
 const OFF_MODEL = "";
 
@@ -26,6 +29,10 @@ export function JournalForm({
   initialConfluences,
   initialModelId,
   initialRulesMet,
+  initialSetup = null,
+  initialDiscipline = null,
+  initialWatchedLevels = [],
+  levelCandidates = [],
 }: {
   tradeKey: string;
   initialNote: string;
@@ -34,15 +41,26 @@ export function JournalForm({
   initialConfluences: string[];
   initialModelId: number | null;
   initialRulesMet: number[];
+  initialSetup?: string | null;
+  initialDiscipline?: string | null;
+  initialWatchedLevels?: string[];
+  /** The measured offer (level_store.candidates_for, off the detail payload).
+   *  With the trade's replay open right above this form, the chart the pick
+   *  needs is in view — the reason this used to be replay-rail-only. */
+  levelCandidates?: LevelCandidate[];
 }) {
   const [note, setNote] = useState(initialNote);
   const [tags, setTags] = useState<string[]>(initialTags);
   const [modelId, setModelId] = useState<number | null>(initialModelId);
   const [rulesMet, setRulesMet] = useState<number[]>(initialRulesMet);
+  const [setup, setSetup] = useState<string | null>(initialSetup);
+  const [discipline, setDiscipline] = useState<string | null>(initialDiscipline);
+  const [watchedLevels, setWatchedLevels] = useState<string[]>(initialWatchedLevels);
   const save = useSaveNote(tradeKey);
   const { scope } = useFilters();
   const { data: opts } = useFiltersData(scope);
   const { data: models = [] } = useModels();
+  const vocab = useReviewVocab();
 
   // Reset the form when switching to a different trade.
   useEffect(() => {
@@ -50,7 +68,11 @@ export function JournalForm({
     setTags(initialTags);
     setModelId(initialModelId);
     setRulesMet(initialRulesMet);
-  }, [tradeKey, initialNote, initialTags, initialModelId, initialRulesMet]);
+    setSetup(initialSetup);
+    setDiscipline(initialDiscipline);
+    setWatchedLevels(initialWatchedLevels);
+  }, [tradeKey, initialNote, initialTags, initialModelId, initialRulesMet,
+      initialSetup, initialDiscipline, initialWatchedLevels]);
 
   const model = models.find((m) => m.id === modelId) ?? null;
   const rules = model?.rules ?? [];
@@ -78,6 +100,15 @@ export function JournalForm({
       confluences: initialConfluences,
       model_id: modelId,
       rules_met: rulesMet,
+      // Partial on the server: null means unchanged. Un-answering is not a
+      // move (the review gate requires these), so a chip toggled off simply
+      // isn't sent and springs back on the next load.
+      setup,
+      discipline,
+      // Except the levels, whose list REPLACES the stored set — deselecting
+      // one of several has to persist. Sent only once something is picked, so
+      // an untouched form can't clear a pick made elsewhere mid-edit.
+      watched_levels: watchedLevels.length ? watchedLevels : null,
     });
   };
 
@@ -89,47 +120,97 @@ export function JournalForm({
         <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={5} />
       </div>
 
-      <div className="field" style={{ marginBottom: 10 }}>
-        <label>Model</label>
-        <select
-          value={modelId == null ? OFF_MODEL : String(modelId)}
-          onChange={(e) => pickModel(e.target.value)}
-        >
-          <option value={OFF_MODEL}>Off-model</option>
-          {options.map((m) => (
-            <option key={m.id} value={String(m.id)}>
-              {m.name}
-              {m.archived ? " (archived)" : ""}
-            </option>
-          ))}
-        </select>
-      </div>
+      {/* Folded away, because the binding is answered once and the checklist is
+          long, while the note and the tags are what a review comes back to. The
+          summary carries the whole answer — which model, and how much of its
+          checklist was met — so folding it costs no information, only room. */}
+      <details className="journal-fold">
+        <summary title="Which model this trade was taken on, and which of its entry rules it met">
+          {model
+            ? `Model: ${model.name}${rules.length ? ` (${rulesMet.length}/${rules.length})` : ""}`
+            : "Model: off-model"}
+        </summary>
 
-      {model && (
-        <div className="field" style={{ marginBottom: 10 }}>
-          <label>
-            Rules met ({rulesMet.length}/{rules.length})
-          </label>
-          {rules.length === 0 ? (
-            <div className="section-cap">
-              “{model.name}” declares no entry rules yet — add them on the Models tab.
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {rules.map((r) => (
-                <label key={r.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <input
-                    type="checkbox"
-                    checked={rulesMet.includes(r.id)}
-                    onChange={() => toggleRule(r.id)}
-                  />
-                  <span>{r.label}</span>
-                </label>
-              ))}
-            </div>
-          )}
+        <div className="field" style={{ margin: "8px 0 10px" }}>
+          <label>Model</label>
+          <select
+            value={modelId == null ? OFF_MODEL : String(modelId)}
+            onChange={(e) => pickModel(e.target.value)}
+          >
+            <option value={OFF_MODEL}>Off-model</option>
+            {options.map((m) => (
+              <option key={m.id} value={String(m.id)}>
+                {m.name}
+                {m.archived ? " (archived)" : ""}
+              </option>
+            ))}
+          </select>
         </div>
-      )}
+
+        {model && (
+          <div className="field" style={{ marginBottom: 10 }}>
+            <label>
+              Rules met ({rulesMet.length}/{rules.length})
+            </label>
+            {rules.length === 0 ? (
+              <div className="section-cap">
+                “{model.name}” declares no entry rules yet — add them on the Models tab.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {rules.map((r) => (
+                  <label key={r.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={rulesMet.includes(r.id)}
+                      onChange={() => toggleRule(r.id)}
+                    />
+                    <span>{r.label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </details>
+
+      {/* The review's answers — the same chips, labels and vocabulary as the
+          replay/drill/recall pickers (AxisRow and LevelRow are theirs). These
+          used to be answered through the tag box, which is how the tag
+          vocabulary grew to 70 entries carrying four different questions; the
+          tags below are for everything they can't say. The level pick belongs
+          where the chart is — which, since the replay moved in above this
+          form, is here. Only the grade stays out: it is answered blind at the
+          recall front. */}
+      <div className="field" style={{ marginBottom: 10 }} data-journal-levels>
+        <label>Watched level</label>
+        <LevelRow
+          levels={levelCandidates}
+          picked={watchedLevels}
+          noLevel={vocab.data?.no_level ?? "none"}
+          onChange={setWatchedLevels}
+        />
+      </div>
+      <div className="field" style={{ marginBottom: 10 }} data-journal-setup>
+        <label>Setup</label>
+        <AxisRow
+          options={vocab.data?.setups ?? []}
+          labels={SETUP_LABEL}
+          value={setup}
+          attr="setup"
+          onPick={setSetup}
+        />
+      </div>
+      <div className="field" style={{ marginBottom: 10 }} data-journal-discipline>
+        <label>Discipline</label>
+        <AxisRow
+          options={vocab.data?.disciplines ?? []}
+          labels={DISCIPLINE_LABEL}
+          value={discipline}
+          attr="discipline"
+          onPick={setDiscipline}
+        />
+      </div>
 
       <div className="field" style={{ marginBottom: 10 }}>
         <label>Tags</label>

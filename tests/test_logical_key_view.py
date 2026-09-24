@@ -42,6 +42,10 @@ def _lot(key: str, open_min: int, close_min: int, open_vol: float, pnl: float) -
         "open_price": 100.0, "open_volume": open_vol,
         "close_price": 105.0, "close_volume": -open_vol,
         "price_pnl": 5.0, "profit_ticks": 20.0, "pnl": pnl,
+        # Every column the inserter names, because `db._insert_ignore` does
+        # `r[c] for c in cols` — a missing key is a KeyError, not a NULL, and
+        # that strictness is what stops a row builder quietly dropping a column.
+        "fees": None,
         "comment": "", "source_file": SRC,
     }
 
@@ -114,9 +118,46 @@ def test_note_and_rules_survive_the_view_switch():
             assert all(r["setups"] == ["Level Bounce"] for r in rows), f"badges lost in {view}"
 
             detail = trades_router.trade_detail(rows[0]["trade_no"], scope)
+            # The journal form's level chips ride the detail; [] here because
+            # this trade was never level-tagged, not a missing key.
+            assert detail["level_candidates"] == [], f"candidates missing in {view}"
             assert detail["note"] == "clean bounce", f"note lost in {view}"
             assert detail["model_id"] == model_id, f"model lost in {view}"
             assert detail["rules_met"] == [rule_id], f"rule checks lost in {view}"
+
+
+def test_a_pre_axes_note_row_does_not_500_the_list():
+    """A trade_notes row written before the review-axes migration has NULL in
+    the new TEXT columns. Once any *other* row holds a string there, pandas
+    gives the column its str dtype — under which a NULL cell reads back as
+    float NaN, which is truthy AND not valid JSON, so ``r[col] or "[]"``
+    hands NaN to json.loads and the whole /trades list 500s. (An all-NULL
+    column dodges it — object dtype, honest Nones — which is why a fresh test
+    DB never showed this.) Every TEXT read off scope.notes goes through
+    ``scope.text_cell``."""
+    with tempfile.TemporaryDirectory() as d:
+        conn = _setup(Path(d))
+        # Two logical trades, so the notes frame has two rows to mix dtypes.
+        db.insert_journal(conn, [_lot("lot_c", 45, 50, 1.0, 30.0)])
+        sc = make_scope(view="logical")
+        k1, k2 = list(sc.filtered["logical_trade_key"])
+        notes.put_note(k1, notes.NoteIn(note="n1", tags=["x"]))
+        notes.put_note(k2, notes.NoteIn(note="n2", tags=["y"]))
+        conn.execute(
+            "UPDATE trade_notes SET watched_levels_json=NULL, setups_json=NULL "
+            "WHERE trade_key=?",
+            (k2,),
+        )
+        conn.commit()
+
+        nf = make_scope(view="logical").notes
+        cell = nf[nf["trade_key"] == k2].iloc[0]["watched_levels_json"]
+        assert not isinstance(cell, str), "repro lost: the NULL cell must not be a str"
+
+        rows = trades_router.list_trades(make_scope(view="logical"))
+        gap = next(r for r in rows if r["logical_trade_key"] == k2)
+        assert gap["setups"] == [] and gap["watched_labels"] == []
+        assert gap["reviewed"] is False
 
 
 if __name__ == "__main__":

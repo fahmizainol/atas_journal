@@ -38,13 +38,42 @@ export interface ResumePoint {
   contextTicks: number;
 }
 
-const KEY = "sim.resume";
+/** One bookmark per mode, not one for the page. Replay, Paper and Backtest are
+ *  three worlds — a sitting and a rep are different kinds of thing on different
+ *  ledgers — and when they shared a key a drill rep quietly overwrote where
+ *  your replay sitting stood (and vice versa). The mode names the key, so
+ *  parking one world and visiting the other costs neither its place. Paper is
+ *  the reason this matters at a glance: switching accounts is a thing you do
+ *  between sittings, and each side keeps its own place while you are away. */
+/** The scope one bookmark belongs to: an **account id**, or `"drill"`.
+ *
+ *  It used to be the mode, which could name exactly two accounts. Now that
+ *  there can be any number, a mode-keyed bookmark would have every LucidPro
+ *  account you own fighting over one — park a sitting on the 25K, open the 50K,
+ *  and you would land on the 25K's day with the 50K's floor. The id is what
+ *  tells them apart; `"drill"` keeps its own because a drill has no account.
+ *
+ *  The two built-ins keep the strings they already had — `funded` maps to the
+ *  legacy `replay`, `paper` is itself — so no existing bookmark is orphaned. */
+export type ResumeScope = string;
+
+/** Which key a scope reads and writes. `funded` is spelled `replay` for the
+ *  same reason its route is `/charts/replay`: it is the one that predates the
+ *  registry, and renaming its key would silently drop the bookmark of the only
+ *  account most people have. */
+const keyOf = (scope: ResumeScope) =>
+  `sim.resume.${scope === "funded" ? "replay" : scope}`;
+/** The pre-split shared key. Read as a replay fallback so an existing bookmark
+ *  survives the rename; removed on the next clear so it cannot resurface. */
+const LEGACY_KEY = "sim.resume";
 
 const str = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 
-export function loadResume(): ResumePoint | null {
+export function loadResume(mode: ResumeScope): ResumePoint | null {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw =
+      localStorage.getItem(keyOf(mode)) ??
+      (mode === "replay" ? localStorage.getItem(LEGACY_KEY) : null);
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<Record<keyof ResumePoint, unknown>>;
     // A bookmark is all-or-nothing: half of one would put you on the right day
@@ -64,9 +93,9 @@ export function loadResume(): ResumePoint | null {
   }
 }
 
-export function saveResume(p: ResumePoint): void {
+export function saveResume(mode: ResumeScope, p: ResumePoint): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify({ ...p, clockMs: Math.round(p.clockMs) }));
+    localStorage.setItem(keyOf(mode), JSON.stringify({ ...p, clockMs: Math.round(p.clockMs) }));
   } catch {
     // Private mode / quota. The replay still runs; it just won't be waiting for
     // you next time.
@@ -76,9 +105,10 @@ export function saveResume(p: ResumePoint): void {
 /** Forget the bookmark. Pressing 🎲 or picking a day by hand is a decision to
  *  start somewhere else, and leaving the old point behind would resurrect it on
  *  the next reload. */
-export function clearResume(): void {
+export function clearResume(mode: ResumeScope): void {
   try {
-    localStorage.removeItem(KEY);
+    localStorage.removeItem(keyOf(mode));
+    if (mode === "replay") localStorage.removeItem(LEGACY_KEY);
   } catch {
     /* nothing to clear if the store isn't there */
   }

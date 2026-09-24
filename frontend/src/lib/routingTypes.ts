@@ -47,7 +47,6 @@ export interface BrokerState {
   /** Whether the active account skips the confirm popup. */
   one_click: boolean;
   accounts: BrokerAccount[];
-  max_qty: number;
   /** The contract orders go to — which is not necessarily the one on screen.
    *  See `instruments`. */
   symbol: string;
@@ -60,6 +59,20 @@ export interface BrokerState {
   /** The contract the tape is actually on. Equal to `symbol` until routing is
    *  pointed elsewhere, and the pair is what the panel draws when they differ. */
   feed_symbol: string;
+  /** The micro lookup was attempted and failed, as opposed to this login simply
+   *  not having one. Both leave `instruments` one entry long and neither draws
+   *  a switch — but only this one is worth reconnecting to retry. */
+  instrument_lookup_failed: boolean;
+  /** What Rithmic said when the lookup failed, or null. Drawn in the tooltip
+   *  rather than the line: it is the difference between "no permission" and
+   *  "try again later", which is not visible anywhere else without a second
+   *  login — and a second login logs the running feed out. */
+  instrument_lookup_error: string | null;
+  /** The root this login last chose to route to, when the session could **not**
+   *  honour it — otherwise null. Non-null means the stored plan is in micros
+   *  and the orders are going to the mini at ten times the money, which is the
+   *  one thing the switch exists to prevent and so must be said out loud. */
+  instrument_want: string | null;
   /** Both follow `symbol`, so the panel's risk arithmetic is read rather than
    *  assumed: the same 50 ticks is $250 of NQ and $25 of MNQ. */
   tick_size: number;
@@ -69,6 +82,8 @@ export interface BrokerState {
   commission_per_side: number;
   /** Epoch seconds of the last reconciliation, or null for "never asked". */
   reconciled_at: number | null;
+  /** The trailing ladder this API is running on the open position, or null. */
+  ladder: LadderState | null;
   /** Will a gesture actually reach the exchange? The server's own answer, not a
    *  re-derivation: routing is switched on, this is a real account, a person has
    *  labelled it, and the broker has been read back. False means the order path
@@ -142,14 +157,17 @@ export interface GuardLevels {
   stop_ticks_min: number;
   stop_ticks_max: number;
   require_bracket: boolean;
-  /** Close what is open when the day crosses `daily_loss_stop`, rather than
-   *  only refusing the next entry. The stop is measured on **equity** —
-   *  realised plus the open position — because the account's own drawdown does
-   *  not wait for a loss to be booked. */
+  /** Close what is *still* open when the day crosses `daily_loss_stop`, rather
+   *  than only refusing the next entry. The stop is measured on **booked** P&L,
+   *  so the only case this acts on is a close that took the day past the line
+   *  and left size on — a scale-out with a runner behind it. Off, the day still
+   *  locks; it just leaves the runner to you. */
   auto_flatten: boolean;
   /** The most one entry may risk: stop x size x the contract's dollars-per-tick.
-   *  The rule `max_qty` cannot be — 5 on a 50-tick stop is $125 of micros or
-   *  $1,250 of minis, and the order goes out on whatever the chart is on. */
+   *  The whole of how large an order may be — there is no quantity ceiling
+   *  beside it, and there was one. 5 on a 50-tick stop is $125 of micros or
+   *  $1,250 of minis, and the order goes out on whatever the chart is on, so a
+   *  ceiling that passed both was never the rule protecting the account. */
   max_risk_usd: number;
   commission_per_side: number;
 }
@@ -177,8 +195,9 @@ export interface GuardState {
   /** What the broker's PnL plant says the account did today. Shown beside
    *  `realized` rather than instead of it — they measure different things and a
    *  gap between them is worth seeing. */
-  /** Realised plus what the open position is currently down. What the daily
-   *  stop actually fires on. */
+  /** Realised plus what the open position is currently down. What the *firm's*
+   *  floor is marked against — **not** what the daily stop fires on, which is
+   *  `realized` (see `Guards.auto_flatten` on the server for why). */
   equity: number;
   open_pnl: number | null;
   /** The automatic flatten has already fired today. Latches until the roll. */
@@ -230,15 +249,34 @@ export interface BrokerTrade {
   id: number;
   side: "long" | "short";
   size: number;
+  /** The contract it was actually taken on. Not always the one routing points
+   *  at now — an instrument switch mid-session leaves two rows of `×1` meaning
+   *  very different money, which is the case the blotter badges. */
+  symbol?: string;
   entry_price: number;
   entry_ms: number;
   exit_price: number;
   exit_ms: number;
   pts: number;
+  /** **Gross**, unlike the paper simulation's. `fees` is the commission the
+   *  day's `realized` charges for it; anything showing net subtracts it. */
   pnl: number;
-  /** Stake R against the stop the position opened with. **Null** when it
-   *  carried none — there was no risk to divide by. */
+  /** Commission on this portion, both sides, at the rate for `symbol`. Null on
+   *  a row restored from the journal, which has no commission column. */
+  fees?: number | null;
+  /** Excursion R against the stop the position opened with: points made over
+   *  points risked, size-blind. **Null** when it carried no stop — there was no
+   *  risk to divide by. */
   r: number | null;
+  /** Stake R: net dollars over `risk_usd`. Null on the same terms. */
+  r_cash?: number | null;
+  /** The dollars staked at open — the figure the order pad's sizer quoted.
+   *  The *position's*, repeated on every scale-out of it, so it must never be
+   *  totalled; see `replaySim.Trade.riskUsd`, the same field on the same terms. */
+  risk_usd?: number | null;
+  /** How the position was opened — `limit`, `stop`, `market`. Null when it
+   *  cannot be known (a restored row). */
+  open_type?: string | null;
   reason: string;
 }
 
@@ -262,7 +300,6 @@ export interface RoutingStatus {
   /** LIVE_ROUTING is set — the one env var left, and the deployment-level
    *  "this machine must never trade". False means no amount of clicking helps. */
   enabled: boolean;
-  max_qty: number;
   /** `LIVE_GUARDRAILS` is not switched off. Readable with no session running,
    *  like `enabled` — "are the rules on" is a property of the deployment. */
   guardrails: boolean;
@@ -341,4 +378,51 @@ export interface OrderDraft {
    *  Must be ≥ 1 whenever `be_trigger_ticks` is set: a 0 is a proto3 default and
    *  never reaches the wire. */
   be_ticks: number;
+  /** --- the ladder: the same trail, run by this app instead ----------------
+   *
+   *  None of these four reach the wire. The order goes out as a plain static
+   *  bracket and the server's own ladder moves the stop leg with `modify` — the
+   *  Python port of the rule `replaySim` runs on paper. That buys the grid, the
+   *  breakeven rung and a stop that can still be dragged, and costs the ratchet
+   *  if the API stops running.
+   *
+   *  **Mutually exclusive with the two Rithmic-managed fields above**, and the
+   *  server refuses the pair rather than picking one: a managed stop is
+   *  re-derived absolutely on every new extreme, so the two would overwrite each
+   *  other for as long as the trade lasted. */
+  ladder_dist_ticks: number;
+  /** The grid the stop may rest on. 0 = one rung per `ladder_dist_ticks`. */
+  ladder_step_ticks: number;
+  /** How far past the fill the first rung lands. 0 is breakeven *gross*. */
+  ladder_be_ticks: number;
+  /** Take the first rung and no other: a breakeven stop rather than a trail. */
+  ladder_be_only: boolean;
+}
+
+/** The ladder the API is running on the open position, off the routing poll.
+ *
+ *  Worth drawing rather than inferring: a stop that moves on its own is the one
+ *  line on the chart nobody put there by hand, and a ladder that has quietly
+ *  given up (three refused modifies) looks exactly like one that has not earned
+ *  a rung yet. `failures` is what tells those apart. */
+export interface LadderState {
+  side: "long" | "short";
+  entry: number;
+  /** The best price the trade has seen — what the next rung is measured from. */
+  hwm: number;
+  stop: number | null;
+  /** Has the ladder moved this stop yet? False on a stop still sitting where it
+   *  was placed, or on one just dragged by hand. */
+  armed: boolean;
+  /** Where the grid is pinned, once a drag has re-pinned it. Null while the
+   *  ladder still owns the origin. */
+  ladder: number | null;
+  rungs: number;
+  dist: number;
+  step: number;
+  be: number;
+  be_only: boolean;
+  /** Consecutive failed modifies. At 3 the ladder has stopped trying. */
+  failures: number;
+  stats: { rungs: number; failed: number; given_up: number };
 }

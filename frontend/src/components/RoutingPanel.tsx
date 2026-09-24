@@ -66,8 +66,11 @@ import {
   type RoutingStatus,
 } from "../lib/routingTypes";
 import { fmtPts, fmtUsd } from "../lib/simViews";
-import type { LiveTicket } from "../lib/simPrefs";
+import type { LiveTicket, TrailSource } from "../lib/simPrefs";
 import { GuardMeters } from "./charts/GuardMeters";
+import { TicketCard, type PresetCtx } from "./charts/TicketCard";
+import { LegAmount, legEcho } from "./charts/LegAmount";
+import type { PresetBracket } from "../lib/orderPresets";
 import { palette } from "../theme";
 
 const TYPES = ["market", "limit", "stop"] as const;
@@ -100,6 +103,9 @@ export function RoutingPanel({
   tickSize,
   ticket,
   onTicket,
+  preset,
+  onPreset,
+  pace,
 }: {
   mark: number;
   tickSize: number;
@@ -110,6 +116,19 @@ export function RoutingPanel({
    *  a bracket nobody had typed. */
   ticket: LiveTicket;
   onTicket: TicketEdit;
+  /** The presets' own ruler reading, from the page. Same reason the ticket comes
+   *  down rather than being read here: the chip on the dock, the setup drawer and
+   *  this pad all offer the same shapes, and they have to be the *same* ones —
+   *  one reading, one place it is taken. */
+  preset: PresetCtx | null;
+  /** What applying one means, which is the page's rule and not this panel's — see
+   *  `applyPreset` in LiveChart, where it lands on the ladder. */
+  onPreset: (b: PresetBracket) => void;
+  /** Why the next entry is coming too fast, or null. Computed on the page off
+   *  the blotter rows rather than here, for the reason the ticket comes down
+   *  the same way: the chip in the top bar and this readout have to be saying
+   *  the same thing, so there is one reading and one place it is taken. */
+  pace: string | null;
 }) {
   const q = useRoutingStatus();
   const status = q.data;
@@ -154,7 +173,8 @@ export function RoutingPanel({
         </Note>
       ) : (
         <Live status={status} broker={broker} mark={mark} tickSize={tickSize}
-              ticket={ticket} onTicket={onTicket} onDone={refetch} />
+              ticket={ticket} onTicket={onTicket} preset={preset}
+              onPreset={onPreset} onDone={refetch} pace={pace} />
       )}
     </div>
   );
@@ -208,7 +228,10 @@ function Live({
   tickSize,
   ticket,
   onTicket,
+  preset,
+  onPreset,
   onDone,
+  pace,
 }: {
   status: RoutingStatus;
   broker: BrokerState;
@@ -216,7 +239,11 @@ function Live({
   tickSize: number;
   ticket: LiveTicket;
   onTicket: TicketEdit;
+  preset: PresetCtx | null;
+  onPreset: (b: PresetBracket) => void;
   onDone: () => void;
+  /** Straight through to `Guard`'s meters — see `RoutingPanel`'s own prop. */
+  pace: string | null;
 }) {
   const paper = broker.paper;
   return (
@@ -258,10 +285,11 @@ function Live({
       ) : (
         <>
           <Position broker={broker} />
-          <Guard guard={broker.guard} onDone={onDone} />
+          <Guard guard={broker.guard} onDone={onDone} pace={pace} />
           <OneClick broker={broker} onDone={onDone} />
           <Ticket status={status} broker={broker} mark={mark}
                   tickSize={tickSize} ticket={ticket} onTicket={onTicket}
+                  preset={preset} onPreset={onPreset}
                   onDone={onDone} />
           <Working broker={broker} onDone={onDone} />
           <Flatten broker={broker} onDone={onDone} />
@@ -421,9 +449,63 @@ function InstrumentSwitch({ broker, onDone }: { broker: BrokerState; onDone: () 
   const [busy, setBusy] = useState(false);
   const [e, setE] = useState<string | null>(null);
   const perTick = broker.tick_size * broker.point_value;
+  const money = perTick % 1 === 0 ? perTick.toFixed(0) : perTick.toFixed(2);
   const away = broker.symbol !== broker.feed_symbol;
+  // When the lookup failed the micro was still offered — derived from the
+  // mini's own month code rather than resolved. That is a weaker claim than
+  // the rest of this list makes, so it is never passed off as the same thing.
+  const assembled = broker.instrument_lookup_failed
+    ? (broker.instruments.find((s) => s !== broker.feed_symbol) ?? null)
+    : null;
 
-  if (broker.instruments.length < 2) return <span>{broker.symbol}</span>;
+  // Nothing to switch between — so say which nothing. A bare symbol reads as
+  // "this login has no micros" whatever the cause, and one of the causes is a
+  // stored choice being dropped on the floor. The control that would let you
+  // fix it is the one control that is not drawn, which is exactly why the
+  // reason has to be written in its place.
+  if (broker.instruments.length < 2) {
+    const want = broker.instrument_want;
+    return (
+      <>
+        <span>{broker.symbol}</span>
+        {want ? (
+          <span
+            style={{ color: palette.orange }}
+            title={
+              `You last chose to route ${want}, and this session could not offer it` +
+              (broker.instrument_lookup_failed
+                ? " — the front-month lookup failed when the feed connected."
+                : " — this login did not turn out to have it.") +
+              ` Orders are going to ${broker.symbol} at $${money}/tick instead, ` +
+              "which is ten times the money a micro plan was written in: every " +
+              "bracket on this panel is measured in ticks, so the geometry is " +
+              "unchanged and the risk is not. The list is built once, at " +
+              "connect — reconnect the feed to ask again." +
+              (broker.instrument_lookup_error
+                ? `\n\nRithmic said: ${broker.instrument_lookup_error}`
+                : "")
+            }
+          >
+            ⚠ {want} unavailable — routing {broker.symbol} at ${money}/tick
+          </span>
+        ) : broker.instrument_lookup_failed ? (
+          <span
+            title={
+              `The micro of ${broker.symbol} could not be resolved when the feed ` +
+              "connected, so there is nothing to switch to. That is a failed " +
+              "question rather than an answer — the login may well have micros. " +
+              "The list is built once, at connect: reconnect the feed to ask again." +
+              (broker.instrument_lookup_error
+                ? `\n\nRithmic said: ${broker.instrument_lookup_error}`
+                : "")
+            }
+          >
+            micro unavailable — lookup failed
+          </span>
+        ) : null}
+      </>
+    );
+  }
 
   return (
     <>
@@ -453,12 +535,13 @@ function InstrumentSwitch({ broker, onDone }: { broker: BrokerState; onDone: () 
         {broker.instruments.map((s) => (
           <option key={s} value={s}>
             {s}
+            {s === assembled ? "  (assembled)" : ""}
           </option>
         ))}
       </select>
       {/* The money, because that is the only reason to touch this control. */}
       <span title="Dollars per tick on the routed contract. Every bracket on this panel is measured in ticks, so this is what turns the geometry into risk.">
-        ${perTick % 1 === 0 ? perTick.toFixed(0) : perTick.toFixed(2)}/tick
+        ${money}/tick
       </span>
       {away && (
         <span
@@ -471,6 +554,25 @@ function InstrumentSwitch({ broker, onDone }: { broker: BrokerState; onDone: () 
           }
         >
           ⚠ chart is {broker.feed_symbol}
+        </span>
+      )}
+      {assembled && broker.symbol === assembled && (
+        <span
+          style={{ color: palette.orange }}
+          title={
+            `${assembled} was not confirmed by Rithmic — the front-month lookup ` +
+            "failed at connect, so this contract was assembled from " +
+            `${broker.feed_symbol}'s own month and year. That is the month the ` +
+            "chart is on, which is the month a plan read off it was written in. " +
+            "What it cannot know is whether the micro's front month has already " +
+            "rolled ahead of the mini's — near a roll, check the contract before " +
+            "sending size." +
+            (broker.instrument_lookup_error
+              ? `\n\nRithmic said: ${broker.instrument_lookup_error}`
+              : "")
+          }
+        >
+          ⚠ assembled, not confirmed
         </span>
       )}
       {busy && <span>switching…</span>}
@@ -624,7 +726,16 @@ function Position({ broker }: { broker: BrokerState }) {
  * same login. A gap between them is shown rather than reconciled — it means one
  * of the two is missing trades, and quietly picking a winner would hide that.
  */
-function Guard({ guard: g, onDone }: { guard: GuardState; onDone: () => void }) {
+function Guard({
+  guard: g,
+  onDone,
+  pace,
+}: {
+  guard: GuardState;
+  onDone: () => void;
+  /** Why the next entry is coming too fast, or null — see `RoutingPanel`. */
+  pace: string | null;
+}) {
   const [editing, setEditing] = useState(false);
   const lv = g.levels;
   const tone = !g.on
@@ -662,10 +773,25 @@ function Guard({ guard: g, onDone }: { guard: GuardState; onDone: () => void }) 
           levels: lv,
           realized: g.realized,
           trades: g.trades,
+          // The broker counts positions too (`Broker._count_day`), so there is
+          // no separate lot figure on the wire and nothing for the meter to
+          // qualify. Live's blotter says it, off the rows it is drawing.
+          legs: null,
           locked: g.locked,
           slow: g.slow,
           equity: null,
           floor: null,
+          // And no floor total, no prop daily limit and no day goal, for the
+          // same reason: they are an *account's* figures, and Live's account is
+          // the broker's. The day meter falls back to the personal stop off
+          // `routing.Guards`, which is the number this page actually enforces.
+          floorTotal: null,
+          dayLimit: null,
+          dayLeft: null,
+          goal: null,
+          goalLeft: null,
+          goalArmed: false,
+          trailing: null,
           size: 0,
           cap: 0,
           // Measured on the replay, where the whole session is re-derivable
@@ -674,6 +800,10 @@ function Guard({ guard: g, onDone }: { guard: GuardState; onDone: () => void }) 
           fastShare: null,
           medianGapS: null,
           tradedInTheHole: null,
+          // The one behavioural figure this page *can* answer, because it is
+          // counted off the blotter it is already drawing rather than off a
+          // re-derivable log. Passed down from the page — see the prop.
+          pace,
           refused: null,
         }}
       />
@@ -705,13 +835,14 @@ function Guard({ guard: g, onDone }: { guard: GuardState; onDone: () => void }) 
               · {g.restored} rebuilt
             </span>
           )}
-          {/* What the stop actually fires on. Only worth drawing while
-              something is open — flat, it is the same number as realised, and
-              two identical figures side by side read as a bug. */}
+          {/* What the *firm's* floor is marked against — no longer what the
+              daily stop fires on. Only worth drawing while something is open —
+              flat, it is the same number as realised, and two identical figures
+              side by side read as a bug. */}
           {g.open_pnl != null && g.open_pnl !== 0 && (
             <span
               style={{ color: g.equity < 0 ? tone : palette.green }}
-              title="Realised plus the open position. The daily stop is measured on this, not on realised — a position held at −$800 has already spent the drawdown whether or not it has been booked."
+              title="Realised plus the open position. This is what the firm's drawdown floor is marked against; the daily stop is not measured on it — that one fires on booked P&L, so an open trade is left to run or to be closed by you."
             >
               {" "}
               · equity <b>{fmtUsd(g.equity)}</b>
@@ -856,7 +987,7 @@ function Levels({ levels, onDone }: { levels: GuardLevels; onDone: () => void })
       </label>
       <label
         style={{ fontSize: 10, color: palette.muted, display: "flex", gap: 6 }}
-        title="At the daily stop, close what is open rather than only refusing the next entry. Measured on equity, so an unbooked loss counts. Off, the day still locks — it just stops acting."
+        title="At the daily stop, close what is still open rather than only refusing the next entry. The stop is measured on booked P&L, so this acts only when a close takes the day past the line and leaves size on — a scale-out with a runner behind it. Off, the day still locks; it just leaves the runner to you."
       >
         <input
           type="checkbox"
@@ -909,6 +1040,8 @@ function Ticket({
   tickSize,
   ticket,
   onTicket,
+  preset,
+  onPreset,
   onDone,
 }: {
   status: RoutingStatus;
@@ -917,6 +1050,8 @@ function Ticket({
   tickSize: number;
   ticket: LiveTicket;
   onTicket: TicketEdit;
+  preset: PresetCtx | null;
+  onPreset: (b: PresetBracket) => void;
   onDone: () => void;
 }) {
   const [side, setSide] = useState<"buy" | "sell">("buy");
@@ -932,13 +1067,28 @@ function Ticket({
   //
   // The guard levels are still drawn beside the inputs below — as the limits
   // they are, rather than as a default that silently overwrote a choice.
-  const { size: qty, stopTicks, targetTicks, trailTicks, beTicks, beLock } = ticket;
+  const {
+    size: qty, stopTicks, targetTicks, trailSource, trailTriggerTicks, beTicks,
+    beLock, ladderTicks, ladderStepTicks, ladderBeTicks, ladderBeOnly,
+  } = ticket;
   const setQty = (v: number) => onTicket("size", v);
   const setStopTicks = (v: number) => onTicket("stopTicks", v);
   const setTargetTicks = (v: number) => onTicket("targetTicks", v);
-  const setTrailTicks = (v: number) => onTicket("trailTicks", v);
+  const setTrailTicks = (v: number) => onTicket("trailTriggerTicks", v);
   const setBeTicks = (v: number) => onTicket("beTicks", v);
   const setBeLock = (v: number) => onTicket("beLock", v);
+  /** Is the ladder the live source? The pad sends one trail block or the other
+   *  and never both — the server refuses the pair, because a Rithmic-managed
+   *  stop is re-derived absolutely on every new extreme and the two would spend
+   *  the trade overwriting each other. */
+  const onLadder = trailSource === "ladder" && stopTicks > 0 && ladderTicks > 0;
+  // What this ticket risks, on the contract it is actually going to. There is
+  // no quantity ceiling any more — `max_risk_usd` is the whole of how large an
+  // order may be — so the limit drawn beside Qty has to be the dollar one, in
+  // the same place the stop and target draw theirs. Zero stop or zero rate
+  // means the rule is silent, and so is this.
+  const perTick = broker.tick_size * broker.point_value;
+  const risk = stopTicks * perTick * qty;
   const [staged, setStaged] = useState<Staged | null>(null);
   const [busy, setBusy] = useState(false);
   const [e, setE] = useState<string | null>(null);
@@ -1048,12 +1198,23 @@ function Ticket({
         ))}
       </div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <label style={{ fontSize: 11, color: palette.muted, display: "grid", gap: 2 }}>
-          Qty (max {status.max_qty})
+        <label
+          style={{ fontSize: 11, color: palette.muted, display: "grid", gap: 2 }}
+          title={
+            "How many contracts. What bounds this is the dollar ceiling, not a " +
+            "number of lots: the same five contracts is $125 of MNQ and $1,250 " +
+            "of NQ, and the order goes to whatever routing is pointed at."
+          }
+        >
+          Qty
+          {status.guardrails && gl.max_risk_usd > 0 && risk > 0 && (
+            <span style={{ fontSize: 9, color: risk > gl.max_risk_usd ? palette.red : undefined }}>
+              ${Math.round(risk).toLocaleString()} / ${Math.round(gl.max_risk_usd).toLocaleString()}
+            </span>
+          )}
           <input
             type="number"
             min={1}
-            max={status.max_qty}
             value={qty}
             onChange={(x) => setQty(Math.max(1, Number(x.target.value) || 1))}
             style={{ width: 62 }}
@@ -1085,43 +1246,89 @@ function Ticket({
         )}
       </div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {/* Ticks or the money they are worth — the button on the end of the box
+            says which, and pinned to money the distance re-derives itself as the
+            size and the routed contract move (lib/bracketUsd). The guard bounds
+            stay in ticks because that is what the router refuses in; the caption
+            carries them and whatever unit the box is not in. */}
         <label style={{ fontSize: 11, color: palette.muted, display: "grid", gap: 2 }}>
-          Stop (ticks)
-          {status.guardrails && gl.stop_ticks_max > 0 && (
-            <span style={{ fontSize: 9 }}>
-              {gl.stop_ticks_min}–{gl.stop_ticks_max}
-            </span>
-          )}
-          <input
-            type="number"
-            min={0}
-            value={stopTicks}
-            onChange={(x) => setStopTicks(Math.max(0, Number(x.target.value) || 0))}
-            style={{ width: 72 }}
+          Stop
+          <span style={{ fontSize: 9 }}>
+            {[
+              status.guardrails && gl.stop_ticks_max > 0
+                ? `${gl.stop_ticks_min}–${gl.stop_ticks_max}t`
+                : "",
+              legEcho(stopTicks, ticket.stopUsd, perTick, qty),
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+          <LegAmount
+            ticks={stopTicks}
+            pin={ticket.stopUsd}
+            tickUsd={perTick}
+            size={qty}
+            onTicks={setStopTicks}
+            onPin={(usd) => onTicket("stopUsd", usd)}
+            style={{ width: 94 }}
           />
         </label>
         <label style={{ fontSize: 11, color: palette.muted, display: "grid", gap: 2 }}>
-          Target (ticks)
-          {status.guardrails && gl.min_target_ticks > 0 && (
-            <span style={{ fontSize: 9 }}>≥ {gl.min_target_ticks}</span>
-          )}
-          <input
-            type="number"
-            min={0}
-            value={targetTicks}
-            onChange={(x) => setTargetTicks(Math.max(0, Number(x.target.value) || 0))}
-            style={{ width: 72 }}
+          Target
+          <span style={{ fontSize: 9 }}>
+            {[
+              status.guardrails && gl.min_target_ticks > 0 ? `≥ ${gl.min_target_ticks}t` : "",
+              legEcho(targetTicks, ticket.targetUsd, perTick, qty),
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+          <LegAmount
+            ticks={targetTicks}
+            pin={ticket.targetUsd}
+            tickUsd={perTick}
+            size={qty}
+            onTicks={setTargetTicks}
+            onPin={(usd) => onTicket("targetUsd", usd)}
+            style={{ width: 94 }}
           />
         </label>
+        {/* Which of the two ratchets is live. One or the other reaches the
+            wire, never both — a Rithmic-managed stop is re-derived absolutely
+            on every new extreme, so a ladder running against it would spend the
+            trade being overwritten, and the server refuses the pair. Both sets
+            of numbers stay in the ticket: switching should not lose settings. */}
+        {stopTicks > 0 && (
+          <label
+            style={{ fontSize: 11, color: palette.muted, display: "grid", gap: 2 }}
+            title={
+              "Rithmic's trail survives this app closing and cannot be dragged. " +
+              "The ladder is the Simulator's own rule — a grid, a breakeven rung, " +
+              "and a stop you can still drag — run here off the live tape, and it " +
+              "stops ratcheting if this app does."
+            }
+          >
+            Trail by
+            <select
+              value={trailSource}
+              onChange={(x) => onTicket("trailSource", x.target.value as TrailSource)}
+              style={{ width: 88 }}
+            >
+              <option value="rithmic">Rithmic</option>
+              <option value="ladder">Ladder</option>
+            </select>
+          </label>
+        )}
         {/* One number, because Rithmic's trail has one free variable. The ride
             distance is the stop above — measured on MNQU6, a 50-tick stop put
             the first rung 50 ticks under the high — so all that is left to
             choose is how far in profit it wakes up. Disabled without a stop
             rather than hidden: the reason is worth reading once. */}
+        {trailSource === "rithmic" && (
         <label
           style={{
             fontSize: 11,
-            color: trailTicks ? palette.orange : palette.muted,
+            color: trailTriggerTicks ? palette.orange : palette.muted,
             display: "grid",
             gap: 2,
             opacity: stopTicks ? 1 : 0.5,
@@ -1140,13 +1347,15 @@ function Ticket({
             type="number"
             min={0}
             disabled={!stopTicks}
-            value={trailTicks}
+            value={trailTriggerTicks}
             onChange={(x) => setTrailTicks(Math.max(0, Number(x.target.value) || 0))}
             style={{ width: 72 }}
           />
         </label>
+        )}
         {/* Fires once and stops, where the trail keeps going — a separate
             mechanism, not a mode of the one beside it. */}
+        {trailSource === "rithmic" && (
         <label
           style={{
             fontSize: 11,
@@ -1171,7 +1380,8 @@ function Ticket({
             style={{ width: 72 }}
           />
         </label>
-        {beTicks > 0 && stopTicks > 0 && (
+        )}
+        {trailSource === "rithmic" && beTicks > 0 && stopTicks > 0 && (
           <label
             style={{ fontSize: 11, color: palette.orange, display: "grid", gap: 2 }}
             title={
@@ -1190,16 +1400,165 @@ function Ticket({
             />
           </label>
         )}
+        {/* The ladder's own knobs — the four the Simulator trails by and the
+            backtest engine trades. Shown together because they are one rule:
+            how far back it rides, what grid it may rest on, where the first
+            rung lands, and whether there is a second one at all. */}
+        {trailSource === "ladder" && stopTicks > 0 && (
+          <label
+            style={{
+              fontSize: 11,
+              color: ladderTicks ? palette.orange : palette.muted,
+              display: "grid",
+              gap: 2,
+            }}
+            title={
+              "How far behind the best price the stop rides. A real distance, " +
+              "unlike Rithmic's trail — it need not match the stop above. 0 is " +
+              "off. THIS APP moves the stop: if it stops running, the stop stays " +
+              "where it last got to."
+            }
+          >
+            Ladder (t)
+            <input
+              type="number"
+              min={0}
+              value={ladderTicks}
+              onChange={(x) => onTicket("ladderTicks", Math.max(0, Number(x.target.value) || 0))}
+              style={{ width: 72 }}
+            />
+          </label>
+        )}
+        {trailSource === "ladder" && stopTicks > 0 && ladderTicks > 0 && (
+          <label
+            style={{
+              fontSize: 11,
+              color: palette.orange,
+              display: "grid",
+              gap: 2,
+              opacity: ladderBeOnly ? 0.5 : 1,
+            }}
+            title={
+              "The grid the stop may rest on. 0 means one rung per ladder width. " +
+              "Wider than the ladder is refused — the stop would never reach a " +
+              "second rung."
+            }
+          >
+            …step (t)
+            <input
+              type="number"
+              min={0}
+              max={ladderTicks}
+              disabled={ladderBeOnly}
+              value={ladderStepTicks}
+              onChange={(x) =>
+                onTicket("ladderStepTicks", Math.max(0, Number(x.target.value) || 0))
+              }
+              style={{ width: 72 }}
+            />
+          </label>
+        )}
+        {trailSource === "ladder" && stopTicks > 0 && ladderTicks > 0 && (
+          <label
+            style={{ fontSize: 11, color: palette.orange, display: "grid", gap: 2 }}
+            title={
+              "How far past the fill the first rung lands. Zero is breakeven " +
+              "gross — the round turn still owes commission, so a few ticks here " +
+              "is what makes a scratch really a scratch."
+            }
+          >
+            …from (t)
+            <input
+              type="number"
+              min={0}
+              max={Math.max(0, ladderTicks - 1)}
+              value={ladderBeTicks}
+              onChange={(x) =>
+                onTicket("ladderBeTicks", Math.max(0, Number(x.target.value) || 0))
+              }
+              style={{ width: 72 }}
+            />
+          </label>
+        )}
+        {trailSource === "ladder" && stopTicks > 0 && ladderTicks > 0 && (
+          <label
+            style={{
+              fontSize: 11,
+              color: ladderBeOnly ? palette.orange : palette.muted,
+              display: "flex",
+              gap: 4,
+              alignItems: "center",
+              alignSelf: "end",
+              paddingBottom: 4,
+            }}
+            title={
+              "Take the first rung and no other — a breakeven stop rather than a " +
+              "trail. Its own rule, not a mode: a trail hands back open profit on " +
+              "every pullback, which is what this refuses to do."
+            }
+          >
+            <input
+              type="checkbox"
+              checked={ladderBeOnly}
+              onChange={(x) => onTicket("ladderBeOnly", x.target.checked)}
+            />
+            1st only
+          </label>
+        )}
         <span style={{ fontSize: 10, color: palette.muted, alignSelf: "end", paddingBottom: 4 }}>
           {stopTicks ? `${(stopTicks * tickSize).toFixed(2)} pts` : "no stop"} ·{" "}
           {targetTicks ? `${(targetTicks * tickSize).toFixed(2)} pts` : "no target"}
-          {trailTicks > 0 && stopTicks > 0 && (
+          {trailSource === "rithmic" && trailTriggerTicks > 0 && stopTicks > 0 && (
             <>
               {" "}
               · <b style={{ color: palette.orange }}>trails</b>
             </>
           )}
+          {onLadder && (
+            <>
+              {" "}
+              ·{" "}
+              <b style={{ color: palette.orange }}>
+                {ladderBeOnly ? "breakeven" : "ladder"}
+              </b>
+            </>
+          )}
         </span>
+      </div>
+      {/* The same shapes the dock's A–D chip and the setup drawer offer,
+          here because this is the pad where the fields they fill are typed —
+          setting a bracket a leg at a time is exactly what a preset is for, and
+          this was the one order-entry surface you could not reach them from.
+          Under the fields rather than over them, as in the replay's ticket: you
+          read what the ticket currently is, then the shortcut that replaces it.
+          Applying one throws `trailSource` to the ladder (see `applyPreset` on
+          the page), so the block above switches with it. */}
+      <div className="sim-preset-block">
+        {preset && (
+          <TicketCard
+            preset={preset}
+            size={qty}
+            tickUsd={perTick}
+            onApply={onPreset}
+            // The pad's own five fields, so the row matching them is lit — and
+            // only while the ladder is the live source, since on Rithmic's trail
+            // these three are just sitting there. No size half here: on this pad
+            // the contract is routing's, not the ticket's, and `qty` above is
+            // already the field being typed into.
+            active={
+              trailSource === "ladder"
+                ? {
+                    stopTicks,
+                    targetTicks,
+                    trailTicks: ladderTicks,
+                    trailStepTicks: ladderStepTicks,
+                    trailBeTicks: ladderBeTicks,
+                    trailBeOnly: ladderBeOnly,
+                  }
+                : null
+            }
+          />
+        )}
       </div>
       <button
         type="button"
@@ -1222,11 +1581,16 @@ function Ticket({
             target_ticks: targetTicks,
             // Belt and braces against the server's own refusals: a trail with
             // no stop has nothing to ride at, a lock with no trigger never
-            // fires, and a zero lock never reaches Rithmic at all. Sending any
-            // of them would be asking for a 422 the inputs already prevent.
-            trail_trigger_ticks: stopTicks ? trailTicks : 0,
-            be_trigger_ticks: stopTicks ? beTicks : 0,
-            be_ticks: stopTicks && beTicks ? Math.max(1, beLock) : 0,
+            // fires, a zero lock never reaches Rithmic at all, and the two
+            // trail sources together are refused outright. Sending any of them
+            // would be asking for a 422 the inputs already prevent.
+            trail_trigger_ticks: !onLadder && stopTicks ? trailTriggerTicks : 0,
+            be_trigger_ticks: !onLadder && stopTicks ? beTicks : 0,
+            be_ticks: !onLadder && stopTicks && beTicks ? Math.max(1, beLock) : 0,
+            ladder_dist_ticks: onLadder ? ladderTicks : 0,
+            ladder_step_ticks: onLadder ? ladderStepTicks : 0,
+            ladder_be_ticks: onLadder ? ladderBeTicks : 0,
+            ladder_be_only: onLadder ? ladderBeOnly : false,
           };
           try {
             // The pad obeys the same one-click setting the chart gestures do —

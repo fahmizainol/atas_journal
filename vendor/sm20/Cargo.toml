@@ -1,0 +1,31 @@
+[package]
+name = "sm20"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "SuperMemo Algorithm Arena scheduler, vendored. See PROVENANCE.md."
+
+[lib]
+name = "sm20"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sm20-schedule"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+# Real FSRS, used in exactly two places: the M5 competitor when a per-user
+# parameter fit exists, and the optimizer that produces that fit. Both are
+# dormant until the deck has SM20_MIN_OPTIMIZER_SAMPLES (200) reps, but
+# dropping the dependency would silently cap the Arena once it gets there.
+fsrs = "5.2"
+
+[profile.release]
+# The binary is spawned once per rating and its cost is dominated by process
+# startup, not arithmetic, so optimise for a small fast-loading artifact.
+opt-level = 2
+lto = true
+strip = true

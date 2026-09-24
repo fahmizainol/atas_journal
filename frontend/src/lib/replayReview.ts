@@ -19,11 +19,25 @@ export interface ReviewMark {
   attemptId: string;
 }
 
-const KEY = "sim.review";
+/** Scoped per mode for the same reason the resume bookmark is (see
+ *  lib/replayResume): a drill review owed must open on the backtest page and a
+ *  sitting's on the replay page, and a shared marker would send whichever page
+ *  loaded first into the other world's review. */
+export type ReviewScope = string;
 
-export function loadReview(): ReviewMark | null {
+/** Keyed by **account id** rather than by mode, and `funded` keeps the legacy
+ *  `replay` spelling so no existing marker is orphaned. See
+ *  `lib/replayResume.ResumeScope` for why the mode stopped being enough. */
+const keyOf = (scope: ReviewScope) =>
+  `sim.review.${scope === "funded" ? "replay" : scope}`;
+/** Pre-split shared key, read as a replay fallback and removed on clear. */
+const LEGACY_KEY = "sim.review";
+
+export function loadReview(mode: ReviewScope): ReviewMark | null {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw =
+      localStorage.getItem(keyOf(mode)) ??
+      (mode === "replay" ? localStorage.getItem(LEGACY_KEY) : null);
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<Record<keyof ReviewMark, unknown>>;
     return typeof s.attemptId === "string" && s.attemptId ? { attemptId: s.attemptId } : null;
@@ -32,9 +46,9 @@ export function loadReview(): ReviewMark | null {
   }
 }
 
-export function saveReview(m: ReviewMark): void {
+export function saveReview(mode: ReviewScope, m: ReviewMark): void {
   try {
-    localStorage.setItem(KEY, JSON.stringify(m));
+    localStorage.setItem(keyOf(mode), JSON.stringify(m));
   } catch {
     // Private mode / quota. The review page would open as an ordinary replay,
     // which is why the Simulator also checks that what it loaded is reviewable
@@ -42,9 +56,10 @@ export function saveReview(m: ReviewMark): void {
   }
 }
 
-export function clearReview(): void {
+export function clearReview(mode: ReviewScope): void {
   try {
-    localStorage.removeItem(KEY);
+    localStorage.removeItem(keyOf(mode));
+    if (mode === "replay") localStorage.removeItem(LEGACY_KEY);
   } catch {
     /* nothing to clear if the store isn't there */
   }

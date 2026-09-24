@@ -2,28 +2,19 @@ import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../lib/api";
 import { qk, scopeParams } from "../lib/queryKeys";
 import type { FilterScope } from "../lib/queryKeys";
-import type { DayChartData, Excursion, TradeChartData } from "../lib/chartTypes";
+import type { DayChartData, Excursion } from "../lib/chartTypes";
 
-export function useTradeChart(scope: FilterScope, tradeNo: number | null, tf: string) {
-  return useQuery({
-    queryKey: qk.tradeChart(scope, tradeNo ?? -1, tf),
-    queryFn: () =>
-      apiGet<TradeChartData>(`/trade-chart/${tradeNo}`, { ...scopeParams(scope), tf }),
-    enabled: tradeNo != null,
-  });
-}
-
-export function useExcursion(
-  scope: FilterScope,
-  tradeNo: number | null,
-  enabled = true,
-) {
+/** MAE/MFE and the grade, off the cached tape.
+ *
+ * Unconditional once a trade is open. This used to be deferred behind the chart
+ * toggle, back when the numbers came from Databento and a cold cache made
+ * expanding a row wait on a download; it reads local ticks now, and its numbers
+ * belong in the header rather than inside a panel that may never be opened. */
+export function useExcursion(scope: FilterScope, tradeNo: number | null) {
   return useQuery({
     queryKey: qk.excursion(tradeNo ?? -1),
     queryFn: () => apiGet<Excursion>(`/trades/${tradeNo}/excursion`, scopeParams(scope)),
-    // Excursion loads Databento bars (slow on a cold cache), so callers can
-    // defer it — e.g. only fetch once the chart/analysis is revealed.
-    enabled: enabled && tradeNo != null,
+    enabled: tradeNo != null,
   });
 }
 

@@ -79,6 +79,23 @@ the shared indicator preferences, that the order dock stays on the trading pane,
 and — the one the whole design rests on — that a pane repainting only on its own
 bar close does not silently fall behind the tape.
 
+## Prior days
+
+```bash
+node tools/browser/priordayscheck.mjs # the context count, which follows the bar
+```
+
+How much history the chart carries is a setting *per bar size* (`lib/contextDays`
+holds the rule, each page stores only your overrides). The arithmetic needs no
+browser; the wiring does, because the count is derived from state declared ahead
+of the fetch that uses it — a hook order that compiles and then throws on mount.
+`priordayscheck` presses the bar buttons and asks that the count follows, that an
+override sticks to the bar it was made on and survives a reload, and that ↺ only
+appears where there is something to undo.
+
+Replay only. Live carries the same control, but loading `/charts/live`
+auto-connects a routed session, so it stays manual-test-only.
+
 ## Measuring, rather than checking
 
 Four scripts here answer "what does this cost" instead of "did it draw". They

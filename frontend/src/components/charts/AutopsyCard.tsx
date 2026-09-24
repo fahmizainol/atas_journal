@@ -8,14 +8,14 @@
 //
 // The one thing that is written is the sentence. It is the only piece of state
 // in this whole feature authored by a person rather than derived from the
-// trades, which is exactly why the account stays blown until it exists: the
-// 24-hour timeout runs from the death either way, so writing it up promptly
-// costs nothing, and a timeout served in silence teaches the timeout rather
-// than the lesson.
+// trades, which is exactly why the account stays blown until it exists — and
+// since 2026-08-24 it is the *whole* of what a funded death costs. There used to
+// be a 24-hour timeout beside it; a timeout served in silence teaches the
+// timeout rather than the lesson, so what is left is the lesson.
 
 import { useState } from "react";
 import type { AttemptRow } from "../../hooks/useReplays";
-import { fmtWait, remainingMs, type AccountView } from "../../lib/replayAccount";
+import { modeOfAccount, type AccountView } from "../../lib/replayAccount";
 import { pool } from "../../lib/replayStats";
 import { fmtUsd } from "../../lib/simViews";
 import { palette } from "../../theme";
@@ -61,7 +61,6 @@ function Curve({ points, floor, start }: { points: { id: string; equity: number 
 
 export function AutopsyCard({
   view,
-  receivedAt,
   rows,
   onWriteCause,
   writing,
@@ -69,21 +68,31 @@ export function AutopsyCard({
   onReview,
 }: {
   view: AccountView;
-  receivedAt: number;
   /** Every attempt the history page knows about. Filtered to the epoch here. */
   rows: AttemptRow[];
   onWriteCause: (text: string) => void;
   writing: boolean;
   error: string | null;
-  /** Open the death sitting in review mode, if it still owes one. */
+  /** Open the death sitting in review mode. */
   onReview: ((attemptId: string) => void) | null;
 }) {
   const [text, setText] = useState("");
-  const cool = remainingMs(view, view.cooldown_until, receivedAt);
   const death = view.last_death;
+  const paper = view.account === "paper";
 
+  // This account's own sittings, and only those. `rows` is every attempt the
+  // history page knows about — funded, paper and drill together — so the epoch
+  // window has to be closed on the mode as well as on the clock, exactly as
+  // `replay_account.epoch_attempts` does server-side. Without it the curve here
+  // would draw the other account's sittings into this one's death.
+  const wantMode = modeOfAccount(view.account);
   const epoch = rows
-    .filter((a) => a.created_at >= view.epoch.started_at && a.status !== "active")
+    .filter(
+      (a) =>
+        (a.mode ?? "replay") === wantMode &&
+        a.created_at >= view.epoch.started_at &&
+        a.status !== "active",
+    )
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
   const totals = pool(epoch.map((a) => a.summary ?? {}));
   const points = epochCurve(epoch, 50_000);
@@ -93,7 +102,7 @@ export function AutopsyCard({
       <div className="sim-sec-t" style={{ flex: "none" }}>
         Autopsy
         <span className="r" style={{ color: palette.red }}>
-          account #{view.epoch.index + 1}
+          {paper ? "paper" : ""} account #{view.epoch.index + 1}
         </span>
       </div>
 
@@ -134,22 +143,39 @@ export function AutopsyCard({
         </div>
       </div>
 
-      {/* The one link out. A death sitting that still owes a review is the one
-          thing worth looking at before writing the sentence — and the sentence
-          written without looking is the one that says "bad luck". */}
-      {onReview && view.review_block && death && (
+      {/* The one link out. The sitting that killed the account is the one thing
+          worth looking at before writing the sentence — and the sentence written
+          without looking is the one that says "bad luck".
+
+          Offered on every death since 2026-08-25, where it used to be offered
+          only while the sitting still *owed* a review. Reviewing is optional
+          now, so gating the link on a debt would have hidden it exactly when
+          the review had been skipped — which is the case it is most for. */}
+      {onReview && death && (
         <button
           type="button"
           data-autopsy-review
-          onClick={() => onReview(view.review_block!.attempt_id)}
+          onClick={() => onReview(death.attempt_id)}
           style={{ width: "100%", marginTop: 8, padding: "5px 0", fontSize: 12, cursor: "pointer" }}
         >
-          Watch it again — {view.review_block.flags.length} flag
-          {view.review_block.flags.length === 1 ? "" : "s"} to answer
+          Watch it again — the sitting that killed it
         </button>
       )}
 
-      {view.status === "blown" ? (
+      {/* Paper never asks for the sentence. It is not that the death does not
+          matter — the curve above is the same curve — it is that nothing is
+          waiting on the write-up: the account is already resettable, so a form
+          here would be a form with no gate behind it, and a gate you can walk
+          around teaches you to walk around gates. Since the review stopped
+          being mandatory (2026-08-25) a paper death costs nothing at all — the
+          link above is the whole of what it offers, and taking it is a choice. */}
+      {paper ? (
+        <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.6 }}>
+          <div style={{ color: palette.green }}>
+            The next paper sitting opens a fresh $50,000 — same rules, same floor, nothing owed.
+          </div>
+        </div>
+      ) : view.status === "blown" ? (
         <div style={{ marginTop: 10 }}>
           <label style={{ fontSize: 11, color: palette.muted }} htmlFor="autopsy-cause">
             Cause of death — one sentence, in your own words. It gets pinned to the
@@ -171,7 +197,7 @@ export function AutopsyCard({
             disabled={!text.trim() || writing}
             onClick={() => onWriteCause(text.trim())}
             style={{ width: "100%", marginTop: 6, padding: "6px 0", fontSize: 12 }}
-            title="The 24h timeout runs from the death either way — writing this now costs you nothing."
+            title="This is the whole of what a blown account costs — nothing else is waiting on it."
           >
             {writing ? "Recording…" : "Record the cause"}
           </button>
@@ -180,10 +206,8 @@ export function AutopsyCard({
         <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.6 }}>
           <div style={{ color: palette.muted, fontSize: 11 }}>Cause of death</div>
           <div>{death?.cause_of_death}</div>
-          <div style={{ marginTop: 6, color: view.can_reset ? palette.green : palette.orange }}>
-            {view.can_reset
-              ? "The timeout is up. The next sitting opens a fresh $50,000 account, with that sentence pinned to it."
-              : `${fmtWait(cool)} before a new account can be opened.`}
+          <div style={{ marginTop: 6, color: palette.green }}>
+            The next sitting opens a fresh $50,000 account, with that sentence pinned to it.
           </div>
         </div>
       )}

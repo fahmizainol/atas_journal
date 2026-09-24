@@ -62,6 +62,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ..config import DATA_DIR
+from .ladder import LadderRunner, TrailCfg
 from .routing import (PAPER, Confirms, DayState, Intent, Policy,
                       day_refusal, tag_of)
 
@@ -75,11 +76,23 @@ CALL_TIMEOUT_S = 20.0
 # How many finished orders to keep in memory for the panel. The journal on disk
 # is the record; this is just what the page shows without a fetch.
 RECENT_MAX = 50
+# How many orders' timings to keep in memory. Small on purpose: the record is
+# `orders.jsonl`, and this only has to outlive the round trip so that the
+# exchange's answer — which arrives after the response has gone out — has
+# somewhere to land.
+TIMING_MAX = 64
 # The floor under a scaled-down commission. $0.50/side is a $1.00 round turn,
 # measured off a Lucid micro fill — brokers price micros on a per-ticket floor
 # rather than pro rata, so scaling the mini rate by contract size alone lands
 # too low. See `Broker.commission_per_side`.
 MICRO_COMMISSION_FLOOR = 0.50
+# How long the micro lookup at attach may take before it is written off.
+# async_rithmic retries template 113 three times at ~33s, so an unanswered
+# request costs ~100 seconds *inside the connect path* — measured on
+# 2026-09-07, when the gateway stopped answering front-month requests for
+# every root, mini included. A healthy lookup returns in well under a second,
+# so this is generous and still ~12x faster than giving the library its head.
+SIBLING_TIMEOUT_S = 8.0
 # Rithmic's bracket-order request. Its trailing fields are in the protobuf but
 # not in async_rithmic's `submit_order`, so `_patch_order_plant` folds them in.
 BRACKET_TEMPLATE = 330
@@ -252,6 +265,23 @@ class Broker:
         #: of things you can watch — it is a list of things you can send to
         #: while watching the one the feed is on. See ``use_instrument``.
         self.instruments: list[str] = [symbol]
+        #: True when the micro lookup was *attempted and failed*, which is a
+        #: different claim from "this login has no micro". Both leave one entry
+        #: in ``instruments``, and only one of them is worth retrying — so the
+        #: panel is told which, rather than drawing the same silence for a
+        #: capability that is absent and one that could not be read.
+        self.instrument_lookup_failed = False
+        #: Why it failed, as Rithmic put it, or None. Held rather than swallowed
+        #: because "the lookup failed" is the one diagnosis that cannot be made
+        #: from anything else on this object — and the alternative is a second
+        #: login to ask the same question, which logs the running feed out.
+        self.instrument_lookup_error: str | None = None
+        #: The root this login last chose to route to, when this session could
+        #: **not** honour it — see ``_restore_instrument``. Not a preference
+        #: (that lives in settings): a preference that was dropped. Silence here
+        #: is a plan re-sized by ten, which is the one thing the switch exists
+        #: to prevent.
+        self.instrument_want: str | None = None
         # For the P&L on a reconstructed round trip. The broker reports its own
         # day P&L too; this is what a *trade* made, which it does not break out.
         self.point_value = point_value
@@ -301,6 +331,16 @@ class Broker:
         #: refused, and this is the half of that answer the legs themselves do
         #: not carry — see `_server_managed`.
         self._managed_bracket = False
+        #: user_tag -> the ladder that order asked for, held until its fill opens
+        #: a position to arm. The mirror image of `_managed_bracket`: that flag
+        #: means *Rithmic* owns the stop, this means **we** do, and the two are
+        #: refused together at `build_intent` because one stop cannot have two
+        #: owners.
+        self._sent_ladder: dict[str, TrailCfg] = {}
+        #: The ratchet. Always constructed, started at `attach` — a Broker built
+        #: for a test or for a paper-only session should not spawn a thread it
+        #: will never signal.
+        self.ladder = LadderRunner(move=self._move_stop, log=self.journal.write)
         #: basket_id -> the price the last drag asked for, so the notification
         #: that comes back can be checked against it. Verification only: nothing
         #: is retried or corrected from this, it is written down.
@@ -316,6 +356,11 @@ class Broker:
         #: on the panel: a silent count is the same as no count, and this is the
         #: one failure where the trade happened but the record of it did not.
         self.stats_booking_errors = 0
+        #: Round trips the journal already had when we offered them. Re-booking
+        #: is free by design (the key is content-derived), so this is not an
+        #: error count — it is the one that was missing while a scale-out's
+        #: identical lots collapsed into one row and nothing said so.
+        self.stats_booking_dupes = 0
 
         #: --- the day, as the guardrails see it ---------------------------
         #: Per account, and that is the load-bearing part rather than tidiness:
@@ -337,6 +382,24 @@ class Broker:
         #: the lock the fill path takes while sqlite answers would put a query
         #: between a fill and the netting that has to see it.
         self._day_lock = threading.Lock()
+        #: --- how long the send took ---------------------------------------
+        #: tag -> one order's timings, filled in as the answers arrive: the
+        #: plant's ack in `_submit`, the handler's own total in `note_api_ms`,
+        #: the exchange's word in `_on_exchange`, and the browser's press-to-
+        #: acknowledgement in `record_press`.
+        #:
+        #: THREE CLOCKS, NEVER SUBTRACTED FROM EACH OTHER. Every span here is
+        #: measured start-to-finish on one clock — the browser times its own
+        #: press, this process times its own wire call. There is no
+        #: press-timestamp sent to the server and differenced against
+        #: `time.time()`, because the browser is on Windows and this is in WSL,
+        #: and a two-clock subtraction reports the skew between them as though
+        #: it were latency. `net_ms` is `client_ms - api_ms`, and both of those
+        #: are durations rather than instants.
+        self._timing: dict[str, dict] = {}
+        self._timing_seen: deque[str] = deque(maxlen=TIMING_MAX)
+        #: The last order's timings, for the panel to draw without a fetch.
+        self.last_latency: dict | None = None
         #: Has the automatic flatten already fired today? Latches for the rest
         #: of the session day so a stream of PnL updates cannot queue several,
         #: and so a position opened after the stop cannot trigger a second one.
@@ -361,6 +424,7 @@ class Broker:
             self._loop = asyncio.get_running_loop()
             self.error = None
         try:
+            self.ladder.start()
             self.accounts = [a.account_id for a in (client.accounts or [])]
             if not self.accounts:
                 raise LookupError("the order plant reported no accounts")
@@ -427,31 +491,53 @@ class Broker:
         rather than by anything a plan would notice; a contract that did not
         track would make the chart a lie and is deliberately not offered.
 
-        Resolved through Rithmic rather than assembled from the root and the
-        month code. The two agree almost always, and the exception — a
-        front-month roll landing on different days for the mini and the micro —
-        is exactly when a hand-built symbol would be silently wrong and reach
-        the exchange as a contract nobody meant to trade.
+        **Asked of Rithmic first, assembled second.** Resolving is better and
+        stays the default: the two answers agree almost always, and the
+        exception — a front-month roll landing on different days for the mini
+        and the micro — is exactly when a hand-built symbol is wrong.
 
-        Failure here is not fatal. The list falls back to the feed's own
-        contract, which is what every session before this one could do.
+        But refusing to assemble one costs the whole capability whenever the
+        lookup is unavailable, and on 2026-09-07 that stopped being theoretical:
+        the gateway went silent on template 113 for *every* root, mini included,
+        with CME level 1 and 2 both entitled. A session that can only offer the
+        micro when a reference request happens to be up is a session that
+        silently re-sizes a micro plan by ten, which is the accident
+        ``_restore_instrument`` exists to prevent.
 
-        Nothing is journalled either way, deliberately. The journal is the
-        record of what was *done* at a broker, and this is a capability read at
-        connect — the account list is not written there for the same reason. A
-        lookup that failed shows up as a one-entry ``instruments`` in the
-        snapshot, which the panel draws, so it is visible without being audited.
+        So a failed lookup falls back to ``config.micro_symbol`` — the mini's
+        own month and year, carrying the same table that names the pair, so
+        `M`+root guesswork (wrong for RTY) cannot happen and a root with no
+        micro still yields nothing. What that cannot know is whether the micro's
+        front month has moved on ahead of the mini's, so the assembly is not
+        hidden: ``instrument_lookup_failed`` stays set, the panel marks the
+        contract as assembled rather than resolved, and the operator decides.
+
+        Nothing is journalled here, deliberately. The journal is the record of
+        what was *done* at a broker, and this is a capability read at connect —
+        the account list is not written there for the same reason. The flag and
+        ``instrument_lookup_error`` carry it to the panel instead, and
+        ``_restore_instrument`` writes the one case that has consequences.
         """
-        from ..config import root_symbol
+        from ..config import MICRO_ROOTS, micro_symbol, root_symbol
 
-        siblings = {"NQ": "MNQ", "ES": "MES"}
-        micro = siblings.get(root_symbol(self.symbol))
+        micro = MICRO_ROOTS.get(root_symbol(self.symbol))
+        self.instrument_lookup_failed = False
+        self.instrument_lookup_error = None
         if not micro:
             return
         try:
-            contract = await client.get_front_month_contract(micro, self.exchange)
-        except Exception:  # noqa: BLE001 — a missing sibling is not an outage
-            return
+            contract = await asyncio.wait_for(
+                client.get_front_month_contract(micro, self.exchange),
+                timeout=SIBLING_TIMEOUT_S)
+            if not contract:
+                raise LookupError(
+                    f"empty front-month response for {micro}/{self.exchange}")
+        except Exception as e:  # noqa: BLE001 — a missing sibling is not an outage
+            self.instrument_lookup_failed = True
+            self.instrument_lookup_error = f"{type(e).__name__}: {e}"
+            # Same month as the contract on screen, which is the month the plan
+            # was read off — not a second guess at which month is front.
+            contract = micro_symbol(self.symbol)
         if contract and contract not in self.instruments:
             self.instruments.append(str(contract))
 
@@ -474,9 +560,17 @@ class Broker:
 
         Never fatal. A preference that cannot be read leaves the session on the
         feed's own contract, which is where every session started before this.
+
+        But it is not silent, which is the whole point of the paragraph above.
+        A preference that survived while its contract did not is precisely the
+        re-sized plan this method exists to prevent — the trader chose micros
+        and the session came up on the mini anyway — so it is held on
+        ``instrument_want`` for the panel and written to the journal, which is
+        the only durable record that the choice was dropped at all.
         """
         from . import routing as _rt
 
+        self.instrument_want = None
         try:
             want = _rt.instrument_of(self.system)
             if not want or want == _rt.instrument_root(self.symbol):
@@ -486,6 +580,13 @@ class Broker:
                  if _rt.instrument_root(s) == want), None)
             if match:
                 self.use_instrument(match)
+                return
+            self.instrument_want = want
+            self.journal.write("instrument_unavailable", want=want,
+                               routing=self.symbol,
+                               offered=list(self.instruments),
+                               lookup_failed=self.instrument_lookup_failed,
+                               lookup_error=self.instrument_lookup_error)
         except Exception as e:  # noqa: BLE001 — a preference is not an outage
             self.journal.write("instrument_restore_failed",
                                error=f"{type(e).__name__}: {e}")
@@ -500,7 +601,13 @@ class Broker:
         working orders and the position stay, marked stale by ``reconciled_at``,
         because they are the last thing the broker actually said and blanking
         them would read as "flat" at precisely the wrong moment.
+
+        **The ladder stops here and the stop does not move.** That is the whole
+        shape of losing the ratchet: the stop is a working order at the broker,
+        so what a detach costs is future tightening, never protection. A ladder
+        left running against a dead client would spend every rung on a raise.
         """
+        self.ladder.stop()
         with self._lock:
             self._client = None
             self._loop = None
@@ -584,6 +691,11 @@ class Broker:
             # a notification about somebody else's order.
             self._managed_bracket = False
             self._asked.clear()
+        # Outside the lock — it takes the runner's own. Same argument as the flag
+        # above, one degree worse: a ladder carried across would not merely
+        # refuse a drag on the new account, it would send modifies to the old
+        # account's stop.
+        self.ladder.disarm()
         self.journal.write("account", account=account_id)
         # Whose day this account has had, off the journal — here rather than on
         # the first fill, so the query happens on this thread while somebody is
@@ -752,10 +864,9 @@ class Broker:
         that has locked, which stays latched on the reason it latched for.
         """
         with self._lock:
-            self.policy = replace(self.policy, max_qty=settings.max_qty,
-                                  guards=settings.guards)
+            self.policy = replace(self.policy, guards=settings.guards)
         g = settings.guards
-        self.journal.write("settings", max_qty=settings.max_qty,
+        self.journal.write("settings",
                            **{f: getattr(g, f)
                               for f in type(g).__dataclass_fields__})
         return self.snapshot()
@@ -838,8 +949,8 @@ class Broker:
         st = self._netted
 
         if st is None or st["net"] == 0:
-            self._netted = {"net": signed, "avg": px, "opened_ms": ms,
-                            "stop": self._stop_for(rec)}
+            self._netted = self._open_state(rec, signed, px, ms)
+            self._arm_ladder(rec, "long" if long else "short", px)
             return
         if (st["net"] > 0) == long:
             # An add: the average moves, nothing closes.
@@ -855,13 +966,31 @@ class Broker:
         if left > 0:
             # A flip: what is left opens a fresh position the other way, and its
             # entry is this fill's price rather than the old average.
-            self._netted = {"net": (left if long else -left), "avg": px,
-                            "opened_ms": ms, "stop": self._stop_for(rec)}
+            self._netted = self._open_state(rec, left if long else -left, px, ms)
         elif st["net"] == 0:
             self._netted = None
         # Last, once the netting has settled: the latch needs to know whether
         # anything is still held before it decides the day is over.
         self._latch_day()
+
+    def _open_state(self, rec: dict, signed: int, px: float, ms: int) -> dict:
+        """The netting record for a position that has just come off flat.
+
+        ``size0``, ``symbol`` and ``open_type`` are frozen here and never
+        re-based by a scale-in, which is what makes them answer the question the
+        blotter asks: what the *decision* put up, in which contract, through
+        which order. A widened stop or a second clip changes what you go on to
+        lose; neither changes what you staked.
+        """
+        return {
+            "net": signed,
+            "avg": px,
+            "opened_ms": ms,
+            "stop": self._stop_for(rec),
+            "size0": abs(signed),
+            "symbol": self.symbol,
+            "open_type": rec.get("type"),
+        }
 
     def _stop_for(self, rec: dict) -> float | None:
         """The stop the position opened with, for the R denominator.
@@ -882,25 +1011,150 @@ class Broker:
                     return o.get("trigger_price") or o.get("price")
         return None
 
+    def on_ticks(self, frame) -> None:
+        """A batch of live prints, for the ladder's mark.
+
+        **This runs on the feed's event loop**, so it is a min, a max and a lock
+        that is never held across anything slow. The round trip it may cause
+        happens on the ladder's own thread; if it happened here it would be
+        backpressure on the tape, and if it *waited* here it would deadlock the
+        loop it was submitted to (see `_call`).
+
+        The batch's extremes rather than its last print: a drain can carry a
+        spike the closing tick does not show, and the ladder is a function of the
+        high.
+        """
+        if not self.ladder.armed or frame is None or frame.empty:
+            return
+        px = frame["price"]
+        self.ladder.on_prices(float(px.max()), float(px.min()))
+
+    def _arm_ladder(self, rec: dict, side: str, entry: float) -> None:
+        """Start trailing the position this fill just opened, if it asked for it.
+
+        Armed off the **fill**, not off the PnL plant's flat→open transition:
+        the plant reports a state rather than an event and carries no order, so
+        it cannot say *which* ladder. The fill knows, because the order that
+        opened the position is right here.
+
+        The stop may not be readable yet — Rithmic attaches the legs as their own
+        orders and the notification for them can arrive after this one. That is
+        why `LadderState.stop` is nullable rather than required: a ladder that
+        armed a moment early simply has nothing to be tighter than until the
+        first rung, and `tighten` handles a None the same way it handles a level
+        it beats.
+        """
+        cfg = rec.get("ladder")
+        if cfg is None:
+            return
+        self.ladder.arm(side=side, entry_price=entry, cfg=cfg,
+                        stop=self._stop_for(rec))
+
+    def _stop_leg(self) -> str | None:
+        """The basket of the working stop on the open position, if there is one.
+
+        The sibling of `_stop_for`, which wants the same leg's *price* for the R
+        denominator. Kept apart rather than generalised because they are asked at
+        different moments and answer differently when there is no position: this
+        one is called on every rung, and "no leg" is a reason to raise rather
+        than a null to carry.
+        """
+        net = _i((self.position or {}).get("net") or 0)
+        if not net:
+            return None
+        # The stop closes the position, so it faces the other way.
+        closing_buy = net < 0
+        with self._lock:
+            for o in self.working.values():
+                if not o.get("working"):
+                    continue
+                if (o["side"] == "buy") != closing_buy:
+                    continue
+                if o["type"] in ("stop", "stop_limit", "mit"):
+                    return o["basket_id"]
+        return None
+
+    def _move_stop(self, level: float) -> None:
+        """Put the working stop on `level`. What `LadderRunner` spends its round
+        trips on.
+
+        Raises rather than returning a status, because the runner's contract is
+        "a raise means the stop is still where it was" — and every failure here
+        genuinely is that: a leg that has gone (the position closed under us), a
+        plant that refused, a client that detached.
+
+        **This runs on the ladder's own thread, never on the feed's event loop.**
+        `modify` reaches the loop through `_call`, which submits and waits; on
+        the loop itself that is a deadlock that takes the tick feed down with it.
+        """
+        basket = self._stop_leg()
+        if basket is None:
+            raise LookupError(
+                "no working stop on this position — nothing for the ladder to "
+                "move")
+        self.modify(basket, stop=level)
+
+    def note_manual_stop(self, basket_id: str, level: float) -> None:
+        """A person dragged a stop. Re-pins the ladder if it was *the* stop.
+
+        Called from the routing endpoint rather than from `modify`, because
+        `modify` is also how the ladder moves its own stop — routing a rung
+        through here would have the ladder re-pin on itself every time it
+        ratcheted, and the grid would walk instead of standing still.
+
+        **Checked against the position's own leg, not merely against being
+        called with a stop.** A resting *stop entry* is an order of kind "stop"
+        too, so a drag of somebody's next entry arrives here looking exactly like
+        a drag of this position's exit — and would re-pin a ladder on a level
+        from a trade that has not happened.
+        """
+        if basket_id and basket_id == self._stop_leg():
+            self.ladder.note_drag(level)
+
     def _emit_trade(self, st: dict, size: int, exit_px: float, ms: int,
                     rec: dict) -> None:
         long = st["net"] > 0
         entry = st["avg"]
         pts = (exit_px - entry) * (1 if long else -1)
         risk = None if not st.get("stop") else abs(entry - st["stop"])
+        symbol = st.get("symbol") or self.symbol
+        # What the entry staked: the stop distance, in money, at the size it
+        # opened with. The number the order pad's sizer quoted before the order
+        # went ("risks $250 if the stop is hit"), which is what makes it worth
+        # carrying onto the trade — the blotter can print the bet beside what
+        # the bet paid. Not this portion's: see `_open_state`, and see
+        # `replaySim.Trade.riskUsd`, which is the same field on the same terms.
+        risk_usd = (None if risk is None
+                    else risk * self.point_value * int(st.get("size0") or size))
+        # Commission on this portion, both sides — the *same* charge `_count_day`
+        # takes out of the day's realised total, computed once here so the
+        # blotter's rows and the day's figure cannot come to disagree. `pnl`
+        # stays gross, as it always was; anything showing net subtracts this.
+        fees = 2.0 * self.commission_per_side(symbol) * size
+        pnl = pts * self.point_value * size
         trade = {
             "id": len(self.trades) + 1,
             "side": "long" if long else "short",
             "size": size,
+            "symbol": symbol,
             "entry_price": entry,
             "entry_ms": st["opened_ms"],
             "exit_price": exit_px,
             "exit_ms": ms,
             "pts": pts,
-            "pnl": pts * self.point_value * size,
-            # Stake R, the same one the paper blotter prints: points made over
-            # points risked at open. Null without a stop, never zero.
+            "pnl": pnl,
+            "fees": fees,
+            # Excursion R, the same one the paper blotter prints: points made
+            # over points risked at open. Size-blind, so it asks whether the
+            # *read* was good. Null without a stop, never zero.
             "r": None if not risk else pts / risk,
+            # Stake R: net dollars over dollars staked. Asks whether the *bet*
+            # paid, and parts company with `r` the moment size changes mid-trade.
+            "r_cash": None if not risk_usd else (pnl - fees) / risk_usd,
+            "risk_usd": risk_usd,
+            # How the position was opened, for the blotter's `lmt→` / `stp→`
+            # prefix. The closing order's type is already in `reason`.
+            "open_type": st.get("open_type"),
             # Which leg closed it. `reduce` is what the paper simulation calls
             # size taken off by an order on the other side, and that is exactly
             # what a partial close is here.
@@ -954,12 +1208,20 @@ class Broker:
         try:
             conn = db.connect()
             try:
-                booking.book_trade(
+                booked = booking.book_trade(
                     conn, account=self.account_id,
                     instrument=f"{self.symbol}@{self.exchange}",
                     mode="live", session_date=self.day, trade=trade)
             finally:
                 conn.close()
+            if not booked:
+                # A trade the journal already had, or one it refused to take.
+                # Re-booking is legitimately free (the key is content-derived),
+                # so this is not an error — but for nine months it was also how
+                # a scale-out lost three of its four lots, silently, because
+                # nothing looked at this return value. Now the count says so.
+                self.stats_booking_dupes += 1
+                self.journal.write("book_duplicate", **trade)
         except Exception as e:  # noqa: BLE001 — see the docstring
             self.stats_booking_errors += 1
             self.journal.write("book_failed", error=f"{type(e).__name__}: {e}",
@@ -1026,7 +1288,12 @@ class Broker:
         worse failure than a guard that has to be told the number.
         """
         rec = {"realized": 0.0, "trades": 0, "locked": None,
-               "last_entry_at": None, "restored": 0}
+               "last_entry_at": None, "restored": 0,
+               # The positions behind `trades`, keyed by `booking.position_key`.
+               # `trades` is its size and never an increment of its own: a lot
+               # is a row, and a *trade* is the decision it came off — see the
+               # key's docstring for why the two differ and by how much.
+               "positions": set()}
         try:
             from .. import db
             from . import booking
@@ -1049,13 +1316,14 @@ class Broker:
             rec["realized"] += (t["pnl"] - 2.0
                                 * self.commission_per_side(t["symbol"])
                                 * t["size"])
-            rec["trades"] += 1
+            rec["positions"].add(booking.position_key(t))
             rec["restored"] += 1
             if rec["locked"] is None:
                 rec["locked"] = self._locked_by(rec["realized"])
+        rec["trades"] = len(rec["positions"])
         if rec["restored"]:
             self.journal.write("day_restored", account=self.account_id,
-                               trades=rec["restored"],
+                               trades=rec["trades"], lots=rec["restored"],
                                realized=round(rec["realized"], 2),
                                locked=rec["locked"])
         return rec
@@ -1066,9 +1334,18 @@ class Broker:
         Dropping the records is enough to *clear* them: the rebuild is keyed on
         ``self.day``, which ``roll_day`` has already advanced, so the next read
         derives the new day's total — which is nothing, until it isn't.
+
+        **The blotter is not a record and has to be emptied by hand.**
+        ``self.trades`` is the day's closed lots as the panel draws them, and it
+        is only ever refilled by ``_restore_trades`` — which the roll does not
+        call. Left alone it would carry yesterday's trades into a session that
+        did not take them, under a header that says "today". Only the caller
+        holds no lock here, so taking it is safe.
         """
         self._days = {}
         self._flattening = False
+        with self._lock:
+            self.trades = []
 
     @property
     def day_realized(self) -> float:
@@ -1094,9 +1371,21 @@ class Broker:
         is not a $500 stop.
         """
         rec = self._day()
-        rec["realized"] += (trade["pnl"]
-                            - 2.0 * self.commission_per_side() * trade["size"])
-        rec["trades"] += 1
+        # `fees` rather than a second commission calculation. It is the same
+        # arithmetic, and it was the same arithmetic before — except that this
+        # one asked `commission_per_side()` about whatever routing pointed at
+        # *now*, so a day that ran NQ in the morning and switched to MNQ after
+        # lunch charged the morning's trades at the afternoon's rate. The trade
+        # carries the rate for the contract it was actually taken on.
+        rec["realized"] += trade["pnl"] - trade["fees"]
+        # The *position*, not the lot. A Rithmic bracket is attached per partial
+        # fill, so an ordinary entry-and-exit routinely closes in two portions
+        # and this used to report twice the day the journal recorded. Adding to
+        # a set rather than incrementing is what makes a second portion of a
+        # position already counted cost nothing.
+        from . import booking
+        rec["positions"].add(booking.position_key(trade))
+        rec["trades"] = len(rec["positions"])
 
     def commission_per_side(self, symbol: str | None = None) -> float:
         """The configured rate, scaled to whatever routing is pointed at.
@@ -1161,6 +1450,14 @@ class Broker:
         because the day locked while they were reading it. A refusal that traps
         somebody in a trade is worse than no rule at all, and the lock itself
         never refuses a reducing order (``routing.day_refusal``).
+
+        **This is also where the automatic flatten fires**, and that is the
+        whole of what "the daily stop is a closed-P&L rule" means: the only
+        moment the stop can be reached is the moment a trade books, so the only
+        moment worth asking is right here, once the fill that booked it has
+        settled. It used to be asked on every PnL update against realised *plus*
+        the open position, which ended trades the market had not yet taken
+        anything for.
         """
         if not self.policy.guardrails:
             return
@@ -1179,6 +1476,12 @@ class Broker:
             # "Flat, nothing staged, done." Only when there is nothing left to
             # manage — see the docstring.
             self.confirms.clear()
+        else:
+            # Size still on after the day's loss limit booked: a scale-out that
+            # took the day past the line and left a runner. Only the loss half
+            # acts — the profit lock refuses the next entry and has never had a
+            # reason to end a trade that is winning.
+            self._flatten_the_rest(pnl)
 
     def _reducing(self, side: str | None, qty: int) -> bool:
         """Does this order take size off the position rather than put it on?
@@ -1262,8 +1565,14 @@ class Broker:
         # *intention* left lying about would be a second, staler answer to the
         # same question.
         sent = self._sent_bracket.get(tag) or {}
+        # Carried on the record rather than looked up later, because the lookup
+        # would already be too late: a fill *is* terminal, so the entry that
+        # opens a position drops its own tag from these maps on the way past —
+        # and the fill handler that arms the ladder runs afterwards.
+        ladder = self._sent_ladder.get(tag)
         if terminal:
             self._sent_bracket.pop(tag, None)
+            self._sent_ladder.pop(tag, None)
         return {
             "basket_id": _s(getattr(m, "basket_id", "")),
             "user_tag": tag,
@@ -1293,6 +1602,11 @@ class Broker:
             # Not what Rithmic says: it says nothing until the legs exist.
             "stop_ticks": _i(sent.get("stop_ticks", 0)),
             "target_ticks": _i(sent.get("target_ticks", 0)),
+            # The ladder this order asked *this app* to run once it fills. None
+            # on every order that did not, which is most of them — and always
+            # None when `trail_by_ticks` below is set, because one stop cannot
+            # have two owners (refused at `build_intent`).
+            "ladder": ladder,
             # Non-zero on a leg Rithmic is trailing: the distance it rides behind
             # the extreme, which it re-derives and re-sends itself. Carried
             # because it is the difference between a stop this app may move and
@@ -1327,6 +1641,7 @@ class Broker:
         if not self._mine(m):
             return
         rec = self._order_rec(m)
+        self._note_exchange_ms(rec)
         if not rec["basket_id"]:
             return
         # 5 == FILL. Paired into round trips *before* the working set is
@@ -1343,6 +1658,25 @@ class Broker:
                 self.recent.appendleft(rec)
         self.journal.write("exchange", **rec)
         self._settled(rec)
+
+    def _note_exchange_ms(self, rec: dict) -> None:
+        """The exchange's first word on an order we sent, timed from the wire.
+
+        This is the honest end of "the order is placed": ``plant_ms`` is
+        Rithmic's order plant taking the request, and the exchange saying it is
+        working (or rejected) comes later and on its own schedule. Only the
+        first notification per tag is timed — the ones after it are fills,
+        modifies and cancels, which are the order's life rather than its
+        placement.
+        """
+        tag = rec.get("user_tag") or ""
+        timing = self._timing.get(tag) or {}
+        if timing.get("_wire_at") is None or "exch_ms" in timing:
+            return
+        wire = timing["_wire_at"]
+        self._timing_update(
+            tag, exch_ms=round((time.perf_counter() - wire) * 1000, 1),
+            exch_status=rec.get("status") or None)
 
     def _settled(self, rec: dict) -> None:
         """Did the last drag on this order actually move it?
@@ -1423,6 +1757,13 @@ class Broker:
             # the PnL plant repeats net=0 the whole time it is resting.
             self._managed_bracket = False
         if net == 0:
+            # Unconditional, unlike the flag above, and `disarm` is idempotent
+            # for exactly this reason: the ladder is the one thing here that
+            # would keep *sending* if it were left armed against a position that
+            # is gone, and a repeated flat reading is a cheaper thing to answer
+            # than a rung landing on somebody's next trade.
+            self.ladder.disarm()
+        if net == 0:
             opened_ms = None
         elif was_flat:
             ss = _i(getattr(m, "ssboe", 0))
@@ -1440,16 +1781,14 @@ class Broker:
             "opened_ms": opened_ms,
             "at": time.time(),
         }
-        # The PnL plant is the only thing that reports an *open* loss, so this
-        # is the one place the equity stop can be judged from.
-        self._check_equity_stop()
 
     def _equity(self) -> float:
         """Realised today plus what the open position is currently down.
 
-        The number the account's own drawdown is measured against, and the
-        reason the guard cannot run on realised alone: a position held at −$800
-        has already spent the drawdown whether or not it has been booked.
+        The number the *account's* own drawdown is measured against — the firm's
+        floor marks an open position, whatever the daily stop does — so it is
+        reported in the snapshot and read by the meters. **The daily stop no
+        longer fires on it**; see ``_latch_day``.
 
         The open leg is the broker's ``open_position_pnl`` rather than anything
         derived from the tape here — it is the figure the firm will act on, and
@@ -1459,39 +1798,30 @@ class Broker:
         open_pnl = _f((self.position or {}).get("open_pnl")) or 0.0
         return self.day_realized + open_pnl
 
-    def _check_equity_stop(self) -> None:
-        """Close what is open if the day has spent its loss limit. Never raises.
+    def _flatten_the_rest(self, pnl: float) -> None:
+        """Close what the day's loss limit left on. Never raises.
 
-        Runs inside the PnL notification handler, on the feed's event loop, so
-        the actual flatten is **scheduled** rather than called: ``flatten()``
-        goes through ``_call``, which submits to that same loop and blocks on the
-        result, and blocking the loop from inside itself is a deadlock rather
-        than a slow request.
+        Called from ``_latch_day``, which runs inside the fill notification
+        handler on the feed's event loop, so the actual flatten is **scheduled**
+        rather than called: ``flatten()`` goes through ``_call``, which submits
+        to that same loop and blocks on the result, and blocking the loop from
+        inside itself is a deadlock rather than a slow request.
 
         Fires once. ``_flattening`` latches for the rest of the session day and
         is cleared only by ``reset_day`` — a position re-opened after the stop
         (which the day lock refuses anyway) must not trigger a second automatic
-        exit, and a stream of PnL updates while the exit is in flight must not
-        queue several.
+        exit.
         """
         g = self.policy.guards
-        if (not self.policy.guardrails or not g.auto_flatten
-                or not g.daily_loss_stop or self._flattening):
+        if (not g.auto_flatten or not g.daily_loss_stop or self._flattening
+                or pnl > -g.daily_loss_stop):
             return
-        if not _i((self.position or {}).get("net")):
-            return  # nothing open: the realised latch in `_latch_day` has it
-        eq = self._equity()
-        if eq > -g.daily_loss_stop:
-            return
-        why = (f"the daily stop of ${g.daily_loss_stop:,.0f} was reached on "
-               f"equity (${eq:,.0f}: ${self.day_realized:,.0f} booked plus the "
-               "open position)")
+        why = (f"the daily stop of ${g.daily_loss_stop:,.0f} was reached "
+               f"(${pnl:,.0f} booked) and size was still on — closed "
+               "automatically")
         self._flattening = True
-        rec = self._day()
-        if not rec["locked"]:
-            rec["locked"] = why
-        self.journal.write("auto_flatten", reason=why, equity=eq,
-                           realized=self.day_realized, account=self.account_id)
+        self.journal.write("auto_flatten", reason=why, realized=pnl,
+                           account=self.account_id)
         print(f"[live-broker] AUTO-FLATTEN: {why}", flush=True)
         try:
             asyncio.get_running_loop().create_task(self._auto_flatten(why))
@@ -1666,6 +1996,13 @@ class Broker:
                             # rather than assumed, so the same 50 ticks refuses
                             # at $250 of NQ and passes at $25 of MNQ.
                             tick_usd=self.tick_size * self.point_value,
+                            # The contract the *tape* is on, which since
+                            # `use_instrument` need not be the one orders go to.
+                            # Only the ladder cares: it measures the high off the
+                            # tape this process can see, so routing elsewhere
+                            # leaves it trailing the wrong instrument.
+                            feed_symbol=(self.instruments[0] if self.instruments
+                                         else self.symbol),
                             **kw)
 
     def preview(self, **kw) -> dict:
@@ -1718,9 +2055,83 @@ class Broker:
                 "settings")
         return self._submit(self._intent(kw), kind, how="one_click")
 
+    # --- how long the send took ---------------------------------------------
+
+    def _timing_open(self, tag: str, how: str, wire_at: float) -> None:
+        """Start one order's timing record, at the instant it goes to the wire.
+
+        Kept keyed by tag rather than basket_id because the tag is ours and
+        exists *before* Rithmic has said a word — which is the whole point: the
+        exchange's answer arrives long after the response has gone back to the
+        browser, and it has to find its way to the same record.
+        """
+        with self._lock:
+            if len(self._timing_seen) == self._timing_seen.maxlen:
+                self._timing.pop(self._timing_seen[0], None)
+            self._timing_seen.append(tag)
+            self._timing[tag] = {"tag": tag, "how": how, "_wire_at": wire_at}
+
+    def _timing_update(self, tag: str, **fields) -> dict | None:
+        """Fold in what has just been learned, and write the record down.
+
+        One ``latency`` line per answer, each carrying **everything known so
+        far**, so a reader takes the last line for a tag and has the whole
+        timeline. Cheaper to write than to reconstruct, and it means a tag whose
+        exchange notification never came still leaves a complete-as-it-got
+        record on disk rather than nothing.
+        """
+        with self._lock:
+            rec = self._timing.get(tag)
+            if rec is None:
+                return None
+            rec.update(fields)
+            view = {k: v for k, v in rec.items() if not k.startswith("_")}
+            self.last_latency = view
+        self.journal.write("latency", **view)
+        return view
+
+    def note_api_ms(self, tag: str, ms: float) -> dict | None:
+        """How long the whole request handler took, wall to wall.
+
+        Measured by the router rather than here because the part this method
+        exists to capture — reading the policy, finding the session, parsing the
+        body — happens before ``_submit`` is reached. The difference between
+        this and ``plant_ms`` is what the API costs the order.
+        """
+        return self._timing_update(tag, api_ms=round(ms, 1))
+
+    def record_press(self, tag: str, client_ms: float, gesture: str = "") -> dict | None:
+        """What the browser measured: its own press to its own acknowledgement.
+
+        Reported after the fact, on a request of its own, so that measuring the
+        order costs the order nothing. ``gesture`` is which button it was — the
+        keyboard, the dock, the pad — because the interesting differences
+        between them are in the part of the timeline only the browser can see.
+
+        Returns None for a tag this process has no record of, which is what a
+        report arriving after a restart looks like. Not an error: nothing about
+        the order depends on it.
+        """
+        rec = self._timing.get(tag)
+        api = (rec or {}).get("api_ms")
+        client_ms = round(client_ms, 1)
+        return self._timing_update(
+            tag, client_ms=client_ms, gesture=gesture or None,
+            # The browser's total minus the server's own — the fetch, the proxy,
+            # the JSON, and React getting round to the handler. Both are
+            # durations on their own clock, so this subtraction is sound where
+            # differencing two wall clocks would not be.
+            net_ms=None if api is None else round(client_ms - api, 1))
+
+    def latency_of(self, tag: str) -> dict | None:
+        rec = self._timing.get(tag)
+        return None if rec is None else {k: v for k, v in rec.items()
+                                         if not k.startswith("_")}
+
     def _submit(self, intent: Intent, kind: str, how: str = "review") -> dict:
         from async_rithmic import OrderDuration, OrderType, TransactionType
 
+        t_enter = time.perf_counter()
         # The last gate before the wire, and the one that has to be here rather
         # than only on the review: `send` spends a token minted earlier, and
         # "still allowed when I staged it" is not the question.
@@ -1748,6 +2159,18 @@ class Broker:
             # chart so a resting entry can show the bracket it will get.
             self._sent_bracket[tag] = {"stop_ticks": intent.stop_ticks,
                                        "target_ticks": intent.target_ticks}
+        # The ladder this app will run once the order fills. Nothing about it
+        # reaches the wire — that is the entire difference from the block below,
+        # where Rithmic is being asked to do the trailing. Keyed by tag for the
+        # same reason the trail extras are: a shared slot would let the next
+        # order inherit this one's ladder, i.e. a stop that starts moving on a
+        # trade nobody asked to be trailed.
+        cfg = TrailCfg.from_ticks(self.tick_size, dist=intent.ladder_dist_ticks,
+                                  step=intent.ladder_step_ticks,
+                                  be=intent.ladder_be_ticks,
+                                  be_only=intent.ladder_be_only)
+        if cfg is not None:
+            self._sent_ladder[tag] = cfg
         # Registered against this order's tag for `_patch_order_plant` to pick
         # up, because async_rithmic drops unknown kwargs rather than forwarding
         # them.
@@ -1783,6 +2206,13 @@ class Broker:
             self._managed_bracket = True
 
         self.journal.write("submit", tag=tag, how=how, **intent.__dict__)
+        # Everything above this line is ours: the guards, the day's arithmetic,
+        # the bracket bookkeeping, the journal write. Everything below it is the
+        # network and Rithmic. The split is where it is so the two can be told
+        # apart when the number is bad — a slow gate is a bug here, a slow plant
+        # is not.
+        t_wire = time.perf_counter()
+        self._timing_open(tag, how, t_wire)
         try:
             res = self._call(
                 lambda c: c.submit_order(
@@ -1795,17 +2225,30 @@ class Broker:
         except Exception as e:  # noqa: BLE001 — reported, never swallowed
             self.journal.write("submit_failed", tag=tag,
                                error=f"{type(e).__name__}: {e}")
+            # A failed send is still a measurement, and the one worth having:
+            # the 20s a wedged plant costs is invisible in a record that only
+            # times the sends that worked.
+            self._timing_update(
+                tag, gate_ms=round((t_wire - t_enter) * 1000, 1),
+                plant_ms=round((time.perf_counter() - t_wire) * 1000, 1),
+                failed=f"{type(e).__name__}: {e}")
             raise
         if not self._reducing(intent.side, intent.qty):
             # The slow-down clock starts when the entry goes out, not when it
             # fills: what the measurement showed is people re-entering fast, and
             # an order sitting unfilled is already that decision made.
             self._day()["last_entry_at"] = time.monotonic()
+        t_ack = time.perf_counter()
         first = (res or [None])[0]
         basket = _s(getattr(first, "basket_id", ""))
         self.journal.write("submitted", tag=tag, how=how, basket_id=basket)
+        latency = self._timing_update(
+            tag, basket_id=basket,
+            gate_ms=round((t_wire - t_enter) * 1000, 1),
+            plant_ms=round((t_ack - t_wire) * 1000, 1))
         return {"tag": tag, "basket_id": basket, "how": how,
-                "sentence": intent.sentence(kind, self.tick_size)}
+                "sentence": intent.sentence(kind, self.tick_size),
+                "latency": latency}
 
     def modify(self, basket_id: str, price: float | None = None,
                stop: float | None = None, target: float | None = None) -> dict:
@@ -1891,6 +2334,35 @@ class Broker:
                 "the high water mark on every new tick of profit, so a stop "
                 "moved here would be silently put back, wider, the moment the "
                 "trade goes your way. Flatten, or re-enter without a trail.")
+        # **A bracket leg is rarely one order.** Rithmic attaches a fresh
+        # stop/target pair to every *partial fill* of a bracket entry, so the
+        # thing the chart draws as "the stop" can be three working orders at
+        # three baskets. Moving only the one that was grabbed is how a position
+        # ends up protected at two different prices — see `_sibling_legs`.
+        self._modify_one(rec, leg, want)
+        moved = [basket_id]
+        stuck: list[str] = []
+        for other in self._sibling_legs(rec, leg):
+            try:
+                self._modify_one(other, leg, want)
+                moved.append(other["basket_id"])
+            except Exception:  # noqa: BLE001
+                stuck.append(other["basket_id"])
+        if stuck:
+            # The addressed leg moved and a sibling did not, which is the exact
+            # state this fan-out exists to prevent: part of the position is
+            # protected at the new price and part at the old one, and the chart
+            # can only draw one of them. Journalled and returned rather than
+            # swallowed — the caller shows it, because a stop that half-moved is
+            # worth interrupting someone for.
+            self.journal.write("bracket_split", leg=leg, price=want,
+                               moved=moved, stuck=stuck)
+        return {"basket_id": basket_id, "changed": [leg], "asked": want,
+                "baskets": moved, "stuck": stuck}
+
+    def _modify_one(self, rec: dict, leg: str, want: float) -> None:
+        """One working order, moved to one price. The wire half of `modify`."""
+        basket_id = rec["basket_id"]
         fields = _reprice(rec, want)
         lock = self._basket_lock(basket_id)
         with lock:
@@ -1914,7 +2386,49 @@ class Broker:
                 self.journal.write("modify_failed", basket_id=basket_id,
                                    leg=leg, error=f"{type(e).__name__}: {e}")
                 raise
-        return {"basket_id": basket_id, "changed": [leg], "asked": want}
+
+    def _sibling_legs(self, rec: dict, leg: str) -> list[dict]:
+        """The *other* working orders that make up the same bracket leg.
+
+        Rithmic brackets a **fill, not an order**. A 7-lot bracket entry that
+        fills 4 then 3 comes back as two stops (4 and 3) and two targets, each
+        with its own basket and its own price — verified on MNQU6 2026-08-24,
+        entry 202083398 answering with legs 202083399..402, and again on the
+        same day's 5+2 fill. A mini fills in one print and never shows this; the
+        micros, on seven lots, split routinely. That is the whole reason a
+        position that was given one stop can be sitting under five.
+
+        So "the stop" on a position is a *set*, and every caller that moves it —
+        a drag on the chart, and `LadderRunner` through `_move_stop` — has to
+        move the whole set or leave the rest of the position at the old price
+        while the chart draws the one that moved.
+
+        Only ever the legs of the **open position**: a resting order that merely
+        happens to be on the closing side is somebody's scale-out, not a sibling.
+        And only for a named leg — a drag on an ordinary working order arrives as
+        ``price`` and fans out to nothing, which is what it should do.
+        """
+        if leg not in ("stop", "target"):
+            return []
+        net = _i((self.position or {}).get("net") or 0)
+        if not net:
+            return []
+        # The legs close the position, so they face the other way.
+        closing_buy = net < 0
+        kinds = (("stop", "stop_limit", "mit") if leg == "stop"
+                 else ("limit", "lit"))
+        out: list[dict] = []
+        with self._lock:
+            for o in self.working.values():
+                if o["basket_id"] == rec["basket_id"]:
+                    continue
+                if not o.get("working"):
+                    continue
+                if (o["side"] == "buy") != closing_buy:
+                    continue
+                if o["type"] in kinds:
+                    out.append(o)
+        return out
 
     def _server_managed(self, rec: dict, leg: str) -> bool:
         """Is this order Rithmic's to move rather than ours?
@@ -2050,6 +2564,19 @@ class Broker:
             # the thing most worth saying out loud.
             "instruments": list(self.instruments),
             "feed_symbol": self.instruments[0] if self.instruments else self.symbol,
+            # Why the list is as short as it is. One entry can mean the login
+            # has no micro, or that the question could not be asked — the panel
+            # draws a switch for neither, and only the second is worth a
+            # reconnect, so it is told which rather than left to guess.
+            "instrument_lookup_failed": bool(self.instrument_lookup_failed),
+            # What Rithmic said, for the panel's tooltip. The difference between
+            # "no permission" and "try again later" lives in this string and
+            # nowhere else reachable without a second login.
+            "instrument_lookup_error": self.instrument_lookup_error,
+            # The root this login chose and this session could not honour, or
+            # null. Non-null is the loud case: the plan is in micros and the
+            # orders are not.
+            "instrument_want": self.instrument_want,
             # Both change with the instrument, and the panel's risk arithmetic
             # is drawn from them rather than assumed.
             "tick_size": self.tick_size,
@@ -2058,12 +2585,17 @@ class Broker:
             # None means "not asked", which is a different claim from "nothing
             # working" and the whole reason the field is nullable.
             "reconciled_at": self.reconciled_at,
+            # The ladder this app is running on the open position, or null. The
+            # panel needs it drawn: a stop that moves on its own is the one thing
+            # on the chart nobody put there by hand, and a trailing stop that is
+            # silently *not* trailing (given up after three refusals) looks
+            # exactly like one that has not earned a rung yet.
+            "ladder": self.ladder.snapshot(),
             # Will a gesture actually reach the exchange? The whole of
             # `check_routable` folded into one boolean, so the chart's "this is
             # live" outline is drawn from the same answer the order path gives
             # rather than from a re-derivation of it.
             "routable": self.routable,
-            "max_qty": self.policy.max_qty,
             "working": sorted(self.working.values(),
                               key=lambda r: r.get("at", 0.0)),
             "recent": list(self.recent)[:12],
@@ -2074,8 +2606,14 @@ class Broker:
             # about. `orders.jsonl` still has it, so it is recoverable — but
             # nothing recovers it automatically, so the number has to be visible.
             "booking_errors": self.stats_booking_errors,
+            "booking_dupes": self.stats_booking_dupes,
             "position": self.position,
             "guard": self.guard_view(),
+            # What the last order took, leg by leg. Read off the snapshot rather
+            # than only from the send's own response so the exchange's word —
+            # which lands after that response has gone — shows up too, on the
+            # next poll.
+            "last_latency": self.last_latency,
             "error": self.error,
         }
 
@@ -2118,9 +2656,9 @@ class Broker:
                          and st.realized <= -g.slow_down_at
                          and not st.locked),
             # Realised plus what the open position is currently down — the
-            # number the account's own drawdown is measured against, and what
-            # the automatic flatten fires on. Realised alone would sit silent
-            # through an open loss that had already spent the limit.
+            # number the *account's* own drawdown is measured against, which is
+            # why it is worth having on screen. The daily stop is not measured
+            # on it: that one fires on booked P&L (see `Guards.auto_flatten`).
             "equity": self._equity(),
             "open_pnl": _f((self.position or {}).get("open_pnl")),
             "auto_flattened": self._flattening,

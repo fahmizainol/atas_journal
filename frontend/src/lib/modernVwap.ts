@@ -1,3 +1,5 @@
+import { barMoments } from "./vwap";
+
 // Modern VWAP [GBB], ported from the demo to the chart.
 //
 // The Python side of this is demo/modern_vwap_demo.py, which is itself a port
@@ -26,21 +28,75 @@
 // of the indicator, not of this port; the demo page makes the same point by
 // rebuilding rather than resampling when its timeframe switch moves.
 
-import type { Bar } from "./replayEngine";
+/**
+ * The bar this indicator needs, and nothing else.
+ *
+ * Structural rather than the replay's `Bar`: the Interactions Lab draws the same
+ * layer over the journal's bars (lib/chartTypes), which carry no tick indices,
+ * and nothing in here has ever read one. Both chart components' bar types
+ * satisfy this.
+ */
+export interface MvBar {
+  /** ET wall-clock epoch seconds on the chart's gap-collapsing clock. */
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  /** This bar's own tick VWAP and variance, when the chart has them. The
+   *  accumulator below folds these rather than `hlc3 × volume` so this line is
+   *  the same statistic as the ⚓ tool and the session bands beside it — see
+   *  lib/vwap. Absent, it falls back to hlc3, which is a different statistic and
+   *  visibly so near an anchor. */
+  tvwap?: number;
+  tvar?: number;
+}
 
 // --- parameters -------------------------------------------------------------
 
-export type MvAnchor = "swing" | "globex" | "rth" | "week";
+export type MvAnchor = "swing" | "poc" | "globex" | "rth" | "week";
+export type MvPocSource = "globex" | "weekly";
+/** What has to happen before a POC touch counts again. See the `poc` branch of
+ *  `computeModernVwap` — the two ask different questions of the same level. */
+export type MvRearmMode = "distance" | "pocMove";
 export type MvSignalMode = "gated" | "all" | "none";
 
 export interface ModernVwapParams {
-  /** Where the accumulator resets. `swing` is his construct; the other three are
-   *  clock anchors, and on those this indicator *is* the VWAP the chart already
-   *  draws from ticks — see the note on `computeModernVwap`. */
+  /** Where the accumulator resets. `swing` is his construct; `poc` is ours under
+   *  evaluation (re-anchor where price revisits the developing point of control
+   *  — see docs/research/modern-vwap-swing-anchor.html for the walkthrough and
+   *  its failure modes); the other three are clock anchors, and on those this
+   *  indicator *is* the VWAP the chart already draws from ticks — see the note
+   *  on `computeModernVwap`. */
   anchor: MvAnchor;
   /** Swing pivot length: the centre bar must beat all `pivot` neighbours on each
    *  side, so a pivot confirms `pivot` bars after it happened. */
   pivot: number;
+  /** POC anchor only: which of the two things has to happen before a touch
+   *  counts again — price leaving the level (`distance`, his published shape) or
+   *  the level itself moving (`pocMove`). Whichever it is, `rearmTicks` is how
+   *  far. */
+  rearmMode: MvRearmMode;
+  /** POC anchor only, and read against whatever `rearmMode` is measuring.
+   *
+   *  On `distance`: after a touch, the next touch counts only once the close has
+   *  been at least this many ticks from the POC. 0 disables re-arming, and in
+   *  balance that shreds the accumulator — price *lives* at the POC, so raw
+   *  touches arrive in clusters. The demo page's verdict stands: this knob, not
+   *  the anchor, is the model.
+   *
+   *  On `pocMove`: how far the POC must migrate from the level last anchored at
+   *  before its next touch counts. 0 means any move at all, which in balance is
+   *  barely a debounce — the developing POC wobbles a tick at a time while price
+   *  sits on it, and every wobble would then be a fresh anchor. */
+  rearmTicks: number;
+  /** Which developing POC the touch is against: the globex session's, or the
+   *  week's (the profile carried from Sunday 18:00). One horizon up the same
+   *  caveats bite harder — the study page's weekly section shows a tick
+   *  re-arm is nearly no debounce against a weekly level's wander, and a
+   *  weekly POC migration teleports across the week's range. */
+  pocSource: MvPocSource;
   /** How many σ envelopes are drawn. The MR signal always tests ±2σ whatever
    *  this says — it is a drawing knob, not a rule knob. */
   bands: 1 | 2 | 3;
@@ -67,11 +123,21 @@ export interface ModernVwapParams {
 
 export const MV_ANCHOR_OPTIONS = [
   { value: "swing", label: "swing pivots" },
+  { value: "poc", label: "POC touch" },
   { value: "globex", label: "globex 18:00" },
   { value: "rth", label: "NY 09:30" },
   { value: "week", label: "weekly" },
 ] as const;
 export const MV_PIVOT_OPTIONS = [3, 5, 10, 20, 40] as const;
+export const MV_REARM_OPTIONS = [0, 10, 25, 50] as const;
+export const MV_REARM_MODE_OPTIONS = [
+  { value: "distance", label: "price leaves the POC" },
+  { value: "pocMove", label: "the POC moves (naked)" },
+] as const;
+export const MV_POC_SOURCE_OPTIONS = [
+  { value: "globex", label: "globex session" },
+  { value: "weekly", label: "weekly" },
+] as const;
 export const MV_BAND_OPTIONS = [1, 2, 3] as const;
 export const MV_KER_WEIGHT_OPTIONS = [0.25, 0.5, 0.75, 1] as const;
 export const MV_KER_LEN_OPTIONS = [10, 14, 20, 30, 50] as const;
@@ -97,6 +163,9 @@ export function mvOccMinOptions(occWindow: number): number[] {
 export const DEFAULT_MODERN_VWAP: ModernVwapParams = {
   anchor: "swing",
   pivot: 10,
+  rearmMode: "distance",
+  rearmTicks: 25,
+  pocSource: "globex",
   bands: 2,
   adaptive: false,
   kerWeight: 0.5,
@@ -180,7 +249,7 @@ function kerSeries(close: Float64Array, n: number): Float64Array {
 /** Wilder's ATR, first-TR seeded. The seeding differs from Pine's `ta.rma` (SMA
  *  seed there) by an amount that has decayed to nothing long before anything is
  *  drawn. */
-function atrSeries(bars: Bar[], n: number): Float64Array {
+function atrSeries(bars: MvBar[], n: number): Float64Array {
   const out = new Float64Array(bars.length).fill(NaN);
   let atr = NaN;
   for (let i = 0; i < bars.length; i++) {
@@ -250,7 +319,7 @@ function rollingMedian(src: Float64Array, win: number): Float64Array {
  * (that one is not strict on the left). A simultaneous high and low is one
  * event, as there.
  */
-function swingEvents(bars: Bar[], pl: number): Uint8Array {
+function swingEvents(bars: MvBar[], pl: number): Uint8Array {
   const n = bars.length;
   const ev = new Uint8Array(n);
   const w = 2 * pl + 1;
@@ -276,7 +345,7 @@ function swingEvents(bars: Bar[], pl: number): Uint8Array {
  * (see replayEngine's Bar), so a day index is a plain division — the same
  * arithmetic lib/volRuler does to find 10:00 ET.
  */
-function clockKey(bars: Bar[], mode: MvAnchor): Float64Array {
+function clockKey(bars: MvBar[], mode: MvAnchor): Float64Array {
   const out = new Float64Array(bars.length);
   for (let i = 0; i < bars.length; i++) {
     const t = bars[i].time;
@@ -310,25 +379,54 @@ function clockKey(bars: Bar[], mode: MvAnchor): Float64Array {
  * number. These modes are here so the swing anchor has something to be compared
  * against inside its own indicator, not as a second copy of a band the chart
  * already draws properly.
+ *
+ * The `poc` anchor is the exception to "computed from the drawn bars": the
+ * developing POC itself can't be read off bars, so the chart hands it in via
+ * `ctx` — the engine's own tick-accumulated globex profile, one value per bar
+ * time. A touch is known on its own bar (zero lag, no backfill, unlike a swing
+ * pivot); the re-arm rule — `rearmMode` and `rearmTicks` together — is what
+ * keeps balance from shredding the accumulator.
+ * Without a `ctx.poc` series the mode degrades to a plain session anchor (only
+ * the barstate.isfirst reset fires) — visible in the legend as 1 anchor.
+ *
+ * **The `poc` anchor is ported to Python in `src/journal/sim/modern_vwap.py`
+ * (mid line only, both re-arm modes at 50 ticks) and the two must stay equal.**
+ * That port is what `journal.level_tag` measures fills against — one level
+ * family per re-arm rule — so a change to the anchor rule here silently
+ * re-defines a family there, and both sides would keep drawing a perfectly
+ * plausible VWAP while disagreeing.
  */
+export interface MvContext {
+  /** Developing POC by bar time, tick-accumulated in the engine. */
+  poc?: ReadonlyMap<number, number>;
+  /** Price per tick, for the re-arm distance. */
+  tickSize?: number;
+}
+
 export function computeModernVwap(
-  bars: Bar[],
+  bars: MvBar[],
   histCount: number,
   p: ModernVwapParams,
+  ctx?: MvContext,
 ): ModernVwapData {
   const n = bars.length;
   if (n === 0) return EMPTY;
 
   const close = new Float64Array(n);
-  const tp = new Float64Array(n);
-  const vol = new Float64Array(n);
+  // Each bar's contribution to an anchored VWAP, tick-exact where the chart was
+  // given the moments and hlc3 where it wasn't (lib/vwap.barMoments). A bar with
+  // no volume contributes nothing but must not zero the average; the accumulator
+  // simply doesn't move on it.
+  const mv = new Float64Array(n);
+  const mpv = new Float64Array(n);
+  const mp2v = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const b = bars[i];
     close[i] = b.close;
-    tp[i] = (b.high + b.low + b.close) / 3;
-    // A bar with no volume contributes nothing but must not zero the average;
-    // the accumulator simply doesn't move on it.
-    vol[i] = b.volume > 0 ? b.volume : 0;
+    const m = barMoments(b);
+    mv[i] = m.v;
+    mpv[i] = m.pv;
+    mp2v[i] = m.p2v;
   }
 
   // --- regime: two axes, each against its own trailing median.
@@ -355,6 +453,57 @@ export function computeModernVwap(
   let ev: Uint8Array;
   if (p.anchor === "swing") {
     ev = swingEvents(bars, pl);
+  } else if (p.anchor === "poc") {
+    // A touch of the developing POC while armed. Two ways to re-arm, and they
+    // ask different questions of the same level:
+    //
+    //  * `distance` — *price* has to leave. After a touch the next one counts
+    //    only once a close is `rearmTicks` away from the POC, so a bar can re-arm
+    //    and touch in one go (a wide bar through the level) — a genuine revisit,
+    //    not a cluster artifact.
+    //  * `pocMove` — the *level* has to move. Once anchored at a POC, no amount
+    //    of whipsawing across it anchors again: the accumulator waits until the
+    //    developing POC has migrated `rearmTicks` from the price it last
+    //    anchored at, and then the first bar to touch that new level fires. What
+    //    that buys is one anchor per migration instead of one per revisit —
+    //    price rotating around a level the market has already agreed on is not
+    //    new information, a level it has just moved to is.
+    //
+    //    "Naked" is the shorthand, and it is worth being exact about how naked:
+    //    the level has never been *anchored at*, which is not the same as never
+    //    traded. A migration usually happens because volume built at the new
+    //    price, so the bar that moves the POC often spans it and fires the same
+    //    bar. The genuinely untouched case — the POC jumping to a shelf price
+    //    has left — is the one that waits, and it is the one worth watching.
+    ev = new Uint8Array(n);
+    const poc = ctx?.poc;
+    const tick = ctx?.tickSize ?? 0.25;
+    if (poc) {
+      const byMove = p.rearmMode === "pocMove";
+      let armed = true;
+      /** The POC price the last anchor fired at. NaN until one has. */
+      let firedAt = NaN;
+      for (let i = 0; i < n; i++) {
+        const v = poc.get(bars[i].time);
+        if (v === undefined || !Number.isFinite(v)) continue;
+        if (!armed) {
+          armed = byMove
+            ? // A move, and one big enough. Both halves matter: `!== firedAt`
+              // keeps a 0-tick threshold meaning "any migration" rather than
+              // "no debounce at all", which is what `>= 0` alone would be.
+              v !== firedAt && Math.abs(v - firedAt) >= p.rearmTicks * tick
+            : Math.abs(close[i] - v) >= p.rearmTicks * tick;
+        }
+        if (armed && bars[i].low <= v && bars[i].high >= v) {
+          ev[i] = 1;
+          firedAt = v;
+          // On `pocMove` a fired anchor always disarms — the way back is a
+          // migration, and there is no threshold that makes touching the same
+          // level again mean something.
+          armed = !byMove && p.rearmTicks === 0;
+        }
+      }
+    }
   } else {
     const key = clockKey(bars, p.anchor);
     ev = new Uint8Array(n);
@@ -379,15 +528,15 @@ export function computeModernVwap(
       anchors.push(bars[i].time);
       if (pl && i >= pl) {
         for (let j = i - pl; j < i; j++) {
-          sPv += tp[j] * vol[j];
-          sV += vol[j];
-          sP2v += tp[j] * tp[j] * vol[j];
+          sPv += mpv[j];
+          sV += mv[j];
+          sP2v += mp2v[j];
         }
       }
     }
-    sPv += tp[i] * vol[i];
-    sV += vol[i];
-    sP2v += tp[i] * tp[i] * vol[i];
+    sPv += mpv[i];
+    sV += mv[i];
+    sP2v += mp2v[i];
     if (sV > 0) {
       const m = sPv / sV;
       mid[i] = m;
@@ -509,7 +658,10 @@ export function computeModernVwap(
   return {
     points,
     signals: p.signals === "gated" ? signals.filter((s) => s.gated) : signals,
-    anchors: p.anchorMarks ? anchors : [],
+    // Always the real list — the legend quotes its length (a fact about the
+    // anchor, not about the marks); whether it is *drawn* is the caller's call
+    // via `anchorMarks`.
+    anchors,
     trendPct: sess ? (100 * trend) / sess : 0,
     undefPct: sess ? (100 * undef) / sess : 0,
   };
@@ -532,6 +684,13 @@ export function modernVwapParams(raw: unknown): ModernVwapParams {
       ? (s.anchor as MvAnchor)
       : d.anchor,
     pivot: pickNum(s.pivot, MV_PIVOT_OPTIONS, d.pivot),
+    rearmMode: MV_REARM_MODE_OPTIONS.some((o) => o.value === s.rearmMode)
+      ? (s.rearmMode as MvRearmMode)
+      : d.rearmMode,
+    rearmTicks: pickNum(s.rearmTicks, MV_REARM_OPTIONS, d.rearmTicks),
+    pocSource: MV_POC_SOURCE_OPTIONS.some((o) => o.value === s.pocSource)
+      ? (s.pocSource as MvPocSource)
+      : d.pocSource,
     bands: pickNum(s.bands, MV_BAND_OPTIONS, d.bands) as 1 | 2 | 3,
     adaptive: typeof s.adaptive === "boolean" ? s.adaptive : d.adaptive,
     kerWeight: pickNum(s.kerWeight, MV_KER_WEIGHT_OPTIONS, d.kerWeight),

@@ -5,7 +5,6 @@ import { useCalendar } from "../hooks/useCalendar";
 import { CalendarHeatmap } from "../components/charts/CalendarHeatmap";
 import { CalendarTable } from "../components/CalendarTable";
 import { DayExplorer } from "../components/DayExplorer";
-import { RecordingsCard } from "../components/RecordingsCard";
 
 type View = "calendar" | "table";
 
@@ -36,7 +35,6 @@ export function Calendar() {
 
   return (
     <div>
-      <RecordingsCard scope={scope} />
       <div
         style={{
           display: "flex",

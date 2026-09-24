@@ -1,3 +1,4 @@
+
 export interface Bar {
   time: number;
   open: number;
@@ -5,6 +6,20 @@ export interface Bar {
   low: number;
   close: number;
   volume: number;
+  /** This bar's own tick VWAP and tick variance, from
+   *  `journal.sim.vwap.bar_moments`. Every cumulative anchored VWAP the chart
+   *  draws — the ⚓ tool, Modern VWAP, the Dynamic Swing VWAP's cumulative mode —
+   *  accumulates these rather than `hlc3 × volume`, which is what keeps them
+   *  equal to the session bands drawn beside them and to the replay engine's own
+   *  lines. See lib/vwap.
+   *
+   *  Absent on two kinds of bar, and the distinction matters: one that caught no
+   *  volume (nothing to average), and one from a payload with no tape behind it
+   *  (`api/charts_data.bars_window`, the timeframe-radio refetch, resampled from
+   *  the bar store). Both fall back to hlc3, which is a *different statistic* —
+   *  `lib/vwap.hasTickMoments` is how a caller tells the user which it got. */
+  tvwap?: number;
+  tvar?: number;
 }
 
 // Candle resolution for the strategy charts. "tick" is the engine's own
@@ -145,11 +160,35 @@ export interface Excursion {
   avg_atr_usd?: number | null;
 }
 
-// Real volume-at-price per bar — `footprint[i]` is the [price, size] pairs of
-// every trade inside `bars[i]`. Only the sim's charts send it (they hold the tape
-// the bars were built from); the journal's Databento bars have no such thing, and
-// their volume profile falls back to an estimate. See lib/volumeProfile.
+// Real volume-at-price per bar — `footprint[i]` is the [price, size, delta] rows
+// of every trade inside `bars[i]`. Only the sim's charts send it (they hold the
+// tape the bars were built from); the journal's Databento bars have no such
+// thing, and their volume profile falls back to an estimate. See
+// lib/volumeProfile.
+//
+// `delta` is the level's signed aggressor volume, and is what lets a chart with
+// no tape of its own colour its profile by flow. It is simply absent — a
+// two-element row — on a session the feed tagged no aggressor on, which is why
+// the length is tested rather than the value (api/session_chart._footprint).
 export type Footprint = number[][][];
+
+/**
+ * One prior session's volume-at-price, as the two windows a composite may be
+ * cut from: `on` is the 18:00→09:30 night, `rth` the 09:30→16:00 day. The hour
+ * after the close belongs to neither — a Globex session is the open to the
+ * close, which is the span the composite's balance runs were measured over.
+ *
+ * Each window is a *dense* histogram: `min` is the integer tick level `counts[0]`
+ * sits on, and every level above it follows, zeros included. That is the shape
+ * the server already caches per session (journal.sim.weekly), and the shape a
+ * client-side profile wants — expanding it to (level, size) pairs is one loop
+ * with no lookups. Either window may be missing when its ticks weren't bought.
+ */
+export interface ContextProfile {
+  date: string;
+  on?: { min: number; counts: number[] };
+  rth?: { min: number; counts: number[] };
+}
 
 export interface TradeChartData {
   available: boolean;
@@ -168,6 +207,13 @@ export interface TradeChartData {
   vwap_anchor?: "globex" | "ny";
   profile_globex?: ProfilePoint[];
   profile_ny?: ProfilePoint[];
+  /** Developing weekly value area — the globex profile carrying the week behind
+   * it. Absent when the week has a hole (same rule as `vwap_weekly`). */
+  profile_weekly?: ProfilePoint[];
+  /** The prior sessions' volume-at-price, oldest first — what the composite
+   * layer is built from, client-side, by the same balance walk the replay chart
+   * runs. Empty when the run of days ends at a roll or an unbought session. */
+  context_profiles?: ContextProfile[];
   /** 9/20/50/200 EMA on the 1-minute grid — day-trading convention, context
    * only. 9/20 are the fast pullback pair, 50/200 the slower trend reference. */
   ema9?: EmaPoint[];
@@ -187,6 +233,12 @@ export interface TradeChartData {
   footprint?: Footprint;
   cvd?: CvdPoint[];
   cvd_divergences?: CvdDivergence[];
+  /** Signed aggressor volume *per bar* (not accumulated) — what the CVD
+   *  oscillator windows. Ships beside `cvd` because it is the same tape pass;
+   *  the window, its fractals and the divergences off them are computed on the
+   *  frontend (lib/cvdOsc), so the replay's live stepping and this cannot
+   *  disagree. Empty when the tape carried no aggressor side. */
+  delta?: CvdPoint[];
   tick_size?: number;
   /** Dollars per full point per contract (contract spec) — for the ruler's $/lot. */
   point_value?: number;
@@ -210,6 +262,13 @@ export interface DayChartData {
   vwap_anchor?: "globex" | "ny";
   profile_globex?: ProfilePoint[];
   profile_ny?: ProfilePoint[];
+  /** Developing weekly value area — the globex profile carrying the week behind
+   * it. Absent when the week has a hole (same rule as `vwap_weekly`). */
+  profile_weekly?: ProfilePoint[];
+  /** The prior sessions' volume-at-price, oldest first — what the composite
+   * layer is built from, client-side, by the same balance walk the replay chart
+   * runs. Empty when the run of days ends at a roll or an unbought session. */
+  context_profiles?: ContextProfile[];
   atr_points?: ATRPoint[];
   /** 9/20/50/200 EMA on the 1-minute grid — day-trading convention, context
    * only. 9/20 are the fast pullback pair, 50/200 the slower trend reference. */
@@ -226,6 +285,12 @@ export interface DayChartData {
   footprint?: Footprint;
   cvd?: CvdPoint[];
   cvd_divergences?: CvdDivergence[];
+  /** Signed aggressor volume *per bar* (not accumulated) — what the CVD
+   *  oscillator windows. Ships beside `cvd` because it is the same tape pass;
+   *  the window, its fractals and the divergences off them are computed on the
+   *  frontend (lib/cvdOsc), so the replay's live stepping and this cannot
+   *  disagree. Empty when the tape carried no aggressor side. */
+  delta?: CvdPoint[];
   tick_size?: number;
   /** Dollars per full point per contract (contract spec) — for the ruler's $/lot. */
   point_value?: number;

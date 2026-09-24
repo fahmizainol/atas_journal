@@ -12,19 +12,49 @@
 //                          the tape.
 //
 // Both return the same shape, so the renderers don't care which one produced it.
+//
+// A row also carries `delta` — its signed aggressor volume — wherever the source
+// can answer for it: a tape whose aggressor tag was handed over, or a footprint
+// whose levels shipped one. That is the same quantity the CVD pane accumulates,
+// cut by price instead of by time, and it is what lets a profile be read for
+// flow (who lifted, who hit) as well as for structure. The renderers draw it as
+// its own histogram beside the volume rows rather than as a colour on them:
+// volume-at-price and net-delta-at-price are two distributions, and a lane each
+// is what lets you see a price that traded heavily *and* two-sided. Where there
+// is no tag there is no delta, and `hasDelta` says so rather than the rows
+// quietly reading zero.
 
 import type { Bar } from "./chartTypes";
+import { SIDE_BUY, SIDE_SELL } from "./replayEngine";
 
 export interface ProfileRow {
   low: number;
   high: number;
   volume: number;
+  /** Signed aggressor volume in this row: buy market orders minus sell ones —
+   *  the same quantity the CVD pane accumulates, cut by price instead of by time.
+   *
+   *  Absent, rather than zero, when the source has no aggressor tag to read: the
+   *  estimated profile (bars, no tape), and a tape whose every print came back
+   *  untagged. A row of exactly zero is a real reading — the two sides cancelled
+   *  at that price — and the two must not be spelled the same. */
+  delta?: number;
 }
 
 export interface VolumeProfile {
   rows: ProfileRow[];
   /** Largest single-row volume — the width the renderer scales against. */
   maxVolume: number;
+  /** Whether the rows carry `delta` at all. What the legend needs to say why a
+   *  delta reading isn't there, which is otherwise indistinguishable from a
+   *  session that happened to trade perfectly two-sided. */
+  hasDelta: boolean;
+  /** Largest |delta| on any row — what the delta lane scales against, exactly as
+   *  `maxVolume` is what the volume rows scale against. Its own maximum and not
+   *  `maxVolume`: net delta is a small fraction of volume, and a lane scaled to
+   *  the volume it netted out of would be a row of hairlines. Zero when there is
+   *  no delta, or when every row's two sides cancelled exactly. */
+  maxAbsDelta: number;
   /** Point of control: mid price of the heaviest row. */
   poc: number;
   /** Value-area high/low: the outer edges of the rows holding `valueAreaPct`. */
@@ -75,10 +105,15 @@ const MAX_LEVELS = 2000;
 /**
  * The exact profile: real volume-at-price off the tape, one row per tick level.
  *
- * `entries` is the [price, size] pairs of every trade in the selected bars (the
- * `footprint` the sim's chart API ships per bar). Unlike computeVolumeProfile
+ * `entries` is the [price, size, delta] rows of every trade in the selected bars
+ * (the `footprint` the sim's chart API ships per bar). Unlike computeVolumeProfile
  * nothing is estimated here — and because rows *are* tick levels, POC/VAH/VAL
  * come back as real tradeable prices rather than arbitrary bucket midpoints.
+ *
+ * The third element is that level's signed aggressor volume, and is what a
+ * chart with no tape of its own reads delta from. It is absent on a payload from
+ * a server that predates it, and on a day whose ticks carried no aggressor tag —
+ * so its presence is tested for rather than assumed.
  */
 export function computeTickProfile(entries: number[][], tickSize: number): VolumeProfile | null {
   if (entries.length === 0 || !(tickSize > 0)) return null;
@@ -101,16 +136,24 @@ export function computeTickProfile(entries: number[][], tickSize: number): Volum
   // Both must be the same rounding, or the widest bar on the chart has no row.
   const rowCount = Math.round((max - min) / step) + 1;
 
+  // Every row carries delta or none does: the footprint is one shape for the
+  // whole payload, so one look at its first row settles it.
+  const withDelta = entries[0].length > 2;
   const rows: ProfileRow[] = Array.from({ length: rowCount }, (_, i) => {
     const centre = min + i * step;
-    return { low: centre - step / 2, high: centre + step / 2, volume: 0 };
+    const row: ProfileRow = { low: centre - step / 2, high: centre + step / 2, volume: 0 };
+    if (withDelta) row.delta = 0;
+    return row;
   });
-  for (const [price, size] of entries) {
-    rows[Math.round((price - min) / step)].volume += size;
+  for (const e of entries) {
+    const row = rows[Math.round((e[0] - min) / step)];
+    row.volume += e[1];
+    if (withDelta) row.delta! += e[2] ?? 0;
   }
 
   let total = 0;
   let maxVolume = 0;
+  let maxAbsDelta = 0;
   let pocIdx = 0;
   for (let i = 0; i < rows.length; i++) {
     total += rows[i].volume;
@@ -118,6 +161,8 @@ export function computeTickProfile(entries: number[][], tickSize: number): Volum
       maxVolume = rows[i].volume;
       pocIdx = i;
     }
+    const d = Math.abs(rows[i].delta ?? 0);
+    if (d > maxAbsDelta) maxAbsDelta = d;
   }
   if (total <= 0) return null;
 
@@ -131,6 +176,8 @@ export function computeTickProfile(entries: number[][], tickSize: number): Volum
   return {
     rows,
     maxVolume,
+    hasDelta: withDelta,
+    maxAbsDelta,
     poc: priceAt(pocIdx),
     vah: priceAt(hi),
     val: priceAt(lo),
@@ -157,6 +204,11 @@ export interface TapeRange {
  * `level` is price on the integer tick grid, which is how the tape arrives —
  * binning on it directly costs no division and cannot drift off the grid.
  * `i0`/`i1` are inclusive tick indices.
+ *
+ * `side` is the tape's aggressor tag (`Tape.side`). Hand it over and the rows
+ * come back carrying delta as well as volume; leave it out and they carry
+ * volume alone, which is what a caller that only wants the distribution should
+ * do — the binning loop then skips the question entirely.
  */
 export function computeTapeProfile(
   level: Int32Array,
@@ -165,8 +217,9 @@ export function computeTapeProfile(
   i1: number,
   tickSize: number,
   binSize = 0,
+  side?: Uint8Array,
 ): VolumeProfile | null {
-  return computeTapeProfileRanges(level, size, [{ i0, i1 }], tickSize, binSize);
+  return computeTapeProfileRanges(level, size, [{ i0, i1 }], tickSize, binSize, side);
 }
 
 /**
@@ -186,6 +239,7 @@ export function computeTapeProfileRanges(
   ranges: TapeRange[],
   tickSize: number,
   binSize = 0,
+  side?: Uint8Array,
 ): VolumeProfile | null {
   if (!(tickSize > 0)) return null;
   const spans = ranges.filter((r) => r.i1 >= r.i0 && r.i0 >= 0 && r.i1 < level.length);
@@ -217,11 +271,26 @@ export function computeTapeProfileRanges(
   const rowCount = Math.floor((max - min) / group) + 1;
 
   const vols = new Float64Array(rowCount);
+  const dels = side ? new Float64Array(rowCount) : null;
+  let tagged = false;
   for (const { i0, i1 } of spans) {
-    for (let i = i0; i <= i1; i++) vols[Math.floor((level[i] - min) / group)] += size[i];
+    for (let i = i0; i <= i1; i++) {
+      const r = Math.floor((level[i] - min) / group);
+      vols[r] += size[i];
+      if (!dels) continue;
+      // An untagged print (`side` 0) belongs to neither side, so it adds volume
+      // and no delta — the same rule the CVD accumulator applies to it.
+      const s = side![i];
+      if (s === SIDE_BUY) dels[r] += size[i];
+      else if (s === SIDE_SELL) dels[r] -= size[i];
+      else continue;
+      tagged = true;
+    }
   }
 
-  return finalizeProfile(vols, min, group, tickSize);
+  // A span the feed tagged nothing in reports no delta rather than a row of
+  // zeros — "nobody was the aggressor" is not a reading.
+  return finalizeProfile(vols, tagged ? dels : null, min, group, tickSize);
 }
 
 /**
@@ -233,9 +302,12 @@ export function computeTapeProfileRanges(
  * report the same numbers off the same bins.
  *
  * `minLevel` is the level `vols[0]` starts at, on the whole-`group` grid.
+ * `dels` is the signed aggressor volume of the same bins, or null where there
+ * was no aggressor tag to bin.
  */
 function finalizeProfile(
   vols: Float64Array,
+  dels: Float64Array | null,
   minLevel: number,
   group: number,
   tickSize: number,
@@ -248,17 +320,28 @@ function finalizeProfile(
   // one-tick row's ±half-tick box when group is 1.
   const rows: ProfileRow[] = Array.from({ length: rowCount }, (_, i) => {
     const low = minPrice + i * step;
-    return { low: low - tickSize / 2, high: low + step - tickSize / 2, volume: vols[i] };
+    const row: ProfileRow = {
+      low: low - tickSize / 2,
+      high: low + step - tickSize / 2,
+      volume: vols[i],
+    };
+    if (dels) row.delta = dels[i];
+    return row;
   });
 
   let total = 0;
   let maxVolume = 0;
+  let maxAbsDelta = 0;
   let pocIdx = 0;
   for (let i = 0; i < rowCount; i++) {
     total += vols[i];
     if (vols[i] > maxVolume) {
       maxVolume = vols[i];
       pocIdx = i;
+    }
+    if (dels) {
+      const d = Math.abs(dels[i]);
+      if (d > maxAbsDelta) maxAbsDelta = d;
     }
   }
   if (total <= 0) return null;
@@ -275,6 +358,8 @@ function finalizeProfile(
   return {
     rows,
     maxVolume,
+    hasDelta: dels !== null,
+    maxAbsDelta,
     poc: lowOf(pocIdx),
     vah: lowOf(hi) + step - tickSize,
     val: lowOf(lo),
@@ -304,6 +389,7 @@ function finalizeProfile(
 export class LiveTapeProfile {
   private level: Int32Array | null = null;
   private size: Int32Array | null = null;
+  private side: Uint8Array | null = null;
   private tickSize = 0;
   private binSize = 0;
   private i0 = -1;
@@ -315,9 +401,17 @@ export class LiveTapeProfile {
   /** Highest level seen, so an extension knows whether it has to regroup. */
   private top = 0;
   private vols: Float64Array | null = null;
+  /** Signed aggressor volume of the same bins, kept in step with `vols`. Null
+   *  when the caller asked for no delta. */
+  private dels: Float64Array | null = null;
+  /** Whether any tick folded in so far carried an aggressor tag. Cumulative, so
+   *  a quiet stretch of untagged prints can't take a reading away that the
+   *  earlier tape already earned. */
+  private tagged = false;
   private profile: VolumeProfile | null = null;
 
-  /** `i0`/`i1` are inclusive tick indices, as in `computeTapeProfile`. */
+  /** `i0`/`i1` are inclusive tick indices, as in `computeTapeProfile`, and
+   *  `side` is optional on the same terms. */
   update(
     level: Int32Array,
     size: Int32Array,
@@ -325,6 +419,7 @@ export class LiveTapeProfile {
     i1: number,
     tickSize: number,
     binSize = 0,
+    side?: Uint8Array,
   ): VolumeProfile | null {
     if (!(tickSize > 0) || i0 < 0 || i1 < i0 || i1 >= level.length) {
       this.reset();
@@ -334,11 +429,15 @@ export class LiveTapeProfile {
       this.vols !== null &&
       level === this.level &&
       size === this.size &&
+      // A caller that starts (or stops) asking for delta is asking for a
+      // different profile, and the bins behind it were never kept — so it is a
+      // rebuild, exactly like a new tape or a new bin size.
+      (side ?? null) === this.side &&
       tickSize === this.tickSize &&
       binSize === this.binSize &&
       i0 === this.i0 &&
       i1 >= this.done;
-    if (!extends_) return this.rebuild(level, size, i0, i1, tickSize, binSize);
+    if (!extends_) return this.rebuild(level, size, i0, i1, tickSize, binSize, side);
     if (i1 === this.done) return this.profile;
 
     // Range first, bins second: the new ticks may widen the profile past the
@@ -352,37 +451,56 @@ export class LiveTapeProfile {
       if (l > hi) hi = l;
     }
     if (groupFor(hi - lo + 1, tickSize, binSize) !== this.group)
-      return this.rebuild(level, size, i0, i1, tickSize, binSize);
+      return this.rebuild(level, size, i0, i1, tickSize, binSize, side);
 
-    const vols = this.extend(lo, hi);
+    this.extend(lo, hi);
+    const vols = this.vols!;
+    const dels = this.dels;
     for (let i = this.done + 1; i <= i1; i++) {
-      vols[Math.floor((level[i] - this.base) / this.group)] += size[i];
+      const r = Math.floor((level[i] - this.base) / this.group);
+      vols[r] += size[i];
+      if (!dels) continue;
+      const s = side![i];
+      if (s === SIDE_BUY) dels[r] += size[i];
+      else if (s === SIDE_SELL) dels[r] -= size[i];
+      else continue;
+      this.tagged = true;
     }
     this.done = i1;
     this.top = hi;
-    this.profile = finalizeProfile(vols, this.base, this.group, tickSize);
+    this.profile = finalizeProfile(
+      vols,
+      this.tagged ? dels : null,
+      this.base,
+      this.group,
+      tickSize,
+    );
     return this.profile;
   }
 
-  /** Widen the bin array to cover `lo`…`hi`, keeping the rows already filled. */
-  private extend(lo: number, hi: number): Float64Array {
-    let vols = this.vols!;
+  /** Widen the bin arrays to cover `lo`…`hi`, keeping the rows already filled.
+   *  Both arrays or neither: they are one binning read two ways, and a delta
+   *  array a row short of its volumes would silently mis-attribute the edge. */
+  private extend(lo: number, hi: number): void {
+    const grow = (a: Float64Array | null, add: number, len: number): Float64Array | null => {
+      if (!a) return null;
+      const grown = new Float64Array(len);
+      grown.set(a, add);
+      return grown;
+    };
     if (lo < this.base) {
       const base = Math.floor(lo / this.group) * this.group;
       const add = (this.base - base) / this.group;
-      const grown = new Float64Array(vols.length + add);
-      grown.set(vols, add);
+      const len = this.vols!.length + add;
+      this.vols = grow(this.vols, add, len);
+      this.dels = grow(this.dels, add, len);
       this.base = base;
-      vols = grown;
     }
     const need = Math.floor((hi - this.base) / this.group) + 1;
-    if (need > vols.length) {
-      const grown = new Float64Array(need);
-      grown.set(vols, 0);
-      vols = grown;
+    if (need > this.vols!.length) {
+      this.vols = grow(this.vols, 0, need);
+      this.dels = grow(this.dels, 0, need);
     }
-    this.vols = vols;
-    return vols;
   }
 
   private rebuild(
@@ -392,6 +510,7 @@ export class LiveTapeProfile {
     i1: number,
     tickSize: number,
     binSize: number,
+    side?: Uint8Array,
   ): VolumeProfile | null {
     let min = Infinity;
     let max = -Infinity;
@@ -406,11 +525,24 @@ export class LiveTapeProfile {
     }
     const group = groupFor(max - min + 1, tickSize, binSize);
     const base = Math.floor(min / group) * group;
-    const vols = new Float64Array(Math.floor((max - base) / group) + 1);
-    for (let i = i0; i <= i1; i++) vols[Math.floor((level[i] - base) / group)] += size[i];
+    const rowCount = Math.floor((max - base) / group) + 1;
+    const vols = new Float64Array(rowCount);
+    const dels = side ? new Float64Array(rowCount) : null;
+    let tagged = false;
+    for (let i = i0; i <= i1; i++) {
+      const r = Math.floor((level[i] - base) / group);
+      vols[r] += size[i];
+      if (!dels) continue;
+      const s = side![i];
+      if (s === SIDE_BUY) dels[r] += size[i];
+      else if (s === SIDE_SELL) dels[r] -= size[i];
+      else continue;
+      tagged = true;
+    }
 
     this.level = level;
     this.size = size;
+    this.side = side ?? null;
     this.tickSize = tickSize;
     this.binSize = binSize;
     this.i0 = i0;
@@ -419,16 +551,21 @@ export class LiveTapeProfile {
     this.base = base;
     this.top = max;
     this.vols = vols;
-    this.profile = finalizeProfile(vols, base, group, tickSize);
+    this.dels = dels;
+    this.tagged = tagged;
+    this.profile = finalizeProfile(vols, tagged ? dels : null, base, group, tickSize);
     return this.profile;
   }
 
   private reset(): void {
     this.level = null;
     this.size = null;
+    this.side = null;
     this.i0 = -1;
     this.done = -1;
     this.vols = null;
+    this.dels = null;
+    this.tagged = false;
     this.profile = null;
   }
 }
@@ -471,8 +608,14 @@ export const DEFAULT_NODE_SMOOTH = 0.04;
 
 /** Centred rolling mean, partial at the edges — pandas'
  *  `rolling(k, center=True, min_periods=1).mean()`, which is what the demo
- *  smooths with. */
-function smoothed(vol: Float64Array, k: number): Float64Array {
+ *  smooths with.
+ *
+ *  Exported because lib/volumeShelf smooths its own curve before thresholding
+ *  it, and two rolling means that were meant to be the same one are two things
+ *  to keep in step. Note the *partial* window at the edges: the last index
+ *  averages over fewer terms, so a curve that is high at the boundary rises
+ *  into it. Callers who care pad their input. */
+export function smoothed(vol: Float64Array, k: number): Float64Array {
   const n = vol.length;
   const sum = new Float64Array(n + 1);
   for (let i = 0; i < n; i++) sum[i + 1] = sum[i] + vol[i];
@@ -614,6 +757,10 @@ export function computeVolumeProfile(bars: Bar[], rowCount = PROFILE_ROWS): Volu
   return {
     rows,
     maxVolume,
+    // A bar's single volume number says nothing about who was the aggressor, so
+    // there is no delta to be had here — not even a spread-out estimate of one.
+    hasDelta: false,
+    maxAbsDelta: 0,
     poc: (rows[pocIdx].low + rows[pocIdx].high) / 2,
     vah: rows[hi].high,
     val: rows[lo].low,

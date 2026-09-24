@@ -16,14 +16,21 @@ export interface CalendarMonth {
   month: number;
   label: string;
 }
+/** One trading day, read as its **latest attempt alone** — not as a sum.
+ *
+ *  `net_pnl`, `trades`, `win_rate` and `account` all describe the one take the
+ *  day finished on (the day explorer opens that same take by default). `attempts`
+ *  counts every in-scope take that exists, so a day showing one of several says
+ *  so. Everything outside the calendar — statistics, overview — still sums every
+ *  attempt; see the note in `api/routers/calendar.py`. */
 export interface CalendarDay {
   date: string;
   net_pnl: number;
   trades: number;
   win_rate: number;
-  attempts: number; // distinct replay takes on this day; >1 means re-done
-  has_video: boolean; // any attempt on this day has a recording linked
-  file_modified: string | null; // latest attempt's "Date modified", ISO in display tz
+  attempts: number; // distinct in-scope takes on this day; >1 means re-done
+  account: string | null; // the account the shown take traded
+  file_modified: string | null; // shown attempt's "Date modified", ISO in display tz
 }
 export interface CalendarData {
   months: CalendarMonth[];
@@ -36,9 +43,33 @@ export interface DayAttempt {
   file_modified: string | null; // export's "Date modified", ISO in display tz
 }
 
+/** How often the day's entries pointed the right way, read off the tape at a
+ *  fixed clock from each entry and *blind to the exit* — so it scores the entry
+ *  itself, not the trade that was managed out of it.
+ *
+ *  Three denominators, and they are not interchangeable: `trades` is what was
+ *  taken, `measured` is what the tape could speak to (a day whose ticks were
+ *  never cached measures nothing), and each horizon's `n` is what still had
+ *  session left that far out. A 15:57 entry counts in the first two and in
+ *  none of the third at five minutes. */
+export interface EntryDirection {
+  trades: number;
+  measured: number;
+  horizons: {
+    label: string; // "30s", "1m", "5m"
+    seconds: number;
+    n: number;
+    right: number;
+    flat: number; // price back at the entry to the tick: neither side
+    hit_rate: number | null; // percent, null when nothing was measured
+    median_pts: number | null;
+  }[];
+}
+
 export interface DayDetail {
   kpis: Metrics;
   extras: SummaryExtras;
+  entry_direction: EntryDirection;
   equity: EquityPoint[];
   per_trade_bars: { trade_no: number; net_pnl: number; time: string }[];
   trades: TradeRow[];

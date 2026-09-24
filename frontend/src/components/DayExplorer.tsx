@@ -1,33 +1,47 @@
 import { type ColumnDef } from "@tanstack/react-table";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useDay, useDeleteDay, useDeleteAttempt } from "../hooks/useCalendar";
+import { useDay } from "../hooks/useCalendar";
 import type { FilterScope } from "../lib/queryKeys";
 import { KpiGrid } from "./KpiGrid";
 import { DataTable } from "./DataTable";
 import { DaySessionChart } from "./charts/DaySessionChart";
 import { DayJournalForm } from "./DayJournalForm";
+import { WhatIfExits } from "./WhatIfExits";
 import { EquityCurveChart } from "./charts/EquityCurveChart";
 import { PerTradeBarChart } from "./charts/PerTradeBarChart";
 import { TradeDetail } from "./TradeDetail";
 import { SessionControl } from "./SessionControl";
-import { VideoReviewProvider, VideoPanel, TradeVideoCell } from "./VideoReview";
+import { DayReplayProvider, DayReplaySlot, TradeReplayCell } from "./charts/DayReplayer";
 import { BadgeList } from "./BadgeInput";
 import { fmt, fmtDateTime, fmtInt, fmtPct, fmtTime } from "../lib/format";
 import { toneOf } from "../theme";
 import type { Card } from "./KpiCard";
 import type { TradeRow } from "../lib/types";
 
+// "narrow-hide" columns drop below 640px (see DataTable's ColumnMeta): what a
+// phone keeps is the trade, when, what it made, and the ▶ — everything else is
+// one tap away in the expanded detail.
 const dayColumns: ColumnDef<TradeRow, any>[] = [
   { accessorKey: "trade_no", header: "#", cell: (c) => `#${c.getValue()}` },
-  { accessorKey: "direction", header: "Dir" },
-  { accessorKey: "max_contracts", header: "Qty", cell: (c) => fmtInt(c.getValue() as number) },
+  { accessorKey: "direction", header: "Dir", meta: { className: "narrow-hide" } },
+  {
+    accessorKey: "max_contracts",
+    header: "Qty",
+    meta: { className: "narrow-hide" },
+    cell: (c) => fmtInt(c.getValue() as number),
+  },
   { accessorKey: "entry_ts_local", header: "Entry", cell: (c) => fmtTime(c.getValue() as string) },
-  { accessorKey: "exit_ts_local", header: "Exit", cell: (c) => fmtTime(c.getValue() as string) },
+  {
+    accessorKey: "exit_ts_local",
+    header: "Exit",
+    meta: { className: "narrow-hide" },
+    cell: (c) => fmtTime(c.getValue() as string),
+  },
   {
     id: "hold",
     header: "Hold",
     accessorFn: (r) => r.duration_s,
+    meta: { className: "narrow-hide" },
     cell: (c) => `${((c.getValue() as number) / 60).toFixed(1)}m`,
   },
   {
@@ -42,13 +56,14 @@ const dayColumns: ColumnDef<TradeRow, any>[] = [
     id: "setup",
     header: "Setup",
     enableSorting: false,
+    meta: { className: "narrow-hide" },
     cell: (c) => <BadgeList items={c.row.original.setups ?? []} />,
   },
   {
-    id: "video",
-    header: "Video",
+    id: "replay",
+    header: "Replay",
     enableSorting: false,
-    cell: (c) => <TradeVideoCell trade={c.row.original} />,
+    cell: (c) => <TradeReplayCell trade={c.row.original} />,
   },
 ];
 
@@ -57,35 +72,6 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
   const [attempt, setAttempt] = useState<string | null>(null);
   useEffect(() => setAttempt(null), [date]); // back to latest when the day changes
   const { data, isLoading } = useDay(scope, date, attempt);
-  const navigate = useNavigate();
-  const deleteDay = useDeleteDay();
-  const deleteAttempt = useDeleteAttempt();
-  const onDelete = () => {
-    if (!data) return;
-    const msg =
-      `Delete all executions and journal trades for ${date}?\n\n` +
-      `${data.trades.length} trades will be removed. ` +
-      `Notes and AI analyses are kept (they'll reattach if you re-import an identical replay). ` +
-      `Statistics rows persist per source file and will be overwritten on re-import.`;
-    if (!window.confirm(msg)) return;
-    deleteDay.mutate(
-      { date },
-      { onSuccess: () => navigate("/calendar", { replace: true }) },
-    );
-  };
-  const onDeleteAttempt = () => {
-    if (!data) return;
-    const cur = data.attempts.find((a) => a.source_file === data.source_file);
-    const msg =
-      `Delete ${cur?.label ?? "this attempt"} (${data.source_file}) for ${date}?\n\n` +
-      `Only this replay take is removed — the day's other attempts stay. ` +
-      `You can re-upload this export later.`;
-    if (!window.confirm(msg)) return;
-    deleteAttempt.mutate(
-      { sourceFile: data.source_file },
-      { onSuccess: () => setAttempt(null) }, // fall back to the latest remaining take
-    );
-  };
   if (isLoading || !data) return <div className="notice">Loading day…</div>;
 
   const m = data.kpis;
@@ -163,6 +149,23 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
     },
   ];
 
+  // Was the direction right, per horizon. The card is tinted by the SIGN OF THE
+  // MEDIAN MOVE and never by the hit rate: a signed median is a fact about the
+  // day, whereas colouring "58% right" green or red would be this component
+  // picking a pass mark and applying it to a scalper and a swing alike.
+  const ed = data.entry_direction;
+  const entryCards: Card[] = ed.horizons.map((h) => ({
+    label: `Right at ${h.label}`,
+    value: h.hit_rate == null ? "—" : fmtPct(h.hit_rate),
+    tone: h.median_pts == null ? "neutral" : toneOf(h.median_pts),
+    sub:
+      h.n === 0
+        ? "no tape this far out"
+        : `${h.right}/${h.n} right${h.flat ? ` · ${h.flat} flat` : ""} · median ${
+            h.median_pts! > 0 ? "+" : ""
+          }${h.median_pts!.toFixed(2)} pts`,
+  }));
+
   return (
     <div>
       <div className="day-head">
@@ -173,28 +176,6 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
             {data.attempts.length > 1 &&
               ` · ${data.attempts.find((a) => a.source_file === data.source_file)?.label} of ${data.attempts.length}`}
           </div>
-        </div>
-        <div className="day-head-actions">
-          {data.attempts.length > 1 && (
-            <button
-              type="button"
-              className="btn-danger"
-              onClick={onDeleteAttempt}
-              disabled={deleteAttempt.isPending}
-              title="Delete only the replay take currently shown; the day's other attempts stay."
-            >
-              {deleteAttempt.isPending ? "Deleting…" : "Delete this attempt"}
-            </button>
-          )}
-          <button
-            type="button"
-            className="btn-danger"
-            onClick={onDelete}
-            disabled={deleteDay.isPending}
-            title="Delete all executions and trades for this day (every attempt). Use before re-importing a replayed ATAS export."
-          >
-            {deleteDay.isPending ? "Deleting…" : "Delete day's data"}
-          </button>
         </div>
       </div>
       {data.attempts.length > 1 && (
@@ -213,40 +194,50 @@ export function DayExplorer({ scope, date }: { scope: FilterScope; date: string 
         </div>
       )}
       <SessionControl sourceFile={data.source_file} />
-      <VideoReviewProvider sourceFile={data.source_file}>
+      <DayReplayProvider
+        scope={scope}
+        date={date}
+        trades={data.trades}
+        instrument={data.instrument}
+      >
         <KpiGrid cards={cards} template="1.5fr 1fr 1fr 1fr" />
         <KpiGrid cards={sideCards} template="1fr 1fr 1fr 1fr" />
         <KpiGrid cards={flowCards} template="repeat(6, 1fr)" />
-        {/* Experimental layout: the player sits in the same container as the
-            trades table, side-by-side. The video column is sticky, so the
-            table scrolls beside a pinned player. Below ~900px the 3fr track is
-            narrower than one row of the trades table, so the two stack (see
-            .day-video-grid). */}
-        <div className="day-video-grid">
-          <VideoPanel sourceFile={data.source_file} scope={scope} />
-          <div>
-            <div className="section-title">Trades this day</div>
-            <div className="section-cap">Click a row to expand its full detail.</div>
-            <div className="panel compact-table table-scroll-x">
-              <DataTable
-                data={data.trades}
-                columns={dayColumns}
-                rowKey={(r) => r.trade_no}
-                scrollOnExpand={false}
-                renderExpanded={(r) => (
-                  <TradeDetail scope={scope} tradeNo={r.trade_no} showRecording={false} />
-                )}
-              />
+        {ed.measured > 0 && (
+          <>
+            <div className="section-title">Entry direction</div>
+            <div className="section-cap">
+              Where price was 30 seconds, 1 minute and 5 minutes after each entry,
+              signed to its direction — measured off the tape and ignoring what you
+              did with the trade, so this grades the entry rather than the exit.
+              {ed.measured < ed.trades &&
+                ` Measured on ${ed.measured} of ${ed.trades} trades; the rest have no cached tape.`}
             </div>
-          </div>
+            <KpiGrid cards={entryCards} template="repeat(3, 1fr)" />
+          </>
+        )}
+        <DayReplaySlot />
+        <div className="section-title">Trades this day</div>
+        <div className="section-cap">Click a row to expand its full detail.</div>
+        <div className="panel compact-table table-scroll-x-narrow">
+          <DataTable
+            data={data.trades}
+            columns={dayColumns}
+            rowKey={(r) => r.trade_no}
+            scrollOnExpand={false}
+            renderExpanded={(r) => (
+              <TradeDetail scope={scope} tradeNo={r.trade_no} />
+            )}
+          />
         </div>
         <DayJournalForm date={date} />
+        <WhatIfExits sourceFile={data.source_file} />
         <DaySessionChart scope={scope} date={date} sourceFile={data.source_file} />
         <div className="grid-2">
           {data.equity.length > 0 && <EquityCurveChart data={data.equity} />}
           <PerTradeBarChart data={data.per_trade_bars} />
         </div>
-      </VideoReviewProvider>
+      </DayReplayProvider>
     </div>
   );
 }

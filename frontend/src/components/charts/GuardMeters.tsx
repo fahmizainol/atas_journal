@@ -33,7 +33,13 @@ export interface GuardFeed {
   levels: GuardLevels;
   /** Realised on the day, net of commission. */
   realized: number;
+  /** How many **positions** were opened and closed today, which is what the
+   *  journal calls a trade. Never the row count of the blotter beside it: a
+   *  scale-out, or a bracket that filled in parts, books a lot each. */
   trades: number;
+  /** Those lots, when there are more of them than there are trades. Null, or
+   *  equal to `trades`, says nothing was split and the meter shows one number. */
+  legs: number | null;
   /** Why the day is over, or null. Latched. */
   locked: string | null;
   /** Past the slow-down level and not yet stopped. */
@@ -43,6 +49,29 @@ export interface GuardFeed {
    *  bar would read as "no room left". */
   equity: number | null;
   floor: number | null;
+  /** The full bar of the floor meter — the account's own max loss, not a
+   *  constant. A 25K and a 50K of one product have different drawdowns and the
+   *  meter has to read as a fraction of the right one. Null falls back to the
+   *  distance the floor currently sits below equity, which draws a full bar
+   *  rather than a wrong one. */
+  floorTotal: number | null;
+  /** The day's allowance, and what is left of it. Supplied by the adapter
+   *  rather than derived here, because the two pages mean different things by
+   *  a day: Live's is the switchable personal stop off `routing.Guards`, and
+   *  the replay's is the prop firm's own daily loss limit, which is not
+   *  switchable and ends the day by itself. */
+  dayLimit: number | null;
+  dayLeft: number | null;
+  /** The day's profit goal, what is left to reach it, and whether it has been
+   *  made. Once armed the goal *is* the day's floor: reaching it is the end of
+   *  a good day, and the meter says so by filling rather than depleting. Null
+   *  on an account that has no goal set, and the meter simply does not draw. */
+  goal: number | null;
+  goalLeft: number | null;
+  goalArmed: boolean;
+  /** How the floor moves, so the tooltip can say. Null on a page with no
+   *  account. Read from the account's template — never guessed. */
+  trailing: "eod" | "intraday" | null;
   /** Contracts currently on, and the most that may be. */
   size: number;
   cap: number;
@@ -53,6 +82,16 @@ export interface GuardFeed {
   fastShare: number | null;
   medianGapS: number | null;
   tradedInTheHole: boolean | null;
+  /** Why the next entry is coming too fast, or null — `guardRules.paceRefusal`,
+   *  already rendered as a sentence. Unlike the three numbers above this one is
+   *  *forward*-looking: they are medians over a day that has happened, this is
+   *  a statement about the entry not yet placed. Still reported and never
+   *  enforced, and the copy says so, so that promoting it later reads as a
+   *  change rather than as a line nobody had noticed.
+   *
+   *  Honest about where it holds: validated in backtest, inverted in replay and
+   *  on Live. `paceRefusal` carries the numbers. */
+  pace: string | null;
   /** The last thing that was refused, or null. */
   refused: string | null;
 }
@@ -68,14 +107,20 @@ function Meter({
   left,
   total,
   title,
+  /** A goal fills instead of depleting: it is the one bar here where a full one
+   *  is the good outcome, so it must not read as red at the start of the day. */
+  filling = false,
 }: {
   label: string;
   left: number;
   total: number;
   title: string;
+  filling?: boolean;
 }) {
   const frac = total > 0 ? Math.max(0, Math.min(1, left / total)) : 0;
-  const tone = frac <= 1 / 6 ? palette.red : frac <= 1 / 3 ? palette.orange : palette.green;
+  const tone = filling
+    ? frac >= 1 ? palette.green : palette.muted
+    : frac <= 1 / 6 ? palette.red : frac <= 1 / 3 ? palette.orange : palette.green;
   return (
     <div style={{ flex: 1, minWidth: 0 }} title={title} data-meter={label}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: palette.muted }}>
@@ -95,9 +140,13 @@ export function GuardMeters({ feed }: { feed: GuardFeed }) {
   const pct = (x: number | null) => (x == null ? "—" : `${Math.round(x * 100)}%`);
   const secs = (x: number | null) => (x == null ? "—" : `${Math.round(x)}s`);
 
-  // What is left of the day, on realised. A green day banks no extra room —
-  // the limit is a limit, not a budget that rolls.
-  const dayLeft = Math.max(0, g.daily_loss_stop + Math.min(0, feed.realized));
+  // What is left of the day. The adapter's figures when it has them — the prop
+  // firm's own limit, counted against the tape day — and otherwise the personal
+  // stop against this session's realised, which is what Live has. A green day
+  // banks no extra room either way: the limit is a limit, not a budget that rolls.
+  const dayLimit = feed.dayLimit ?? g.daily_loss_stop;
+  const dayLeft =
+    feed.dayLeft ?? Math.max(0, g.daily_loss_stop + Math.min(0, feed.realized));
   const room = feed.equity != null && feed.floor != null ? feed.equity - feed.floor : null;
 
   return (
@@ -116,8 +165,18 @@ export function GuardMeters({ feed }: { feed: GuardFeed }) {
         >
           {fmtUsd(feed.realized)}
         </strong>
-        <span style={{ color: palette.muted, fontSize: 11 }}>
+        <span
+          style={{ color: palette.muted, fontSize: 11 }}
+          title={
+            feed.legs != null && feed.legs > feed.trades
+              ? `${feed.legs} closed lots out of ${feed.trades} positions — a scale-out, ` +
+                `or a bracket that filled in parts, books a row each. The journal counts ` +
+                `the ${feed.trades}.`
+              : undefined
+          }
+        >
           {feed.trades} trade{feed.trades === 1 ? "" : "s"}
+          {feed.legs != null && feed.legs > feed.trades && ` · ${feed.legs} legs`}
         </span>
         {/* Size against the cap, on the same row as the money it is risking.
             4 minis / 40 micros is the prop firm's own number, and it is the one
@@ -142,20 +201,45 @@ export function GuardMeters({ feed }: { feed: GuardFeed }) {
           together is the whole point — a day with $900 left on an account with
           $200 of room is not a day with $900 left. */}
       <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
-        {g.daily_loss_stop > 0 && (
+        {dayLimit > 0 && (
           <Meter
             label="day"
             left={dayLeft}
-            total={g.daily_loss_stop}
-            title={`Of the ${fmtUsd(g.daily_loss_stop)} daily stop. A green day banks no extra room.`}
+            total={dayLimit}
+            title={`Of the ${fmtUsd(dayLimit)} daily loss limit${
+              feed.dayLimit != null
+                ? ", counted against the day being replayed. Reaching it closes what is open and ends the day; the account survives it."
+                : " you set. A green day banks no extra room."
+            }`}
+          />
+        )}
+        {/* The one bar that fills rather than depletes, because it is the one
+            allowance you are trying to *spend*. Once it is full the goal is the
+            day's floor and giving it back ends the day — which is the whole
+            device: a good day you did not hand back. */}
+        {feed.goal != null && feed.goal > 0 && (
+          <Meter
+            label={feed.goalArmed ? "goal ✓" : "goal"}
+            left={feed.goal - Math.max(0, feed.goalLeft ?? feed.goal)}
+            total={feed.goal}
+            filling
+            title={
+              feed.goalArmed
+                ? `The ${fmtUsd(feed.goal)} goal is made, and is now the day's floor. Giving any of it back closes what is open and ends the day.`
+                : `${fmtUsd(feed.goalLeft ?? feed.goal)} of booked P&L to the day's ${fmtUsd(feed.goal)} goal. It arms on realised, never on an open runner — and once armed it becomes the day's floor.`
+            }
           />
         )}
         {room != null && feed.floor != null && (
           <Meter
             label="floor"
             left={room}
-            total={2_000}
-            title={`Equity ${fmtUsd(feed.equity ?? 0)} against a ${fmtUsd(feed.floor)} trailing floor. It only moves on a day close, so this number is constant for a whole sitting.`}
+            total={feed.floorTotal ?? room}
+            title={`Equity ${fmtUsd(feed.equity ?? 0)} against a ${fmtUsd(feed.floor)} floor.${
+              feed.trailing === "intraday"
+                ? " It follows the running peak including your open position, so money you were up and gave back is room you do not get again."
+                : " It only moves on a day close, so this number is constant for a whole sitting."
+            }`}
           />
         )}
       </div>
@@ -183,6 +267,16 @@ export function GuardMeters({ feed }: { feed: GuardFeed }) {
           same start sped up on costs $803.
         </div>
       ) : null}
+
+      {feed.pace && (
+        <div
+          data-pace
+          style={{ fontSize: 11, color: palette.orange, marginTop: 4, lineHeight: 1.5 }}
+        >
+          <b>Coming in fast.</b> On the tape clock, {feed.pace}. Nothing is
+          refused.
+        </div>
+      )}
 
       <RefusalFlash reason={feed.refused} />
 

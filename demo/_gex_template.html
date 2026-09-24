@@ -1,0 +1,358 @@
+<meta charset="utf-8"/>
+<title>Dealer gamma regime — the GEX curve against price</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0e13; color:#cbd5e1; font:14px/1.5 Inter,system-ui,sans-serif; }
+  #wrap { max-width:1400px; margin:0 auto; padding:18px 20px 60px; }
+  h1 { font-size:20px; font-weight:600; margin:0 0 4px; }
+  h2 { font-size:14px; font-weight:600; color:#e2e8f0; margin:26px 0 8px; }
+  .lede { color:#64748b; font-size:12.5px; margin:0 0 14px; max-width:1020px; }
+  .lede b { color:#94a3b8; }
+  .warn { display:flex; gap:10px; padding:10px 13px; margin:0 0 16px; font-size:12.5px;
+          background:#1a1410; border:1px solid #3a2a18; border-radius:8px; color:#c8a06a; }
+  .warn b { color:#e0b878; }
+
+  /* the badge — a mock of what would sit in ChartTopBar */
+  .badge { display:flex; align-items:center; gap:0; margin:0 0 14px; border:1px solid #1c2230;
+           border-radius:8px; overflow:hidden; background:#11151d; font-size:13px; }
+  .badge .cell { padding:9px 16px; border-right:1px solid #1c2230; display:flex; align-items:baseline; gap:8px; }
+  .badge .cell:last-child { border-right:none; }
+  .badge .lbl { font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; color:#64748b; }
+  .badge .val { font-weight:600; font-size:15px; font-variant-numeric:tabular-nums; color:#e2e8f0; }
+  .badge .regime { font-weight:600; letter-spacing:.4px; font-size:13px; }
+  .pos { color:#4ade80; } .neg { color:#f87171; }
+  .badge .cell.unstable { background:#1a1410; }
+  .flag { font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; color:#e0b878; }
+
+  .controls { display:flex; flex-wrap:wrap; align-items:center; gap:12px 26px; padding:12px 14px;
+              background:#11151d; border:1px solid #1c2230; border-radius:8px; margin:0 0 14px; }
+  .ctl { display:flex; align-items:center; gap:9px; font-size:12.5px; color:#94a3b8; }
+  .ctl b { color:#e2e8f0; font-weight:600; font-variant-numeric:tabular-nums; min-width:74px; display:inline-block; }
+  input[type=range] { width:230px; accent-color:#8b5cf6; }
+  .seg { display:flex; border:1px solid #1c2230; border-radius:6px; overflow:hidden; }
+  .seg button { background:#0b0e13; color:#94a3b8; border:none; padding:5px 13px; font:inherit; font-size:12px; cursor:pointer; }
+  .seg button.on { background:#1c2230; color:#e2e8f0; }
+  .btn { background:#0b0e13; color:#cbd5e1; border:1px solid #1c2230; border-radius:6px;
+         padding:5px 11px; font:inherit; font-size:12px; cursor:pointer; }
+  .btn:hover { border-color:#2a3446; }
+
+  .panel { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px 4px; }
+  svg { display:block; width:100%; height:auto; }
+  .cap { display:flex; align-items:baseline; gap:8px; font-size:12px; color:#64748b; margin:0 2px 6px; }
+  .cap b { color:#e2e8f0; font-size:12.5px; font-weight:600; }
+
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(168px,1fr)); gap:10px; margin:14px 0 0; }
+  .card { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; }
+  .card .k { font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; color:#64748b; }
+  .card .v { font-size:17px; font-weight:600; color:#e2e8f0; font-variant-numeric:tabular-nums; margin-top:2px; }
+  .card .s { font-size:11.5px; color:#64748b; margin-top:1px; }
+
+  table { border-collapse:collapse; font-size:12.5px; width:100%; max-width:760px; }
+  th, td { padding:5px 10px; text-align:right; border-bottom:1px solid #1c2230; font-variant-numeric:tabular-nums; }
+  th { color:#64748b; font-weight:500; text-align:right; font-size:11px; text-transform:uppercase; letter-spacing:.4px; }
+  th:first-child, td:first-child { text-align:left; }
+  tr.now td { background:#161b26; }
+  tr.now td:first-child { color:#e2e8f0; font-weight:600; }
+
+  .notes { font-size:12.5px; color:#94a3b8; max-width:1020px; }
+  .notes li { margin:5px 0; }
+  .notes b { color:#e2e8f0; }
+  code { background:#0b0e13; border:1px solid #1c2230; border-radius:4px; padding:1px 5px; font-size:12px; }
+  .foot { color:#475569; font-size:11.5px; margin-top:26px; }
+</style>
+
+<div id="wrap">
+  <h1>Dealer gamma regime — the GEX curve against price</h1>
+  <p class="lede">
+    Net gamma exposure is <b>not a property of the day</b> — it is a property of <b>where price is</b>.
+    Drag the spot marker and watch the regime change without a single position changing hands.
+    Left panel is dollar-gamma per strike, drawn like a volume profile. Right panel is net GEX as a
+    function of spot; its zero crossing <i>is</i> the gamma flip. Built from the free Cboe delayed
+    chain — gamma recomputed with Black&#8209;Scholes so it can be evaluated at spots other than the current one.
+  </p>
+
+  <div class="warn">
+    <span>⚠</span>
+    <span><b>Unvalidated.</b> No historical GEX exists in this repo, so no A/B has been run and none can be
+    until a collector banks ~6 months. This is a context overlay and a probe, <b>not a signal</b>.
+    Do not trade the walls — Creamer doesn't either, and level-bounce geometry is nulled four times over here.</span>
+  </div>
+
+  <div class="badge" id="badge">
+    <div class="cell"><span class="lbl">GEX</span><span class="val" id="b-gex">—</span></div>
+    <div class="cell"><span class="regime" id="b-regime">—</span></div>
+    <div class="cell"><span class="lbl">flip</span><span class="val" id="b-flip">—</span><span class="val" id="b-dist" style="font-size:13px;color:#94a3b8">—</span></div>
+    <div class="cell" id="b-unstable" style="display:none"><span class="flag">⚑ regime unstable</span></div>
+  </div>
+
+  <div class="controls">
+    <div class="ctl">
+      <span>symbol</span>
+      <div class="seg" id="sym-seg"></div>
+    </div>
+    <div class="ctl">
+      <span>spot</span>
+      <input type="range" id="spot" />
+      <b id="spot-v">—</b>
+      <button class="btn" id="reset">reset to live</button>
+    </div>
+    <div class="ctl">
+      <span>clock</span>
+      <input type="range" id="time" min="0" max="7" step="1" value="0" />
+      <b id="time-v">09:30</b>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="cap"><b>Shared price axis.</b>
+      <span id="cap-note">left: $-gamma per strike &nbsp;·&nbsp; right: net GEX vs spot, zero crossing = flip</span></div>
+    <svg id="chart" viewBox="0 0 1340 640" preserveAspectRatio="xMidYMid meet"></svg>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <h2>What actually moves the number</h2>
+  <p class="notes" style="margin:0 0 8px">
+    Holding open interest <i>and</i> spot fixed and advancing only the clock. Six hours of decay moves the
+    flip by a fraction of a percent — <b>spot dominates by roughly 10&times;</b>. The time slider exists to
+    show that, not because it is load-bearing. The last row is the least trustworthy in the table: it is the
+    most sensitive to the arbitrary time floor used for 0DTE, where at-the-money gamma runs away as T&nbsp;&rarr;&nbsp;0.
+  </p>
+  <table id="clock-table"></table>
+
+  <h2>Notes &amp; traps</h2>
+  <ul class="notes">
+    <li><b>Stale expiries.</b> The pre-open snapshot still carries yesterday's expired contracts with stale
+      gamma attached. Summing them naively overstated net GEX by <b>36%</b> the first time round. Everything
+      here is filtered to <code>DTE &gt;= 0</code>.</li>
+    <li><b>Open interest is frozen intraday.</b> OCC publishes it once, pre-open. So the entire curve is
+      knowable at 08:00 and the live badge is an array lookup, not a Black&#8209;Scholes sweep — which is why
+      this needs <i>no</i> live options feed, only live spot.</li>
+    <li><b>Sticky strike.</b> Each contract's IV is held fixed as spot moves. In reality downside IV rises,
+      so the true negative-gamma region differs somewhat from the one drawn here.</li>
+    <li><b>Recompute vs feed.</b> Black&#8209;Scholes here (r=0) against Cboe's own published greeks at spot —
+      the gap is shown in the cards. Fine for a binary regime read; <b>not</b> fine for trading wall levels precisely.</li>
+    <li><b>OI is frozen in the data, not in the market.</b> Positions are opened all day; you just cannot see
+      them until tomorrow morning. The curve drifts from truth as the session ages.</li>
+    <li><b>NQ price space.</b> Levels are native NDX / QQQ. NQ futures trade at NDX plus a carry basis —
+      rescale by the live ratio before drawing these on an NQ chart.</li>
+  </ul>
+
+  <p class="foot" id="foot">—</p>
+</div>
+
+<script>
+const DATA = __GEX_JSON__;
+
+const F = {
+  b:   v => (v >= 0 ? "+" : "−") + "$" + Math.abs(v).toFixed(2) + "B",
+  px:  v => v.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}),
+  pct: v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "%",
+};
+const GREEN = "#4ade80", RED = "#f87171", DIM = "#1c2230", AXIS = "#334155";
+
+let sym = "NDX", ti = 0, spot = null;
+
+// --- controls -------------------------------------------------------------
+const seg = document.getElementById("sym-seg");
+Object.keys(DATA.books).forEach(s => {
+  const b = document.createElement("button");
+  b.textContent = s; b.dataset.sym = s;
+  b.onclick = () => { sym = s; spot = null; syncSpotRange(); render(); };
+  seg.appendChild(b);
+});
+
+const spotEl = document.getElementById("spot");
+const timeEl = document.getElementById("time");
+spotEl.oninput = () => { spot = book().grid[+spotEl.value]; render(); };
+timeEl.oninput = () => { ti = +timeEl.value; render(); };
+document.getElementById("reset").onclick = () => { spot = null; syncSpotRange(); render(); };
+
+function book() { return DATA.books[sym]; }
+function slice() { return book().slices[ti]; }
+
+function syncSpotRange() {
+  const g = book().grid;
+  spotEl.min = 0; spotEl.max = g.length - 1; spotEl.step = 1;
+  spotEl.value = nearestIdx(spot === null ? book().spot : spot);
+}
+function nearestIdx(s) {
+  const g = book().grid;
+  let best = 0, bd = Infinity;
+  g.forEach((v, i) => { const d = Math.abs(v - s); if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+
+/** net GEX at an arbitrary spot, linearly interpolated off the precomputed curve. */
+function gexAt(s) {
+  const g = book().grid, c = slice().curve;
+  if (s <= g[0]) return c[0];
+  if (s >= g[g.length - 1]) return c[c.length - 1];
+  for (let i = 0; i < g.length - 1; i++) {
+    if (s >= g[i] && s <= g[i + 1]) {
+      const t = (s - g[i]) / (g[i + 1] - g[i]);
+      return c[i] + t * (c[i + 1] - c[i]);
+    }
+  }
+  return c[0];
+}
+
+// --- render ---------------------------------------------------------------
+function render() {
+  const bk = book(), sl = slice();
+  const S = spot === null ? bk.spot : spot;
+  const g = gexAt(S), flip = sl.flip;
+  const dist = flip ? 100 * (flip / S - 1) : null;
+
+  [...seg.children].forEach(b => b.classList.toggle("on", b.dataset.sym === sym));
+  document.getElementById("spot-v").textContent = F.px(S);
+  document.getElementById("time-v").textContent = sl.label;
+
+  // badge
+  const pos = g > 0;
+  document.getElementById("b-gex").textContent = F.b(g);
+  document.getElementById("b-gex").className = "val " + (pos ? "pos" : "neg");
+  const reg = document.getElementById("b-regime");
+  reg.textContent = (pos ? "▼ DAMPENING" : "▲ AMPLIFYING");
+  reg.className = "regime " + (pos ? "pos" : "neg");
+  document.getElementById("b-flip").textContent = flip ? F.px(flip) : "n/a";
+  document.getElementById("b-dist").textContent = dist === null ? "" : "(" + F.pct(dist) + ")";
+  document.getElementById("b-unstable").style.display =
+    (dist !== null && Math.abs(dist) < 0.5) ? "flex" : "none";
+
+  drawChart(bk, sl, S, flip);
+  drawCards(bk, sl, S, g, flip, dist);
+  drawClockTable(bk);
+  document.getElementById("foot").textContent =
+    `${bk.n_live.toLocaleString()} live contracts · ${bk.note} · Cboe snapshot ${bk.timestamp} · built ${DATA.built}`;
+}
+
+function drawChart(bk, sl, S, flip) {
+  const W = 1340, H = 640, T = 22, B = 34;
+  const AX = 74;                        // price-label gutter
+  const A0 = AX + 14, A1 = 620;         // panel A: per-strike profile
+  const B0 = 700, B1 = W - 22;          // panel B: net GEX curve
+  const g = bk.grid, lo = g[0], hi = g[g.length - 1];
+  const y = p => T + (H - T - B) * (hi - p) / (hi - lo);
+
+  const el = [];
+  const line = (x1,y1,x2,y2,c,w,d) =>
+    el.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-width="${w||1}"${d?` stroke-dasharray="${d}"`:""}/>`);
+  const text = (x,yy,t,c,a,sz,wt) =>
+    el.push(`<text x="${x}" y="${yy}" fill="${c}" font-size="${sz||11}" text-anchor="${a||"start"}" font-weight="${wt||400}" font-family="Inter,system-ui,sans-serif">${t}</text>`);
+
+  // ---- price axis + gridlines
+  const step = niceStep((hi - lo) / 9);
+  for (let p = Math.ceil(lo / step) * step; p <= hi; p += step) {
+    line(A0, y(p), B1, y(p), "#151b26", 1);
+    text(AX, y(p) + 3.5, F.px(p), "#475569", "end", 11);
+  }
+
+  // ---- panel A: per-strike dollar-gamma — puts left, calls right.
+  // Drawn as magnitudes rather than net, so the walls ARE the longest bars on
+  // each side and neither half of the panel goes to waste.
+  const cx = (A0 + A1) / 2;
+  const maxSide = Math.max(...bk.strikes.flatMap(r => [r.c, r.p]), 1e-9);
+  const halfW = (A1 - A0) / 2 - 8;
+  const barH = Math.max(1.5, (H - T - B) / (bk.strikes.length * 1.5));
+  bk.strikes.forEach(r => {
+    const wc = r.c / maxSide * halfW, wp = r.p / maxSide * halfW;
+    if (wc > 0.4) el.push(`<rect x="${cx}" y="${y(r.k)-barH/2}" width="${wc}" height="${barH}" fill="${GREEN}" opacity="0.62"/>`);
+    if (wp > 0.4) el.push(`<rect x="${cx-wp}" y="${y(r.k)-barH/2}" width="${wp}" height="${barH}" fill="${RED}" opacity="0.62"/>`);
+  });
+  line(cx, T, cx, H - B, AXIS, 1);
+  text(A0, H - B + 16, "← put $Γ", RED, "start", 10.5);
+  text(A1, H - B + 16, "call $Γ →", GREEN, "end", 10.5);
+  text(cx, T - 8, "$-gamma per strike", "#94a3b8", "middle", 11.5, 600);
+
+  // ---- panel B: net GEX vs spot
+  const c = sl.curve;
+  const maxAbs = Math.max(...c.map(Math.abs), 1e-9);
+  const zx = B0 + (B1 - B0) * (0 - (-maxAbs)) / (2 * maxAbs);
+  const gx = v => B0 + (B1 - B0) * (v + maxAbs) / (2 * maxAbs);
+
+  // filled area, split at zero
+  let path = "";
+  g.forEach((p, i) => { path += (i ? "L" : "M") + gx(c[i]).toFixed(1) + "," + y(p).toFixed(1) + " "; });
+  el.push(`<clipPath id="clipPos"><rect x="${zx}" y="${T}" width="${B1-zx}" height="${H-T-B}"/></clipPath>`);
+  el.push(`<clipPath id="clipNeg"><rect x="${B0}" y="${T}" width="${zx-B0}" height="${H-T-B}"/></clipPath>`);
+  const area = path + `L${zx},${y(lo)} L${zx},${y(hi)} Z`;
+  el.push(`<path d="${area}" fill="${GREEN}" opacity="0.16" clip-path="url(#clipPos)"/>`);
+  el.push(`<path d="${area}" fill="${RED}"   opacity="0.16" clip-path="url(#clipNeg)"/>`);
+  el.push(`<path d="${path}" fill="none" stroke="#e2e8f0" stroke-width="1.8"/>`);
+  line(zx, T, zx, H - B, AXIS, 1);
+  text(zx, T - 8, "net GEX vs spot", "#94a3b8", "middle", 11.5, 600);
+  text(B0 + 4, H - B + 16, F.b(-maxAbs), "#475569", "start", 10.5);
+  text(B1 - 4, H - B + 16, F.b(maxAbs), "#475569", "end", 10.5);
+  text(zx + 4, H - B + 16, "0", "#475569", "start", 10.5);
+
+  // ---- levels across both panels. Labels get a backing plate and are nudged
+  // apart, because the flip and a wall can sit a few points from each other.
+  const usedY = [];
+  const mark = (p, colour, label, dash) => {
+    if (p === null || p === undefined || p < lo || p > hi) return;
+    line(A0, y(p), B1, y(p), colour, 1.4, dash);
+    let ty = y(p) - 5;
+    while (usedY.some(u => Math.abs(u - ty) < 13)) ty -= 13;
+    usedY.push(ty);
+    const w = label.length * 5.9 + 10;
+    el.push(`<rect x="${B1-4-w}" y="${ty-11}" width="${w}" height="15" rx="3" fill="#0b0e13" opacity="0.86"/>`);
+    text(B1 - 9, ty, label, colour, "end", 11, 600);
+  };
+  mark(bk.call_wall, "#38bdf8", "call wall " + F.px(bk.call_wall), "5 3");
+  mark(bk.put_wall,  "#c084fc", "put wall "  + F.px(bk.put_wall),  "5 3");
+  mark(flip, "#e0b878", "gamma flip " + (flip ? F.px(flip) : ""), "2 3");
+
+  // ---- the draggable spot marker
+  line(A0, y(S), B1, y(S), "#e2e8f0", 1.6);
+  el.push(`<circle cx="${gx(gexAt(S))}" cy="${y(S)}" r="4.5" fill="#e2e8f0"/>`);
+  el.push(`<rect x="${A0-2}" y="${y(S)-9}" width="74" height="18" rx="3" fill="#e2e8f0"/>`);
+  text(A0 + 34, y(S) + 4, F.px(S), "#0b0e13", "middle", 11, 700);
+
+  const svg = document.getElementById("chart");
+  svg.innerHTML = el.join("");
+  svg.onclick = ev => {                       // click anywhere to move spot
+    const r = svg.getBoundingClientRect();
+    const py = (ev.clientY - r.top) / r.height * H;
+    const p = hi - (py - T) / (H - T - B) * (hi - lo);
+    spot = Math.min(hi, Math.max(lo, p));
+    spotEl.value = nearestIdx(spot);
+    render();
+  };
+}
+
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  return [1,2,2.5,5,10].map(m => m*p).find(v => v >= raw) || 10*p;
+}
+
+function drawCards(bk, sl, S, g, flip, dist) {
+  const wallGap = bk.call_wall && bk.put_wall ? 100*(bk.call_wall/bk.put_wall - 1) : null;
+  const cards = [
+    ["net GEX @ spot", F.b(g), (g>0?"dampening — dealers fade moves":"amplifying — dealers chase moves"), g>0?"pos":"neg"],
+    ["gamma flip", flip ? F.px(flip) : "n/a", dist===null?"":F.pct(dist)+" from spot"],
+    ["call wall", bk.call_wall ? F.px(bk.call_wall) : "n/a", "peak call $Γ"],
+    ["put wall",  bk.put_wall  ? F.px(bk.put_wall)  : "n/a", "peak put $Γ"],
+    ["wall span", wallGap===null?"n/a":wallGap.toFixed(2)+"%", "put wall → call wall"],
+    ["recompute vs feed", F.b(bk.recompute_gex),
+      "Cboe greeks " + F.b(bk.feed_gex) + " · " +
+      (Math.abs(bk.recompute_gex/bk.feed_gex-1)*100).toFixed(1) + "% apart"],
+  ];
+  document.getElementById("cards").innerHTML = cards.map(([k,v,s,cls]) =>
+    `<div class="card"><div class="k">${k}</div><div class="v ${cls||""}">${v}</div><div class="s">${s||""}</div></div>`
+  ).join("");
+}
+
+function drawClockTable(bk) {
+  const rows = bk.slices.map((s,i) => {
+    const d = s.flip ? 100*(s.flip/bk.spot - 1) : null;
+    return `<tr class="${i===ti?"now":""}"><td>${s.label}</td><td class="${s.at_spot>0?"pos":"neg"}">${F.b(s.at_spot)}</td>`
+         + `<td>${s.flip?F.px(s.flip):"n/a"}</td><td>${d===null?"—":F.pct(d)}</td></tr>`;
+  }).join("");
+  document.getElementById("clock-table").innerHTML =
+    `<thead><tr><th>ET</th><th>net GEX @ spot</th><th>flip level</th><th>vs spot</th></tr></thead><tbody>${rows}</tbody>`;
+}
+
+syncSpotRange();
+render();
+</script>

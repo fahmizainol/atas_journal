@@ -383,7 +383,7 @@ around 89% whatever the policy**, against 98% at 5 micros.
 | `risk_per_trade` | **$125** (5 MNQ at a 50-tick stop) | same | §5b, §5d |
 | `daily_loss_stop` (hard disarm) | **$500** — ~4 losses deep | **$500** | §5d — moves with the exit policy |
 | `daily_profit_lock` | **off** | **$1,000** | §5 — inverts between stages |
-| `max_qty` | **5 micros** (10 micros = 1 mini) | 5, → 10 only above $52,100 | §5b |
+| ~~`max_qty`~~ → `max_risk_usd` | **$250** — the size ceiling, said in dollars | same, and it is what moves above $52,100 | §5b |
 | size vs stop distance | inverse — hold $100 constant | same | §5b |
 | size vs running P&L | **flat, never dynamic** | same | §5b — every variant lost |
 | rate governor (min gap between entries once $500 down) | on | on | behaviour audit §2e |

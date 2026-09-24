@@ -37,6 +37,14 @@ VALUE_AREA_PCT = 0.70
 # Interactions Lab (interactions.py) measures it per minute; the engine's
 # drift-touch-fade measures it per bar. Both call ``gap_closer`` so the definition
 # lives in exactly one place (the chart/study/engine agreement rule).
+#
+# One place, in two languages. ``frontend/src/lib/levelApproach.ts`` reads the
+# same classification onto the live chart, where the level paths only exist
+# client-side — so the rule above is held by a test rather than by there being a
+# single copy: ``tests/test_level_approach.py`` bundles that module with the
+# frontend's esbuild, runs it under node, and compares it to this function at
+# every bar index, this constant included. Change the arithmetic here first; the
+# port follows, and the test is what says so.
 GAP_LOOKBACK_BARS = 5
 
 
@@ -146,6 +154,7 @@ def developing_profile(
     bars: pd.DataFrame,
     tick_size: float,
     pct: float = VALUE_AREA_PCT,
+    seed: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> DevelopingProfile:
     """Cumulative POC/VAH/VAL as of each bar's close, one row per bar.
 
@@ -153,6 +162,11 @@ def developing_profile(
     ``bars.tick_bars`` produces. Accumulation starts at the first tick, so the
     caller anchors the session by slicing the tick frame — same contract as
     ``vwap.vwap_bands``.
+
+    ``seed`` is optional (prices, sizes) volume already behind the accumulation
+    when the first tick lands — the weekly case, where the profile carries the
+    week's prior sessions (journal.sim.weekly's histogram seed) and this frame
+    only holds the current one. Present in every bar's histogram from bar 0.
     """
     if ticks.empty or bars.empty:
         return DevelopingProfile(np.array([]), np.array([]), np.array([]))
@@ -164,9 +178,14 @@ def developing_profile(
     # makes the histogram dense: raw floats would scatter one bin per distinct
     # price and the pair-expansion would step over holes that aren't really there.
     lv = np.rint(price / tick_size).astype("int64")
-    base = int(lv.min())
+    seed_lv = (
+        np.rint(np.asarray(seed[0], dtype="float64") / tick_size).astype("int64")
+        if seed is not None and len(seed[0])
+        else None
+    )
+    base = int(lv.min() if seed_lv is None else min(lv.min(), seed_lv.min()))
     idx = lv - base
-    n_levels = int(lv.max()) - base + 1
+    n_levels = int(lv.max() if seed_lv is None else max(lv.max(), seed_lv.max())) - base + 1
 
     hist = np.zeros(n_levels, dtype="float64")
     ends = bars["end_idx"].to_numpy(dtype="int64")
@@ -176,6 +195,10 @@ def developing_profile(
     val = np.full(len(bars), np.nan)
 
     total = 0.0
+    if seed_lv is not None:
+        seed_sz = np.asarray(seed[1], dtype="float64")
+        hist += np.bincount(seed_lv - base, weights=seed_sz, minlength=n_levels)
+        total += float(seed_sz.sum())
     cursor = 0
     for k, end in enumerate(ends):
         stop = int(end) + 1  # end_idx is inclusive

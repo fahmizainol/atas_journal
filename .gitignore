@@ -21,6 +21,13 @@ __pycache__/
 *.pyc
 .venv/
 .uv/
+# Kronos (OHLCV foundation model) — an ISOLATED venv + the upstream clone, kept
+# out of .venv because Kronos hard-pins pandas==2.2.2 and this project runs 3.0.3
+# under the live feed. Recreate: `uv venv .venv-kronos --python 3.12`,
+# `git clone --depth 1 https://github.com/shiyu-coder/Kronos .kronos`, then
+# install torch from the CPU index followed by .kronos/requirements.txt.
+.venv-kronos/
+.kronos/
 
 # frontend
 frontend/node_modules/
@@ -32,3 +39,13 @@ data/imports/**/*.xlsx
 data/*.bak
 # Sim run artifacts — regenerate with `python -m journal.sim.run --both`.
 # data/sims/
+
+# The vendored scheduler's build tree — half a gigabyte of it. Rebuild with
+# `cargo build --release --manifest-path vendor/sm20/Cargo.toml`; the deck falls
+# back to SM-2 until you do, so a clone without a Rust toolchain still works.
+vendor/sm20/target/
+
+# Third-party Pine pulled by tools/pine-fetch — other people's published source,
+# kept for transcription reference (see lib/pineStudy). Not ours to redistribute,
+# and re-fetchable from the script URL at any time.
+data/pine/

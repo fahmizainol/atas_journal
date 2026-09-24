@@ -23,6 +23,7 @@
 import type { PositionLine } from "../components/charts/ReplayChart";
 import type { WorkingOrderView } from "../components/charts/OrdersPrimitive";
 import type { TradeMarkView } from "../components/charts/TradesPrimitive";
+import type { BlotterRow } from "./simViews";
 import type { BrokerOrder, BrokerPosition, BrokerTrade } from "./routingTypes";
 
 /** Numeric ids for basket ids, stable for the life of a session.
@@ -105,10 +106,24 @@ export interface Bracket {
    *  rather than attempted — the broker refuses it too, and also catches the
    *  breakeven-only case, which leaves no mark on the leg for this to read. */
   stopManaged: boolean;
-  /** Both leg ids, for excluding them from the working-order lines. */
+  /** **Every** leg id on both sides, for excluding them from the working-order
+   *  lines. Rarely two: see the note on the multi-leg bracket below. */
   legs: Set<string>;
 }
 
+/** Rithmic brackets a **fill, not an order** — a 7-lot entry that fills 4 then 3
+ *  comes back as two stops and two targets, each its own basket at its own
+ *  price (MNQU6 2026-08-24, entry 202083398 → legs 202083399..402). Minis fill
+ *  in one print and never show it; seven micros split routinely, which is how a
+ *  position given one stop ends up drawn under five.
+ *
+ *  So each side collapses to one line here, and the price shown is the **worst**
+ *  of the set — the least protective stop, the furthest target. Not the first
+ *  one found: if the legs have drifted apart, the honest number is the one that
+ *  says what you are actually guaranteed, and the optimistic one is a chart
+ *  under-reporting live risk. A drag re-converges them, because the broker moves
+ *  every sibling (`Broker._sibling_legs`).
+ */
 export function bracketOf(orders: BrokerOrder[], pos: BrokerPosition | null): Bracket {
   const legs = new Set<string>();
   let stopId: string | null = null;
@@ -133,15 +148,25 @@ export function bracketOf(orders: BrokerOrder[], pos: BrokerPosition | null): Br
     // guessed at.
     const protective = entry == null || (long ? px < entry : px > entry);
     const profitable = entry == null || (long ? px > entry : px < entry);
-    if (isStop && protective && stop == null) {
-      stop = px;
-      stopId = o.basket_id;
-      stopManaged = (o.trail_by_ticks ?? 0) > 0;
+    // "Worse" is further from the entry on both legs, which is `<` for a long
+    // stop and a short target and `>` for the other two.
+    const worse = (a: number, b: number | null) =>
+      b == null || (long === isStop ? a < b : a > b);
+    if (isStop && protective) {
       legs.add(o.basket_id);
-    } else if (!isStop && profitable && target == null) {
-      target = px;
-      targetId = o.basket_id;
+      if (worse(px, stop)) {
+        stop = px;
+        stopId = o.basket_id;
+        // Read off the leg the drag will be addressed to, so the refusal the
+        // chart shows matches the order the broker would refuse.
+        stopManaged = (o.trail_by_ticks ?? 0) > 0;
+      }
+    } else if (!isStop && profitable) {
       legs.add(o.basket_id);
+      if (worse(px, target)) {
+        target = px;
+        targetId = o.basket_id;
+      }
     }
   }
   return { stop, target, stopId, targetId, stopManaged, legs };
@@ -256,6 +281,43 @@ export function tradeViews(
     pnl: t.pnl,
     r: t.r,
     reason: t.reason as TradeMarkView["reason"],
+  }));
+}
+
+/** The broker's paired round trips as blotter rows — the sibling of
+ *  `simViews.blotterRow`, so Live and Replay draw one card.
+ *
+ *  **`pnl` comes out net here and goes in gross.** The broker records what the
+ *  points were worth and charges the commission separately, into the day's
+ *  running total; the paper simulation nets it into the trade. A blotter whose
+ *  rows are gross while the guard panel above it reads net is a page that
+ *  disagrees with itself, so the subtraction happens here, once. A restored row
+ *  has no `fees` to subtract (`booking.day_trades`) and stays gross, which is
+ *  the honest reading of a row whose commission was never written down.
+ *
+ *  `routedSymbol` is what orders go to *now*; a row taken on anything else is
+ *  badged with its own contract, for the reason `BlotterRow.contract` gives.
+ *  Undefined badges nothing — no selection is being offered to differ from. */
+export function blotterRows(
+  trades: BrokerTrade[],
+  routedSymbol?: string,
+): BlotterRow[] {
+  return trades.map((t) => ({
+    id: t.id,
+    entryMs: t.entry_ms,
+    side: t.side,
+    size: t.size,
+    contract:
+      routedSymbol && t.symbol && t.symbol !== routedSymbol ? t.symbol : null,
+    openType: t.open_type ?? null,
+    reason: t.reason,
+    entryPrice: t.entry_price,
+    exitPrice: t.exit_price,
+    pnl: t.pnl - (t.fees ?? 0),
+    fees: t.fees ?? null,
+    r: t.r,
+    rCash: t.r_cash ?? null,
+    riskUsd: t.risk_usd ?? null,
   }));
 }
 

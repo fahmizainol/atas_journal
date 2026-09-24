@@ -2,11 +2,26 @@
 // band fill that lightweight-charts has no native equivalent for (an Area
 // series only fills to a baseline, not between two arbitrary lines). Two ribbons
 // are drawn per anchor: upper1→upper2 and lower1→lower2. The mid-to-±1σ region
-// is deliberately left clear so the mid line stays readable.
+// is left clear by default so the mid line stays readable; `setRegion("inner")`
+// swaps the two for one lower1→upper1 ribbon — the anchor's value area.
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 import type { VwapPoint } from "../../lib/chartTypes";
+import type { VwapFillRegion } from "../../lib/chartPrefs";
 import { ink } from "../../theme";
+
+/** First index whose time fails `keepGoing` — the standard lower bound, over a
+ *  point array that is always in ascending time. */
+function lowerBound(points: VwapPoint[], keepGoing: (time: number) => boolean): number {
+  let lo = 0;
+  let hi = points.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (keepGoing(points[mid].time)) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
 
 /** One resolved column of a ribbon: where it sits and what colour it is in. */
 interface Col {
@@ -31,26 +46,61 @@ class BandRenderer {
     // changes within a session (the Modern VWAP's regime read is the only one
     // today). Null for the four session anchors, whose wash is one colour.
     private tint: () => ((i: number) => string | undefined) | null,
-    private alphaScale: number,
+    // An accessor for the same reason the two above are: the session anchors'
+    // wash is a knob now (see chartPrefs.VwapFillWeights), and the primitive is
+    // attached once for the life of the chart.
+    private alphaScale: () => number,
+    private region: () => VwapFillRegion,
     private chart: IChartApi,
     private series: ISeriesApi<"Candlestick">,
     private visible: () => boolean,
   ) {}
 
+  /**
+   * The slice of `points` that can land on screen: the visible time range plus
+   * one column past each edge, so a ribbon still runs to the edges instead of
+   * stopping a bar short of them. The whole array when the time scale cannot
+   * answer yet (no data, first layout).
+   *
+   * Worth a binary search because `draw` runs on every chart *paint*, not only
+   * when the band changed — and a replay on a seconds bucketing carries several
+   * thousand points per anchor, times four anchors plus Modern VWAP. Resolving
+   * all of them each frame was measured as the most expensive single thing on
+   * this canvas; off-screen columns are work whose only result is a null.
+   */
+  private window(points: VwapPoint[]): { lo: number; hi: number } {
+    const range = this.chart.timeScale().getVisibleRange();
+    if (!range) return { lo: 0, hi: points.length - 1 };
+    const from = range.from as number;
+    const to = range.to as number;
+    // First index at or after `from`; one back from it is the column that
+    // anchors the polygon off the left edge.
+    const first = lowerBound(points, (t) => t < from);
+    // First index strictly after `to` — kept, as the column past the right edge.
+    const past = lowerBound(points, (t) => t <= to);
+    return { lo: Math.max(0, first - 1), hi: Math.min(points.length - 1, past) };
+  }
+
   draw(target: any) {
     const points = this.points();
-    if (!this.visible() || points.length < 2) return;
+    // A scale of 0 is the knob's "off": the anchor keeps its five lines and
+    // loses only the wash, so nothing is resolved for a fill nobody can see.
+    if (!this.visible() || points.length < 2 || this.alphaScale() <= 0) return;
     target.useMediaCoordinateSpace((scope: any) => {
       const ctx: CanvasRenderingContext2D = scope.context;
       const ts = this.chart.timeScale();
 
-      // Resolve every point once; a null coordinate (off-screen time or a price
-      // outside the visible scale) breaks the ribbon into a separate polygon
-      // rather than closing across the gap.
+      // Resolve every point that can be seen; a null coordinate (off-screen time
+      // or a price outside the visible scale) breaks the ribbon into a separate
+      // polygon rather than closing across the gap.
       const base = this.rgb();
       const tint = this.tint();
-      const cols: Col[][] = [[], []];
-      for (let i = 0; i < points.length; i++) {
+      const inner = this.region() === "inner";
+      const cols: Col[][] = inner ? [[]] : [[], []];
+      const win = this.window(points);
+      // `i` stays an index into the *whole* array: `tint` is asked about the
+      // point, and Modern VWAP's regime read numbers them from the anchor.
+      for (let i = win.lo; i <= win.hi; i++) {
         const p = points[i];
         const rgb = tint?.(i) ?? base;
         // A non-finite point is a session-boundary break (see Interactions.tsx) —
@@ -58,25 +108,27 @@ class BandRenderer {
         // washing across the gap to the next session.
         const x =
           Number.isFinite(p.upper1) &&
-          Number.isFinite(p.upper2) &&
           Number.isFinite(p.lower1) &&
-          Number.isFinite(p.lower2)
+          (inner || (Number.isFinite(p.upper2) && Number.isFinite(p.lower2)))
             ? ts.timeToCoordinate(p.time as Time)
             : null;
         if (x == null) {
-          cols[0].push(null as any);
-          cols[1].push(null as any);
+          for (const c of cols) c.push(null as any);
           continue;
         }
         const yU1 = this.series.priceToCoordinate(p.upper1);
-        const yU2 = this.series.priceToCoordinate(p.upper2);
         const yL1 = this.series.priceToCoordinate(p.lower1);
+        if (inner) {
+          cols[0].push(yU1 == null || yL1 == null ? (null as any) : { x, inner: yU1, outer: yL1, rgb });
+          continue;
+        }
+        const yU2 = this.series.priceToCoordinate(p.upper2);
         const yL2 = this.series.priceToCoordinate(p.lower2);
         cols[0].push(yU1 == null || yU2 == null ? (null as any) : { x, inner: yU1, outer: yU2, rgb });
         cols[1].push(yL1 == null || yL2 == null ? (null as any) : { x, inner: yL1, outer: yL2, rgb });
       }
 
-      const alpha = ink().bandAlpha * this.alphaScale;
+      const alpha = ink().bandAlpha * this.alphaScale();
       for (const ribbon of cols) {
         let run: Col[] = [];
         const flush = () => {
@@ -119,12 +171,13 @@ class BandPaneView {
     points: () => VwapPoint[],
     rgb: () => string,
     tint: () => ((i: number) => string | undefined) | null,
-    alphaScale: number,
+    alphaScale: () => number,
+    region: () => VwapFillRegion,
     chart: IChartApi,
     series: ISeriesApi<"Candlestick">,
     visible: () => boolean,
   ) {
-    this._renderer = new BandRenderer(points, rgb, tint, alphaScale, chart, series, visible);
+    this._renderer = new BandRenderer(points, rgb, tint, alphaScale, region, chart, series, visible);
   }
   update() {}
   renderer() {
@@ -143,6 +196,7 @@ export class VwapBandPrimitive {
   private requestUpdate?: () => void;
   private visible = true;
   private tint: ((i: number) => string | undefined) | null = null;
+  private region: VwapFillRegion = "outer";
 
   constructor(
     private points: VwapPoint[],
@@ -152,9 +206,32 @@ export class VwapBandPrimitive {
      *  anchor's σ runs several times a session anchor's, so the same alpha lays
      *  the same wash over a slab several times the area and the candles inside it
      *  stop being the thing you are looking at. Quieter per pixel, so the layer
-     *  weighs about what the others do overall. */
+     *  weighs about what the others do overall.
+     *
+     *  That is the *authored* weight; the three session anchors then multiply it
+     *  again by the reader's own — see `setAlphaScale`. */
     private alphaScale = 1,
   ) {}
+
+  /** Re-weight the wash, 0–1, without touching the lines it sits between. What
+   *  the per-anchor fill knob drives (chartPrefs.VwapFillWeights): the σ envelope
+   *  is the reading, the fill only says which side of it you are on, and on a
+   *  pane carrying three anchors at once that is three washes over the same
+   *  candles. 0 draws none. */
+  setAlphaScale(scale: number) {
+    if (scale === this.alphaScale) return;
+    this.alphaScale = scale;
+    this.requestUpdate?.();
+  }
+
+  /** Which part of the envelope the wash covers — the two ±1σ→±2σ ribbons
+   *  ("outer", the default) or the one −1σ→+1σ ribbon ("inner"). What the
+   *  per-anchor region knob drives (chartPrefs.VwapFillRegions). */
+  setRegion(region: VwapFillRegion) {
+    if (region === this.region) return;
+    this.region = region;
+    this.requestUpdate?.();
+  }
 
   // Driven by the legend toggle alongside the anchor's line series. A primitive
   // has no `visible` option, so it culls itself in draw() and asks for a repaint.
@@ -197,7 +274,8 @@ export class VwapBandPrimitive {
         () => this.points,
         () => this.rgb,
         () => this.tint,
-        this.alphaScale,
+        () => this.alphaScale,
+        () => this.region,
         this.chart,
         this.series,
         () => this.visible,

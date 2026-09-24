@@ -21,6 +21,6 @@ export default defineConfig({
   preview: {
     port: 4300,
     strictPort: true,
-    proxy: { "/api": "http://localhost:8000" },
+    proxy: { "/api": "http://127.0.0.1:8000" },
   },
 });

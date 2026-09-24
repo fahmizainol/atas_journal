@@ -17,12 +17,22 @@ export type IndicatorKey =
    *  1-minute EMAs, RSI pane, level touches and VA-snap marks. */
   | "atr"
   | "cvd"
+  /** Both charts: the CVD Divergence Oscillator — windowed delta as a histogram
+   *  in its own pane, with the fractal divergences it names drawn on that pane
+   *  *and* over the candles. Distinct from `cvd` above, which is the cumulative
+   *  line: this one throws the session anchor away and reads a rolling window, so
+   *  the two disagree by construction. A borrowed, unfalsified construct — see
+   *  lib/cvdOsc. One key, because the histogram and its marks are one read. */
+  | "cvdOsc"
   | "levels"
   | "initialBalance"
   | "ibExtensions"
   | "volumeProfile"
+  | "volumeShelf"
+  | "volumeShelfBoxes"
   | "developingProfileGlobex"
   | "developingProfileNy"
+  | "developingProfileWeekly"
   | "ema9"
   | "ema20"
   | "ema50"
@@ -64,7 +74,28 @@ export type IndicatorKey =
    *  lib/modernVwap and docs/research/modern-vwap.html before reading anything
    *  off it. */
   | "modernVwap"
-  | "modernVwapSignals";
+  | "modernVwapSignals"
+  /** Charts workspace only: Dynamic Swing Anchored VWAP [Zeiierman] — the other
+   *  swing-anchored VWAP, and a different construct from the one above in all
+   *  three of where it anchors, how it averages and how fast it tracks. One key,
+   *  because it draws one line and the flags that explain it. Also unfalsified:
+   *  see lib/dynamicSwingVwap. */
+  | "dynamicSwingVwap"
+  /** Both charts: the External Chart read — a coarser period's candles outlined
+   *  over this one's (lib/externalChart). One of the few layers that is drawn
+   *  from the bars themselves rather than from the tape, which is why it is on
+   *  both surfaces: anything with a bar array can carry it. */
+  | "externalChart"
+  /** Replay chart: the 5m/15m (+1h) EMA trend regrouped from this chart's bars —
+   *  stepped EMA lines plus a wash where the frames agree (lib/htfTrend). */
+  | "htfTrend"
+  | "rankedZones"
+  /** Replay chart: USD economic releases off ForexFactory (journal.econ_calendar),
+   *  one vertical line per print. Context only — the event-day study is a null. */
+  | "econEvents"
+  /** Replay chart: dealer-gamma flip band and walls from the NDX and QQQ option
+   *  books (journal.gex), per session. Context only — unvalidated. */
+  | "gexLevels";
 
 export interface LegendItem {
   key: IndicatorKey;
@@ -82,6 +113,34 @@ export interface LegendItem {
 
 /** Settings by layer, as the page that owns those settings hands them over. */
 export type IndicatorSettingsMap = Partial<Record<IndicatorKey, IndicatorSettingsSpec>>;
+
+/**
+ * One community study on this pane (see lib/studies).
+ *
+ * Its own row type rather than a `LegendItem` with the key widened, because the
+ * two genuinely differ and the difference is worth showing. A layer above is one
+ * of a fixed set with a measured reason to exist — it can be hidden, never
+ * deleted. A study is an instance the reader added, can add twice at two lengths,
+ * and can take away again; and it is *borrowed*, most of it transpiled from
+ * community Pine, which is a thing to be able to see at a glance rather than
+ * something to blend into the rows above it.
+ */
+export interface StudyRow {
+  /** The spec id — unique within the pane's list. */
+  id: string;
+  label: string;
+  color: string;
+  on: boolean;
+  /** Why nothing is drawn: it threw, or it computed no plottable output. Null
+   *  when it drew, which is the ordinary case. */
+  error?: string | null;
+  /** Marks with no lines — the pattern studies. Worth printing, because a row
+   *  with no visible series and no number reads as broken. */
+  marks?: number;
+  settings?: IndicatorSettingsSpec;
+  onToggle: () => void;
+  onRemove: () => void;
+}
 
 function EyeIcon({ open }: { open: boolean }) {
   return (
@@ -150,9 +209,10 @@ function Chevron({ open }: { open: boolean }) {
 }
 
 /** The header's panel is keyed like a row's so one piece of open/close logic
- *  covers both — it just isn't a layer. */
+ *  covers both — it just isn't a layer. A study's panel is keyed by its spec id,
+ *  which is a string and cannot collide with either. */
 const APPEARANCE = "__appearance";
-type PanelKey = IndicatorKey | typeof APPEARANCE;
+type PanelKey = IndicatorKey | typeof APPEARANCE | string;
 
 // TV-style on-chart indicator list: one row per indicator, click to hide/show,
 // and a "…" on the rows that have something to tune. The whole list collapses
@@ -167,6 +227,7 @@ type PanelKey = IndicatorKey | typeof APPEARANCE;
 // read it: what · when · how deep.
 export function IndicatorLegend({
   items,
+  studies,
   visibility,
   onToggle,
   appearance,
@@ -179,6 +240,9 @@ export function IndicatorLegend({
   onTfChange,
 }: {
   items: LegendItem[];
+  /** The community studies on this pane, under the layers and behind their own
+   *  divider. Omitted by a chart that doesn't offer them (the journal charts). */
+  studies?: StudyRow[];
   visibility: Record<IndicatorKey, boolean>;
   onToggle: (key: IndicatorKey) => void;
   /** What this chart is. The *page* decides what to call it — blind replay hands
@@ -218,8 +282,8 @@ export function IndicatorLegend({
 }) {
   const [open, setOpen] = useState(() => loadLegendOpen(prefsPane));
   /** Which row has its settings panel out — `APPEARANCE` for the header's. One at
-   *  a time: they overlay the rows below them, so two open panels would mostly be
-   *  one panel hiding another. */
+   *  a time: every panel opens in the same place (the middle of the screen), so
+   *  two open panels would be one panel hiding another exactly. */
   const [settingsFor, setSettingsFor] = useState<PanelKey | null>(null);
   /** Whether the bucketing list is out, and the wrapper a press has to land
    *  inside of to count as "still in this picker". */
@@ -288,16 +352,21 @@ export function IndicatorLegend({
     };
   }, [settingsFor]);
 
-  if (items.length === 0 && !appearance && !symbol) return null;
+  const studyRows = studies ?? [];
+  if (items.length === 0 && studyRows.length === 0 && !appearance && !symbol) return null;
   // A row switched off by its own setting doesn't count as shown, whatever its
-  // eye says: the count is "how much of this is on the chart".
-  const shown = items.filter((it) => visibility[it.key] && !it.dim).length;
+  // eye says: the count is "how much of this is on the chart". Studies count in
+  // both halves of it — they are as much on the chart as anything above them.
+  const shown =
+    items.filter((it) => visibility[it.key] && !it.dim).length +
+    studyRows.filter((s) => s.on && !s.error).length;
+  const total = items.length + studyRows.length;
   const setOpenPersist = (v: boolean) => {
     setOpen(v);
     saveLegendOpen(v, prefsPane);
-    // Collapsing the list takes any open row panel with it — it is anchored to a
-    // row that is about to stop existing. The header's own panel stays: its
-    // anchor is the one thing collapsing leaves behind.
+    // Collapsing the list takes any open row panel with it — it belongs to a row
+    // that is about to stop existing. The header's own panel stays: its row is
+    // the one thing collapsing leaves behind.
     if (!v && settingsFor !== APPEARANCE) setSettingsFor(null);
   };
   const appearanceOpen = settingsFor === APPEARANCE;
@@ -362,7 +431,7 @@ export function IndicatorLegend({
           <Chevron open={open} />
           <LayersIcon />
           <span className="chart-legend-count">
-            <b>{shown}</b>/{items.length}
+            <b>{shown}</b>/{total}
           </span>
         </button>
         {appearance && (
@@ -406,6 +475,61 @@ export function IndicatorLegend({
               )}
               {it.settings && openHere && (
                 <IndicatorSettings spec={it.settings} onClose={() => setSettingsFor(null)} />
+              )}
+            </div>
+          );
+        })}
+      {/* The community studies, under a divider and marked. Same three gestures
+          as a layer above — eye, "…", and here an × as well, because unlike a
+          layer a study is an instance you added and can take away. The divider
+          is not decoration: everything above it is ours and measured, everything
+          below it is borrowed and mostly transpiled, and reading a number off
+          the wrong side of that line is the whole risk this feature carries. */}
+      {open && studyRows.length > 0 && (
+        <div className="chart-legend-rule" aria-hidden>
+          community
+        </div>
+      )}
+      {open &&
+        studyRows.map((st) => {
+          const openHere = settingsFor === st.id;
+          return (
+            <div key={st.id} className="chart-legend-item" data-ind-item={st.id}>
+              <button
+                className={`chart-legend-row study${st.on && !st.error ? "" : " off"}${st.settings ? " has-dots" : ""}`}
+                onClick={st.onToggle}
+                title={st.error ? st.error : st.on ? `Hide ${st.label}` : `Show ${st.label}`}
+              >
+                <span className="chart-legend-swatch" style={{ background: st.color }} />
+                <span>
+                  {st.label}
+                  {st.error && <span className="chart-legend-warn"> !</span>}
+                  {!st.error && st.marks ? (
+                    <span className="chart-legend-sub"> · {st.marks} marks</span>
+                  ) : null}
+                </span>
+                <EyeIcon open={st.on} />
+              </button>
+              {st.settings && (
+                <button
+                  className="chart-legend-dots"
+                  onClick={() => setSettingsFor(openHere ? null : st.id)}
+                  aria-expanded={openHere}
+                  title={`Settings for ${st.settings.title}`}
+                >
+                  <DotsIcon />
+                </button>
+              )}
+              <button
+                className="chart-legend-x"
+                onClick={st.onRemove}
+                title={`Remove ${st.label} from this pane`}
+                aria-label={`Remove ${st.label}`}
+              >
+                ×
+              </button>
+              {st.settings && openHere && (
+                <IndicatorSettings spec={st.settings} onClose={() => setSettingsFor(null)} />
               )}
             </div>
           );

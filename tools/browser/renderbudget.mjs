@@ -15,7 +15,10 @@ import { launch, openChart } from "./lib.mjs";
 const WINDOW = 10;
 // A route can be passed in, so variants of the same page can be compared:
 //   node renderbudget.mjs "/charts/replay?spike=gated"
-const ROUTE = process.argv[2] ?? "/charts/replay";
+// The paper replay by default: the funded one is locked to 1× with no ladder
+// (`clockLocked` in Simulator.tsx), so the `]`s below would be no-ops and this
+// would measure a tape nobody is benchmarking.
+const ROUTE = process.argv[2] ?? "/charts/replay/paper";
 const { browser, page, errors } = await launch({ headed: false });
 
 try {

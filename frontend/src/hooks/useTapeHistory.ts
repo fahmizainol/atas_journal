@@ -31,6 +31,12 @@ export interface HistDay {
    *  does — a cached day and a recorded day are different bytes for the same
    *  date, and a reader should not have to infer which from the calendar. */
   source?: string;
+  /** The week already behind *this* day's Globex open, as the payload shipped
+   *  it. Kept because the weekly anchor is the one indicator that reaches back
+   *  across these days, and it needs each day's own seed to do it without
+   *  double-counting (see `ReplayEngine.historyWeeklyBand`). Null when the week
+   *  behind that day has a hole in it. */
+  weeklySeed: number[] | null;
 }
 
 const TAPES = new Map<string, HistDay>();
@@ -65,14 +71,32 @@ const IDLE: HistoryTapes = { days: [], loading: false, failed: [], settled: true
  *
  * `dates` must be oldest-first, and every day must be the same contract as the
  * session: a roll would splice two price series a hundred points apart.
+ *
+ * `versions` is optional and is how a *finished* day gets to change underneath a
+ * running page. A recorded day is not immutable: you disconnect an hour after
+ * the bell, and the rest of that session only lands when the harvest sweep fills
+ * it on your next connect — which is routinely a minute after this page loaded
+ * and cached the truncated version. Half a day's volume can arrive that way, and
+ * with it that day's whole stretch of the weekly anchor, so drawing the tape
+ * fetched a minute earlier is not a stale pixel but a wrong number. Pass the
+ * manifest's `updated_at` per date (`/live/recordings`, which is already polled)
+ * and the day re-reads itself when the sweep rewrites it. Days with no entry key
+ * as `"-"` and behave exactly as they did before — the Databento cache only ever
+ * changes when somebody buys more of it, so the Simulator passes nothing.
  */
 export function useTapeHistory(
   endpoint: string,
   symbol: string | null,
   dates: string[],
   tz: string,
+  versions?: Record<string, string | null>,
 ): HistoryTapes {
   const key = dates.join(",");
+  // The version of each requested day, in the same order — the cache key's
+  // second half. Built from the requested dates and not from `versions` itself
+  // so that a map which churns for an unrelated day (the one being recorded
+  // updates its manifest every chunk) does not read as a change here.
+  const vkey = dates.map((d) => versions?.[d] ?? "-").join(",");
   const [state, setState] = useState<HistoryTapes>(IDLE);
 
   useEffect(() => {
@@ -88,7 +112,11 @@ export function useTapeHistory(
       const dates = key.split(",");
       const days: HistDay[] = [];
       const failed: string[] = [];
-      const ckOf = (date: string) => `${endpoint}|${symbol}|${date}|${tz}`;
+      // Paired with `dates` by position — `vkey` was built from the same list.
+      const vlist = vkey.split(",");
+      const vers = new Map(dates.map((d, i) => [d, vlist[i] ?? "-"]));
+      const ckOf = (date: string) =>
+        `${endpoint}|${symbol}|${date}|${tz}|${vers.get(date) ?? "-"}`;
       type Payload = SessionPayload & { source?: string };
       // A day is asked for while the one before it is being decoded, and never
       // more than that. Not the whole week at once: the payload is the expensive
@@ -130,6 +158,7 @@ export function useTapeHistory(
               rthOpenMs: p.rth_open_ms,
               rthCloseMs: p.rth_close_ms,
               source: p.source,
+              weeklySeed: p.weekly_seed ?? null,
             };
           } catch {
             failed.push(date);
@@ -145,7 +174,7 @@ export function useTapeHistory(
     return () => {
       cancelled = true;
     };
-  }, [endpoint, symbol, key, tz]);
+  }, [endpoint, symbol, key, tz, vkey]);
 
   return state;
 }

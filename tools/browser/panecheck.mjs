@@ -145,7 +145,7 @@ await page.route("**/api/replays/account", (route) =>
       equity: 50000, floor: 48000, peak_close: 50000, status: "live",
       day_net: 0, day_loss_remaining: 1200, target_remaining: 3000,
       next_sitting_at: null, cooldown_until: null, can_reset: false,
-      review_block: null,
+      review_flagged: null,
       epoch: { index: 0, started_at: "2026-01-01T00:00:00Z", sittings: 0, net: 0 },
       last_death: null, caps: { minis: 4, micros: 40 },
     },
@@ -336,7 +336,9 @@ try {
   // be visibly frozen here for a quarter of an hour of wall clock. Two seconds
   // is far too short to close one and far longer than the 200ms repaint floor,
   // so this passes only if the floor is doing its job.
-  await page.selectOption(".sim-transport select", "1");
+  // No selectOption any more: the funded replay is pinned to 1× and has no
+  // ladder to pick it off (`clockLocked` in Simulator.tsx), which is exactly the
+  // speed this gate wants. The comment above is the reason it wants it.
   const before = await axisOf(1);
   await page.keyboard.press("k");
   await page.waitForTimeout(3000);
@@ -377,13 +379,13 @@ try {
   // Two bits of housekeeping before the gesture, both of them app behaviour
   // this check would otherwise trip over.
   //
-  // Drop focus: the speed <select> above still has it, and the chart
+  // Drop focus: the layout picker above still has it, and the chart
   // deliberately ignores Space while a form control is focused — Space is that
   // control's own key.
   await page.evaluate(() => document.activeElement?.blur?.());
-  // And make sure the replay is actually paused. The `k` that was meant to
-  // pause it went to the focused <select> for the same reason, so the tape may
-  // still be running — and a resting order placed a tick off a moving mark
+  // And make sure the replay is actually paused. A `k` that landed on a focused
+  // form control for the same reason never reached the transport, so the tape
+  // may still be running — and a resting order placed a tick off a moving mark
   // fills immediately, which reads as "the pane placed nothing".
   const transport = () => page.locator(".sim-transport button").first().textContent();
   if ((await transport())?.includes("Pause")) {
@@ -525,6 +527,33 @@ try {
 
   await pickLayout("One chart");
   check("the picker takes them away again", (await paneCount()) === 1, `${await paneCount()} pane(s)`);
+
+  // …and on a tablet. Below 1199px the top bar becomes a horizontal scroller,
+  // which computes `overflow-y: auto` and so clips anything anchored *under* a
+  // button on it — the stylesheet answers that by re-parenting the bar's
+  // popovers to the viewport, and the layout menu was left out of that list for
+  // as long as the list existed. The failure is silent: the menu opens, paints
+  // into a 36px box, and every tap meant for it lands on the chart behind. So
+  // the assertion is reachability, not presence — `document.elementFromPoint`
+  // at the menu's own centre has to come back as the menu.
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.waitForTimeout(600);
+  await page.locator(".chart-layout-btn").click();
+  await page.waitForTimeout(300);
+  const reach = await page.evaluate(() => {
+    const m = document.querySelector(".chart-layout-menu");
+    if (!m) return { open: false };
+    const r = m.getBoundingClientRect();
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return { open: true, reachable: !!top && m.contains(top), over: top?.tagName?.toLowerCase() ?? "nothing" };
+  });
+  check("the layout menu is tappable on a tablet-width bar", reach.open && reach.reachable,
+    reach.open ? `the tap lands on <${reach.over}>` : "the menu never opened");
+  await page.locator('.chart-layout-menu button[title="Two side by side"]').click();
+  await page.waitForTimeout(2000);
+  check("…and picking one still splits the chart", (await paneCount()) === 2, `${await paneCount()} pane(s)`);
+  await page.setViewportSize({ width: 1600, height: 900 });
+
   check("no console errors", errors.length === 0, errors.slice(0, 2).join(" | "));
 } finally {
   await browser.close();

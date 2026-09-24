@@ -1,72 +1,68 @@
 """R-multiple bracket what-ifs across all stored replay sittings: no trail,
 target capped at R x the placed stop distance (computed at fill, since the
-log stores absolute levels). 'sf' variants drop recorded bracket drags
-(set-and-forget); manual closes and the end-of-sitting flatten are kept.
+log stores absolute levels). Manual closes and the end-of-sitting flatten are kept.
 
 Companion to exit_whatif.py; see docs/research/replay-exit-whatif.md §5.
+
+The R multiple used to be a module-global monkeypatch over the engine's
+`open_position`. It is a field of the scenario spec now, and the ladder itself is
+`journal.replay_whatif.PRESETS` — the same rows the app serves per sitting. One
+consequence for anyone comparing against the old printout: every counterfactual row
+drops recorded bracket drags, because a drag writes an absolute level that would
+overwrite the row's own target. The old `r1` row (which kept them) no longer exists;
+`r1` here is what that run called `r1sf`.
 
 Usage:
     .venv/bin/python data/research/replay-trail/r_whatif.py
 """
+from __future__ import annotations
+
 import collections
-import importlib.util
 import json
 import pathlib
+import sys
 from multiprocessing import Pool
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
-_spec = importlib.util.spec_from_file_location(
-    "exit_whatif", pathlib.Path(__file__).parent / "exit_whatif.py")
-X = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(X)
-w = X.w
+sys.path.insert(0, str(ROOT / "src"))
 
-R_MULT = None
-_orig_open = w.open_position
+from journal.replay_whatif import (  # noqa: E402
+    PRESETS,
+    apply_scenario,
+    contract_spec,
+    load_tape,
+    pick_cfg,
+    run_flat,
+    scen_of,
+    summarize,
+)
+from journal.replays import read as read_attempt  # noqa: E402
 
-
-def open_r(o, legs, ms, idx, price, size):
-    p = _orig_open(o, legs, ms, idx, price, size)
-    if R_MULT is not None and p["stop"] is not None:
-        d = 1 if p["side"] == "long" else -1
-        p["target"] = price + d * R_MULT * abs(price - p["stop"])
-    return p
-
-
-w.open_position = open_r
-
-# name -> (R, trail_spec as in exit_whatif, keep_drags)
-SCEN = [
-    ("as-played", (None, "asis", True)),
-    ("no-trail", (None, None, True)),
-    ("r1", (1.0, None, True)),
-    ("r1sf", (1.0, None, False)),
-    ("r15sf", (1.5, None, False)),
-    ("r2sf", (2.0, None, False)),
-    ("r1be25sf", (1.0, dict(dist=25, step=0, beOnly=True), False)),
-]
+#: The R half of the shared ladder, against the two baselines it is read against.
+SCEN = [r for r in PRESETS
+        if r["key"] in ("as-played", "no-trail") or r["spec"].get("targetR") is not None]
 
 
 def run_one(aid):
-    global R_MULT
-    a, log, recorded, summ = w.load_attempt(aid)
-    t, px = w.load_tape(a["symbol"], a["date"], a["tz"])
-    clock = a["clock_ms"]
-    R_MULT = None
-    cfg = X.pick_cfg(a, t, px, log, recorded, clock)
-    if cfg is None:
+    try:
+        a = read_attempt(aid)
+        log, recorded = a["log"], a["trades"]
+        t, px = load_tape(a["symbol"], a["date"], a.get("tz"))
+        clock = a["clock_ms"]
+        tick_size = float(contract_spec(a["symbol"])["tick_size"])
+        cfg, _ = pick_cfg(a, t, px, log, recorded, clock)
+        if cfg is None:
+            return dict(aid=aid, valid=False)
+        out = dict(aid=aid, date=a["date"], valid=True,
+                   contracts=sum(tr["size"] for tr in recorded), scen={})
+        for row in SCEN:
+            drop_drags = row["spec"].get("targetR") is not None
+            lg = apply_scenario(log, row["spec"], tick_size, drop_drags=drop_drags)
+            st = run_flat(t, px, lg, clock, cfg, scen_of(row["spec"]))
+            out["scen"][row["key"]] = summarize(st["trades"])
+        return out
+    except Exception:
         return dict(aid=aid, valid=False)
-    out = dict(aid=aid, date=a["date"], valid=True,
-               contracts=sum(tr["size"] for tr in recorded), scen={})
-    for name, (r, tspec, drags) in SCEN:
-        lg = X.apply_scenario(log, tspec)
-        if not drags:
-            lg["brackets"] = []
-        R_MULT = r
-        st = X.run_flat(t, px, lg, clock, cfg)
-        R_MULT = None
-        out["scen"][name] = w.summarize(st["trades"])
-    return out
 
 
 def main():
@@ -81,7 +77,7 @@ def main():
         results = [r for r in pool.imap_unordered(run_one, aids) if r["valid"]]
     results.sort(key=lambda r: r["date"])
     print(f"{len(results)}/{len(aids)} sittings validate")
-    names = [n for n, _ in SCEN]
+    names = [row["key"] for row in SCEN]
     hdr = f"{'date':<11}{'n':>4}" + "".join(f"{n:>10}" for n in names)
     print(hdr)
     for r in results:

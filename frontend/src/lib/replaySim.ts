@@ -133,6 +133,10 @@ export interface TrailCfg {
 /** `limit` rests on the passive side of the market, `stop` triggers through it. */
 export type OrderType = "market" | "limit" | "stop";
 
+/** The claim a trade is opened on. Closed, and mirrored from `journal.intent`'s
+ *  `THESES` — a fourth value here would collect answers the grader refuses. The
+ *  server serves the labels (`GET /intent/vocab`); this is only the shape. */
+
 /** A drag, stamped with the clock. Carries the whole level set rather than the
  *  one leg that moved, so replaying the log never has to merge edits. */
 export interface OrderEdit {
@@ -157,9 +161,37 @@ export interface OrderRec {
   price: number | null;
   /** The bracket it proposes, as absolute prices. Set from the ticket at
    *  placement and moved by dragging. Becomes the *position's* bracket if this
-   *  order's fill opens one. */
+   *  order's fill opens one.
+   *
+   *  For a **market** order these are the prices the ticket implied at the
+   *  instant of the gesture, and the pair below is what actually gets used —
+   *  see there. Kept anyway: they are what you were looking at when you clicked,
+   *  and every reader written before the distances existed still finds them. */
   stop: number | null;
   target: number | null;
+  /** The bracket as the ticket said it: **distances, in ticks**.
+   *
+   *  Only a market order carries them, and for a market order they win. The
+   *  prices above are struck from the mark at the gesture, but the fill lands
+   *  `latencyMs` later and pays the spread — so a bracket frozen as prices makes
+   *  the ticket's promise ("risk 50 ticks") come out as 54 and 46 on a fill four
+   *  ticks the wrong way. Measured over the recorded sittings the fill was not
+   *  the clicked print on 90% of orders, a median of one tick out and a p90 of
+   *  six; on 2025-01-30 a ⊥50/⊤50 ticket opened a position with a 227-tick stop
+   *  and a target already behind price.
+   *
+   *  A **resting** order keeps the price anchor and carries none of these: there
+   *  the bracket belongs to the level you drew it against, not to whatever the
+   *  fill happened to be, and it can be dragged before it fills.
+   *
+   *  This is also what a real account does — the live API sends `stop_ticks` and
+   *  the plant hangs the legs off the fill (`journal/live/broker.py`), so before
+   *  this the replay was practising a bracket the funded account does not place.
+   *
+   *  Optional: absent on every order logged before they existed, and those
+   *  re-derive off the prices exactly as they always did. */
+  stopTicks?: number;
+  targetTicks?: number;
   /** The trail it proposes, snapshotted off the ticket at placement — like the
    *  bracket, and for the same reason. Settings that live only in React state
    *  would make a rebuild disagree with the forward play the moment you touched
@@ -304,6 +336,10 @@ export interface Trade {
    *  sitting that changed contract between positions can be read: two rows of
    *  `×1` for very different money is a blotter that owes you the reason. */
   micro: boolean;
+  /** The claim this position was opened on, if the ticket carried one. Every
+   *  portion of a scale-out repeats it, which is right: they are one position
+   *  and one read. The server collapses them back to one claim per position
+   *  before it writes anything (`_record_intent`). */
   /** Excursion R: points moved ÷ points risked at open. Size-blind — it asks
    *  whether the *read* was good, i.e. whether price travelled further than the
    *  distance you'd allowed against you. Null when the position carried no risk
@@ -316,7 +352,40 @@ export interface Trade {
    *  this one sums — every portion divides by the same opening stake, so the
    *  scale-outs of one position add up to what it did. */
   rCash: number | null;
+  /** The dollars staked at open — `rCash`'s own denominator, carried so the
+   *  blotter can print the figure the order pad's sizer quoted before the entry
+   *  went on ("risks $250 if the stop is hit"). Null when the position opened
+   *  bare, on the same terms as `Position.riskCash`.
+   *
+   *  **The position's, not this portion's, and therefore NOT summable.** Every
+   *  scale-out of one entry repeats it, exactly as `rCash` divides by it — the
+   *  question it answers is "what did that decision put up", and taking size
+   *  off does not retroactively change the answer. */
+  riskUsd: number | null;
 }
+
+/** The distinct **positions** a list of closed lots came out of, oldest first.
+ *
+ *  A scale-out books one row per portion and every one of them carries the
+ *  position's own open stamp — the fold freezes `entryMs` when the position
+ *  comes off flat and no scale-in re-bases it, and the live broker's
+ *  `_open_state` freezes `opened_ms` on exactly the same terms. So grouping
+ *  lots by that stamp groups them by the *decision* that opened them.
+ *
+ *  Which is the same grouping `journal.trades.build_logical_trades` walks the
+ *  journal into — it finds the flat->flat boundaries by netting the position,
+ *  and arrives at the same answer because the two are the same fact. Checked
+ *  against every live day on disk: 8 out of 12 lots on 2026-09-09, 12 out of 24
+ *  on 2026-09-08, 8 out of 15 on 2026-08-26, and equality wherever nothing was
+ *  scaled out of. **This is what "how many trades did I take today" means**,
+ *  and counting rows instead is how a page comes to disagree with the journal
+ *  about a number the journal is the record of.
+ *
+ *  Structural in its argument so the one rule serves both trade shapes: the
+ *  simulation's `Trade` and the blotter's `BlotterRow`, which carries `entryMs`
+ *  from either source for this. */
+export const openStamps = (lots: readonly { entryMs: number }[]): number[] =>
+  [...new Set(lots.map((t) => t.entryMs))].sort((a, b) => a - b);
 
 /** Everything the user did, in the order they did it. */
 export interface Log {
@@ -351,10 +420,59 @@ export interface SimState {
   oi: number;
   ci: number;
   bi: number;
+  /** Running realised, so the excursion can be read on a tick without folding
+   *  `trades` again. */
+  realizedUsd: number;
+  /** The sitting's equity excursion, in dollars from where it started.
+   *
+   *  Realised plus whatever the open position is currently worth, marked on
+   *  **every print** rather than sampled. An intraday-trailing account derives
+   *  its floor from this (`journal.replay_account.excursion`), and a peak taken
+   *  off the HUD's throttled tick would make that floor depend on which
+   *  animation frames happened to land.
+   *
+   *  In the fold rather than in a ref on the page, and that is the whole design.
+   *  A rewind truncates the log and `runSim` re-derives from tick zero, so an
+   *  excursion inside an un-happened trade un-happens with it — the same rule
+   *  `guardRules.DayState.locked` follows, for the same reason. A ratchet a
+   *  rewind could not lower would raise an account's floor off a trade that
+   *  never occurred, which is a false death.
+   *
+   *  (`minRoomUsd` is the third figure the account wants and it is deliberately
+   *  *not* here: it measures against a floor, and the sim does not know about
+   *  accounts. `Simulator` keeps it, as a ratchet — see there for why the two
+   *  are opposites.)
+   *
+   *  `peakUsd >= 0 >= troughUsd` always, because t=0 is a point on the path: a
+   *  sitting that only ever lost has `peakUsd === 0`, not its best trade. */
+  peakUsd: number;
+  troughUsd: number;
+}
+
+/** What an open position is worth right now, in dollars. Zero when flat.
+ *
+ *  The position's own contract, not the ticket's — they are the same until the
+ *  ticket is re-pointed after a fill, and that is precisely the moment this must
+ *  not move. Gross of the exit's commission, which has not been paid and may
+ *  never be; `Simulator.openPnl` marks the same way, so the two agree. */
+export function openValue(p: Position | null, px: number, cfg: FillCfg): number {
+  if (!p || !Number.isFinite(px)) return 0;
+  const dir = p.side === "long" ? 1 : -1;
+  return (px - p.entryPrice) * dir * money(cfg, p.micro).pointValue * p.size;
+}
+
+/** Mark the sitting's equity path at one price. Called per print. */
+function mark(st: SimState, px: number, cfg: FillCfg): void {
+  const eq = st.realizedUsd + openValue(st.open, px, cfg);
+  if (eq > st.peakUsd) st.peakUsd = eq;
+  if (eq < st.troughUsd) st.troughUsd = eq;
 }
 
 export function newSim(): SimState {
-  return { trades: [], open: null, working: [], oi: 0, ci: 0, bi: 0 };
+  return {
+    trades: [], open: null, working: [], oi: 0, ci: 0, bi: 0,
+    realizedUsd: 0, peakUsd: 0, troughUsd: 0,
+  };
 }
 
 /** The orders still working, in the order they were placed. */
@@ -388,10 +506,26 @@ function openPosition(
   size: number,
   cfg: FillCfg,
 ): Position {
-  // Measured from the price that filled, not from the price the ticket was
-  // written at: the spread you paid getting in is money already at risk, and a
-  // stop 40 ticks under the level you clicked is 41 ticks under the fill.
-  const riskPts = legs.stop != null ? Math.abs(price - legs.stop) : null;
+  // Where the bracket goes. A market order's is a distance and is struck here,
+  // from the price that filled — which is the ticket's own promise, and what a
+  // real account does with `stop_ticks`. A resting order's is a pair of levels
+  // it was placed against, and those do not move because the fill drifted.
+  const dir = o.side === "long" ? 1 : -1;
+  const byTicks = o.type === "market" && (o.stopTicks != null || o.targetTicks != null);
+  const stop = byTicks
+    ? o.stopTicks && o.stopTicks > 0
+      ? price - dir * o.stopTicks * cfg.tickSize
+      : null
+    : legs.stop;
+  const target = byTicks
+    ? o.targetTicks && o.targetTicks > 0
+      ? price + dir * o.targetTicks * cfg.tickSize
+      : null
+    : legs.target;
+  // Measured from the price that filled either way: the spread you paid getting
+  // in is money already at risk, and on a resting order's levels a stop 40 ticks
+  // under the price you drew is 41 ticks under the fill.
+  const riskPts = stop != null ? Math.abs(price - stop) : null;
   const micro = !!o.micro;
   return {
     side: o.side,
@@ -402,8 +536,8 @@ function openPosition(
     openType: o.type,
     micro,
     scaled: false,
-    stop: legs.stop,
-    target: legs.target,
+    stop,
+    target,
     trail: o.trail && o.trail.dist > 0 ? o.trail : null,
     hwm: price,
     ladder: null,
@@ -504,11 +638,19 @@ function reduce(
     // paid two round turns was not quite a 1R winner.
     r: p.riskPts && p.riskPts > 0 ? pts / p.riskPts : null,
     rCash: p.riskCash && p.riskCash > 0 ? pnl / p.riskCash : null,
+    riskUsd: p.riskCash && p.riskCash > 0 ? p.riskCash : null,
   });
   // The average of what's left is the average it had: taking size off never
   // moves it, only adding does.
   p.size -= size;
   if (p.size <= 0) st.open = null;
+  // The booked half of the equity path, and the excursion re-marked at the
+  // price it booked at. Marking here as well as per print is what puts a close
+  // that happened *between* two prints on the path: without it a trade that
+  // stopped out at its worst and never printed there again would leave a trough
+  // the account could not see.
+  st.realizedUsd += pnl;
+  mark(st, price, cfg);
 }
 
 /** Land a fill on the net position: open it, add to it, take size off it, or run
@@ -775,6 +917,12 @@ export function stepSim(
         }
       }
     }
+    // The sitting's equity path, marked last on the tick so everything that
+    // happened at this price has happened: the bracket has been read and any
+    // resting order has filled. Marking before them would let one print both
+    // set a new high-water and be the print that stopped you out of it — the
+    // same ordering argument the trail's `hwm` makes a few lines up.
+    mark(st, px, cfg);
   }
   admin(clock);
 }
@@ -855,6 +1003,12 @@ function cloneSim(st: SimState): SimState {
     oi: st.oi,
     ci: st.ci,
     bi: st.bi,
+    // Scalars, carried forward like the cursors: the excursion is a running
+    // fold and a clone that reset it would report the path of whatever slice
+    // was folded next rather than the path of the sitting.
+    realizedUsd: st.realizedUsd,
+    peakUsd: st.peakUsd,
+    troughUsd: st.troughUsd,
   };
 }
 

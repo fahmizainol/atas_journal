@@ -20,7 +20,9 @@ for (const width of WIDTHS) {
   const { browser, page, errors } = await launch({ headed: false });
   try {
     await page.setViewportSize({ width, height: 900 });
-    await openChart(page, "/charts/replay");
+    // Paper, for the same reason renderprofile is: the funded replay is pinned
+    // to 1× (`clockLocked` in Simulator.tsx) and would scale the wrong load.
+    await openChart(page, "/charts/replay/paper");
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("Performance.enable");
     const read = async () => {

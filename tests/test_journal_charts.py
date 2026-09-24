@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -142,3 +143,67 @@ def test_a_scalp_gets_an_excursion_off_the_minute_it_traded_in():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# --- the footprint's delta column --------------------------------------------
+
+
+def _ticks(rows: list[tuple[float, int, str]], dtype: str) -> pd.DataFrame:
+    """A tick frame with `size` in a chosen dtype — the whole point of the test
+    below is that the dtype is what decided the answer."""
+    return pd.DataFrame({
+        "price": [r[0] for r in rows],
+        "size": np.array([r[1] for r in rows], dtype=dtype),
+        "side": [r[2] for r in rows],
+    })
+
+
+def test_a_sell_heavy_level_reports_a_negative_delta():
+    """The bug that made every sell-dominated price level report about 4.3
+    billion.
+
+    `_footprint` signed its delta with `-size` while `size` was still the tape
+    cache's own **uint32**, so the negation wrapped instead of negating: a
+    one-lot sell became 4294967295, and a row came out as (sells x 2^32) plus the
+    true figure. Only the sell side was touched, so the column stayed perfectly
+    plausible on buy-heavy levels, and the lane it feeds scaled itself against a
+    four-billion outlier.
+
+    Parameterised over the dtype because that is the whole mechanism, and because
+    the synthetic tick frames the rest of this suite builds use float64 sizes —
+    under which the old code was correct. The fixtures could not have caught it;
+    only the real cache stores uint32.
+    """
+    from api import session_chart as sc
+
+    for dtype in ("uint32", "int64", "float64"):
+        t = _ticks([(100.0, 5, "A"), (100.0, 3, "B"), (100.25, 2, "A")], dtype)
+        b = pd.DataFrame({"end_idx": [3]})
+        rows = sc._footprint(t, b, 0.25)[0]
+        by_price = {p: (s, d) for p, s, d in rows}
+
+        assert by_price[100.0] == (8.0, -2.0), f"{dtype}: 5 sold, 3 bought"
+        assert by_price[100.25] == (2.0, -2.0), f"{dtype}: a lone sell"
+        for p, (s, d) in by_price.items():
+            assert abs(d) <= s, f"{dtype}: |delta| exceeded volume at {p}"
+
+
+def test_the_footprint_and_the_cvd_pane_agree_bar_for_bar():
+    """The invariant the module docstring promises — "the profile's rows and the
+    CVD pane cannot disagree about which way a session leaned" — and which the
+    uint32 wrap broke on every bar that traded a single sell.
+
+    Worth its own test rather than folding into the one above: the two are
+    computed by different functions over the same ticks, and it was the one that
+    cast to float first (`_per_bar_delta`) that was right.
+    """
+    from api import session_chart as sc
+
+    rows = [(100.0 + (i % 5) * 0.25, i % 7 + 1, "BAN"[i % 3]) for i in range(120)]
+    t = _ticks(rows, "uint32")
+    b = pd.DataFrame({"end_idx": [40, 80, 120]})
+
+    fp = sc._footprint(t, b, 0.25)
+    per_bar = sc._per_bar_delta(t, b)
+    for i, bar in enumerate(fp):
+        assert sum(r[2] for r in bar) == pytest.approx(per_bar[i]), f"bar {i}"

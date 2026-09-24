@@ -50,14 +50,19 @@ export const qk = {
   sessions: ["sessions"] as const,
   trades: (scope: FilterScope) => ["trades", scope] as const,
   trade: (scope: FilterScope, no: number) => ["trade", no, scope] as const,
+  // Scope-free: a trade_key is a content hash, so the same key means the same
+  // trade under every filter, and the review panel in /charts shares this cache
+  // with the Trades page instead of refetching per view.
+  tradeContext: (keys: string[]) => ["trade-context", [...keys].sort().join(",")] as const,
+  // The bars half does take a scope — it needs the journal row to know the
+  // instrument and the fills, and that lookup is scoped.
+  tradeContextChart: (scope: FilterScope, key: string) =>
+    ["trade-context-chart", key, scope] as const,
   note: (tradeKey: string) => ["note", tradeKey] as const,
   dayNote: (date: string) => ["day-note", date] as const,
   dayNotesAll: ["day-note", "all"] as const,
   excursion: (no: number) => ["excursion", no] as const,
-  tradeVideoStatus: (scope: FilterScope) => ["trade-video-status", scope] as const,
   bars: (params: Record<string, unknown>) => ["bars", params] as const,
-  tradeChart: (scope: FilterScope, no: number, tf: string) =>
-    ["trade-chart", no, tf, scope] as const,
   dayChart: (scope: FilterScope, date: string, tf: string, sourceFile: string | null) =>
     ["day-chart", date, tf, sourceFile, scope] as const,
   calendar: (scope: FilterScope) => ["calendar", scope] as const,
@@ -68,7 +73,10 @@ export const qk = {
   aiTrade: (tradeKey: string) => ["ai-trade", tradeKey] as const,
   aiPeriod: (scope: FilterScope) => ["ai-period", scope] as const,
   settings: (key: string) => ["settings", key] as const,
-  video: (sourceFile: string) => ["video", sourceFile] as const,
   researchList: ["research-list"] as const,
   researchDoc: (slug: string) => ["research-doc", slug] as const,
+  recallDeck: ["recall-deck"] as const,
+  /** The flipped card's answer. Named here because a review saved from the card
+   *  has to invalidate it, and that write lives in `useSaveTradeReview`. */
+  recallBack: (tradeKey: string) => ["recall-back", tradeKey] as const,
 };

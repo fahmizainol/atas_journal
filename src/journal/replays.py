@@ -30,6 +30,8 @@ is simply no longer the only place it goes.
         trades.json      # frozen — the trades that log produced
         discarded.json   # trades a rewind erased (written only when there were any)
         summary.json     # derived — the aggregates the history page reads
+        whatif.json      # derived — this sitting re-priced under the exit ladder
+                         #   (written when it finishes; see ``read_whatif``)
 
 One *attempt* is one sitting, not one day: replay the same session twice and
 that is two attempts, the second carrying ``repeat_index: 1`` so a track record
@@ -84,13 +86,20 @@ STATUSES = ("active", "finished", "abandoned", "reviewed")
 
 # What kind of sitting this is. ``replay`` is the page you pick a day on;
 # ``drill`` is backtest mode — one model, a random RTH clock on a day you are
-# not told the date of (docs/backtest-mode-plan.md).
+# not told the date of (docs/backtest-mode-plan.md); ``paper`` is that same
+# pick-a-day page run on the practice account, which has the funded account's
+# rules but not its consequences (see ``journal.replay_account``).
+#
+# The mode is also **which account prices the sitting**: ``replay`` and ``paper``
+# each have one and never share it, ``drill`` has none. That mapping lives in
+# ``replay_account.BY_MODE`` rather than here, so this stays the list of what a
+# sitting can be.
 #
 # It is written once, at create, and `patch` refuses to change it. Otherwise
-# "relabel the losing sitting as a drill" hides a loss from the account, since
-# the account is drill-blind by design — the same hole the stale-active sweep
-# exists to close, re-opened through a new door.
-MODES = ("replay", "drill")
+# "relabel the losing sitting" moves a loss off the account that took it — onto
+# the paper one, or off every account at all — which is the same hole the
+# stale-active sweep exists to close, re-opened through a new door.
+MODES = ("replay", "drill", "paper")
 
 # A sitting is a few hundred orders at the very most. The bound is here so a
 # runaway client can't write an unbounded file, not because anyone is expected
@@ -159,6 +168,7 @@ def create(
     started_ms: int,
     model_id: int | None = None,
     mode: str = "replay",
+    account_id: str | None = None,
     drop_ms: int | None = None,
     window: dict | None = None,
 ) -> dict:
@@ -227,6 +237,13 @@ def create(
         # "replay"` — see `is_drill`. Writing it unconditionally here keeps that
         # fallback needed in exactly one generation of files.
         "mode": mode,
+        # **Which account pays for this sitting**, and like the mode it is fixed
+        # the moment the sitting opens (`patch` refuses to move it). The mode
+        # used to carry this and could name two accounts; there can now be any
+        # number, so it gets a field. `None` on a drill, which no account
+        # prices — see `account_id_of` for the fallback that makes every sitting
+        # already on disk answer correctly without being touched.
+        "account_id": None if mode == "drill" else (account_id or None),
         "drop_ms": None if drop_ms is None else int(drop_ms),
         "window": dict(window) if window else None,
         # Every seek that erased a fill, and how many trades it took with it.
@@ -262,6 +279,17 @@ def save(
     if status is not None and status not in STATUSES:
         raise ValueError(f"unknown status {status!r}")
 
+    attempt = _read_json(d / "attempt.json", {})
+    # Does this save claim to *reopen* a sitting that had ended? If so, hold on
+    # to what the sitting held before the write, so the claim can be checked
+    # below against something other than the writer's word for it.
+    reopening = status == "active" and attempt.get("status") in ("finished", "reviewed")
+    was = (
+        (_read_json(d / "log.json", {}), _read_json(d / "trades.json", []))
+        if reopening
+        else None
+    )
+
     _write_json(d / "log.json", log)
     _write_json(d / "trades.json", trades)
     _write_json(d / "summary.json", summary)
@@ -272,7 +300,6 @@ def save(
     else:
         (d / "discarded.json").unlink(missing_ok=True)
 
-    attempt = _read_json(d / "attempt.json", {})
     now = _utc_now()
     attempt["updated_at"] = _iso(now)
     if clock_ms is not None:
@@ -280,17 +307,33 @@ def save(
     if rewinds is not None:
         attempt["rewinds"] = rewinds
     attempt["discarded_trades"] = len(discarded or [])
+    # A sitting reopens only when it is **traded on**, and a save carrying the
+    # very orders and trades it already held is not trading on. It is a resume
+    # re-marking the excursion, a scrub, a bracket leg cancelling a step after
+    # the flatten — all of which write, and all of which used to un-end the
+    # sitting. An hour later the stale sweep found it `active` and filed it
+    # `abandoned`, which is where 23 ended sittings went before 2026-09-06.
+    #
+    # The recorder knows the difference now too (`useReplayAttempt`'s
+    # `settledRef`, which is where the rule belongs — only the browser knows
+    # what it is about to do). This is not that rule a second time: it is the
+    # store declining to record a change when nothing it stores has changed,
+    # which needs no notion of trading and can only ever refuse a no-op.
+    if was is not None and was == (log, trades):
+        status = attempt.get("status")
     if status is not None:
         attempt["status"] = status
         # Stamped once: an attempt that finishes, is reopened and finishes again
         # keeps the moment it first ran out of tape.
         if status == "finished" and not attempt.get("finished_at"):
             attempt["finished_at"] = _iso(now)
-        # Trading on after a review withdraws the review. The trades it was
-        # written about are no longer the trades in the file, so keeping the
-        # verdicts would let a reviewed sitting be traded further under the
-        # protection of an answer given about a different sitting. Flags are
-        # recomputed the next time it finishes.
+        # Trading on drops what was said about the old sitting: its flags no
+        # longer describe the trades in the file, and a `reviewed` carried
+        # forward would let a sitting be traded further under the protection of
+        # an answer given about a different one. Flags are recomputed the next
+        # time it finishes. `review` is the retired verdict record (see `patch`)
+        # — cleared here so an attempt from before 2026-08-20 does not carry a
+        # stale one through a rewind.
         if status == "active":
             attempt.pop("review", None)
             attempt.pop("flags", None)
@@ -298,41 +341,82 @@ def save(
     return attempt
 
 
-def is_drill(attempt: dict) -> bool:
-    """Is this sitting a backtest-mode rep?
+def mode_of(attempt: dict) -> str:
+    """Which of ``MODES`` this sitting is — the one reader of the field.
 
-    One reader for the whole codebase, because the fallback matters: attempts
-    written before the mode existed carry no ``mode`` key and are all replays.
-    Anything testing ``attempt["mode"] == "drill"`` directly would KeyError on
-    the 77 sittings already on disk.
+    The fallback is the whole reason it exists: attempts written before the mode
+    did carry no ``mode`` key and are all replays, so anything reading
+    ``attempt["mode"]`` directly would KeyError on the sittings already on disk.
+    The account walks by mode (``replay_account.epoch_attempts``), which makes a
+    wrong answer here a sitting priced on the wrong account rather than a crash.
     """
-    return (attempt.get("mode") or "replay") == "drill"
+    return str(attempt.get("mode") or "replay")
+
+
+def is_drill(attempt: dict) -> bool:
+    """Is this sitting a backtest-mode rep? The one mode no account prices."""
+    return mode_of(attempt) == "drill"
+
+
+def account_id_of(attempt: dict) -> str | None:
+    """Which account prices this sitting — ``None`` for a drill.
+
+    This used to be the ``mode``, which could name exactly two accounts. It now
+    names any number of them, so the account is stamped in its own field and the
+    mode is left to say what *kind* of sitting this is (a drill or not).
+
+    The fallback is the whole reason the field is optional, and it is exact
+    rather than a guess: every sitting written before accounts were a list was
+    priced by mode, ``paper`` was the paper account and everything else was the
+    funded one. So nothing on disk needs migrating and nothing is reattributed.
+
+    A drill is priced by nobody and says so with ``None`` — the same answer
+    ``replay_account.for_mode`` gave it, and for the same reason (backtest reps
+    are unpriced by design, docs/backtest-mode-plan.md D2).
+    """
+    if is_drill(attempt):
+        return None
+    stamped = str(attempt.get("account_id") or "").strip()
+    if stamped:
+        return stamped
+    return "paper" if mode_of(attempt) == "paper" else "funded"
 
 
 def patch(attempt_id: str, **fields: Any) -> dict:
     """Change the things that are yours to change after the fact — the note, the
-    model it was practising, the status, the flags raised over it and the review
-    answering them. Never the trades, and never the mode."""
+    model it was practising, the status, the flags raised over it and whether it
+    is marked to review later. Never the trades, and never the mode.
+
+    A sitting used to carry a ``review`` here as well: one leak/justified verdict
+    per flag. Retired 2026-08-20 (``docs/trade-grading-plan.md`` G6) — the review
+    is the per-trade answers, which live on the journal rows. Attempts written
+    before then keep the field on disk; nothing reads it, and ``save`` still
+    clears it when a reviewed sitting is traded on."""
     d = _require(attempt_id)
     attempt = _read_json(d / "attempt.json", {})
     now = _utc_now()
-    # A drill is unpriced and a replay is not, so the mode decides whether the
-    # account ever counts this sitting. Letting it move after the fact would
-    # make "relabel it" a way to hide a loss — refuse loudly rather than
-    # silently dropping the field, since an "ok" that ignored you is worse.
+    # The mode decides *which account* counts this sitting — the funded one, the
+    # paper one, or none at all. Letting it move after the fact would make
+    # "relabel it" a way to shift a loss onto an account that did not take it;
+    # refuse loudly rather than silently dropping the field, since an "ok" that
+    # ignored you is worse.
     if "mode" in fields and fields["mode"] is not None:
-        if fields["mode"] != (attempt.get("mode") or "replay"):
+        if fields["mode"] != mode_of(attempt):
             raise ValueError("an attempt's mode is fixed when it opens")
+    # And for the same reason, one door along: the account id is *the* answer to
+    # "which account counts this loss", so letting it move after the fact would
+    # reopen exactly the hole the mode's immutability closes.
+    if "account_id" in fields and fields["account_id"] is not None:
+        if fields["account_id"] != account_id_of(attempt):
+            raise ValueError("an attempt's account is fixed when it opens")
     if "note" in fields and fields["note"] is not None:
         attempt["note"] = str(fields["note"])
     if "model_id" in fields:
         attempt["model_id"] = fields["model_id"]
     if fields.get("flags") is not None:
         attempt["flags"] = list(fields["flags"])
-    if fields.get("review") is not None:
-        review = dict(fields["review"])
-        review.setdefault("reviewed_at", _iso(now))
-        attempt["review"] = review
+    if fields.get("review_later") is not None:
+        attempt["review_later"] = bool(fields["review_later"])
     status = fields.get("status")
     if status is not None:
         if status not in STATUSES:
@@ -340,6 +424,12 @@ def patch(attempt_id: str, **fields: Any) -> dict:
         attempt["status"] = status
         if status == "finished" and not attempt.get("finished_at"):
             attempt["finished_at"] = _iso(now)
+        # Filing the review answers the flag, so the flag comes off with it —
+        # here rather than in the router because it is an invariant of the
+        # record ("a reviewed sitting is not waiting to be reviewed"), and a
+        # caller that had to remember to clear it is a caller that will forget.
+        if status == "reviewed":
+            attempt["review_later"] = False
     attempt["updated_at"] = _iso(now)
     _write_json(d / "attempt.json", attempt)
     return attempt
@@ -407,7 +497,13 @@ def list_attempts(
 
 
 def read(attempt_id: str) -> dict:
-    """One attempt, whole: the record, the log, the trades, the aggregates."""
+    """One attempt, whole: the record, the log, the trades, the aggregates.
+
+    ``whatif.json`` is deliberately *not* here. It is a counterfactual measured
+    off this sitting rather than a part of it, it is the largest file in the
+    folder, and every caller of ``read`` today wants the sitting — see
+    ``read_whatif``.
+    """
     d = _require(attempt_id)
     return {
         **_read_json(d / "attempt.json", {}),
@@ -416,3 +512,44 @@ def read(attempt_id: str) -> dict:
         "discarded": _read_json(d / "discarded.json", []),
         "summary": _read_json(d / "summary.json", {}),
     }
+
+
+# --- the cached what-if grid -------------------------------------------------
+#
+# Re-pricing a sitting under the exit ladder costs about a second and a whole
+# tick tape, which is affordable when a day view asks for one and is not when an
+# account view asks for thirty. So the grid is measured once, when the sitting
+# finishes, and read back from here afterwards.
+
+
+def read_whatif(attempt_id: str, *, engine_version: int, grid_version: int) -> dict | None:
+    """This sitting's cached what-if grid, or None if there is not a usable one.
+
+    **A grid from another engine or another ladder is missing, not usable.** Both
+    fingerprints are checked here rather than by the callers, because the failure
+    they prevent is silent: a row still keyed ``t25`` whose arithmetic has moved
+    would pool into an account's answer looking exactly like a fresh one. Re-price
+    it instead — that is what ``demo/whatif_backfill.py`` is for.
+    """
+    try:
+        d = attempt_dir(attempt_id)
+    except ValueError:
+        return None
+    got = _read_json(d / "whatif.json")
+    if not isinstance(got, dict):
+        return None
+    if got.get("engine_version") != engine_version or got.get("grid_version") != grid_version:
+        return None
+    return got
+
+
+def write_whatif(attempt_id: str, payload: dict) -> dict:
+    """Store a priced grid beside the sitting it was measured off.
+
+    An invalid grid is stored too, and on purpose: ``pick_cfg`` refusing to
+    reproduce a sitting is a stable fact about it under this engine, and storing
+    the refusal is what stops every account view re-paying a second per rep to be
+    told the same thing.
+    """
+    _write_json(_require(attempt_id) / "whatif.json", payload)
+    return payload

@@ -705,6 +705,10 @@ def _feed() -> RithmicFeed:
     f = RithmicFeed.__new__(RithmicFeed)   # no socket, no credentials
     f._last_ns = 0
     f.stats = __import__("collections").Counter()
+    # `_drain` offers each batch to the broker's ladder before routing it. A
+    # session without routing is the ordinary case and answers None, which is
+    # what these tests are.
+    f.broker = None
     return f
 
 

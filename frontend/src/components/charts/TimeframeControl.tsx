@@ -7,8 +7,15 @@
 // tick cache now, so it can offer what everything else does. Mapping a chosen
 // key back to backend params (resolution vs bar_minutes/ticks_per_bar) stays
 // with each caller; this is only the button row.
+//
+// `custom` adds a field to the overflow popup for a bucketing nobody put a
+// button on. It is a prop rather than the default because the two kinds of
+// caller differ in what they can honour: the tape-bucketed charts build every
+// bar in the browser and can draw any rule, while the ones above ask an API for
+// bars at a fixed set of resolutions.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { addCustomTimeframe, isCustomTimeframe, removeCustomTimeframe } from "../../lib/timeframes";
 
 export type TfOption = { key: string; label: string };
 
@@ -31,10 +38,11 @@ export function TimeframeControl({
   options,
   primary,
   compact,
+  custom,
 }: {
   value: string;
   onChange: (tf: string) => void;
-  options: TfOption[];
+  options: readonly TfOption[];
   /** Keys to keep on the row; everything else moves behind a ⋯ button. Omit and
    *  every option is shown, which is what the four-option callers want.
    *
@@ -47,8 +55,19 @@ export function TimeframeControl({
    *  buttons off-centre. Kept inline and conditional rather than moved to CSS —
    *  `.radio-group` is shared with six components that space themselves. */
   compact?: boolean;
+  /** Offer a field for a bucketing that isn't on the list, and an × to forget
+   *  one you added. Only the charts that bucket the tape *in the browser* can
+   *  take one — the Simulator, Live, and the two replays build every bar from
+   *  prints, so any rule is drawable. The Journal/Strategies/Drafts pickers ask
+   *  a backend for bars at a fixed set of resolutions, and a typed `45s` there
+   *  would be a promise the API can't keep. */
+  custom?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  /** The field rejected what's in it. Cleared on the next keystroke — an error
+   *  that outlives the text it was about is an error about nothing. */
+  const [bad, setBad] = useState(false);
 
   // Esc and outside-press close, both in the capture phase — the same reasoning
   // as NavMenu and IndicatorLegend: a listener registered on open would
@@ -96,17 +115,37 @@ export function TimeframeControl({
     </button>
   );
 
+  // The ⋯ is also where a bucketing is typed, so with `custom` it stays on the
+  // row even when nothing has overflowed into it.
+  const hasPop = extra.length > 0 || !!custom;
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const tf = addCustomTimeframe(draft);
+    if (!tf) {
+      setBad(true);
+      return;
+    }
+    onChange(tf.id);
+    setDraft("");
+    setOpen(false);
+  };
+
   const row = (
     <div className="radio-group" style={compact ? undefined : { marginBottom: 10 }}>
       {onRow.map((o) => btn(o))}
-      {extra.length > 0 && (
+      {hasPop && (
         <button
           type="button"
           className={`tf-more${open ? " active" : ""}`}
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
           aria-haspopup="menu"
-          title={`More timeframes (${extra.map((o) => o.label).join(", ")})`}
+          title={
+            extra.length > 0
+              ? `More timeframes (${extra.map((o) => o.label).join(", ")})`
+              : "Another timeframe"
+          }
         >
           ⋯
         </button>
@@ -114,14 +153,55 @@ export function TimeframeControl({
     </div>
   );
 
-  if (extra.length === 0) return row;
+  if (!hasPop) return row;
 
   return (
     <div className="tf-wrap" data-tf-more>
       {row}
       {open && (
         <div className="tf-pop radio-group" role="menu">
-          {extra.map((o) => btn(o, true))}
+          {extra.map((o) =>
+            // One you added, and not the one on screen — dropping the selected
+            // bucketing would re-bucket the chart as a side effect of tidying.
+            // Option and × share a wrapper so a wrap never orphans the × on the
+            // next line, where it would read as belonging to whatever it landed
+            // beside. `.radio-group button` is a descendant rule, so the buttons
+            // inside it are styled exactly as the flat ones are.
+            custom && isCustomTimeframe(o.key) && o.key !== value ? (
+              <span className="tf-opt" key={o.key}>
+                {btn(o, true)}
+                <button
+                  type="button"
+                  className="tf-forget"
+                  title={`Forget ${o.label}`}
+                  aria-label={`Forget ${o.label}`}
+                  onClick={() => removeCustomTimeframe(o.key)}
+                >
+                  ×
+                </button>
+              </span>
+            ) : (
+              btn(o, true)
+            ),
+          )}
+          {custom && (
+            <form className="tf-custom" onSubmit={submit}>
+              <input
+                value={draft}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  setBad(false);
+                }}
+                className={bad ? "bad" : undefined}
+                placeholder="e.g. 90s"
+                aria-label="Custom timeframe"
+                title="Seconds, minutes, hours or ticks: 45s, 7m, 2h, 1500t. A bare number is minutes."
+              />
+              <button type="submit" title="Add this timeframe">
+                +
+              </button>
+            </form>
+          )}
         </div>
       )}
     </div>

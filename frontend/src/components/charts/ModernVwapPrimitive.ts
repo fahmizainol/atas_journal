@@ -22,8 +22,7 @@
 // construct working without inferring it from where the line steps.
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
-import type { Bar } from "../../lib/replayEngine";
-import type { MvSignal } from "../../lib/modernVwap";
+import type { MvBar, MvSignal } from "../../lib/modernVwap";
 
 /** Long green, short red — the signal is a direction, and these marks sit off
  *  the bar's high/low rather than over the body, so they never compete with a
@@ -43,7 +42,7 @@ interface Ctx {
   series: ISeriesApi<"Candlestick">;
   signals: () => MvSignal[];
   anchors: () => number[];
-  bars: () => Map<number, Bar>;
+  bars: () => ReadonlyMap<number, MvBar>;
   visible: () => boolean;
 }
 
@@ -124,12 +123,12 @@ export class ModernVwapPrimitive {
   private requestUpdate?: () => void;
   private _signals: MvSignal[] = [];
   private _anchors: number[] = [];
-  private _bars = new Map<number, Bar>();
+  private _bars: ReadonlyMap<number, MvBar> = new Map();
   private _visible = false;
 
   /** Swap the whole set — the indicator is recomputed whole on each bar close
    *  (see ReplayChart.refreshMv), so there is never an append to make. */
-  setData(signals: MvSignal[], anchors: number[], bars: Map<number, Bar>) {
+  setData(signals: MvSignal[], anchors: number[], bars: ReadonlyMap<number, MvBar>) {
     this._signals = signals;
     this._anchors = anchors;
     this._bars = bars;

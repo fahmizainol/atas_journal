@@ -89,6 +89,32 @@ def test_schema_is_additive_and_reverts_by_dropping():
         assert _count(conn, "setups") == len(db.SEED_SETUPS)
 
 
+def test_measured_levels_survive_a_second_connect():
+    """``_migrate_trade_levels_per_member`` rebuilds the table once, not forever.
+
+    It drops ``trade_levels`` to change the primary key, and its guard read the
+    old key out of the wrong ``PRAGMA index_list`` column — so the guard never
+    matched and every connect wiped the measurements. Nothing failed loudly:
+    the table simply stayed empty, review cards offered no level to pick, and a
+    trade that cannot name its level cannot be answered or filed.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "test.db"
+        conn = db.connect(path)
+        db.init_db(conn)
+        conn.execute(
+            "INSERT INTO trade_levels"
+            " (trade_key, anchor, family, member, rank, dist_ticks, method, computed_at)"
+            " VALUES ('t1', 'entry', 'vwap', 'vwap_l1', 0.9, -4.0, 'test', '2026-08-22')"
+        )
+        conn.commit()
+        conn.close()
+
+        conn = db.connect(path)
+        assert _count(conn, "trade_levels") == 1, \
+            "the per-member migration re-ran and dropped the measurements"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

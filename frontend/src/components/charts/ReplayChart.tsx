@@ -25,7 +25,7 @@
 //   - the IB *develops*. A strategy chart only draws a completed window; a
 //     replay is a session in progress and watching the hour form is the point.
 
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
   CandlestickSeries,
   ColorType,
@@ -40,7 +40,7 @@ import {
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
-import { chartInk, chartSurfaces, ink, palette, type BandHue } from "../../theme";
+import { chartInk, chartSurfaces, palette, type BandHue } from "../../theme";
 import {
   applyAppearance,
   appearanceSettings,
@@ -60,32 +60,138 @@ import type {
   TapeEvent,
   EventTuning,
 } from "../../lib/replayEngine";
+import { LevelHist } from "../../lib/replayEngine";
 import type { TapeRange } from "../../lib/volumeProfile";
-import type { VwapPoint } from "../../lib/chartTypes";
-import { VR_STOP_TICKS, computeVolRuler } from "../../lib/volRuler";
+import { clusterLevels, GAP_LOOKBACK_BARS, type ApproachRow } from "../../lib/levelApproach";
 import {
-  computeModernVwap,
-  type ModernVwapParams,
-  type MvPoint,
-} from "../../lib/modernVwap";
-import { ModernVwapPrimitive } from "./ModernVwapPrimitive";
+  ARM_REACH_TICKS,
+  hlineKey,
+  levelKey,
+  type ArmShape,
+  type ArmableLevel,
+  type LevelArm,
+} from "../../lib/levelArm";
+import { LevelApproach } from "./LevelApproach";
+import { LegAmount, legEcho } from "./LegAmount";
+import type { UsdBracket } from "../../lib/bracketUsd";
+import type { VwapPoint } from "../../lib/chartTypes";
+import {
+  PresetRuler,
+  hasPresetRead,
+  samePresetRead,
+  VR_STOP_TICKS,
+  computeVolRuler,
+  type VolRulerRead,
+} from "../../lib/volRuler";
+import type { ModernVwapData, ModernVwapParams } from "../../lib/modernVwap";
+import type { DsvParams, DynamicSwingVwapData } from "../../lib/dynamicSwingVwap";
+import {
+  createDynamicSwingVwapLayer,
+  type DsvSource,
+  type DynamicSwingVwapLayer,
+} from "./dynamicSwingVwapLayer";
+import {
+  MV_KEYS,
+  MV_RING,
+  createModernVwapLayer,
+  type ModernVwapLayer,
+  type MvKey,
+  type MvSource,
+} from "./modernVwapLayer";
+import { StudyLayer } from "./StudyLayer";
+import {
+  catalogue,
+  findStudy,
+  loadCatalogue,
+  studyColor,
+  studyFields,
+  studyLabel,
+  type StudyReport,
+  type StudySpec,
+} from "../../lib/studies";
+import { LAYER_NAME, type LayerState, type ReplayLayerKey } from "./chartLayers";
 import {
   IndicatorLegend,
   type IndicatorKey,
+  type StudyRow,
   type IndicatorSettingsMap,
   type LegendItem,
 } from "./IndicatorLegend";
-import { ChartToolButton, ChartToolSep } from "./ChartToolButton";
+import { ChartToolButton, ChartToolSep, ChartTools } from "./ChartToolButton";
 import {
   loadChartAppearance,
+  loadCvdOsc,
+  deltaLaneLabel,
+  loadDeltaLane,
   loadDrawings,
   loadIndicatorVisibility,
+  loadLevelPanelOpen,
+  loadExternalChartParams,
+  loadHtfTrendParams,
+  loadRankedZonesParams,
+  saveRankedZonesParams,
+  loadProfileDelta,
+  loadVwapBands,
+  loadVwapFill,
+  loadVwapFillRegion,
   saveChartAppearance,
+  saveCvdOsc,
+  saveDeltaLane,
   saveDrawings,
   saveIndicatorVisibility,
+  saveLevelPanelOpen,
+  saveExternalChartParams,
+  saveHtfTrendParams,
+  saveProfileDelta,
+  saveVwapBands,
+  saveVwapFill,
+  saveVwapFillRegion,
   type ChartAppearance,
+  type DeltaLaneKnobs,
   type IndicatorVisibility,
+  vwapBandLabel,
+  vwapBandsShown,
+  type VwapBandChoice,
+  type VwapBandChoices,
+  type VwapFillAnchor,
+  type VwapFillRegion,
+  type VwapFillRegions,
+  type VwapFillWeights,
 } from "../../lib/chartPrefs";
+import {
+  computeCvdOsc,
+  cvdOscHist,
+  cvdOscStrengthLabel,
+  type CvdOscDivergence,
+  type CvdOscParams,
+} from "../../lib/cvdOsc";
+import {
+  cvdOscKnobs,
+  externalChartKnobs,
+  htfTrendKnobs,
+  rankedZonesKnobs,
+  volumeProfileKnobs,
+  vwapAnchorKnobs,
+} from "./indicatorKnobs";
+import { ExternalChartPrimitive } from "./ExternalChartPrimitive";
+import { HtfTrendPrimitive } from "./HtfTrendPrimitive";
+import { computeHtfTrend, framesLabel, type HtfTrendParams } from "../../lib/htfTrend";
+import { RankedZonePrimitive } from "./RankedZonePrimitive";
+import { EconEventPrimitive, type EconEvent } from "./EconEventPrimitive";
+import { GexLevelsPrimitive, type GexSession, type GexStep } from "./GexLevelsPrimitive";
+import {
+  computeRankedZones,
+  type RankedZonesData,
+  type ZoneTape,
+  type RankedZonesParams,
+} from "../../lib/rankedZones";
+import {
+  EXTERNAL_PERIOD_OPTIONS,
+  groupExternalBars,
+  type ExternalBar,
+  type ExternalChartParams,
+} from "../../lib/externalChart";
+import { CvdDivergencePrimitive } from "./CvdDivergencePrimitive";
 import { playCue } from "../../lib/orderSound";
 import { focusChart, hasChartFocus, mountChart, nextChartId, unmountChart } from "../../lib/chartFocus";
 import { joinLink, publishCrosshair, publishRightEdge, setPaneLinked } from "../../lib/paneLink";
@@ -114,6 +220,42 @@ import {
   type VolumeProfile,
 } from "../../lib/volumeProfile";
 import {
+  VolumeShelfPrimitive,
+  type ShelfColumn,
+  type ShelfField,
+} from "./VolumeShelfPrimitive";
+import {
+  detectShelves,
+  evalBars,
+  windowStart,
+  ShelfTracker,
+  shelfFlow,
+  type ShelfParams,
+} from "../../lib/volumeShelf";
+import { loadShelfParams, loadShelfField } from "../../lib/chartPrefs";
+import {
+  loadEconEventsParams,
+  saveEconEventsParams,
+  type EconImpactFloor,
+  GEX_EXPIRY_OPTIONS,
+  GEX_WALL_OPTIONS,
+  loadGexLevelsParams,
+  saveGexLevelsParams,
+  type GexExpiry,
+  type GexLevelsParams,
+} from "../../lib/chartPrefs";
+import { apiGet } from "../../lib/api";
+import {
+  LANE_WINDOW_MINUTES,
+  classifyFlagged,
+  readLane,
+  readVisitLane,
+  splitVisits,
+  windowedOnto,
+  type LaneReading,
+  type LaneSource,
+} from "../../lib/deltaFlow";
+import {
   buildComposite,
   type Composite,
   type CompositeRule,
@@ -122,11 +264,12 @@ import { COARSE_POINTER, byPointer } from "../../lib/pointer";
 
 // (Volume bar colours follow the candle scheme — see chartAppearance.volumeColors.)
 
-/** How tall one row of the volume profile is, in points — two ticks on NQ. The
- *  tape can be read at its own tick, but four rows to the point draw as a comb;
- *  pairing them keeps the shape of a shelf without smoothing it into one. Every
- *  profile on this chart uses it: the viewport one and each fixed-range one. */
-const PROFILE_BIN = 0.5;
+/** How tall one row of the volume profile is, in points — one tick on NQ, the
+ *  finest the tape can be read at, and the same grid `/charts` and the engine's
+ *  own value area sit on. Every profile on this chart uses it: the viewport one
+ *  and each fixed-range one. Wide windows still group above `MAX_LEVELS`
+ *  (lib/volumeProfile), so this is a floor on the row, not a promise about it. */
+const PROFILE_BIN = 0.25;
 
 /** The open position as the page knows it. The chart fills in the rest of what
  *  the overlay needs (tick size, $/point, the mark price) from the tape and the
@@ -151,12 +294,14 @@ export interface PositionLine {
 }
 
 /** The bracket a chart-placed order is measured with — the page's ticket, shown
- *  inside the long-press menu so a whole order can be built without opening it. */
-export interface TicketDraft {
-  size: number;
-  stopTicks: number;
-  targetTicks: number;
-}
+ *  inside the long-press menu so a whole order can be built without opening it.
+ *
+ *  Either leg may be pinned to a dollar figure instead of a tick distance
+ *  (lib/bracketUsd). The **page resolves the pin before handing this down**, so
+ *  `stopTicks` here is always the distance an order would actually carry — the
+ *  menu below sets the pin and reads the resolution, and never does the
+ *  arithmetic itself. */
+export type TicketDraft = UsdBracket;
 
 /** An order chosen outright rather than inferred from which side of the market
  *  was clicked: the long-press menu names the type and the side. */
@@ -208,6 +353,13 @@ export interface ReplayChartHandle {
    *  lib/chartTools. Arming stays in here (so does the pointer, the mutual
    *  exclusion and every drawing); the rail is a remote control over it. */
   armTool(id: ChartToolId | null): void;
+  /** Draw a layer on this pane, or stop drawing it. What the topbar catalogue's
+   *  add and remove are for an app layer: visibility is per pane and lives in
+   *  here, so the catalogue reaches the focused pane through its handle rather
+   *  than the page holding a second copy of the state.
+   *
+   *  A no-op when the layer is already the way you asked for. */
+  setLayer(key: IndicatorKey, on: boolean): void;
   /** The rail's "take it away" group, in the order the rail draws them: the
    *  anchored VWAP, whichever drawing is selected, and everything at once. */
   clearAvwap(): void;
@@ -251,6 +403,10 @@ interface Props {
   /** The page's order ticket, so the menu can show and edit it in place. */
   ticket?: TicketDraft;
   onTicketChange?: (t: TicketDraft) => void;
+  /** The vol ruler as it stands, on every bar close — the ticket's risk sizer
+   *  sets its stop from it. Fires whether or not the pane is drawn, and with
+   *  null while there is nothing to read. */
+  onVolRuler?: (r: VolRulerRead | null) => void;
   /** What a point is worth in the contract this page's orders are **routed** to,
    *  when that is not the contract the tape is on — the ticket prices its two
    *  bracket boxes in money, and the story is the same one `PositionLine`
@@ -286,6 +442,11 @@ interface Props {
   /** Prominence floor for the composite's HVN/LVN nodes, as a share of its
    *  tallest hump. Zero leaves the node reader off. */
   nodeProm?: number;
+  /** The volume shelves' window and thresholds. Absent on a page that offers no
+   *  knob panel for them, in which case the stored (sticky-global) setting is
+   *  used — the layer is still drawn, it just cannot be adjusted from there. */
+  shelfParams?: ShelfParams;
+  shelfField?: ShelfField;
   /** The tape-event layer, or absent for a chart that doesn't offer it at all —
    *  which is the layer's off switch in the sense the *page* means it, distinct
    *  from the per-row indicator toggles a reader flicks. The engine is always
@@ -301,6 +462,11 @@ interface Props {
    *  none of it — the page holds the state and hands the knobs back through
    *  `indicatorSettings`. See lib/modernVwap for what the thing is. */
   modernVwap?: ModernVwapParams;
+  /** The Zeiierman swing-flip VWAP's parameters, on exactly the same terms as
+   *  Modern VWAP above: present offers the layer, absent and its row never
+   *  appears. A different indicator, not a mode of that one — see
+   *  lib/dynamicSwingVwap for the three places they disagree. */
+  dynamicSwingVwap?: DsvParams;
   /** The knobs above, as the page offers them back to the user — hung off the
    *  "…" on the legend row each one belongs to. The chart doesn't own any of
    *  this state (it arrives as the props above and leaves through these
@@ -325,12 +491,50 @@ interface Props {
    * guessing, and the page's push becomes idempotent.
    */
   onReady?: () => void;
+  /** The community studies picked off the topbar (see lib/studies), drawn over
+   *  *this* pane's bars: an overlay goes on the price, anything else gets a pane
+   *  of its own below the chart's own extra panes.
+   *
+   *  The chart owns none of it. The page holds the list and hands the same one
+   *  to every pane, so a split layout is four bucketings of the same studies —
+   *  which is how you get an RSI on the 5m and the 1h at once. */
+  studies?: StudySpec[];
+  /** A study was hidden, re-tuned or removed on this pane's legend. The page owns
+   *  the list (it persists it, and it is per pane), so the legend's edits leave
+   *  through here the way a bucketing change leaves through `onTfChange`. */
+  onStudiesChange?: (specs: StudySpec[]) => void;
+  /** What this pane's layers are doing — every one of them, on or off, drawable
+   *  or not yet. The topbar catalogue is driven from this: visibility lives in
+   *  here (see `vis`), so the page is told rather than asked, the same way
+   *  `onToolsChange` reports the hand tools. */
+  onLayers?: (layers: LayerState[]) => void;
   /** Which pane's copy of the per-chart display preferences (indicator
    *  visibility, legend open) this chart reads and writes. Omitted on the
    *  primary, which keeps the shared keys every other chart in the app uses —
    *  a secondary pane passes something short and stable like `"b"`, since the
    *  key has to survive a reload and so cannot be a runtime instance id. */
   prefsPane?: string;
+  /** Offer the near-price levels panel (see LevelApproach). Opt-in rather than
+   *  derived from `prefsPane`: that is undefined on the primary pane *and* in
+   *  the journal's day replayer and the Recall card, neither of which passes it
+   *  — so "primary" is not a thing this chart can work out for itself. */
+  levelPanel?: boolean;
+  /** The standing arms (see lib/levelArm), owned by the *page*: firing one
+   *  places an order, and orders are the page's — this chart says which levels
+   *  exist and which are lit, and hands the toggle up.
+   *
+   *  The arm carries its own price, snapshotted at the toggle, so the page never
+   *  has to ask this chart what a level is worth later. That is what keeps the
+   *  seam one callback wide. */
+  arms?: LevelArm[];
+  /** Arm a level with a shape, or `null` to disarm it. The level is passed whole
+   *  because its price at this instant is the price the arm keeps. */
+  onArmToggle?: (level: ArmableLevel, shape: ArmShape | null) => void;
+  /** Whether the first arm to fire cancels the rest of its kind, and the toggle.
+   *  The page owns the flag because the page is what fires arms; the chart only
+   *  draws the switch. */
+  armRace?: boolean;
+  onArmRace?: () => void;
   /** Whether this pane shares the crosshair and the right edge with the others
    *  (see lib/paneLink). Undefined means linked — a lone chart has nobody to
    *  link with, so the default costs nothing and the pages that never split
@@ -348,6 +552,17 @@ interface Props {
    *  hands over a masked name on purpose — so the chart never reads it off the
    *  tape itself. */
   symbol?: string;
+  /** The display zone the bars' wall clock is in ("New York", or an IANA name).
+   *  Only the economic-events layer needs it: its releases are true UTC and have
+   *  to be put on the same wall clock the tape was. Defaults to New York, which
+   *  is what every page in the app plays the tape in. */
+  tz?: string;
+  /** The futures contract the tape is on (NQZ6), for layers that read a store
+   *  by contract — today only the gamma levels, which anchor the options books
+   *  on this contract's own close. Unlike `symbol` this is never masked; a page
+   *  that must not reveal the tape (blind replay) leaves it out, and the layer
+   *  says it is unavailable. */
+  tapeContract?: string;
   /** Which bar this pane is drawing ("5m"), for the same line. The chart is
    *  handed its bars already bucketed and has no other way to know. */
   tfLabel?: string;
@@ -374,26 +589,114 @@ interface Props {
 export interface EventOverlay {
   tuning: EventTuning;
   style: EventStyle;
+  /** Strength below which a published event isn't drawn, per kind (1 = every
+   *  published event). A repaint-only filter over what the engine found — it
+   *  joins the per-kind toggles in `pushEvents`, the one place the event filter
+   *  lives, so the bands, the marginals and the legend counts all agree. */
+  floorSweep: number;
+  floorAbsorb: number;
   /** The marginal over the volume profiles — the same events read against price
    *  instead of against time. Its own switch because it answers its own
    *  question, and because a gutter can only hold so much. */
   marginal: boolean;
 }
 
+/** The "no studies picked" list, as one array rather than a fresh `[]` per
+ *  render — the layer rebuilds on identity, and a new empty array every render
+ *  would be a rebuild every render. */
+const EMPTY_STUDIES: StudySpec[] = [];
+
 type BandKey = "mid" | "u1" | "l1" | "u2" | "l2";
 const BAND_KEYS: BandKey[] = ["mid", "u1", "l1", "u2", "l2"];
+/** Which ring each σ line belongs to, for the per-anchor band knob. The mid is
+ *  not on that knob — it is the anchored VWAP — so it isn't in here either, and
+ *  the two places that read this ask about the mid first. */
+const RING_OF: Record<Exclude<BandKey, "mid">, 1 | 2> = { u1: 1, l1: 1, u2: 2, l2: 2 };
+/** What the ⚓ anchor draws: everything. It is not one of the three fixed anchors
+ *  the knob governs (chartPrefs.VwapFillAnchor). */
+const ALL_BANDS = { s1: true, s2: true, fill: true };
 type ProfKey = "vah" | "val" | "poc";
 const PROF_KEYS: ProfKey[] = ["vah", "val", "poc"];
-/** Modern VWAP's seven line series. Module scope because they are referenced
- *  from inside the build effect's closure, which lives for the life of the
- *  chart — a per-render array there is a stale-capture question nobody should
- *  have to think about. */
-const MV_KEYS = ["mid", "u1", "l1", "u2", "l2", "u3", "l3"] as const;
-type MvKey = (typeof MV_KEYS)[number];
-/** Which σ ring each series is. 0 is the mid line. Module scope for the same
- *  reason as the keys, and because both the builder (which sets the dash and the
- *  weight from it) and the refresh (which sets the alpha) need the same answer. */
-const MV_RING: Record<MvKey, number> = { mid: 0, u1: 1, l1: 1, u2: 2, l2: 2, u3: 3, l3: 3 };
+/** How a σ line names itself at the pane edge. The mid contributes nothing — the
+ *  anchor's own name is the whole label there. */
+const SIGMA_LABEL: Record<MvKey, string> = {
+  mid: "",
+  u1: " +1σ",
+  l1: " −1σ",
+  u2: " +2σ",
+  l2: " −2σ",
+  u3: " +3σ",
+  l3: " −3σ",
+};
+
+/** What the gamma layer's expiry filter is called on its knob and legend row. */
+const GEX_EXPIRY_LABEL: Record<GexExpiry, string> = {
+  all: "all expiries",
+  week: "≤7 days",
+  "0dte": "0DTE",
+};
+
+/** Which construct a level came from. Carried so the approach panel can collapse
+ *  a stack into one row and still say what is in it — three names for one price
+ *  is a stack of one, and a confluence count that does not know that is a
+ *  confidence trick (the 9/20 EMA measured ρ > 0.7 against the +1σ band). */
+type LevelFamily = "vwap" | "devVa" | "modernVwap" | "dsv" | "ib" | "composite" | "hline";
+
+/** One price level this chart is currently drawing. */
+interface EnumeratedLevel {
+  family: LevelFamily;
+  label: string;
+  /** Stable identity for arming (lib/levelArm). Family+label for a drawn layer;
+   *  a hand-drawn line keys on its id instead, since every one of them is
+   *  labelled "your line" and a label key would collapse them into one. */
+  key: string;
+  price: number;
+  /** Whether the price scale fits to it. The edge markers are exactly the levels
+   *  where this is false; nothing else reads it. */
+  fitted: boolean;
+  /** The level's own value at each bar time asked for, `NaN` where it had none —
+   *  which is the right answer for a level younger than the window, and the one
+   *  `gapCloser` turns into "unknown". Empty when no window was asked for. */
+  path: number[];
+}
+
+/** Sample a time-keyed series onto `times`, `NaN` where it has no entry there.
+ *
+ *  Sampled rather than sliced: see `enumerateLevels`. `pts` and `times` are both
+ *  ascending, so this is a merge walk from a binary-searched start — the series
+ *  can be a whole session long and the window is six bars at its end. */
+function sampleAt<T extends { time: number }>(
+  pts: readonly T[],
+  times: readonly number[],
+  pick: (p: T) => number,
+): number[] {
+  const out = new Array<number>(times.length).fill(NaN);
+  if (!pts.length || !times.length) return out;
+  let lo = 0;
+  let hi = pts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (pts[mid].time < times[0]) lo = mid + 1;
+    else hi = mid;
+  }
+  for (let i = 0; i < times.length; i++) {
+    while (lo < pts.length && pts[lo].time < times[i]) lo++;
+    if (lo < pts.length && pts[lo].time === times[i]) out[i] = pick(pts[lo]);
+  }
+  return out;
+}
+
+/** A layer that is drawn but deliberately not *fitted* (see `mkBand`), at a price
+ *  outside the pane. Demoting a series from the price scale's fit has exactly one
+ *  real cost — off screen and non-existent look identical — and this is the thing
+ *  that pays it: the edge markers say which way the level went and how far. */
+interface EdgeLevel {
+  label: string;
+  price: number;
+  /** Points between the level and the last trade, always positive: the chevron
+   *  carries the direction. */
+  dist: number;
+}
 
 /** The bar a time sits on (or the nearest one). Bars are strictly ascending, so
  *  it is a plain binary search — used to hold a viewport across a `setData` that
@@ -426,11 +729,18 @@ const countEvents = (events: TapeEvent[]): { sweep: number; absorb: number } => 
 const clampIdx = (bars: Bar[], at: number): number =>
   bars.length ? Math.max(0, Math.min(bars.length - 1, Math.round(at))) : -1;
 
-/** One fixed-range profile the user has drawn, bounded by bar times. */
+/** One fixed-range profile the user has drawn, bounded by bar times.
+ *
+ *  `live` is what a right edge dropped on the last bar means: keep this edge on
+ *  the live edge. `to` is still the truth every other reader uses (hit-testing,
+ *  drawing, persistence) — `paint` re-resolves it from the bar array first, so a
+ *  latched range is correct after new bars print *and* after a rewind takes them
+ *  away again, without a second notion of where its right edge is. */
 interface RangeSel {
   id: number;
   from: number;
   to: number;
+  live: boolean;
 }
 /** One hand-drawn horizontal price line. Every line is also an alert: `armed`
  *  goes false the moment the tape crosses the price (one chime, and the line
@@ -485,6 +795,52 @@ const FRAME_ROOM = 12;
  *  weekly VWAP and a multi-session composite is a thing autoscale does on its
  *  own, without anyone touching the scale. */
 const RIBBON = 0.25;
+/** How often the developing overlays — the four VWAP bands and the three
+ *  developing value areas, 29 line series between them — may be redrawn while
+ *  the replay plays, in ms.
+ *
+ *  The same rule, for the same reason, as `PANE_DRAW_MS` in pages/Simulator.tsx:
+ *  bar close *or* this, whichever comes first. Bar close alone would freeze the
+ *  developing lines for a whole bar, which reads as a broken layer rather than
+ *  a cheap one; 200ms redraws them ~5 times a second, and a σ band that moves
+ *  five times a second is not a band you can see stepping.
+ *
+ *  Why they need a gate at all, when the candle does not: lightweight-charts
+ *  rebuilds a series' *entire* raw point array on the next paint after any
+ *  `update()` (`_fillRawPoints` — it maps over every row, not the visible
+ *  range). So a frame costs O(bars x updated series), and 29 of the ~32 series
+ *  on this chart are these. Measured: hiding them takes a 15s replay from 10 to
+ *  33fps, because a seconds bucketing holds several thousand bars where a 500t
+ *  one holds a few hundred. */
+const OVERLAY_DRAW_MS = 200;
+/** Overwrite-or-append one point at the tail of a time-keyed series.
+ *
+ *  Every developing layer prints once per bar and keeps re-printing that bar's
+ *  entry while it forms, so a tail always either restates the last point or adds
+ *  a new one — never lands in the middle. `ReplayEngine.put` is the same rule on
+ *  the engine's side of the wire; this is the chart's, shared by the band
+ *  primitives' point arrays and by the buffer the draw gate fills. */
+function putTail<T extends { time: number }>(into: T[], pt: T): void {
+  if (into.length && into[into.length - 1].time === pt.time) into[into.length - 1] = pt;
+  else into.push(pt);
+}
+
+/** How many bars of a developing level's own path are kept, for the approach
+ *  classification to look back over.
+ *
+ *  Two more than the lookback, not one. The classification spans
+ *  `GAP_LOOKBACK_BARS` *gaps* and so touches that many bars plus the one it
+ *  stands on — and it stands on the last *closed* bar, while this buffer's
+ *  newest entry is always the forming one. Keep only lookback+1 and the window's
+ *  oldest bar has already fallen off the front, which reads as a level younger
+ *  than the window and classifies every row `unknown`. */
+const VA_PATH_BARS = GAP_LOOKBACK_BARS + 2;
+
+/** Fold a developing profile's tail into the bounded window above. */
+function keepVaPath(into: ProfilePt[], tail: readonly ProfilePt[]): void {
+  for (const p of tail) putTail(into, p);
+  if (into.length > VA_PATH_BARS) into.splice(0, into.length - VA_PATH_BARS);
+}
 /** Put the viewport on the tail of a `last`-indexed bar array. */
 function frameTail(chart: IChartApi, last: number) {
   chart
@@ -502,6 +858,30 @@ function barRange(bars: Bar[], from: number, to: number): { hi: number; lo: numb
     if (bars[i].low < lo) lo = bars[i].low;
   }
   return hi > -Infinity ? { hi, lo } : null;
+}
+/** Both scales onto the tail of the tape: the frame above, and the price scale
+ *  set by hand to the bars that frame contains. This is what the ◎ does, and it
+ *  is also how every session opens — landing on a chart you have to press a
+ *  button to be able to read is landing on the wrong chart.
+ *
+ *  The price half is deliberately not "turn autoscale on". Autoscale holds every
+ *  series on the scale at once, so a weekly VWAP anchored 800 points under the
+ *  session, or a composite level off a quiet week, crushes the day into a ribbon
+ *  at the top of the pane — autoscale is usually what lost the price in the
+ *  first place. Fitting the bars we just framed is a different question from
+ *  fitting the chart, and it is the one that means "show me where price is".
+ *
+ *  The scale is manual from here (double-click the axis for autoscale back),
+ *  which is why the ◎ keeps watching: when the tape walks out of the window this
+ *  set, it lights up again. */
+function frameOnPrice(chart: IChartApi, bars: Bar[], last: number, tick: number) {
+  frameTail(chart, last);
+  const br = barRange(bars, last - FRAME_BARS, last);
+  if (!br) return;
+  // Room above and below so the newest bar isn't against an edge — and a tick
+  // floor, because a range that opens dead flat would otherwise zoom to a line.
+  const pad = Math.max((br.hi - br.lo) * 0.12, tick * 8);
+  chart.priceScale("right").setVisibleRange({ from: br.lo - pad, to: br.hi + pad });
 }
 
 /** The four resting orders, and which side of the mark each one may sit on. A
@@ -553,39 +933,50 @@ function OrderMenu({
   onClose: () => void;
 }) {
   const known = Number.isFinite(mark);
-  // What a bracket leg costs, at the size on the ticket — the thing you are
-  // actually deciding when you type a number of ticks. Blank at 0 (the box is
-  // saying "no leg") and blank when the contract's money is unknown.
-  const money = (ticks: number): string =>
-    ticks > 0 && tickUsd > 0
-      ? `$${Math.round(ticks * tickUsd * Math.max(1, ticket.size)).toLocaleString("en-US")}`
-      : "";
-  const field = (
-    key: keyof TicketDraft,
-    label: string,
-    min: number,
-    title: string,
-    /** The money this box is worth, and the colour it belongs to. */
-    hint?: { text: string; color: string },
-  ) => (
-    <label className="replay-omenu-f" title={title}>
-      <span className="replay-omenu-l">
-        {label}
-        {hint?.text ? <b style={{ color: hint.color }}>{hint.text}</b> : null}
-      </span>
+  const sizeField = (
+    <label className="replay-omenu-f" title="Contracts">
+      <span className="replay-omenu-l">Size</span>
       <input
         type="number"
-        min={min}
-        // A bracket leg is optional, and zero is how the ticket says "not
-        // attached" — shown as an empty box reading "none" rather than a 0,
-        // which would look like a stop right on the fill. Clearing it by hand
-        // says the same thing.
-        value={ticket[key] === 0 ? "" : ticket[key]}
-        placeholder={min === 0 ? "none" : undefined}
-        onChange={(e) => onTicket({ ...ticket, [key]: Math.max(min, Number(e.target.value)) })}
+        min={1}
+        value={ticket.size}
+        onChange={(e) => onTicket({ ...ticket, size: Math.max(1, Number(e.target.value)) })}
       />
     </label>
   );
+  /** A bracket leg: the same box, in ticks or in dollars.
+   *
+   *  The figure in the caption is the *other* unit — what this many ticks costs,
+   *  or what that money came out as once it was rounded onto the grid. It was
+   *  read-only money before this box could take money; now it is the second half
+   *  of a two-way conversion, and it is the half you check. */
+  const leg = (
+    key: "stop" | "target",
+    label: string,
+    title: string,
+    color: string,
+  ) => {
+    const ticks = ticket[`${key}Ticks`];
+    const pin = ticket[`${key}Usd`];
+    const echo = legEcho(ticks, pin, tickUsd, Math.max(1, ticket.size));
+    return (
+      <label className="replay-omenu-f" title={title}>
+        <span className="replay-omenu-l">
+          {label}
+          {echo ? <b style={{ color }}>{echo}</b> : null}
+        </span>
+        <LegAmount
+          ticks={ticks}
+          pin={pin}
+          tickUsd={tickUsd}
+          size={Math.max(1, ticket.size)}
+          // Typing a distance says the distance is the setting — so the pin goes.
+          onTicks={(t) => onTicket({ ...ticket, [`${key}Ticks`]: t, [`${key}Usd`]: null })}
+          onPin={(usd) => onTicket({ ...ticket, [`${key}Usd`]: usd })}
+        />
+      </label>
+    );
+  };
   return (
     <div className={`replay-omenu${docked ? " docked" : ""}`} role="menu">
       <div className="replay-omenu-kinds">
@@ -618,20 +1009,18 @@ function OrderMenu({
           layout needs to turn one into the other. */}
       <div className="replay-omenu-foot">
         <div className="replay-omenu-row">
-          {field("size", "Size", 1, "Contracts")}
-          {field(
-            "stopTicks",
+          {sizeField}
+          {leg(
+            "stop",
             "SL",
-            0,
-            "Stop, in ticks from the fill — optional, leave empty for none. The figure beside it is what it risks at this size.",
-            { text: money(ticket.stopTicks), color: palette.red },
+            "Stop from the fill — optional, leave empty for none. The t/$ button sets whether you are choosing a distance or the money it risks; pinned to money, the distance follows the size and the contract.",
+            palette.red,
           )}
-          {field(
-            "targetTicks",
+          {leg(
+            "target",
             "TP",
-            0,
-            "Target, in ticks from the fill — optional, leave empty for none. The figure beside it is what it makes at this size.",
-            { text: money(ticket.targetTicks), color: palette.green },
+            "Target from the fill — optional, leave empty for none. The t/$ button sets whether you are choosing a distance or the money it makes; pinned to money, the distance follows the size and the contract.",
+            palette.green,
           )}
         </div>
         <div className="replay-omenu-px">
@@ -681,6 +1070,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     onPlaceTyped,
     ticket,
     onTicketChange,
+    onVolRuler,
     pointValue: pointValueProp,
     mark: markProp = NaN,
     canPlaceOrders = true,
@@ -689,15 +1079,28 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     bigLots = DEFAULT_BIG_LOTS,
     composite = "off",
     nodeProm = 0,
+    shelfParams,
+    shelfField,
     events: eventOverlay,
     modernVwap: mvParams,
+    dynamicSwingVwap: dsvParams,
+    studies,
+    onStudiesChange,
+    onLayers,
     indicatorSettings,
     drawingsKey,
     prefsPane,
+    levelPanel = false,
+    arms,
+    onArmToggle,
+    armRace,
+    onArmRace,
     linked = true,
     onLinkedChange,
     routedTo,
     symbol,
+    tz = "New York",
+    tapeContract,
     tfLabel,
     tfOptions,
     onTfChange,
@@ -741,6 +1144,26 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   const wkRef = useRef<Anchor | null>(null);
   const gProfRef = useRef<Record<ProfKey, ISeriesApi<"Line">> | null>(null);
   const nProfRef = useRef<Record<ProfKey, ISeriesApi<"Line">> | null>(null);
+  const wProfRef = useRef<Record<ProfKey, ISeriesApi<"Line">> | null>(null);
+
+  // The developing overlays' draw gate — see OVERLAY_DRAW_MS.
+  //
+  // `pendingOverlay` is why the gate is honest rather than lossy: the engine's
+  // tails are *deltas since the last advance()*, so a frame that skips the draw
+  // has to keep that frame's points or they are gone. They accumulate here under
+  // the same overwrite-or-append rule they would have been drawn with, and the
+  // next drawing frame applies the whole run at once — which is one `update()`
+  // per changed bar, exactly what an ungated frame would have done, minus the
+  // repeated restatements of the bar still forming.
+  const lastOverlayDrawRef = useRef(0);
+  const pendingOverlayRef = useRef<{ band: BandPt[][]; prof: ProfilePt[][] }>({
+    band: [[], [], [], []],
+    prof: [[], [], []],
+  });
+  const clearPendingOverlay = () => {
+    pendingOverlayRef.current = { band: [[], [], [], []], prof: [[], [], []] };
+    lastOverlayDrawRef.current = 0;
+  };
 
   // What a point is worth on the overlays, which is the routed contract's money
   // when the page named one and the tape's otherwise (see `pointValue`). In a
@@ -806,6 +1229,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   /** The viewport profile, which also carries the event marginal. Owned by the
    *  build effect; held here so the filtered list can reach it. */
   const vpRef = useRef<VolumeProfilePrimitive | null>(null);
+  /** The fixed-range profiles, held here on the same terms: the row-colour knob
+   *  is one setting over both histograms, so it has to reach this one too. */
+  const rangePrimRef = useRef<RangeProfilePrimitive | null>(null);
   /** Nodes at the current prominence, cached: the reading changes only when the
    *  composite or the knob does, and both are rare. */
   const compNodesRef = useRef<ProfileNodes | null>(null);
@@ -840,6 +1266,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   bigLotsRef.current = bigLots;
   const compositeRef = useRef(composite);
   compositeRef.current = composite;
+  // Sticky-global, read at mount (lib/chartPrefs). The replay pages do not offer
+  // the shelf knob panel yet — the journal charts do, and the setting is shared —
+  // so there is nothing here for it to change under.
+  const shelfParamsRef = useRef(shelfParams ?? loadShelfParams());
+  shelfParamsRef.current = shelfParams ?? shelfParamsRef.current;
+  const shelfFieldRef = useRef<ShelfField>(shelfField ?? loadShelfField());
+  shelfFieldRef.current = shelfField ?? shelfFieldRef.current;
   const nodePromRef = useRef(nodeProm);
   nodePromRef.current = nodeProm;
   const eventOvRef = useRef(eventOverlay);
@@ -873,7 +1306,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // Whether the tape has got away — the button lights up exactly when pressing
   // it would change something.
   const [offTape, setOffTape] = useState(false);
+  // The edge markers are recomputed on exactly the occasions the ◎ is: a pan, a
+  // seek, a bar close. Through a ref because `syncEdges` is declared further down
+  // — next to the layers it reads — and this is called from three places that all
+  // already go through here.
+  const syncEdgesRef = useRef<() => void>(() => {});
   const syncOffTape = () => {
+    syncEdgesRef.current();
     const chart = chartRef.current;
     const last = barsRef.current.length - 1;
     if (!chart || last < 0) {
@@ -910,24 +1349,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     const bars = barsRef.current;
     const last = bars.length - 1;
     if (!chart || last < 0) return;
-    frameTail(chart, last);
-    // And the price scale, by hand rather than by turning autoscale back on:
-    // autoscale is usually what lost the price in the first place. It has to
-    // hold every series on the scale at once, so a weekly VWAP anchored 800
-    // points under the session, or a composite level off a quiet week, crushes
-    // the whole day into a ribbon at the top of the pane. Fitting the bars we
-    // just framed is a different question from fitting the chart, and it is the
-    // one that means "show me where price is".
-    const br = barRange(bars, last - FRAME_BARS, last);
-    if (!br) return;
-    // Room above and below so the newest bar isn't against an edge — and a tick
-    // floor, because a range that opens dead flat would otherwise zoom to a line.
-    const tick = tapeRef.current?.tickSize ?? 0.25;
-    const pad = Math.max((br.hi - br.lo) * 0.12, tick * 8);
-    chart.priceScale("right").setVisibleRange({ from: br.lo - pad, to: br.hi + pad });
-    // The scale is manual from here (double-click the axis for autoscale back).
-    // Which is why the button keeps watching: when the tape walks out of the
-    // window it just set, it lights up again.
+    frameOnPrice(chart, bars, last, tapeRef.current?.tickSize ?? 0.25);
+    // The button keeps watching what it just set: when the tape walks out of
+    // that window, it lights up again.
     syncOffTape();
   };
 
@@ -1089,6 +1513,200 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   const visRef = useRef(vis);
   visRef.current = vis;
   const applyRef = useRef<((v: IndicatorVisibility) => void) | null>(null);
+  // How heavily each fixed anchor's ±1σ→±2σ region is washed in — the journal
+  // charts' preference, shared, exactly as the visibility above is. Global even
+  // on a pane with its own `prefsPane`: which layers a context pane draws is a
+  // per-pane question, how loud a band's fill is is not.
+  const [vwapFill, setVwapFill] = useState<VwapFillWeights>(loadVwapFill);
+  const fillRef = useRef(vwapFill);
+  const applyFillRef = useRef<((w: VwapFillWeights) => void) | null>(null);
+  const setFill = (anchor: VwapFillAnchor, weight: number) => {
+    const next = { ...fillRef.current, [anchor]: weight };
+    fillRef.current = next;
+    applyFillRef.current?.(next);
+    saveVwapFill(next);
+    setVwapFill(next);
+  };
+  // Which σ rings each fixed anchor draws — the journal charts' preference,
+  // shared, on the same terms as the fill above. It rides the visibility apply
+  // rather than getting one of its own: the lines it hides are the same series
+  // the row's eye hides, and two functions setting `visible` on one series is two
+  // answers to one question. The edge pills follow, because a demoted line that
+  // isn't drawn is not a level anyone has lost.
+  const [vwapBands, setVwapBands] = useState<VwapBandChoices>(loadVwapBands);
+  const bandsRef = useRef(vwapBands);
+  const setBands = (anchor: VwapFillAnchor, choice: VwapBandChoice) => {
+    const next = { ...bandsRef.current, [anchor]: choice };
+    bandsRef.current = next;
+    saveVwapBands(next);
+    setVwapBands(next);
+    applyRef.current?.(visRef.current);
+    syncEdgesRef.current();
+  };
+  // Which region each fixed anchor's wash covers — outer ±1σ→±2σ, or the inner
+  // −1σ→+1σ value area. Rides the visibility apply like the rings: which region
+  // is drawn decides whether the wash has both of its edges at all.
+  const [vwapRegion, setVwapRegion] = useState<VwapFillRegions>(loadVwapFillRegion);
+  const regionRef = useRef(vwapRegion);
+  const setRegion = (anchor: VwapFillAnchor, region: VwapFillRegion) => {
+    const next = { ...regionRef.current, [anchor]: region };
+    regionRef.current = next;
+    saveVwapFillRegion(next);
+    setVwapRegion(next);
+    applyRef.current?.(visRef.current);
+  };
+  // What the volume profile's rows are coloured by — value area, or the
+  // aggressor delta at each price. The journal charts' preference again, shared
+  // and sticky, and it reaches the canvas by the shortest road there is: it
+  // changes a fill and nothing else, so no series is rebuilt, nothing is
+  // re-profiled, and both histograms are told directly. The ref is what the
+  // build effect reads, so a chart rebuilt mid-session comes back tinted.
+  // The External Chart overlay's parameters (lib/externalChart) — a pane
+  // preference like the two above, sticky and global. The ref is what the
+  // painter reads, so a chart rebuilt mid-session comes back at the same period;
+  // the primitive is told directly, since none of these change a series and a
+  // repaint is all any of them costs. Only the period changes what is *grouped*,
+  // and the painter re-reads that from the ref on the same pass.
+  const [extParams, setExtParams] = useState(loadExternalChartParams);
+  const extParamsRef = useRef(extParams);
+  const extPrimRef = useRef<ExternalChartPrimitive | null>(null);
+  if (!extPrimRef.current) extPrimRef.current = new ExternalChartPrimitive();
+  // Declared beside the state it repaints rather than down with the other
+  // painters, so the patcher below closes over an initialised ref.
+  const paintExtRef = useRef<(() => void) | null>(null);
+  const patchExternal = (patch: Partial<ExternalChartParams>) => {
+    const next = { ...extParamsRef.current, ...patch };
+    extParamsRef.current = next;
+    saveExternalChartParams(next);
+    setExtParams(next);
+    extPrimRef.current?.setParams(next);
+    // A new period is a different grouping, and nothing else on the chart moved
+    // — so the repaint has to be asked for rather than waited for.
+    if (patch.period !== undefined) paintExtRef.current?.();
+  };
+  /** Whether the current period actually grouped this chart's bars — false on a
+   *  chart already at or above it, which draws nothing and says so. */
+  const [extGrouped, setExtGrouped] = useState(true);
+
+  // The HTF trend (lib/htfTrend), wired as the External Chart above: sticky
+  // params, a ref for the painter, the primitive told directly. Every knob but
+  // the tint changes what is computed, so any patch asks for a repaint.
+  const [htfParams, setHtfParams] = useState(loadHtfTrendParams);
+  const htfParamsRef = useRef(htfParams);
+  const htfPrimRef = useRef<HtfTrendPrimitive | null>(null);
+  if (!htfPrimRef.current) htfPrimRef.current = new HtfTrendPrimitive();
+  const paintHtfRef = useRef<((force?: boolean) => void) | null>(null);
+  const patchHtf = (patch: Partial<HtfTrendParams>) => {
+    const next = { ...htfParamsRef.current, ...patch };
+    htfParamsRef.current = next;
+    saveHtfTrendParams(next);
+    setHtfParams(next);
+    htfPrimRef.current?.setParams(next);
+    paintHtfRef.current?.(true);
+  };
+  /** The legend's readout: whether any frame is warm yet, and the frames'
+   *  agreement at the live edge. Only set on a change, never per frame. */
+  const [htfNow, setHtfNow] = useState<{ warm: boolean; state: -1 | 0 | 1 }>({ warm: true, state: 0 });
+
+  // The ranked S/R zones (lib/rankedZones), wired exactly as the overlay above:
+  // sticky-global params, a ref for the painter, the primitive told directly.
+  // The one difference is what a knob costs. The External Chart's period only
+  // changes a *grouping*; every knob here changes the zone set itself, and the
+  // zone set is path-dependent over the whole tape — so a patch has to re-run
+  // the walk rather than repaint what is already computed.
+  const [rzParams, setRzParams] = useState(loadRankedZonesParams);
+  const rzParamsRef = useRef(rzParams);
+  const rzPrimRef = useRef<RankedZonePrimitive | null>(null);
+  if (!rzPrimRef.current) rzPrimRef.current = new RankedZonePrimitive();
+  const paintRzRef = useRef<((force?: boolean) => void) | null>(null);
+  const patchRankedZones = (patch: Partial<RankedZonesParams>) => {
+    const next = { ...rzParamsRef.current, ...patch };
+    rzParamsRef.current = next;
+    saveRankedZonesParams(next);
+    setRzParams(next);
+    rzPrimRef.current?.setParams(next);
+    // Only the two the *primitive* reads are free. `direction` looks like a
+    // display filter and is not one: which zones are visible is decided in
+    // `computeRankedZones`, because the draw cap counts passing zones only — so
+    // the filter and the cap have to be applied together, in the walk. Leaving
+    // it out of this list changed the knob and nothing else, which reads as the
+    // filter silently not working.
+    if (patch.strengthBars === undefined && patch.zoneText === undefined)
+      paintRzRef.current?.(true);
+  };
+  /** What the last walk produced, for the legend's readout. */
+  const [rzCount, setRzCount] = useState(0);
+  /** Whether the last walk had prints behind it. Without them the flow ranking
+   *  falls back to the author's score, and the legend has to say so. */
+  const [rzFlow, setRzFlow] = useState(true);
+
+  // USD economic releases (journal.econ_calendar). Fetched, not computed: one GET
+  // per span of days the bars cover, keyed so the tape advancing within a day
+  // costs nothing. The impact floor is the one knob and sticky-global.
+  const [econParams, setEconParams] = useState(loadEconEventsParams);
+  const econParamsRef = useRef(econParams);
+  const econPrimRef = useRef<EconEventPrimitive | null>(null);
+  if (!econPrimRef.current) econPrimRef.current = new EconEventPrimitive();
+  const paintEconRef = useRef<((force?: boolean) => void) | null>(null);
+  const tzRef = useRef(tz);
+  tzRef.current = tz;
+  const [econCount, setEconCount] = useState(0);
+  const patchEcon = (floor: EconImpactFloor) => {
+    const next = { floor };
+    econParamsRef.current = next;
+    saveEconEventsParams(next);
+    setEconParams(next);
+    paintEconRef.current?.(true);
+  };
+
+  // Dealer-gamma levels (api/routers/gex.py). Fetched like the econ lines: one GET
+  // per span of sessions the bars cover, keyed so the tape advancing within a
+  // session costs nothing. Needs the real contract — see `tapeContract`.
+  const [gexParams, setGexParams] = useState(loadGexLevelsParams);
+  const gexParamsRef = useRef(gexParams);
+  const gexPrimRef = useRef<GexLevelsPrimitive | null>(null);
+  if (!gexPrimRef.current) gexPrimRef.current = new GexLevelsPrimitive();
+  const paintGexRef = useRef<((force?: boolean) => void) | null>(null);
+  const tapeContractRef = useRef(tapeContract);
+  tapeContractRef.current = tapeContract;
+  const [gexLast, setGexLast] = useState<GexStep | null>(null);
+  const patchGex = (patch: Partial<GexLevelsParams>) => {
+    const next = { ...gexParamsRef.current, ...patch };
+    gexParamsRef.current = next;
+    saveGexLevelsParams(next);
+    setGexParams(next);
+    gexPrimRef.current?.setParams(next.walls, next.flip);
+    // A different expiry filter is a different set of levels — refetch.
+    if (patch.expiry) paintGexRef.current?.(true);
+  };
+  useEffect(() => {
+    paintGexRef.current?.(true);
+  }, [tapeContract]);
+
+  const [profileDelta, setProfileDelta] = useState(loadProfileDelta);
+  const profileDeltaRef = useRef(profileDelta);
+  const setProfileTint = (on: boolean) => {
+    profileDeltaRef.current = on;
+    saveProfileDelta(on);
+    setProfileDelta(on);
+    vpRef.current?.setShowDelta(on);
+    rangePrimRef.current?.setShowDelta(on);
+  };
+  // And what that lane is asked — the journal charts' preference again, shared
+  // and sticky (lib/deltaFlow). Unlike the switch above this one cannot take the
+  // short road to the canvas: bar lengths and flags are derived from the profile,
+  // and verdicts from the bars behind it, so the recompute lives in the build
+  // effect where both are in scope.
+  const [deltaLane, setDeltaLane] = useState<DeltaLaneKnobs>(loadDeltaLane);
+  const deltaLaneRef = useRef(deltaLane);
+  const applyLaneRef = useRef<(() => void) | null>(null);
+  const setLaneKnobs = (patch: Partial<DeltaLaneKnobs>) => {
+    const next = { ...deltaLaneRef.current, ...patch };
+    deltaLaneRef.current = next;
+    saveDeltaLane(next);
+    setDeltaLane(next);
+    applyLaneRef.current?.();
+  };
   const toggle = (key: IndicatorKey) =>
     setVis((prev) => {
       const next = { ...prev, [key]: !prev[key] };
@@ -1097,17 +1715,21 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       saveIndicatorVisibility(next, prefsPane);
       return next;
     });
-  // Force a layer on. Hide/show is a sticky global preference, so a layer hidden
-  // on some other chart stays hidden here — fine for the fixed overlays, wrong
-  // for one the user just asked for by hand (the ⚓).
-  const reveal = (key: IndicatorKey) => {
-    if (visRef.current[key]) return;
-    const next = { ...visRef.current, [key]: true };
+  /** Set a layer outright, rather than flipping it. What the topbar catalogue
+   *  drives through the handle — "add" and "remove" there are this, since an app
+   *  layer has nothing to delete: it is drawn on this pane or it isn't. */
+  const setLayer = (key: IndicatorKey, on: boolean) => {
+    if (visRef.current[key] === on) return;
+    const next = { ...visRef.current, [key]: on };
     visRef.current = next;
     applyRef.current?.(next);
     saveIndicatorVisibility(next, prefsPane);
     setVis(next);
   };
+  // Force a layer on. Hide/show is a sticky global preference, so a layer hidden
+  // on some other chart stays hidden here — fine for the fixed overlays, wrong
+  // for one the user just asked for by hand (the ⚓).
+  const reveal = (key: IndicatorKey) => setLayer(key, true);
   const revealRef = useRef(reveal);
   revealRef.current = reveal;
 
@@ -1136,6 +1758,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     wk: false,
     gp: false,
     np: false,
+    wp: false,
     ib: false,
     cvd: false,
   };
@@ -1147,6 +1770,35 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     presentRef.current = next;
     setPresent(next);
   };
+
+  // --- Community studies --------------------------------------------------------
+  // The topbar picker's indicators (see lib/studies and StudyLayer). Same cadence
+  // and the same reason as the vol ruler and Modern VWAP below: every value one
+  // of these emits is a fact about a closed bar, so they are recomputed on a
+  // snapshot and on a bar close, never per tick.
+  const studyLayerRef = useRef<StudyLayer | null>(null);
+  // Read through refs inside the build effect, which is installed once — the prop
+  // itself would be frozen at mount there.
+  const studySpecsRef = useRef<StudySpec[]>(studies ?? EMPTY_STUDIES);
+  studySpecsRef.current = studies ?? EMPTY_STUDIES;
+  /** What each spec actually drew, as the layer last reported it. Kept here
+   *  rather than pushed to the page: the legend that shows it lives in this
+   *  component, so the report never has to leave. */
+  const [studyReport, setStudyReport] = useState<StudyReport[]>([]);
+  const onStudiesRef = useRef(onStudiesChange);
+  onStudiesRef.current = onStudiesChange;
+
+  /** What this pane's layers are doing, for the topbar catalogue. Written during
+   *  render and read by the effect below it — the array is rebuilt every render,
+   *  so the effect keys on its contents instead. */
+  const layerStatesRef = useRef<LayerState[]>([]);
+  const onLayersRef = useRef(onLayers);
+  onLayersRef.current = onLayers;
+
+  const refreshStudies = () => studyLayerRef.current?.setBars(barsRef.current);
+  /** The panes moved — CVD or the vol ruler came or went, and pane indices are
+   *  positional. Puts the studies' panes back at the end. */
+  const remountStudies = () => studyLayerRef.current?.remount();
 
   // --- CVD ------------------------------------------------------------------
   // Cumulative volume delta: the running sum of signed aggressor volume (lifts
@@ -1175,9 +1827,16 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // accumulate: the pane and its legend row then don't appear at all, rather than
   // drawing a flat zero line that reads as perfect balance.
   const cvdAnyRef = useRef(false);
+  // The same walk's *unaccumulated* per-bar delta, kept in step with `cvdPtsRef`
+  // — one entry per session bar, restated in place while a bar is still forming.
+  // This is what the CVD oscillator windows (see the block after this one), and
+  // taking it from here rather than from a second pass over the tape is what
+  // keeps the two panes reading the same prints.
+  const cvdDeltaRef = useRef<number[]>([]);
 
   const resetCvd = () => {
     cvdPtsRef.current = [];
+    cvdDeltaRef.current = [];
     cvdBaseRef.current = 0;
     cvdCurRef.current = 0;
     cvdScanRef.current = 0;
@@ -1217,8 +1876,16 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     }
     cvdCurRef.current = sum;
     const value = cvdBaseRef.current + sum;
-    if (last && last.time === b.time) last.value = value;
-    else pts.push({ time: b.time, value });
+    const deltas = cvdDeltaRef.current;
+    if (last && last.time === b.time) {
+      last.value = value;
+      // `sum` is this bar's own delta — the accumulator was zeroed when it
+      // opened — so the oscillator's input needs no differencing.
+      deltas[deltas.length - 1] = sum;
+    } else {
+      pts.push({ time: b.time, value });
+      deltas.push(sum);
+    }
     return value;
   };
 
@@ -1271,14 +1938,22 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   const syncCvdMount = () => {
     const want = visRef.current.cvd && cvdAnyRef.current;
     if (want === !!cvdSeriesRef.current) return;
-    // CVD owns pane 1 by number, and the vol ruler mounts at whatever the last
-    // pane is — so when CVD comes or goes with the ruler up, the ruler is
-    // remounted around the change to keep both claims true.
+    // CVD owns pane 1 by number, and everything below it mounts at whatever the
+    // last pane is — so when CVD comes or goes with those up, they are remounted
+    // around the change to keep both claims true. Without this the oscillator
+    // would already be holding pane 1 and the line would land inside its pane.
     const vrWas = !!vrDevRef.current;
+    const oscWas = !!cvdOscSeriesRef.current;
     if (vrWas) unmountVr();
+    if (oscWas) unmountCvdOsc();
     if (want) mountCvd();
     else unmountCvd();
+    if (oscWas) mountCvdOsc();
     if (vrWas) mountVr();
+    // And the studies' panes after both, for the same reason: they claim the
+    // last pane indices, and a pane appearing or vanishing below them renumbers
+    // every one of them.
+    remountStudies();
   };
 
   /** Rebuild from a snapshot's bars. A seek can move backwards, so the
@@ -1293,6 +1968,187 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     cvdSeriesRef.current?.setData(
       cvdPtsRef.current.map((p) => ({ time: p.time as Time, value: p.value })),
     );
+    syncCvdOscMount();
+    drawCvdOsc();
+  };
+
+  // --- CVD oscillator ---------------------------------------------------------
+  // The same signed volume, *windowed* instead of accumulated (see lib/cvdOsc for
+  // the port and its provenance): a histogram of the last N bars' delta, with the
+  // fractal divergences against price drawn on this pane and over the candles.
+  //
+  // Where the pane above answers "who has been in control since the open", this
+  // one answers "who is in control now" — a rolling window has no memory of the
+  // morning, which is the entire difference and the reason both exist.
+  //
+  // Every value here is derived from bars and the delta array, never from the
+  // tape directly, so this pane cannot drift out of step with the one above it.
+  // The heavy pass (fractals, pivots, the divergence pairing) runs on bar close
+  // and on snapshot; a frame that only restates the forming bar re-windows the
+  // histogram and writes one point.
+  const cvdOscSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const cvdOscMarksRef = useRef<CvdDivergencePrimitive | null>(null);
+  const cvdOscPriceMarksRef = useRef<CvdDivergencePrimitive | null>(null);
+  const [cvdOscParams, setCvdOscParams] = useState<CvdOscParams>(loadCvdOsc);
+  const cvdOscRef = useRef(cvdOscParams);
+  cvdOscRef.current = cvdOscParams;
+  /** What the legend reports: how many divergences the session has printed and
+   *  how consecutive the last one was. State, so the row re-renders — hence the
+   *  same unchanged-value guard `vrLastRef` exists for. */
+  const [cvdOscRead, setCvdOscRead] = useState({ divs: 0, strength: 0 });
+  const patchCvdOsc = useCallback((patch: Partial<CvdOscParams>) => {
+    setCvdOscParams((prev) => {
+      const next = { ...prev, ...patch };
+      cvdOscRef.current = next;
+      saveCvdOsc(next);
+      return next;
+    });
+  }, []);
+
+  /** The session's own bars — the ones `cvdDeltaRef` is indexed against. The
+   *  context days carry no delta here (see the anchor note on CVD above), so
+   *  windowing across them would window across a boundary the numbers don't
+   *  cross. */
+  const cvdOscBars = () => barsRef.current.slice(histCountRef.current);
+
+  /** The full pass: window, fractals, divergences, both sets of marks. */
+  const drawCvdOsc = () => {
+    const s = cvdOscSeriesRef.current;
+    // A dark layer computes nothing. This runs on every bar close, and the pass
+    // below is the expensive one — the fractal scan over the whole session — so
+    // without this the switch would only be turning off the *drawing*, and the
+    // vol ruler's reason for computing while hidden (the ticket reads it) has no
+    // equivalent here: nothing else consumes a divergence.
+    if (!s) return;
+    const bars = cvdOscBars();
+    const { hist, divergences } = computeCvdOsc(bars, cvdDeltaRef.current, cvdOscRef.current);
+    s.setData(
+      bars.map((b, i) => {
+        const v = hist[i];
+        // Whitespace, not zero, through the seeding window: zero on a windowed
+        // delta means "flow balanced", which is a claim the first N bars can't
+        // make.
+        if (!Number.isFinite(v)) return { time: b.time as Time };
+        return {
+          time: b.time as Time,
+          value: v,
+          color: v >= 0 ? palette.green : palette.red,
+        };
+      }),
+    );
+    const seg = (d: CvdOscDivergence, v1: number, v2: number) => ({
+      kind: d.kind,
+      t1: d.t1,
+      v1,
+      t2: d.t2,
+      v2,
+      label: d.kind === "bear" ? "-RD" : "+RD",
+    });
+    // The same divergence in two unit systems: delta on this pane, price over the
+    // candles. One pairing, so the two can't disagree about what was found.
+    cvdOscMarksRef.current?.setData(divergences.map((d) => seg(d, d.h1, d.h2)));
+    cvdOscPriceMarksRef.current?.setData(divergences.map((d) => seg(d, d.p1, d.p2)));
+    const last = divergences[divergences.length - 1];
+    const strength = last ? last.strength : 0;
+    setCvdOscRead((prev) =>
+      prev.divs === divergences.length && prev.strength === strength
+        ? prev
+        : { divs: divergences.length, strength },
+    );
+  };
+
+  /** The per-frame path: the forming bar's delta moved, so the window it sits at
+   *  the end of moved with it. Nothing else can have changed — a fractal needs
+   *  `fractalN` closed bars to its right, so no divergence can appear or vanish
+   *  inside a bar. */
+  const stepCvdOsc = () => {
+    const s = cvdOscSeriesRef.current;
+    if (!s) return;
+    const bars = cvdOscBars();
+    if (!bars.length) return;
+    // Rebuilds the whole window array to read its last value, once per frame.
+    // Measured 2026-08-22 at 0.0065ms a call — 0.1% of a frame across two charts
+    // — against a delta pane that costs no measurable fps at all. An
+    // allocation-free tail was written and reverted: it bought that 0.1% for a
+    // second implementation of the window math to keep in parity with this one.
+    const hist = cvdOscHist(cvdDeltaRef.current, cvdOscRef.current);
+    const i = bars.length - 1;
+    const v = hist[i];
+    if (!Number.isFinite(v)) return;
+    s.update({
+      time: bars[i].time as Time,
+      value: v,
+      color: v >= 0 ? palette.green : palette.red,
+    });
+  };
+
+  const mountCvdOsc = () => {
+    const chart = chartRef.current;
+    const candle = candleRef.current;
+    if (!chart || !candle || cvdOscSeriesRef.current) return;
+    // Under CVD's pane when that one is up, above the vol ruler's either way —
+    // see syncCvdMount and syncCvdOscMount for how the three claims are kept
+    // true together.
+    const paneIdx = chart.panes().length;
+    const s = chart.addSeries(
+      HistogramSeries,
+      {
+        priceLineVisible: false,
+        lastValueVisible: true,
+        priceFormat: { type: "volume" },
+      },
+      paneIdx,
+    );
+    // The sign is the read here as much as it is on the cumulative pane, and a
+    // histogram that autoscales to a one-sided window can put zero off-frame.
+    s.createPriceLine({
+      price: 0,
+      color: palette.grid,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: false,
+    });
+    cvdOscSeriesRef.current = s;
+    const marks = new CvdDivergencePrimitive();
+    s.attachPrimitive(marks as any);
+    cvdOscMarksRef.current = marks;
+    const priceMarks = new CvdDivergencePrimitive();
+    candle.attachPrimitive(priceMarks as any);
+    cvdOscPriceMarksRef.current = priceMarks;
+    drawCvdOsc();
+    const panes = chart.panes();
+    panes[0]?.setStretchFactor(1000);
+    panes[paneIdx]?.setStretchFactor(200);
+  };
+
+  const unmountCvdOsc = () => {
+    const chart = chartRef.current;
+    const candle = candleRef.current;
+    // The price-pane marks outlive their own pane, so they have to be detached
+    // by hand — the series removal below only takes this pane's copy with it.
+    if (candle && cvdOscPriceMarksRef.current)
+      candle.detachPrimitive(cvdOscPriceMarksRef.current as any);
+    cvdOscPriceMarksRef.current = null;
+    cvdOscMarksRef.current = null;
+    const s = cvdOscSeriesRef.current;
+    if (!chart || !s) return;
+    cvdOscSeriesRef.current = null;
+    chart.removeSeries(s);
+  };
+
+  /** Same rule as CVD's: built and torn down rather than hidden, because the
+   *  pane keeps its height either way. Gated on the same `cvdAnyRef` — an
+   *  untagged tape has no delta to window any more than it has one to
+   *  accumulate. */
+  const syncCvdOscMount = () => {
+    const want = visRef.current.cvdOsc && cvdAnyRef.current;
+    if (want === !!cvdOscSeriesRef.current) return;
+    const vrWas = !!vrDevRef.current;
+    if (vrWas) unmountVr();
+    if (want) mountCvdOsc();
+    else unmountCvdOsc();
+    if (vrWas) mountVr();
+    remountStudies();
   };
 
   // --- Vol ruler --------------------------------------------------------------
@@ -1304,6 +2160,21 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   const vrAtrRef = useRef<ISeriesApi<"Line"> | null>(null);
   const vrDevRef = useRef<ISeriesApi<"Line"> | null>(null);
   const vrYdayLineRef = useRef<IPriceLine | null>(null);
+  // Through a ref for the same reason `mvRef` is: the build effect captures one
+  // `refreshVr` for the life of the chart, so a prop read inside it would be
+  // frozen at mount.
+  const onVolRulerRef = useRef(onVolRuler);
+  onVolRulerRef.current = onVolRuler;
+  /** The last reading handed up, so an unchanged one is not handed up again.
+   *  `refreshVr` also runs on every snapshot — a seek, a timeframe swap, a
+   *  re-anchor — and those mostly re-report the same three numbers. The page
+   *  puts this in state, so a fresh object each time is a page re-render each
+   *  time for no news. */
+  const vrLastRef = useRef<VolRulerRead | null>(null);
+  /** The same ruler at the order presets' fixed bucketing, which is not the one
+   *  being drawn. Stateful (it measures each block of prints once), hence a ref
+   *  that lives as long as the chart does. */
+  const vrPresetRef = useRef(new PresetRuler());
 
   const mountVr = () => {
     const chart = chartRef.current;
@@ -1377,21 +2248,69 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   };
 
   const syncVrMount = () => {
+    const was = !!vrDevRef.current;
     if (visRef.current.volRuler && barsRef.current.length > histCountRef.current) mountVr();
     else unmountVr();
+    // Only when the pane actually came or went: this runs on every bar close, and
+    // rebuilding the studies once a bar to discover nothing moved is the one way
+    // to make a picked indicator flicker.
+    if (was !== !!vrDevRef.current) remountStudies();
   };
 
-  /** Recompute and redraw the whole pane from the drawn bars as they stand. */
+  /** Recompute and redraw the whole pane from the drawn bars as they stand.
+   *
+   *  The computation happens whether or not the pane is up, because the reading
+   *  now feeds the ticket's risk sizer as well as the drawing — and a sizer that
+   *  went blank when you collapsed a pane would be a sizer nobody could rely on.
+   *  Only the drawing is gated on the series existing. */
   const refreshVr = () => {
     syncVrMount();
-    const devS = vrDevRef.current;
-    const atrS = vrAtrRef.current;
-    if (!devS || !atrS) return;
     const d = computeVolRuler(
       barsRef.current,
       histCountRef.current,
       tapeRef.current?.tickSize ?? 0.25,
     );
+    // The presets' ruler, off the prints rather than off these bars: the
+    // session's own stretch of tape, up to the last print the drawn bars have
+    // reached. Cheap to ask on every bar close — it folds each print into its
+    // bars once and remembers (see PresetRuler).
+    const bars = barsRef.current;
+    const hist = histCountRef.current;
+    const preset = vrPresetRef.current.read(
+      tapeRef.current,
+      bars.length > hist ? bars[hist].i0 : -1,
+      bars.length ? bars[bars.length - 1].i1 : -1,
+      tapeRef.current?.tickSize ?? 0.25,
+    );
+    // The last *closed* bar's values — the ruler as it stands. Reported before
+    // the draw so the ticket keeps up with a pane that is switched off.
+    const read: VolRulerRead | null =
+      d.atr.length || d.dev.length || d.yday != null || hasPresetRead(preset)
+        ? {
+            atr: d.atr.length ? d.atr[d.atr.length - 1].value : null,
+            dev: d.dev.length ? d.dev[d.dev.length - 1].value : null,
+            yday: d.yday,
+            preset,
+          }
+        : null;
+    const was = vrLastRef.current;
+    if (
+      !was !== !read ||
+      (was &&
+        read &&
+        (was.atr !== read.atr ||
+          was.dev !== read.dev ||
+          was.yday !== read.yday ||
+          // By value: the ruler builds a fresh record every read, so identity
+          // here would push a re-render on every bar close for ever.
+          !samePresetRead(was.preset, read.preset)))
+    ) {
+      vrLastRef.current = read;
+      onVolRulerRef.current?.(read);
+    }
+    const devS = vrDevRef.current;
+    const atrS = vrAtrRef.current;
+    if (!devS || !atrS) return;
     atrS.setData(d.atr.map((p) => ({ time: p.time as Time, value: p.value })));
     devS.setData(d.dev.map((p) => ({ time: p.time as Time, value: p.value })));
     if (d.yday != null) {
@@ -1419,97 +2338,25 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // a session with three context days behind it, against a cadence of once a
   // bar. Doing it per tick would be the one layer on this chart that made the
   // tape stutter, for numbers that cannot change between closes.
-  const mvLinesRef = useRef<Record<MvKey, ISeriesApi<"Line">> | null>(null);
-  const mvBandRef = useRef<VwapBandPrimitive | null>(null);
-  const mvPrimRef = useRef<ModernVwapPrimitive | null>(null);
-  if (!mvPrimRef.current) mvPrimRef.current = new ModernVwapPrimitive();
+  //
+  // The drawing itself is ./modernVwapLayer — shared with the journal charts,
+  // which grew the same layer for the Interactions Lab. What stays here is the
+  // wiring: when to redraw, what to feed it, and what the legend quotes.
+  const mvLayerRef = useRef<ModernVwapLayer | null>(null);
   // Null when the page doesn't offer the layer. Read through the ref rather than
   // off the prop everywhere below: the build effect captures one `refreshMv` for
   // the life of the chart, so a prop read inside it would be frozen at mount.
   const mvRef = useRef<ModernVwapParams | null>(mvParams ?? null);
   mvRef.current = mvParams ?? null;
   /** What the legend rows quote — the gate's own shares, and how many triggers
-   *  it let through at the current settings. */
+   *  it let through at the current settings. Fed by the layer on every redraw,
+   *  including the ones it does on its own when a row is switched back on. */
   const [mvRead, setMvRead] = useState({ trendPct: 0, undefPct: 0, signals: 0, anchors: 0 });
-
-  const refreshMv = () => {
-    const lines = mvLinesRef.current;
-    const prim = mvPrimRef.current;
-    if (!lines || !prim) return;
-    const p = mvRef.current;
-    const on = visRef.current.modernVwap || visRef.current.modernVwapSignals;
-    // Nothing computed while both rows are off. This is the one layer on the
-    // chart whose cost is worth avoiding when it isn't being looked at, and it
-    // is off by default — so for most sessions this branch is the whole story.
-    if (!on || !p || barsRef.current.length === 0) {
-      for (const k of MV_KEYS) lines[k].setData([]);
-      mvBandRef.current?.setPoints([]);
-      prim.setData([], [], new Map());
-      return;
-    }
-    const d = computeModernVwap(barsRef.current, histCountRef.current, p);
-
-    // Per-point colour rather than a series colour: the regime read is the only
-    // thing on this indicator that changes bar to bar, and the band it tints is
-    // where it belongs (his own choice, and the reason the mid line gives up its
-    // hue to stay legible under it).
-    //
-    // Read per call, not captured: this runs on every refresh, so it picks up a
-    // surface change for free — unlike the series colours, which `relight` has
-    // to push (the regime tint rides on the *data*, and data is re-set).
-    const regimeRgb = (pt: MvPoint): string => {
-      const r = ink().modernVwap.regime;
-      return pt.regime < 0 ? r.undefined : pt.regime >= 2 ? r.trending : r.ranging;
-    };
-    const tint = (pt: MvPoint, alpha: number): string | undefined =>
-      p.regimeColor ? `rgba(${regimeRgb(pt)}, ${alpha})` : undefined;
-    // A ring above the chosen envelope draws nothing at all — the series is kept
-    // (creating and destroying series on a knob turn is how a chart leaks) and
-    // simply handed an empty array.
-    const ring = MV_RING;
-    // Alpha per ring, weighted toward the ±2σ envelope because that is the one
-    // the MR rule actually tests — the others are context. These sat a third
-    // lower and the outer rings read as smudges rather than levels; a band you
-    // have to hunt for is a band you end up reading off the mid line instead.
-    const alpha: Record<number, number> = { 1: 0.7, 2: 0.95, 3: 0.5 };
-    for (const k of MV_KEYS) {
-      if (ring[k] > p.bands) {
-        lines[k].setData([]);
-        continue;
-      }
-      lines[k].setData(
-        d.points.map((pt) => {
-          const v = pt[k];
-          // A gap, not a joined line: before the accumulator has any volume
-          // there is no value, and drawing across it would invent one.
-          if (!Number.isFinite(v)) return { time: pt.time as Time };
-          return k === "mid"
-            ? { time: pt.time as Time, value: v }
-            : { time: pt.time as Time, value: v, color: tint(pt, alpha[ring[k]]) };
-        }),
-      );
-    }
-    // The wash shades ±1σ→±2σ, so it needs both rings to exist: at `bands: 1`
-    // there is no outer edge to fill to and the region is simply not drawn.
-    // Tint and points are set together — the tint indexes into the array below.
-    const band = mvBandRef.current;
-    if (band) {
-      band.setPoints(
-        p.bands < 2
-          ? []
-          : d.points.map((pt) => ({
-              time: pt.time,
-              middle: pt.mid,
-              upper1: pt.u1,
-              lower1: pt.l1,
-              upper2: pt.u2,
-              lower2: pt.l2,
-            })),
-      );
-      band.setTint(p.regimeColor ? (i) => regimeRgb(d.points[i]) : null);
-    }
-    const byTime = new Map(barsRef.current.map((b) => [b.time, b]));
-    prim.setData(d.signals, d.anchors, byTime);
+  const onMvData = useCallback((d: ModernVwapData | null) => {
+    // A dark layer keeps its last numbers rather than printing zeros: the rows
+    // stop quoting them anyway (see `mvLive` in the legend below), and "0 through
+    // the gate" would read as a measurement when it only means nobody asked.
+    if (!d) return;
     setMvRead((prev) =>
       prev.trendPct === d.trendPct &&
       prev.undefPct === d.undefPct &&
@@ -1523,17 +2370,454 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
             anchors: d.anchors.length,
           },
     );
+  }, []);
+  /** Developing globex POC by bar time, for the indicator's `poc` anchor. Kept
+   *  as its own map rather than read back off the profile line series, because
+   *  those refs are null when the page doesn't offer that layer — and the
+   *  anchor should not silently change meaning with an unrelated toggle. */
+  const mvPocRef = useRef<Map<number, number>>(new Map());
+  const mvWkPocRef = useRef<Map<number, number>>(new Map());
+  /** The three developing value areas' newest points, for the reader that has to
+   *  know where a VAH *was* and not only where it is (lib/levelApproach).
+   *
+   *  Kept here rather than read back off the profile line series for the reason
+   *  above it and one more: `series.data()` rebuilds a series' whole raw point
+   *  array on the next paint, which is the cost the overlay draw gate exists to
+   *  avoid. Bounded to the window the classification looks over — this is not a
+   *  history, it is the last few bars, and anything longer would be a second
+   *  copy of the profile the engine already holds. */
+  const vaPathsRef = useRef<{ g: ProfilePt[]; n: ProfilePt[]; w: ProfilePt[] }>({
+    g: [],
+    n: [],
+    w: [],
+  });
+
+  // --- Dynamic Swing VWAP [Zeiierman] --------------------------------------
+  // The other swing-anchored VWAP, on the same cadence and the same terms as
+  // Modern VWAP above: recomputed whole on bar close, drawn by a shared layer
+  // (./dynamicSwingVwapLayer), and computed not at all while its row is off.
+  const dsvLayerRef = useRef<DynamicSwingVwapLayer | null>(null);
+  const dsvRef = useRef<DsvParams | null>(dsvParams ?? null);
+  dsvRef.current = dsvParams ?? null;
+  /** What the row quotes: how many times the structure flipped, which way it
+   *  reads now, and what the volatility adjustment has done to the half-life. */
+  const [dsvRead, setDsvRead] = useState({
+    pivots: 0,
+    bullPct: 0,
+    aptNow: 0,
+    dropped: 0,
+    // Whether the anchor timeframe actually regrouped this pane's bars — a grid
+    // at or below its own bucketing merges nothing, and a row claiming '@5m' on
+    // a 15m pane would be quoting a knob rather than what was computed.
+    anchored: false,
+  });
+  const onDsvData = useCallback((d: DynamicSwingVwapData | null) => {
+    // A dark layer keeps its last numbers rather than printing zeros — same
+    // reason as onMvData above.
+    if (!d) return;
+    setDsvRead((prev) =>
+      prev.pivots === d.pivots.length &&
+      prev.bullPct === d.bullPct &&
+      prev.aptNow === d.aptNow &&
+      prev.dropped === d.dropped &&
+      prev.anchored === d.anchored
+        ? prev
+        : {
+            pivots: d.pivots.length,
+            bullPct: d.bullPct,
+            aptNow: d.aptNow,
+            dropped: d.dropped,
+            anchored: d.anchored,
+          },
+    );
+  }, []);
+  const dsvSource = (): DsvSource => ({
+    bars: barsRef.current,
+    histCount: histCountRef.current,
+    params: dsvRef.current,
+  });
+  const dsvSourceRef = useRef(dsvSource);
+  dsvSourceRef.current = dsvSource;
+  const refreshDsv = () => dsvLayerRef.current?.redraw();
+  const refreshDsvRef = useRef(refreshDsv);
+  refreshDsvRef.current = refreshDsv;
+
+  /** Everything the layer cannot know, pulled when it redraws: which parameters
+   *  this page holds, which bars are context and which are the session, and which
+   *  developing POC the anchor is against. */
+  const mvSource = (): MvSource => {
+    const p = mvRef.current;
+    return {
+      bars: barsRef.current,
+      histCount: histCountRef.current,
+      params: p,
+      ctx: {
+        // The weekly map is empty when the weekly profile couldn't be honestly
+        // seeded, and the anchor then degrades to a plain session anchor — the
+        // legend's 1⚓ is the tell, same absence rule as the weekly rows.
+        poc: p?.pocSource === "weekly" ? mvWkPocRef.current : mvPocRef.current,
+        tickSize: tapeRef.current?.tickSize,
+      },
+    };
   };
+  const mvSourceRef = useRef(mvSource);
+  mvSourceRef.current = mvSource;
+  const refreshMv = () => mvLayerRef.current?.redraw();
   // Through a ref: the knob-change effect below is declared before the build
   // effect that gives `refreshMv` anything to draw into.
   const refreshMvRef = useRef(refreshMv);
   refreshMvRef.current = refreshMv;
+
+  // --- every level this chart is drawing ---------------------------------------
+  // One enumerator, two readers. The price-scale edge markers want the levels
+  // *excluded from the fit* (below); the approach panel wants all of them. They
+  // used to be one function answering only the first question, and a second copy
+  // for the second would be two lists that disagree about what the chart is
+  // drawing — so the list is one and `fitted` is the axis they differ on.
+  //
+  // `times` is the window the approach classification reads over: each level is
+  // sampled *onto those bar times*, never indexed by offset into its own array.
+  // The arrays do not start at the same bar (Globex opens at 18:00, NY at the
+  // bell, the weekly arrives history-prefixed), so an offset would pair one
+  // bar's level with another bar's close and answer plausibly about nothing.
+  // Pass nothing and no paths are built, which is what the edge markers want —
+  // they run on every pan and only ever read `price`.
+  //
+  // Declared here rather than beside `syncOffTape` so that every ref it reads is
+  // in scope above it; nothing calls it during the render pass.
+  const enumerateLevels = (times: readonly number[] = []): EnumeratedLevel[] => {
+    const out: EnumeratedLevel[] = [];
+    const v = visRef.current;
+    const flat = (price: number) => new Array<number>(times.length).fill(price);
+    const push = (
+      label: string,
+      price: number | undefined,
+      fitted: boolean,
+      family: LevelFamily,
+      path: number[],
+    ) => {
+      if (price != null && Number.isFinite(price))
+        out.push({ label, price, fitted, family, path, key: levelKey(family, label) });
+    };
+    // A ring the band knob has taken off the chart gets no row and no pill: the
+    // marker exists to say "this level is off the pane", and a line you asked not
+    // to draw is not a level anyone has lost.
+    const anchor = (
+      a: Anchor | null,
+      on: boolean,
+      name: string,
+      midDemoted: boolean,
+      key?: VwapFillAnchor,
+    ) => {
+      if (!a || !on) return;
+      const p = a.pts[a.pts.length - 1];
+      if (!p) return;
+      const s = key ? vwapBandsShown(bandsRef.current[key]) : ALL_BANDS;
+      const at = (pick: (q: VwapPoint) => number) => sampleAt(a.pts, times, pick);
+      // The weekly is the one anchor demoted mid and all (see mkBand), so its mid
+      // is the one that can leave the pane without anything else saying so.
+      push(name, p.middle, !midDemoted, "vwap", at((q) => q.middle));
+      if (s.s1) {
+        push(`${name}${SIGMA_LABEL.u1}`, p.upper1, false, "vwap", at((q) => q.upper1));
+        push(`${name}${SIGMA_LABEL.l1}`, p.lower1, false, "vwap", at((q) => q.lower1));
+      }
+      if (s.s2) {
+        push(`${name}${SIGMA_LABEL.u2}`, p.upper2, false, "vwap", at((q) => q.upper2));
+        push(`${name}${SIGMA_LABEL.l2}`, p.lower2, false, "vwap", at((q) => q.lower2));
+      }
+    };
+    anchor(gRef.current, v.vwapGlobex, "GX VWAP", false, "globex");
+    anchor(nRef.current, v.vwapNy, "NY VWAP", false, "ny");
+    anchor(aRef.current, v.vwapAnchored, "⚓ VWAP", false);
+    anchor(wkRef.current, v.vwapWeekly, "WK VWAP", true, "weekly");
+
+    // The three developing value areas, off the bounded window kept beside the
+    // POC maps — the only per-bar path these have on this side of the wire.
+    const va = vaPathsRef.current;
+    const devVa = (pts: ProfilePt[], on: boolean, name: string) => {
+      const p = pts[pts.length - 1];
+      if (!on || !p) return;
+      for (const k of PROF_KEYS) {
+        push(`${name} ${k.toUpperCase()}`, p[k], true, "devVa", sampleAt(pts, times, (q) => q[k]));
+      }
+    };
+    devVa(va.g, v.developingProfileGlobex, "GX");
+    devVa(va.n, v.developingProfileNy, "NY");
+    devVa(va.w, v.developingProfileWeekly, "WK");
+
+    const mv = mvLayerRef.current?.last();
+    if (mv && v.modernVwap) {
+      // One past the window, for the same reason `VA_PATH_BARS` is two past the
+      // lookback: the newest point here is the forming bar, which the window the
+      // caller asked about does not include.
+      const tail = mvLayerRef.current?.tail(times.length + 1) ?? [];
+      for (const k of MV_KEYS) {
+        // A ring above the chosen envelope draws nothing.
+        if (MV_RING[k] > mv.bands) continue;
+        push(`MV${SIGMA_LABEL[k]}`, mv.pt[k], MV_RING[k] === 0, "modernVwap",
+             sampleAt(tail, times, (q) => q[k]));
+      }
+    }
+    const dsv = dsvLayerRef.current?.last();
+    if (dsv && v.dynamicSwingVwap) {
+      const tail = dsvLayerRef.current?.tail(times.length + 1) ?? [];
+      push("DSV", dsv.value, true, "dsv", sampleAt(tail, times, (q) => q.value));
+    }
+
+    // The IB, only once its hour is up. A developing IB genuinely moves and no
+    // history of it is kept, so treating it as flat would credit price with all
+    // of the closing — a directional lie during exactly the hour the read is
+    // wanted. Absent is the honest answer; the extensions already worked this way.
+    const ib = ibRef.current;
+    if (ib && ib.complete) {
+      if (v.initialBalance) {
+        push("IB high", ib.high, true, "ib", flat(ib.high));
+        push("IB low", ib.low, true, "ib", flat(ib.low));
+      }
+      if (v.ibExtensions) {
+        const range = ib.high - ib.low;
+        for (const m of [1, 1.5, 2]) {
+          push(`IB +${m}×`, ib.high + m * range, false, "ib", flat(ib.high + m * range));
+          push(`IB −${m}×`, ib.low - m * range, false, "ib", flat(ib.low - m * range));
+        }
+      }
+    }
+
+    // Frozen at the prior close by construction, so its path is genuinely flat —
+    // `level_closed` is 0 here because the level really did not move.
+    const comp = compRef.current?.profile;
+    if (comp && v.compositeProfile) {
+      push("C-POC", comp.poc, true, "composite", flat(comp.poc));
+      push("C-VAH", comp.vah, true, "composite", flat(comp.vah));
+      push("C-VAL", comp.val, true, "composite", flat(comp.val));
+    }
+    const nodes = compNodesRef.current;
+    if (nodes && v.compositeNodes) {
+      for (const h of nodes.hvn) push("C-HVN", h.price, true, "composite", flat(h.price));
+      for (const l of nodes.lvn) push("C-LVN", l.price, true, "composite", flat(l.price));
+    }
+
+    // Your own lines, which are the levels this panel exists for. Static like the
+    // composite, and for a stronger reason: a price you marked cannot chase you.
+    // Keyed by id rather than by label, unlike everything above: these all share
+    // one name, so `push`'s family+label key would make every line you drew the
+    // same level. Arm two of them and one toggle would light both.
+    for (const l of hlinesRef.current)
+      if (Number.isFinite(l.price))
+        out.push({
+          label: "your line",
+          price: l.price,
+          fitted: true,
+          family: "hline",
+          path: flat(l.price),
+          key: hlineKey(l.id),
+        });
+    return out;
+  };
+
+  /** The levels the price scale does not fit to — the four anchors' σ envelopes,
+   *  the weekly mid, the Modern VWAP rings and the IB extension guides. */
+  const demotedLevels = (): { label: string; price: number }[] =>
+    enumerateLevels().filter((l) => !l.fitted);
+
+  // --- the levels near price, and how price is arriving at them ---------------
+  const [levelRows, setLevelRows] = useState<ApproachRow[]>([]);
+  const [levelOpen, setLevelOpen] = useState(loadLevelPanelOpen);
+  const levelBoxRef = useRef<HTMLDivElement | null>(null);
+  /** Reach past `NEAR_TICKS`, so a level price has not arrived at can still be
+   *  armed. Not sticky: it widens the panel to a dozen-odd rows, which is a
+   *  thing you open to do something and then close again. */
+  const [levelReach, setLevelReach] = useState(false);
+  const levelReachRef = useRef(false);
+  levelReachRef.current = levelReach;
+
+  /** Re-read the panel. Bar-close cadence, never per frame: the classification
+   *  spans whole bars, so between closes there is nothing for it to say that it
+   *  did not already say — and the enumerator walks every drawn layer.
+   *
+   *  The *forming* bar is deliberately outside the window. Every developing
+   *  layer re-prints that bar's entry on every step, so a window ending on it
+   *  would re-flip its own answer inside each bar; the panel says "as of last
+   *  close" because that is exactly what it is. Distances are the live half and
+   *  are painted separately (`paintLevelDist`). */
+  const refreshLevels = () => {
+    if (!levelPanel) return;
+    const bars = barsRef.current;
+    const tick = tapeRef.current?.tickSize ?? 0;
+    const price = lastPriceRef.current;
+    const end = bars.length - 1; // exclusive: the forming bar
+    if (end < 2 || !(tick > 0) || !Number.isFinite(price)) {
+      setLevelRows((prev) => (prev.length ? [] : prev));
+      return;
+    }
+    const win = bars.slice(Math.max(0, end - VA_PATH_BARS), end);
+    const times = win.map((b) => b.time);
+    const rows = clusterLevels(
+      enumerateLevels(times),
+      win.map((b) => b.close),
+      win.length - 1,
+      price,
+      tick,
+      // Reaching past `NEAR_TICKS` is what the ⌁ mode is for: a level worth
+      // arming is usually one price has *not* got to yet, and at 40 ticks the
+      // panel cannot see far enough to offer it. Only the reach changes — the
+      // clustering, the classification and the ordering are the panel's own.
+      levelReachRef.current ? { nearTicks: ARM_REACH_TICKS } : {},
+    );
+    // Settle for a no-op render the way the edge markers do: this runs on every
+    // bar close, and a row set that says the same thing is the same panel.
+    const key = (rs: ApproachRow[]) =>
+      rs.map((r) => `${r.cls}:${r.members.map((m) => m.label).join(",")}`).join("|");
+    setLevelRows((prev) => (key(prev) === key(rows) ? prev : rows));
+  };
+  const refreshLevelsRef = useRef(refreshLevels);
+  refreshLevelsRef.current = refreshLevels;
+
+  // Widening the reach has to answer now rather than at the next bar close — the
+  // gesture is "show me more", and a panel that sat unchanged for thirty seconds
+  // would read as a control that does nothing.
+  useEffect(() => {
+    refreshLevelsRef.current();
+  }, [levelReach]);
+
+  /** The distances, which move with the tape rather than with the bars — written
+   *  straight at the DOM like the crosshair's OHLC line, and for the same reason:
+   *  ten numbers a frame through React would re-render the panel at the tape's
+   *  cadence to change two digits.
+   *
+   *  And the row *order* with them: nearest first, farthest last. Ranking is here
+   *  and not in `clusterLevels` because a distance-ranked list built at bar close
+   *  is out of order the moment price moves — the rows are rebuilt every thirty
+   *  seconds and the distances every frame, and the panel visibly read "−15, −2,
+   *  −21, −33" the first time it was tried. The numbers and their ranking come
+   *  from the same read of the same price, so they cannot disagree. React never
+   *  sees it: source order stays price-descending (which is what a panel with no
+   *  painter — the journal replayer, the Recall card — falls back to), and the
+   *  ranking is CSS `order` on a flex column. */
+  const levelOrderRef = useRef("");
+  const paintLevelDist = () => {
+    const box = levelBoxRef.current;
+    const tick = tapeRef.current?.tickSize ?? 0;
+    const price = lastPriceRef.current;
+    if (!box || !(tick > 0) || !Number.isFinite(price)) return;
+    const ranked: { row: HTMLElement; at: number; away: number }[] = [];
+    for (const el of box.querySelectorAll<HTMLElement>(".chart-levels-dist")) {
+      const at = Number(el.dataset.price);
+      if (!Number.isFinite(at)) continue;
+      const ticks = Math.round((at - price) / tick);
+      el.textContent = `${ticks > 0 ? "+" : ""}${ticks}t`;
+      const row = el.parentElement;
+      if (row instanceof HTMLElement) ranked.push({ row, at, away: Math.abs(ticks) });
+    }
+    // Ties by the order they arrived in, which is price-descending — two levels
+    // equidistant either side of price read high-then-low, the way the scale does.
+    ranked.sort((a, b) => a.away - b.away);
+    // Writing `order` on every row every frame would be a layout invalidation per
+    // print for a panel that mostly is not re-ranking. The ranking only changes
+    // when price crosses the midpoint between two adjacent levels, so compare
+    // first: one string join against a dozen short numbers, versus a reflow.
+    //
+    // On the prices and not the distances: a re-render hands back fresh row
+    // elements with no inline `order` on them, and a new row set that happened to
+    // sit at the same distances would otherwise be left unranked at `order: 0` —
+    // which is *ahead* of every ranked row, so the panel would fail loudly and
+    // rarely. The prices change whenever the set does.
+    const sig = ranked.map((r) => r.at).join(",");
+    if (sig === levelOrderRef.current) return;
+    levelOrderRef.current = sig;
+    ranked.forEach((r, i) => {
+      r.row.style.order = String(i + 1);
+    });
+  };
+  const paintLevelDistRef = useRef(paintLevelDist);
+  paintLevelDistRef.current = paintLevelDist;
+
+  // A freshly rendered row has *no* distance in it: the numbers are written
+  // straight at the DOM by the tape, so a row that has just appeared carries
+  // whatever the last print left in the row that used to be in that slot —
+  // nothing, for a row at the end. Invisible while the chart is playing, because
+  // the next print covers it within a frame; plainly wrong on a paused one,
+  // which is where widening the reach put it.
+  useEffect(() => {
+    paintLevelDistRef.current();
+  }, [levelRows]);
+
+  /** The nearest demoted level off the top and off the bottom, and how many are
+   *  out there each way. `paneH` rides along because the lower marker sits on the
+   *  bottom edge of the *price* pane, which is not the bottom of the element when
+   *  CVD is mounted under it. */
+  const [edges, setEdges] = useState<{
+    up: EdgeLevel | null;
+    down: EdgeLevel | null;
+    nUp: number;
+    nDown: number;
+    paneH: number;
+  }>({ up: null, down: null, nUp: 0, nDown: 0, paneH: 0 });
+  const NO_EDGES = { up: null, down: null, nUp: 0, nDown: 0, paneH: 0 };
+  const syncEdges = () => {
+    const chart = chartRef.current;
+    const pr = chart?.priceScale("right").getVisibleRange();
+    const price = lastPriceRef.current;
+    if (!chart || pr == null || !(pr.to > pr.from) || !Number.isFinite(price)) {
+      setEdges((prev) => (prev.up || prev.down ? NO_EDGES : prev));
+      return;
+    }
+    let up: EdgeLevel | null = null;
+    let down: EdgeLevel | null = null;
+    let nUp = 0;
+    let nDown = 0;
+    // Only levels that are properly gone. A σ band a few points over the edge is
+    // off screen in the literal sense and nobody has lost it — one scroll finds
+    // it, and a pill that sits there through most of a session is a pill you stop
+    // reading. Half a pane past the edge is the line: on the sitting this was
+    // built for that is ~100 points against a weekly mid 665 past the edge, so
+    // the case the markers exist for still speaks and the envelope stays quiet.
+    const far = (pr.to - pr.from) * 0.5;
+    for (const l of demotedLevels()) {
+      // Nearest wins: the level about to come back is the one worth naming, and
+      // the count carries the rest.
+      if (l.price > pr.to + far) {
+        nUp++;
+        if (!up || l.price < up.price) up = { ...l, dist: l.price - price };
+      } else if (l.price < pr.from - far) {
+        nDown++;
+        if (!down || l.price > down.price) down = { ...l, dist: price - l.price };
+      }
+    }
+    const paneH = chart.panes()[0]?.getHeight() ?? 0;
+    // This runs on every pan and every bar close, so it settles for the same
+    // no-op render `setOffTape` relies on: same label at the same whole point
+    // distance is the same marker.
+    const key = (e: EdgeLevel | null) => (e ? `${e.label}@${Math.round(e.dist)}` : "");
+    setEdges((prev) =>
+      key(prev.up) === key(up) &&
+      key(prev.down) === key(down) &&
+      prev.nUp === nUp &&
+      prev.nDown === nDown &&
+      prev.paneH === paneH
+        ? prev
+        : { up, down, nUp, nDown, paneH },
+    );
+  };
+  syncEdgesRef.current = syncEdges;
 
   // A knob turned re-derives everything — the anchors, the regime and the
   // triggers all move together, and there is no partial version of that.
   useEffect(() => {
     refreshMvRef.current();
   }, [mvParams]);
+
+  useEffect(() => {
+    refreshDsvRef.current();
+  }, [dsvParams]);
+
+  // The window length, its shape and the fractal width all change what the
+  // histogram *is*, so a turn of any of them is a full re-derive — but a redraw,
+  // never a rebuild: the pane keeps its series and the chart keeps its zoom.
+  useEffect(() => {
+    drawCvdOsc();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cvdOscParams]);
 
   // --- hand-drawn tools -----------------------------------------------------
   // Everything below is mirrored into refs so the mouse handlers inside the build
@@ -1554,6 +2838,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   const armApplyRef = useRef<((a: boolean) => void) | null>(null);
   const paintRef = useRef<(() => void) | null>(null);
   const paintDevRef = useRef<(() => void) | null>(null);
+  /** Repaint the volume shelves; the flag resets the tracker, for when the tape
+   *  underneath them has been replaced or rewound. */
+  const paintShelvesRef = useRef<((reset: boolean) => void) | null>(null);
 
   // Ruler / measure tool.
   const [rulerArmed, setRulerArmed] = useState(false);
@@ -1603,7 +2890,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     const key = drawingsKeyRef.current;
     if (!key) return;
     saveDrawings(key, {
-      ranges: rangesRef.current.map((r) => ({ from: r.from, to: r.to })),
+      ranges: rangesRef.current.map((r) => ({ from: r.from, to: r.to, live: r.live })),
       anchor: avwapAnchorRef.current,
       hlines: hlinesRef.current.map((l) => ({ price: l.price, armed: l.armed })),
     });
@@ -1936,6 +3223,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
 
   useEffect(() => {
     applyRef.current?.(vis);
+    // The shelf layer is painted from the frame loop rather than by `apply`, so
+    // on a paused replay a toggle of either of its two switches would otherwise
+    // not land until the tape moved again.
+    paintShelvesRef.current?.(false);
   }, [vis]);
 
   // Keep the ＋ on its price. lightweight-charts publishes no price-scale change
@@ -2060,10 +3351,33 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     vol.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
     volRef.current = vol;
 
+    // The picker's studies, on this chart. Built here rather than in an effect of
+    // its own so that a remount — StrictMode, or a second pane appearing — comes
+    // up with the studies already on it; the specs are read off the ref, which is
+    // whatever the page last handed over.
+    studyLayerRef.current = new StudyLayer(chart, candle, setStudyReport);
+    studyLayerRef.current.setSpecs(studySpecsRef.current);
+
     // One anchor = 5 lines (mid, ±1σ, ±2σ) plus the shaded ±1σ→±2σ fill, exactly
     // as the journal charts draw them (CandlestickChart.addVwap): same hues, same
     // dashed envelope, same wash — so a band read here reads the same there.
-    const mkBand = (hue: { middle: string; band1: string; band2: string; fill: string }): Anchor => {
+    //
+    // The envelope is drawn, not fitted, and `context: true` extends that to the
+    // mid as well. Both are the call the Modern VWAP rings already make below,
+    // and the measurement behind them is docs/research/chart-price-scale-occupancy.md:
+    // with all twenty σ lines and every mid voting, the price scale ran 3–10× the
+    // traded range and the candles took a median 24% of the pane — at the chart's
+    // own RIBBON threshold, by default, on 5 of 8 random sittings. The envelope
+    // was worth about half of that and the weekly mid most of the rest.
+    //
+    // A demoted line still draws at its true price. It leaves the pane instead of
+    // holding the pane open across the gap, and `syncEdges` names it at the edge
+    // while it is gone.
+    const mkBand = (
+      hue: { middle: string; band1: string; band2: string; fill: string },
+      opts?: { context?: boolean },
+    ): Anchor => {
+      const fitted = (key: BandKey) => key === "mid" && !opts?.context;
       const line = (color: string, key: BandKey) =>
         chart.addSeries(LineSeries, {
           color,
@@ -2072,6 +3386,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           priceLineVisible: false,
           lastValueVisible: false,
           crosshairMarkerVisible: false,
+          ...(fitted(key) ? {} : { autoscaleInfoProvider: () => null }),
         });
       const band = new VwapBandPrimitive([], hue.fill);
       candle.attachPrimitive(band as any);
@@ -2093,40 +3408,36 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // is a *context* band here as it is there — nothing the replay does is
     // measured against it — and it only ever has points when the session shipped
     // a seed the week could be honestly built from.
-    wkRef.current = mkBand(hues.vwap.weekly);
+    //
+    // Which is why it is the one anchor whose mid is demoted too: a week's VWAP
+    // can sit a long way under the day, and it was holding the scale open across
+    // the whole gap to show a line nothing here reads. On 2026-08-05 its mid was
+    // at 29,050 with price at 29,915 and it alone took the scale from 260 points
+    // to 1078 — the candles from 69% of the pane down to 17%.
+    wkRef.current = mkBand(hues.vwap.weekly, { context: true });
     // The ⚓ band is built empty and stays empty until the user anchors — no
     // create/destroy dance, the streaming path just starts finding points in it.
     aRef.current = mkBand(hues.vwap.anchored);
 
-    // Modern VWAP: seven lines and the same ±1σ→±2σ wash the other four anchors
-    // draw. The wash was left off at first because this one's bands carry the
-    // regime colour and a flat fill under a tinted envelope is two colour
-    // channels arguing over the same pixels — so the fill takes the regime
-    // triplet too (see refreshMv), and they argue about nothing.
-    // Built empty; refreshMv fills them or leaves them empty.
-    mvLinesRef.current = Object.fromEntries(
-      MV_KEYS.map((k) => [
-        k,
-        chart.addSeries(LineSeries, {
-          color: k === "mid" ? hues.modernVwap.middle : hues.modernVwap.band,
-          // The mid and the ±2σ envelope are the two lines a rule is ever read
-          // off, so both are solid; ±1σ and ±3σ stay dashed. Weight still
-          // separates the mid from its envelope, so the ring you are looking at
-          // is legible without counting outward from the middle.
-          lineWidth: MV_RING[k] === 0 ? 2 : 1,
-          lineStyle: MV_RING[k] === 0 || MV_RING[k] === 2 ? LineStyle.Solid : LineStyle.Dashed,
-          priceLineVisible: false,
-          lastValueVisible: false,
-          crosshairMarkerVisible: false,
-          // The envelope is drawn, not fitted. A 3σ ring on a fresh swing anchor
-          // is a long way from price, and letting it into the autoscale spends a
-          // third of the pane on empty air — the same call the demo page makes.
-          ...(k === "mid" ? {} : { autoscaleInfoProvider: () => null }),
-        }),
-      ]),
-    ) as Record<MvKey, ISeriesApi<"Line">>;
-    mvBandRef.current = new VwapBandPrimitive([], hues.modernVwap.fill, 0.45);
-    candle.attachPrimitive(mvBandRef.current as any);
+    // Modern VWAP: seven lines, the ±1σ→±2σ wash under them and the trigger
+    // marks, all built by the shared layer (./modernVwapLayer) — the journal
+    // charts mount the same one. Built empty and hidden; `apply` below tells it
+    // which of its two rows the user has on, and refreshMv feeds it.
+    mvLayerRef.current = createModernVwapLayer(
+      chart,
+      candle,
+      () => mvSourceRef.current(),
+      onMvData,
+    );
+
+    // And the Zeiierman line beside it: one series and its anchor flags. Built
+    // empty and hidden, same as the layer above.
+    dsvLayerRef.current = createDynamicSwingVwapLayer(
+      chart,
+      candle,
+      () => dsvSourceRef.current(),
+      onDsvData,
+    );
 
     // Developing value areas, one per anchor: VAH and VAL solid (they are the
     // levels the rules actually test against), POC dashed between them, each in
@@ -2151,6 +3462,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     };
     gProfRef.current = mkProfile(hues.profile.globex);
     nProfRef.current = mkProfile(hues.profile.ny);
+    wProfRef.current = mkProfile(hues.profile.weekly);
 
     // Initial Balance: high/low as flat segments from the bell to the live edge —
     // line series rather than price lines, because an IB doesn't exist over the
@@ -2199,6 +3511,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // Every profile on this chart — the viewport-following one and each
     // fixed-range one — is a slice of bars, and a bar knows the ticks it was
     // built from, so they all resolve to a scan of the real tape.
+    //
+    // The aggressor tag goes with them, so the rows carry delta as well as
+    // volume — unconditionally, not only while the tint is on. It is two
+    // compares per tick on a loop that is already dividing, and buying it
+    // outright means the reading is there the moment the knob is turned, and
+    // that "this tape has no delta" is a fact the legend can state rather than
+    // an artefact of a switch being off.
     const profileFor = (i0: number, i1: number): VolumeProfile | null => {
       const bars = barsRef.current;
       const tape = tapeRef.current;
@@ -2210,7 +3529,140 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         bars[i1].i1,
         tape.tickSize,
         PROFILE_BIN,
+        tape.side,
       );
+    };
+
+    // And how the delta lane on those profiles is read (lib/deltaFlow). Scale and
+    // flags are arithmetic over the rows and cost nothing; a verdict needs the
+    // tape again, cut by bar, which is a scan of the window on the order of the
+    // one `profileFor` above already does.
+    //
+    // So verdicts are cached on the window, the bar count and the knobs, and the
+    // viewport's `reprofile` runs every frame while the tape is playing. Without
+    // the cache that scan would land on every frame; with it, it lands once a bar
+    // — which is also the only honest cadence for it, since a verdict is a
+    // statement about bars that have closed and the forming bar has not.
+    let verdictKey = "";
+    let verdictCache: Map<number, "initiative" | "absorbed"> | null = null;
+    // The lane window's own accumulator, and the visit split's cache. The window
+    // profile is a sliding span — its left edge advances a bar at a time — so
+    // LiveTapeProfile's fast path carries the forming bar's ticks per frame and
+    // pays one rebuild per bar when the edge moves. The visit split has no
+    // incremental form (a returning bar re-files a row's whole history), so it
+    // is computed once per bar window and reused across the frames inside it —
+    // the lane lags the forming bar by at most that bar, which is the price of
+    // not scanning the whole span sixty times a second.
+    const laneWinLive = new LiveTapeProfile();
+    let visitKey = "";
+    let visitLane: LaneReading | null = null;
+    const laneFor = (
+      p: VolumeProfile | null,
+      i0: number,
+      i1: number,
+      /** False for the dragged slices — see RangeProfileItem.lane. */
+      allowVerdict = true,
+      /** True only for the viewport lane. A fixed range's span *is* the window
+       *  the reader drew, so the window knob never re-cuts it. */
+      follow = false,
+    ): LaneReading | null => {
+      if (!p || !p.hasDelta) return null;
+      const k = deltaLaneRef.current;
+      const bars = barsRef.current;
+      const tape = tapeRef.current;
+      const win = follow ? k.window : "session";
+      const spanOk = tape != null && i0 >= 0 && i1 >= i0 && i1 < bars.length;
+
+      if (win === "visit" && spanOk) {
+        const key = `${i0}:${i1}:${bars.length}:${p.rows.length}`;
+        if (key === visitKey && visitLane) return visitLane;
+        const split = splitVisits(p, bars.slice(i0, i1 + 1), (emit) => {
+          for (let b = i0; b <= i1; b++) {
+            for (let t = bars[b].i0; t <= bars[b].i1; t++) {
+              const s = tape!.side[t];
+              if (s !== SIDE_BUY && s !== SIDE_SELL) continue;
+              emit(
+                b - i0,
+                tape!.level[t] * tape!.tickSize,
+                s === SIDE_BUY ? tape!.size[t] : -tape!.size[t],
+              );
+            }
+          }
+        });
+        visitKey = key;
+        visitLane = readVisitLane(p, split);
+        return visitLane;
+      }
+
+      // The timed windows re-source the lane; everything after this block reads
+      // `src` and the `vi0..vi1` bars behind it, so flags, scales and verdicts
+      // are all statements about the same stretch of tape.
+      let src: LaneSource = p;
+      let vi0 = i0;
+      let vi1 = i1;
+      const mins = LANE_WINDOW_MINUTES[win];
+      if (mins != null && spanOk) {
+        const cut = bars[i1].time - mins * 60;
+        let wi0 = i0;
+        while (wi0 < i1 && bars[wi0].time <= cut) wi0++;
+        // A span already inside the window is its own window — the session lane.
+        if (wi0 > i0) {
+          const wp = laneWinLive.update(
+            tape!.level,
+            tape!.size,
+            bars[wi0].i0,
+            bars[i1].i1,
+            tape!.tickSize,
+            PROFILE_BIN,
+            tape!.side,
+          );
+          const ws = windowedOnto(p, wp);
+          if (ws) {
+            src = ws;
+            vi0 = wi0;
+          }
+        }
+      }
+
+      const lane = readLane(src, k.scale, k.flagSigma);
+      if (!allowVerdict || !k.classify || lane.flagged.length === 0 || !tape || vi1 < vi0)
+        return lane;
+      if (vi0 < 0 || vi1 >= bars.length) return lane;
+
+      const key = `${vi0}:${vi1}:${bars.length}:${k.scale}:${k.flagSigma}:${win}:${lane.flagged.join()}`;
+      if (key === verdictKey && verdictCache) {
+        lane.verdict = verdictCache;
+        return lane;
+      }
+
+      const n = vi1 - vi0 + 1;
+      const table = new Map<number, Float64Array>();
+      for (const r of lane.flagged) table.set(r, new Float64Array(n));
+      for (let b = vi0; b <= vi1; b++) {
+        const col = b - vi0;
+        for (let t = bars[b].i0; t <= bars[b].i1; t++) {
+          const price = tape.level[t] * tape.tickSize;
+          for (const r of lane.flagged) {
+            const row = src.rows[r];
+            if (price < row.low || price >= row.high) continue;
+            // The same rule the profile's own binning applies: an untagged print
+            // is volume that belonged to neither side, so it moves no delta.
+            const s = tape.side[t];
+            if (s === SIDE_BUY) table.get(r)![col] += tape.size[t];
+            else if (s === SIDE_SELL) table.get(r)![col] -= tape.size[t];
+            break;
+          }
+        }
+      }
+      verdictKey = key;
+      verdictCache = classifyFlagged(
+        src,
+        lane.flagged,
+        (r) => table.get(r)!,
+        bars.slice(vi0, vi1 + 1),
+      );
+      lane.verdict = verdictCache;
+      return lane;
     };
 
     // The two profiles that have to keep up with the playhead read through their
@@ -2220,10 +3672,16 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // Same numbers as profileFor — the fast path only changes what it costs.
     const vpLive = new LiveTapeProfile();
     const devLive = new LiveTapeProfile();
+    //
+    // `delta` is per accumulator and not per chart: the viewport profile offers
+    // the tint and so buys the tag, the developing NY gutter draws its histogram
+    // in one colour and so doesn't — and its span is the whole session, folded a
+    // few ticks at a time on every frame.
     const liveProfileFor = (
       live: LiveTapeProfile,
       i0: number,
       i1: number,
+      delta = false,
     ): VolumeProfile | null => {
       const bars = barsRef.current;
       const tape = tapeRef.current;
@@ -2235,6 +3693,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         bars[i1].i1,
         tape.tickSize,
         PROFILE_BIN,
+        delta ? tape.side : undefined,
       );
     };
 
@@ -2242,6 +3701,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // primitive (nothing native runs along the price axis), while POC/VAH/VAL are
     // price lines so they get axis labels and span the full pane for free.
     const vp = new VolumeProfilePrimitive(null);
+    vp.showDelta = profileDeltaRef.current;
     candle.attachPrimitive(vp as any);
     vpRef.current = vp;
 
@@ -2286,17 +3746,31 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // the "nothing new" case with the very profile it handed back last time, so
     // that comparison is the honest one to skip on.
     let lastVp: VolumeProfile | null = null;
+    // The bar window `vp.profile` covers, for the lane's verdicts — a profile
+    // knows its prices but not which bars made it.
+    const vpWin = { i0: 0, i1: -1 };
     const reprofile = () => {
       const range = chart.timeScale().getVisibleLogicalRange();
       if (!range) return;
       const from = Math.max(0, Math.ceil(range.from));
       const to = Math.min(barsRef.current.length - 1, Math.floor(range.to));
       if (to < from) return;
-      const p = liveProfileFor(vpLive, from, to);
+      const p = liveProfileFor(vpLive, from, to, true);
       if (p === lastVp) return;
       lastVp = p;
+      vpWin.i0 = from;
+      vpWin.i1 = to;
       vp.setProfile(p);
+      vp.setLane(laneFor(p, from, to, true, true));
       syncProfileLines(p);
+    };
+    // Re-read the lane without re-deriving anything under it: the rows and their
+    // volumes are unchanged, only the question asked of the delta on them.
+    applyLaneRef.current = () => {
+      verdictKey = "";
+      visitKey = "";
+      vp.setLane(laneFor(vp.profile, vpWin.i0, vpWin.i1, true, true));
+      paintRef.current?.();
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
       reprofile();
@@ -2427,12 +3901,39 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     const devPrim = devPrimRef.current!;
     candle.attachPrimitive(devPrim as any);
 
+    // The coarser bar over this one. Attached with the standing backdrop because
+    // that is what it is — it owns both z-orders internally, so "above the
+    // candles" is a setting rather than an attach order (ExternalChartPrimitive).
+    const extPrim = extPrimRef.current!;
+    extPrim.setParams(extParamsRef.current);
+    candle.attachPrimitive(extPrim as any);
+
+    // The HTF trend: owns both z-orders (wash under, lines over).
+    const htfPrim = htfPrimRef.current!;
+    htfPrim.setParams(htfParamsRef.current);
+    candle.attachPrimitive(htfPrim as any);
+
+    // Under the candles always — the zones are the background a bar is read
+    // against, so this one has no z-order setting to own.
+    const rzPrim = rzPrimRef.current!;
+    rzPrim.setParams(rzParamsRef.current);
+    candle.attachPrimitive(rzPrim as any);
+
+    const econPrim = econPrimRef.current!;
+    candle.attachPrimitive(econPrim as any);
+
+    const gexPrim = gexPrimRef.current!;
+    gexPrim.setParams(gexParamsRef.current.walls, gexParamsRef.current.flip);
+    candle.attachPrimitive(gexPrim as any);
+
     const evPrim = evPrimRef.current!;
     candle.attachPrimitive(evPrim as any);
 
     // --- Fixed-range profile: drag across the chart to profile just that slice ---
     const rangePrim = new RangeProfilePrimitive();
+    rangePrim.setShowDelta(profileDeltaRef.current);
     candle.attachPrimitive(rangePrim as any);
+    rangePrimRef.current = rangePrim;
 
     // --- Closed trades: entry arrow → exit dot, and what the leg paid --------
     // Attached before the two live overlays so a mark from an hour ago can never
@@ -2451,8 +3952,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // --- Modern VWAP triggers: MR triangles, TC rings, anchor ticks ----------
     // Above the tape's own marks and below the position: a study layer is
     // context, and it is never what you are currently doing.
-    const mvPrim = mvPrimRef.current!;
-    candle.attachPrimitive(mvPrim as any);
+    mvLayerRef.current?.attachSignals();
+    // The Zeiierman line's frozen segments and swing flags, likewise.
+    dsvLayerRef.current?.attachOverlays();
 
     // --- Open position: entry / stop / target, zones, chips, axis labels ---
     // Drawn above everything else, and the only overlay whose lines can be
@@ -2528,6 +4030,62 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       candle.attachPrimitive(ruler as any);
     };
 
+    // How one selection's value area *developed* — POC/VAH/VAL at every bar close
+    // inside it, which is what the developing VP gives the session and what this
+    // gives an arbitrary slice of it.
+    //
+    // Through the engine's own LevelHist, so these are the same walk (and the
+    // same tick grid) as every other value area on the chart rather than a second
+    // port of it. Cost is the slice's ticks plus one O(levels) scan per bar, paid
+    // on two occasions only:
+    //
+    //  - not mid-drag. A resize changes the span on every pointer move, and
+    //    re-walking a wide selection at pointer rate is the one way this gets
+    //    expensive. The histogram still tracks the drag; the trace comes back on
+    //    release.
+    //  - not when the span is unchanged. `paint` runs on pans, recolours and
+    //    selection changes too, and none of those move a level.
+    // A latched range grows by one bar at a time and never moves its left edge,
+    // so that case extends the histogram it already built instead of re-walking
+    // the slice — the difference between paying the new bar's ticks and paying
+    // the whole selection's, once a bar, for the rest of the session. Any other
+    // change (a resize, a move, a rewind) starts over.
+    const traceCache = new Map<
+      number,
+      { i0: number; end: number; hist: LevelHist; path: ProfilePt[] }
+    >();
+    const traceFor = (id: number, i0: number, i1: number): ProfilePt[] => {
+      const bars = barsRef.current;
+      // Stop at the last *closed* bar. Partly because a value area is the state
+      // of a closed bar — the cadence journal.sim.profile and the developing VP
+      // both keep — and partly because the kept histogram would otherwise absorb
+      // a forming bar's first few ticks and never see the rest of them. The
+      // forming bar is not missing from the reading: the headline POC/VAH/VAL
+      // are built from the whole selection, this bar included.
+      const end = Math.min(i1, bars.length - 2);
+      const hit = traceCache.get(id);
+      if (hit && hit.i0 === i0 && hit.end === end) return hit.path;
+      // The span moved under a live drag: leave the trace off until the drop
+      // rather than re-walking at pointer rate.
+      if (drag) return [];
+      const tape = tapeRef.current;
+      if (!tape || i0 < 0 || end < i0) return [];
+      const grew = hit != null && hit.i0 === i0 && end > hit.end;
+      const hist = grew ? hit!.hist : new LevelHist();
+      const path = grew ? hit!.path : [];
+      const tick = tape.tickSize;
+      for (let b = grew ? hit!.end + 1 : i0; b <= end; b++) {
+        const bar = bars[b];
+        for (let i = bar.i0; i <= bar.i1; i++) hist.add(tape.level[i], tape.size[i]);
+        const l = hist.levels();
+        if (l) {
+          path.push({ time: bar.time, poc: l.poc * tick, vah: l.vah * tick, val: l.val * tick });
+        }
+      }
+      traceCache.set(id, { i0, end, hist, path });
+      return path;
+    };
+
     // Repaint every fixed-range profile from the ref. A range whose span isn't
     // fully on the chart draws nothing rather than being clamped onto the loaded
     // edge — on a rewind its bars genuinely haven't happened yet, and a profile
@@ -2537,13 +4095,27 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       const bars = barsRef.current;
       const lastT = bars.length ? bars[bars.length - 1].time : -Infinity;
       const firstT = bars.length ? bars[0].time : Infinity;
+      // A latched right edge is resolved here rather than written when a bar
+      // arrives: this runs on the new bar *and* on a rewind, so one assignment
+      // covers both directions, and `r.to` stays the single thing hit-testing
+      // and persistence read.
+      if (bars.length) for (const r of rangesRef.current) if (r.live) r.to = lastT;
       rangePrim.setData(
         rangesRef.current.map((r) => {
           const loaded = r.from >= firstT && r.to <= lastT;
-          if (!loaded) return { id: r.id, from: r.from, to: r.to, profile: null };
+          if (!loaded) return { id: r.id, from: r.from, to: r.to, live: r.live, profile: null };
           const i0 = nearestIdx(r.from);
           const i1 = nearestIdx(r.to);
-          return { id: r.id, from: bars[i0].time, to: bars[i1].time, profile: profileFor(i0, i1) };
+          const p = profileFor(i0, i1);
+          return {
+            id: r.id,
+            from: bars[i0].time,
+            to: bars[i1].time,
+            live: r.live,
+            profile: p,
+            lane: laneFor(p, i0, i1, false),
+            path: traceFor(r.id, i0, i1),
+          };
         }),
         selectedRef.current,
       );
@@ -2560,6 +4132,31 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     let lastDev: VolumeProfile | null = null;
     let lastNodes: ProfileNodes | null = null;
     let lastProm = -1;
+    // Shelf state that outlives a frame — see `paintShelves` below for why it
+    // has to. Reset together, by the same call, so a rewound tape cannot leave
+    // the tracker holding bands from a future it no longer has.
+    const shelfPrim = new VolumeShelfPrimitive();
+    candle.attachPrimitive(shelfPrim as any);
+    // Rebuilt on every reset rather than once here, because the hold is a
+    // *constructor* argument. Built once, the tracker went on enforcing whatever
+    // "must hold for" was set to when the chart mounted: `reset()` empties its
+    // bands but cannot change the gate they are measured against, so that one
+    // knob silently did nothing until the page was reloaded while the other two
+    // — read from `params` at paint time — worked. The journal chart never had
+    // this because its tracker is built inside the walk.
+    let shelfTracker = new ShelfTracker(2, shelfParamsRef.current.minHoldMin * 60);
+    const shelfCols: ShelfColumn[] = [];
+    let shelfLastEval = -Infinity;
+    // What the primitive was last handed, so a frame that changes nothing costs
+    // nothing. `paintShelves` runs on every frame of a playing replay, while a
+    // reading can only move once every `stepSec` of tape — without this the
+    // in-between frames rebuilt the bar list, re-filtered and re-sorted the
+    // boxes, and invalidated the chart, all to hand over the picture it already
+    // had.
+    let shelfDirty = true;
+    let shelfOn = false;
+    let shelfBoxesOn = false;
+    let shelfShownField: ShelfField | null = null;
     const paintDev = () => {
       const bars = barsRef.current;
       const start = nyStartRef.current;
@@ -2593,7 +4190,305 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         from: bars[i0].time,
       });
     };
+
+    // --- The external-period candles ----------------------------------------
+    //
+    // Regrouping is one pass over the bar list, which on a full session is a
+    // few thousand cheap iterations — small, but this runs on every frame the
+    // tape advances, and a per-frame walk of every bar is the exact cost the
+    // draw gate was added to stop paying. Only the newest bar can change without
+    // the count changing, so a signature over the count and that bar is enough
+    // to skip the walk on the frames that changed neither.
+    let lastExtSig = "";
+    const paintExt = () => {
+      const bars = barsRef.current;
+      const period = extParamsRef.current.period;
+      const last = bars[bars.length - 1];
+      const sig = last ? `${bars.length}|${period}|${last.time}|${last.high}|${last.low}|${last.close}` : "";
+      if (sig === lastExtSig) return;
+      lastExtSig = sig;
+      const grouped: ExternalBar[] = groupExternalBars(bars, period);
+      extPrim.setBars(grouped);
+      // The legend's dimmed row: it grouped, or the period is not above the bar.
+      // Only ever flipped on a real change, so this is not a per-frame setState.
+      setExtGrouped(grouped.length > 0 || bars.length === 0);
+    };
+
+    // The zones. Gated harder than anything else on this chart, because it is
+    // the most expensive painter here: one pass over every bar, and inside it a
+    // pass over every live zone, so a session's worth is tens of thousands of
+    // comparisons. It is also, like the studies, a statement about *closed*
+    // bars — the pivot that makes a zone confirms `pivotSpan` bars late and can
+    // never be about the bar being painted — so recomputing per tick would buy
+    // nothing at all. Same signature gate as the overlay above, plus a `force`
+    // for a knob change, which moves the zones without moving a bar.
+    let lastRzSig = "";
+    const paintRz = (force = false) => {
+      // Read here rather than watched by an effect, the same rule the shelves
+      // follow: visibility decides whether the walk happens at all, so it has to
+      // be checked wherever the frame came from. A layer that is off costs
+      // nothing — which matters more here than for any other painter, since this
+      // one is a full pass over the session and it is off by default.
+      if (!visRef.current.rankedZones) {
+        lastRzSig = "";
+        return;
+      }
+      const bars = barsRef.current;
+      const last = bars[bars.length - 1];
+      const sig = last ? `${bars.length}|${last.time}` : "";
+      if (!force && sig === lastRzSig) return;
+      lastRzSig = sig;
+      // The prints go with the bars so the flow terms exist whichever ranking
+      // is on: they are what the flow ranking sorts on, and reading them costs
+      // a scan of each pivot window and each touching bar, not of the session.
+      const tape = tapeRef.current;
+      const zoneTape: ZoneTape | null = tape
+        ? {
+            level: tape.level,
+            size: tape.size,
+            side: tape.side,
+            tickSize: tape.tickSize,
+            span: (b) => {
+              const bar = bars[b];
+              return bar && bar.i0 >= 0 && bar.i1 >= bar.i0 ? [bar.i0, bar.i1] : null;
+            },
+          }
+        : null;
+      const data: RankedZonesData | null = last
+        ? computeRankedZones(bars, rzParamsRef.current, tape?.tickSize ?? 0.25, zoneTape)
+        : null;
+      rzPrim.setData(data, last?.time ?? 0);
+      setRzCount(data ? data.zones.filter((z) => z.visible).length : 0);
+      setRzFlow(data ? data.hasFlow : true);
+    };
+    paintRzRef.current = paintRz;
+
+    // --- Economic releases ----------------------------------------------------
+    // The bars are handed over every frame (a reference, so free); the fetch only
+    // when the span of wall-clock days they cover changes. A span reaching today
+    // also keys on a 10-minute bucket, so a live chart picks up the actual once
+    // FF posts it. A failed fetch keeps its key: retrying per frame would be a
+    // request per print against a scraper.
+    let econKey = "";
+    const paintEcon = (force = false) => {
+      const bars = barsRef.current;
+      econPrim.setBars(bars);
+      if (!visRef.current.econEvents || bars.length === 0) return;
+      const d0 = Math.floor(bars[0].time / 86400) - 1;
+      const d1 = Math.floor(bars[bars.length - 1].time / 86400) + 1;
+      const today = Math.floor(Date.now() / 86400000);
+      const floor = econParamsRef.current.floor;
+      const key =
+        `${d0}|${d1}|${floor}|${tzRef.current}` +
+        (d1 >= today ? `|${Math.floor(Date.now() / 600000)}` : "");
+      if (!force && key === econKey) return;
+      econKey = key;
+      const iso = (d: number) => new Date(d * 86400000).toISOString().slice(0, 10);
+      const impact = { high: "high", medium: "high,medium", low: "high,medium,low" }[floor];
+      apiGet<{ events: EconEvent[] }>("/econ/events", {
+        start: iso(d0),
+        end: iso(d1),
+        impact,
+        tz: tzRef.current,
+      })
+        .then((r) => {
+          if (econKey !== key) return;
+          econPrim.setEvents(r.events);
+          setEconCount(r.events.filter((e) => e.timed).length);
+        })
+        .catch(() => {});
+    };
+    paintEconRef.current = paintEcon;
+
+    // --- Gamma levels ---------------------------------------------------------
+    // Keyed on the span of *sessions* the bars cover (a bar at 18:00 belongs to
+    // the next day's session, hence the +6h) and the contract. Books change once
+    // a day, so nothing here needs a clock bucket; a failed fetch keeps its key
+    // for the same reason the econ one does.
+    let gexKey = "";
+    let gexStepSeen: GexStep | null = null;
+    // The legend reads the step in force at the last bar; checked every paint
+    // (cheap — a handful of steps), set only when it changes.
+    const syncGexStep = () => {
+      const b = barsRef.current;
+      const st = b.length ? gexPrim.stepAt(b[b.length - 1].time) : null;
+      if (st !== gexStepSeen) {
+        gexStepSeen = st;
+        setGexLast(st);
+      }
+    };
+    const paintGex = (force = false) => {
+      const bars = barsRef.current;
+      gexPrim.setBars(bars);
+      syncGexStep();
+      const sym = tapeContractRef.current;
+      if (!visRef.current.gexLevels || bars.length === 0 || !sym) return;
+      const sess = (t: number) => Math.floor((t + 6 * 3600) / 86400);
+      const d1 = sess(bars[bars.length - 1].time);
+      const d0 = Math.max(sess(bars[0].time), d1 - 30);
+      const expiry = gexParamsRef.current.expiry;
+      // A span reaching today keys on a 5-minute bucket too, so a live chart
+      // picks up each intraday snapshot the collector banks.
+      const today = Math.floor(Date.now() / 86400000);
+      const key =
+        `${d0}|${d1}|${sym}|${tzRef.current}|${expiry}` +
+        (d1 >= today ? `|${Math.floor(Date.now() / 300000)}` : "");
+      if (!force && key === gexKey) return;
+      gexKey = key;
+      const iso = (d: number) => new Date(d * 86400000).toISOString().slice(0, 10);
+      apiGet<{ sessions: GexSession[] }>("/gex/levels", {
+        symbol: sym,
+        start: iso(d0),
+        end: iso(d1),
+        tz: tzRef.current,
+        expiry,
+      })
+        .then((r) => {
+          if (gexKey !== key) return;
+          gexPrim.setSessions(r.sessions);
+          syncGexStep();
+        })
+        .catch(() => {});
+    };
+    paintGexRef.current = paintGex;
+    paintExtRef.current = paintExt;
+    paintExt();
+
+    // --- The HTF trend --------------------------------------------------------
+    //
+    // A frame's EMA and vote only move when one of its buckets closes, which
+    // only happens when a new drawn bar opens — so the same signature gate as
+    // the overlay above, keyed on the bar count and the newest bar's time, skips
+    // every frame that only moved the forming bar. `force` is for a knob change.
+    let lastHtfSig = "";
+    let lastHtfNow = "";
+    const paintHtf = (force = false) => {
+      const bars = barsRef.current;
+      const p = htfParamsRef.current;
+      const last = bars[bars.length - 1];
+      const sig = last ? `${bars.length}|${last.time}|${p.frames}|${p.length}` : "";
+      if (!force && sig === lastHtfSig) return;
+      lastHtfSig = sig;
+      const trend = computeHtfTrend(bars, p);
+      htfPrim.setData(bars, trend);
+      const now = { warm: trend.warm || bars.length === 0, state: trend.combined[trend.combined.length - 1] ?? 0 };
+      const key = `${now.warm}|${now.state}`;
+      if (key !== lastHtfNow) {
+        lastHtfNow = key;
+        setHtfNow(now);
+      }
+    };
+    paintHtfRef.current = paintHtf;
+    paintHtf(true);
+
+    // --- Volume shelves -----------------------------------------------------
+    //
+    // Incremental, unlike the journal chart's, which re-walks its whole session
+    // whenever a knob moves. Here the tape advances, and re-walking every frame
+    // would be quadratic in the session — so the tracker and the raster's columns
+    // live across frames and each new reading is pushed onto them.
+    //
+    // That is also the honest shape for a replay: a shelf must appear when the
+    // tape reaches the bar that earned it and not a moment before, which is what
+    // stepping the same tracker the live chart steps gives for free. Rebuilding
+    // from the whole session each frame would let a band that is about to form
+    // show up early on a re-render.
+    const paintShelves = (reset: boolean) => {
+      const params = shelfParamsRef.current;
+      if (reset) {
+        shelfTracker = new ShelfTracker(2, params.minHoldMin * 60);
+        shelfCols.length = 0;
+        shelfLastEval = -Infinity;
+        shelfDirty = true;
+      }
+      const bars = barsRef.current;
+      // Visibility is read here rather than watched by an effect because it is
+      // what the primitive is handed, so a change to either flag has to reach
+      // `setData` however the frame arrived.
+      const on = visRef.current.volumeShelf;
+      const boxesOn = visRef.current.volumeShelfBoxes;
+      const fld = shelfFieldRef.current;
+      if (on !== shelfOn || boxesOn !== shelfBoxesOn || fld !== shelfShownField) {
+        shelfDirty = true;
+      }
+      shelfOn = on;
+      shelfBoxesOn = boxesOn;
+      shelfShownField = fld;
+
+      if (!on || !bars.length || !tapeRef.current) {
+        if (!shelfDirty) return;
+        shelfPrim.setData({
+          columns: [], boxes: [], showBoxes: false, zMin: 0,
+          field: "size", flowAvailable: false,
+        });
+        shelfDirty = false;
+        return;
+      }
+
+      // A reset walks the bars already on screen before going incremental.
+      //
+      // Not an optimisation — without it a replay that opens part-way through a
+      // session (a resumed sitting, a seek) shows one sliver of raster and no
+      // boxes at all, because a box has to be *held* before it is reported and a
+      // single reading has held for nothing. The history is right there in
+      // `bars`; refusing to read it would make the layer's emptiness a statement
+      // about when the chart mounted rather than about the market.
+      // `shelfLastEval` still at its sentinel means nothing has been read yet —
+      // the first paint of a chart that already has bars, which wants the same
+      // backfill an explicit reset does and never announces itself as one.
+      //
+      // Bounded to this session: `bars` also holds the context days the composite
+      // is built from, and a shelf is a reading about the auction in front of
+      // you, not about last Tuesday's. Unbounded it walked ~4,300 minutes of
+      // chart on a three-day load — 4,176 windowed profiles at every reset,
+      // several megabytes of raster held for days that are off-screen, and boxes
+      // drawn across sessions the trader never opened. Every other tape-reading
+      // layer here slices on the same count (`cvdOscBars`, the vol ruler).
+      const backfill = reset || shelfLastEval === -Infinity;
+      const due = backfill || bars[bars.length - 1].time - shelfLastEval >= params.stepSec;
+      if (!due && !shelfDirty) return;
+
+      if (due) {
+        const shelfBars = bars.map((b) => ({
+          time: b.time,
+          high: b.high,
+          low: b.low,
+        }));
+        const tick = tapeRef.current.tickSize;
+        const readAt = (i: number) => {
+          const t = shelfBars[i].time;
+          shelfLastEval = t;
+          const j = windowStart(shelfBars, i, params.windowMin);
+          const prof = profileFor(j, i);
+          const win = shelfBars.slice(j, i + 1);
+          const { shelves, reading } = detectShelves(prof, win, true, tick, params);
+          shelfTracker.push(t, shelves, win);
+          if (prof && reading) {
+            shelfCols.push({
+              time: t, rows: prof.rows, z: reading.z, flow: shelfFlow(prof) ?? undefined,
+            });
+          }
+        };
+        if (backfill) {
+          const from = Math.min(histCountRef.current, shelfBars.length - 1);
+          const own = shelfBars.slice(from);
+          for (const k of evalBars(own, params.stepSec)) readAt(from + k);
+        } else {
+          readAt(bars.length - 1);
+        }
+      }
+      shelfPrim.setData({
+        columns: shelfCols,
+        boxes: shelfTracker.boxes(),
+        showBoxes: boxesOn,
+        zMin: params.zMin,
+        field: shelfFieldRef.current,
+        flowAvailable: shelfCols.some((c) => c.flow != null),
+      });
+      shelfDirty = false;
+    };
     paintDevRef.current = paintDev;
+    paintShelvesRef.current = paintShelves;
 
     // --- IB overlay ---------------------------------------------------------
     // Redrawn whenever the box or the live edge moves (once per bar close, not
@@ -2934,7 +4829,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       if (armedRef.current) {
         const id = nextIdRef.current++;
         const t = barsRef.current[idx].time;
-        rangesRef.current = [...rangesRef.current, { id, from: t, to: t }];
+        rangesRef.current = [...rangesRef.current, { id, from: t, to: t, live: false }];
         selectedRef.current = id;
         drag = { mode: "new", id, anchorIdx: idx, from: idx, to: idx };
         e.preventDefault();
@@ -3053,6 +4948,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         syncHlinesRef.current();
       }
       drag = { mode: hit.mode, id: hit.id, anchorIdx: idx, from: nearestIdx(r.from), to: nearestIdx(r.to) };
+      // A range being dragged is not following anything: unlatch on the grab, and
+      // let the drop decide again. Without this `paint` would keep pulling the
+      // right edge back to the live edge while the pointer is trying to move it.
+      r.live = false;
       e.preventDefault();
       if (hit.mode === "move") host.style.cursor = "grabbing";
       syncRef.current();
@@ -3252,6 +5151,14 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       const moved = Math.abs(xOf(e) - downX);
       drag = null;
 
+      // Dropped with the right edge on the last bar: latch it there and let it
+      // follow the tape from now on. Dropped anywhere else it stays where it was
+      // put, which is also how a latched profile is released — drag its edge off
+      // the live edge. One predicate for every drag mode, so moving a whole
+      // range up against the live edge latches it too.
+      const dropped = rangesRef.current.find((r) => r.id === id);
+      if (dropped) dropped.live = nearestIdx(dropped.to) === barsRef.current.length - 1;
+
       // A click with no real drag means "never mind" — don't leave a hairline
       // profile of a single bar behind.
       if (wasNew && moved < DRAG_SLOP) {
@@ -3380,20 +5287,29 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     window.addEventListener("pointercancel", onUp);
 
     applyRef.current = (v: IndicatorVisibility) => {
-      const setBand = (a: Anchor | null, on: boolean) => {
+      // An anchor's row toggles the whole thing. Inside it, a *fixed* anchor's
+      // band knob says which rings survive — the mid is not on that knob, so it
+      // is drawn whenever the anchor is, and the wash needs both rings to be an
+      // honest fill (chartPrefs.vwapBandsShown owns both rules). The ⚓ band is
+      // not one of the three and keeps its whole envelope: it is drawn one at a
+      // time, by hand, at the place you asked about.
+      const setBand = (a: Anchor | null, on: boolean, anchor?: VwapFillAnchor) => {
         if (!a) return;
-        // Lines and fill of an anchor hide as a unit — a naked wash (or naked
-        // lines) would read as a different indicator.
-        for (const k of BAND_KEYS) a.lines[k].applyOptions({ visible: on });
-        a.band.setVisible(on);
+        const region = anchor ? regionRef.current[anchor] : "outer";
+        const s = anchor ? vwapBandsShown(bandsRef.current[anchor], region) : ALL_BANDS;
+        a.band.setRegion(region);
+        for (const k of BAND_KEYS)
+          a.lines[k].applyOptions({ visible: on && (k === "mid" || (RING_OF[k] === 1 ? s.s1 : s.s2)) });
+        a.band.setVisible(on && s.fill);
       };
-      setBand(gRef.current, v.vwapGlobex);
-      setBand(nRef.current, v.vwapNy);
+      setBand(gRef.current, v.vwapGlobex, "globex");
+      setBand(nRef.current, v.vwapNy, "ny");
       setBand(aRef.current, v.vwapAnchored);
-      setBand(wkRef.current, v.vwapWeekly);
+      setBand(wkRef.current, v.vwapWeekly, "weekly");
       for (const k of PROF_KEYS) {
         gProfRef.current?.[k].applyOptions({ visible: v.developingProfileGlobex });
         nProfRef.current?.[k].applyOptions({ visible: v.developingProfileNy });
+        wProfRef.current?.[k].applyOptions({ visible: v.developingProfileWeekly });
       }
       for (const s of ibSeries) s.applyOptions({ visible: v.initialBalance });
       for (const s of ibExtSeries) s.applyOptions({ visible: v.ibExtensions });
@@ -3404,6 +5320,17 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       bigPrim.setVisible(v.bigTrades);
       compPrim.setVisible(v.compositeProfile, v.compositeNodes);
       devPrim.setVisible(v.developingVpNy, v.developingVpNyNodes);
+      extPrim.setVisible(v.externalChart);
+      htfPrim.setVisible(v.htfTrend);
+      rzPrim.setVisible(v.rankedZones);
+      // The walk is skipped while it is off, so turning it on has nothing to
+      // show until something else moves — forced here, which is the difference
+      // between a layer that appears and one that appears at the next tick.
+      if (v.rankedZones) paintRz(true);
+      econPrim.setVisible(v.econEvents);
+      if (v.econEvents) paintEcon();
+      gexPrim.setVisible(v.gexLevels);
+      if (v.gexLevels) paintGex();
       // The two event layers hide by dropping out of the filtered list, so that
       // the bands and the marginals can never show different sets.
       pushEvents();
@@ -3411,18 +5338,27 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // a pane, and an empty pane keeps its height. The vol ruler is the same
       // kind of layer; the refresh mounts or drops it and fills it when it came up.
       syncCvdMount();
+      syncCvdOscMount();
       refreshVr();
       // The line's seven series hide as a unit and the marks have their own eye.
-      // Both go through the refresh rather than a `visible` flip, because when
-      // both are off the layer isn't drawn *or computed* — see refreshMv.
-      for (const k of MV_KEYS) mvLinesRef.current?.[k].applyOptions({ visible: v.modernVwap });
-      // The wash belongs to the lines, not to the marks — a fill with no
-      // envelope over it is a stain, the same call `setBand` makes above.
-      mvBandRef.current?.setVisible(v.modernVwap);
-      mvPrimRef.current?.setVisible(v.modernVwapSignals);
-      refreshMv();
+      // The layer redraws itself when this takes it out of, or into, dark —
+      // with both rows off it isn't drawn *or computed*.
+      mvLayerRef.current?.setVisible(v.modernVwap, v.modernVwapSignals);
+      // One row, line and flags together — the flags are how the line is read,
+      // not a separate claim about the tape.
+      dsvLayerRef.current?.setVisible(v.dynamicSwingVwap);
     };
     applyRef.current(visRef.current);
+
+    // The three fixed anchors' fills. Seeded from the ref for the same reason the
+    // visibility is: the bands were built at the authored weight, and this effect
+    // re-runs for reasons that have nothing to do with the reader's choice.
+    applyFillRef.current = (w) => {
+      gRef.current?.band.setAlphaScale(w.globex);
+      nRef.current?.band.setAlphaScale(w.ny);
+      wkRef.current?.band.setAlphaScale(w.weekly);
+    };
+    applyFillRef.current(fillRef.current);
 
     // Re-cut every series this effect built. `hues` is reassigned so that
     // anything created later off it (there is nothing today, but the streaming
@@ -3442,12 +5378,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       band(nRef.current, hues.vwap.ny);
       band(wkRef.current, hues.vwap.weekly);
       band(aRef.current, hues.vwap.anchored);
-      for (const k of MV_KEYS) {
-        mvLinesRef.current?.[k].applyOptions({
-          color: k === "mid" ? hues.modernVwap.middle : hues.modernVwap.band,
-        });
-      }
-      mvBandRef.current?.setRgb(hues.modernVwap.fill);
+      // The layer re-cuts its own seven lines and its wash, and redraws — its
+      // regime tint rides on per-point colours, which only come back with data.
+      mvLayerRef.current?.relight();
+      dsvLayerRef.current?.relight();
       const prof = (r: Record<ProfKey, ISeriesApi<"Line">> | null, pal: { edge: string; poc: string }) => {
         if (!r) return;
         r.vah.applyOptions({ color: pal.edge });
@@ -3456,11 +5390,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       };
       prof(gProfRef.current, hues.profile.globex);
       prof(nProfRef.current, hues.profile.ny);
+      prof(wProfRef.current, hues.profile.weekly);
       for (const l of ibSeries) l.applyOptions({ color: hues.ib.line });
       for (const l of ibExtSeries) l.applyOptions({ color: hues.ib.ext });
-      // The Modern VWAP's regime tint rides on per-point colours, so it comes
-      // back only when the data is re-set — and the primitives want a frame.
-      refreshMv();
+      // The primitives want a frame.
       paint();
     };
 
@@ -3479,7 +5412,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     return () => {
       hooksRef.current = null;
       vpRef.current = null;
+      rangePrimRef.current = null;
       applyRef.current = null;
+      applyFillRef.current = null;
       armApplyRef.current = null;
       rulerApplyRef.current = null;
       rulerClearRef.current = () => false;
@@ -3488,7 +5423,14 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       spaceApplyRef.current = null;
       orderApplyRef.current = null;
       paintRef.current = null;
+      applyLaneRef.current = null;
       paintDevRef.current = null;
+      paintExtRef.current = null;
+      paintHtfRef.current = null;
+      paintRzRef.current = null;
+      paintEconRef.current = null;
+      paintGexRef.current = null;
+      paintShelvesRef.current = null;
       paintHlinesRef.current = null;
       clearPress();
       if (ctxTimer != null) window.clearTimeout(ctxTimer);
@@ -3521,6 +5463,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       vrAtrRef.current = null;
       vrDevRef.current = null;
       vrYdayLineRef.current = null;
+      // Dropped rather than destroyed, for the same reason: its series went with
+      // the chart, and taking them off a chart that no longer exists throws from
+      // inside the library. A remount builds a fresh layer above.
+      studyLayerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -3582,6 +5528,37 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     bigPrimRef.current?.setMinLots(bigLots);
   }, [bigLots]);
 
+  // A study added, removed or re-tuned. Structural (series are made and
+  // destroyed, a pane appears) and then drawn against the bars already in hand,
+  // so a study picked mid-replay comes up with the session behind it rather than
+  // waiting for the next bar to close. Nothing here touches the clock or the
+  // tape — this is a layer, like every other row on the legend.
+  useEffect(() => {
+    studyLayerRef.current?.setSpecs(studies ?? EMPTY_STUDIES);
+    refreshStudies();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studies]);
+
+  // The legend's study rows are named from the catalogue, so a pane that came up
+  // holding saved specs has to re-render once the package lands or its rows sit
+  // there labelled with bare export names. The layer asks for the catalogue too
+  // and would redraw the canvas either way; this is the DOM half of the same
+  // wait, and `loadCatalogue` is one shared import however many panes ask.
+  const [catReady, setCatReady] = useState(() => catalogue() != null);
+  useEffect(() => {
+    if (catReady || !studies?.length) return;
+    let alive = true;
+    loadCatalogue()
+      .then(() => alive && setCatReady(true))
+      .catch(() => {
+        // The row keeps its export name and the legend says the study drew
+        // nothing — which is true, and is what the catalogue failing looks like.
+      });
+    return () => {
+      alive = false;
+    };
+  }, [catReady, studies]);
+
   // The style is a repaint and the marginal switch is a re-push — neither needs
   // the engine. The *tuning* is not handled here at all: the page rebuilds the
   // snapshot for that, the same path a timeframe change takes, and the new
@@ -3590,7 +5567,15 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     if (eventOverlay) evPrimRef.current?.setStyle(eventOverlay.style);
     pushEvents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventOverlay?.style.labelSt, eventOverlay?.style.fill, eventOverlay?.marginal, !eventOverlay]);
+  }, [
+    eventOverlay?.style.labelSt,
+    eventOverlay?.style.fillSweep,
+    eventOverlay?.style.fillAbsorb,
+    eventOverlay?.floorSweep,
+    eventOverlay?.floorAbsorb,
+    eventOverlay?.marginal,
+    !eventOverlay,
+  ]);
 
   // A new rule is a new composite; a new prominence is the same composite read
   // again. Both leave the replay exactly where it stands — nothing here can
@@ -3605,32 +5590,52 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     compNodesRef.current = null;
     paintComposite();
     paintDevRef.current?.();
+    paintExtRef.current?.();
+    paintHtfRef.current?.();
+    paintRzRef.current?.();
+    paintEconRef.current?.();
+    paintGexRef.current?.();
+    // Reset rather than step: a changed window or hold makes every reading so
+    // far a reading of a different question.
+    paintShelvesRef.current?.(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeProm]);
+  }, [nodeProm, shelfParams]);
+
+  // The field is a repaint, not a re-reading: every column already carries both
+  // quantities, so this must NOT reset the way a parameter change does.
+  useEffect(() => {
+    paintShelvesRef.current?.(false);
+  }, [shelfField]);
 
   // The one place the event filter lives: whether the page offers the layer at
-  // all and the two per-kind toggles are applied here, and the same list then
-  // feeds the bands on the candles, the marginal over each profile, and the
-  // legend's counts. Three copies of one filter would be three places for them
-  // to disagree.
+  // all, the two per-kind toggles and the per-kind draw-floors are applied
+  // here, and the same list then feeds the bands on the candles, the marginal
+  // over each profile, and the legend's counts. Three copies of one filter
+  // would be three places for them to disagree.
   //
-  // What is *not* here is any threshold: those live in the engine now, because a
-  // burst is a cluster and an absorption is scored against a median, and neither
-  // can be recovered by filtering the events a different setting published.
+  // What is *not* here is any selection threshold: those live in the engine,
+  // because a burst is a cluster and an absorption is scored against a median,
+  // and neither can be recovered by filtering the events a different setting
+  // published. The draw-floor is different in kind — it reads the strength the
+  // engine already assigned, so filtering here is exactly what it means.
   const pushEvents = () => {
     const ov = eventOvRef.current;
     const v = visRef.current;
     const list = !ov
       ? []
-      : eventsRef.current.filter((e) => (e.kind === "sweep" ? v.sweepBursts : v.absorption));
+      : eventsRef.current.filter((e) =>
+          e.kind === "sweep"
+            ? v.sweepBursts && e.st >= ov.floorSweep
+            : v.absorption && e.st >= ov.floorAbsorb,
+        );
     evPrimRef.current?.setEvents(list);
     // The marginal is the same list read against price instead of time, and it
     // has its own switch — so the gutters get an empty list rather than a
-    // different one.
+    // different one. The developing NY gutter is not one of them: it draws its
+    // histogram and nothing over it (DevelopingProfilePrimitive).
     const marginal = ov?.marginal ? list : [];
     compPrimRef.current?.setEvents(marginal);
     vpRef.current?.setEvents(marginal);
-    devPrimRef.current?.setEvents(marginal);
     const next = countEvents(list);
     setEvCount((c) => (c.sweep === next.sweep && c.absorb === next.absorb ? c : next));
   };
@@ -3676,11 +5681,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // Fold a playback tail into an anchor's fill points: the first tail entry
   // re-states the bar still forming (replace it), the rest are new (append).
   const mergeTail = (a: Anchor, tail: BandPt[]) => {
-    for (const p of tail) {
-      const pt = toVwapPoint(p);
-      if (a.pts.length && a.pts[a.pts.length - 1].time === pt.time) a.pts[a.pts.length - 1] = pt;
-      else a.pts.push(pt);
-    }
+    for (const p of tail) putTail(a.pts, toVwapPoint(p));
     if (tail.length) a.band.setPoints(a.pts);
   };
 
@@ -3689,6 +5690,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       tapeRef.current = tape;
       barsRef.current = [];
       histCountRef.current = 0;
+      clearPendingOverlay();
       nyStartRef.current = NaN;
       nyVaRef.current = null;
       ibRef.current = null;
@@ -3742,6 +5744,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
             id: nextIdRef.current++,
             from: r.from,
             to: r.to,
+            live: r.live === true,
           }));
           hlinesRef.current = saved.hlines.map((l) => ({
             id: nextHlineIdRef.current++,
@@ -3765,6 +5768,13 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       hooksRef.current?.remakeRuler(tape);
       hooksRef.current?.paint();
       paintDevRef.current?.();
+      paintExtRef.current?.();
+      paintHtfRef.current?.();
+      paintRzRef.current?.();
+      paintEconRef.current?.();
+      paintGexRef.current?.();
+      // The tape itself was swapped — the tracker's bands belong to the old one.
+      paintShelvesRef.current?.(true);
       paintHlinesRef.current?.();
     },
     setContextRanges(ranges: TapeRange[]) {
@@ -3806,6 +5816,10 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       const prevLast = barsRef.current.length - 1;
       barsRef.current = drawn;
       histCountRef.current = s.history.length;
+      // The snapshot re-`setData`s every overlay below, so anything the draw gate
+      // was still holding is not just stale but would double-apply against the
+      // series it is about to be replaced by.
+      clearPendingOverlay();
       candle.setData(
         drawn.map((b) => ({ time: b.time as Time, open: b.open, high: b.high, low: b.low, close: b.close })),
       );
@@ -3814,8 +5828,22 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         drawn.map((b) => ({ time: b.time as Time, value: b.volume, color: b.close >= b.open ? volc.up : volc.down })),
       );
       rebuildCvd(drawn, s.history.length);
+      // A seek rebuilds the developing POC from tick zero, so this is a swap —
+      // and it must land before refreshMv reads it for the `poc` anchor.
+      mvPocRef.current = new Map(s.gProfile.map((p) => [p.time, p.poc]));
+      mvWkPocRef.current = new Map(s.wProfile.map((p) => [p.time, p.poc]));
+      // A swap, for the same reason the maps above are: a seek can hand back a
+      // *shorter* list than the one held, and appending to it would leave the
+      // approach reader looking at bars the replay has rewound past.
+      vaPathsRef.current = {
+        g: s.gProfile.slice(-VA_PATH_BARS),
+        n: s.nProfile.slice(-VA_PATH_BARS),
+        w: s.wProfile.slice(-VA_PATH_BARS),
+      };
       refreshVr();
       refreshMv();
+      refreshDsv();
+      refreshStudies();
       const anchors: [Anchor, BandPt[]][] = [
         [gRef.current, s.gBand],
         [nRef.current, s.nBand],
@@ -3840,6 +5868,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       };
       setProf(gProfRef.current, s.gProfile);
       setProf(nProfRef.current, s.nProfile);
+      setProf(wProfRef.current, s.wProfile);
       // A seek rebuilds the NY value area from tick zero, so the bell is
       // wherever this snapshot says it is — including "not yet", after a rewind
       // to before it.
@@ -3860,6 +5889,18 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       hooksRef.current?.syncIb();
       hooksRef.current?.paint();
       paintDevRef.current?.();
+      paintExtRef.current?.();
+      paintHtfRef.current?.();
+      paintRzRef.current?.();
+      paintEconRef.current?.();
+      paintGexRef.current?.();
+      paintShelvesRef.current?.(false);
+      // A seek is a bar close as far as the levels panel is concerned: it lands
+      // on a different last-closed bar, so the window it classifies over is a
+      // different one. Here rather than beside the refreshes above because it
+      // reads the anchors' `pts` and the IB, which this block has just replaced.
+      refreshLevelsRef.current();
+      paintLevelDistRef.current();
       // The context bars only arrive with a snapshot, so this is where the
       // composite finds the stretch to pin its histogram to.
       paintComposite();
@@ -3870,13 +5911,17 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         wk: s.wkBand.length > 0,
         gp: s.gProfile.length > 0,
         np: s.nProfile.length > 0,
+        wp: s.wProfile.length > 0,
         ib: s.ib != null,
         cvd: cvdAnyRef.current,
       });
       // Frame the tail of the loaded history so the replay opens zoomed-in, not
-      // fit to the whole (possibly overnight-spanning) session. Skipped when the
-      // snapshot is a side effect of something else (a re-anchor) rather than a
-      // move through time — the user's zoom is theirs.
+      // fit to the whole (possibly overnight-spanning) session — on both scales,
+      // which is the same fit the ◎ performs (see `frameOnPrice`). A session that
+      // opens as a ribbon under a far-off weekly band is one you have to press a
+      // button before you can read, and the first thing anyone did on landing was
+      // press it. Skipped when the snapshot is a side effect of something else (a
+      // re-anchor) rather than a move through time — the user's zoom is theirs.
       //
       // Framed in bar indices rather than in times (see FRAME_BARS), so it means
       // the same thing on every timeframe.
@@ -3898,7 +5943,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       } else if (!keepZoom && frame !== "hold") {
         // Counted off the drawn array, so the context days stay off to the left
         // where they belong: the replay opens on the session, not on Tuesday.
-        if (s.bars.length) frameTail(chart, last);
+        if (s.bars.length) frameOnPrice(chart, drawn, last, tapeRef.current?.tickSize ?? 0.25);
       } else if (keepZoom && held) {
         // The room past the newest bar is the user's too — an order gets placed
         // into it — so it is carried across rather than re-imposed. Capped at
@@ -3928,6 +5973,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // pointer first crosses the chart — a session opens with a whole block of
       // numbers missing, and the rows under them sitting one line too high.
       paintOhlcRef.current?.(hoverIdxRef.current);
+      // The other readout the tape moves rather than the bars.
+      paintLevelDistRef.current();
     },
     applyStep(r: StepResult) {
       const candle = candleRef.current;
@@ -3958,6 +6005,11 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       }
       // The first tagged tick of the session is what brings the pane to life.
       if (cvdAnyRef.current && !cvdSeriesRef.current) syncCvdMount();
+      if (cvdAnyRef.current && !cvdOscSeriesRef.current) syncCvdOscMount();
+      // The window moved with the forming bar. The divergences can't have — they
+      // need closed bars to the right — so this writes one point, and the pass
+      // that can find a new one runs on the close below.
+      stepCvdOsc();
       // Keep the legend's readout on the bar it is meant to be on. Idle that is
       // the newest one, which is precisely the one this step just moved — a
       // readout that froze the moment you stopped pointing at something would be
@@ -3965,31 +6017,75 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // method; when the pointer *is* on a bar the index doesn't change and this
       // rewrites the same numbers.
       paintOhlcRef.current?.(hoverIdxRef.current);
+      // The other readout the tape moves rather than the bars.
+      paintLevelDistRef.current();
+      // The developing-POC tail folds in before the indicator refresh below
+      // reads it — same overwrite-or-append the engine itself does.
+      for (const p of r.gProfTail) mvPocRef.current.set(p.time, p.poc);
+      for (const p of r.wProfTail) mvWkPocRef.current.set(p.time, p.poc);
+      // Same fold for the approach reader's window, through `putTail` and not a
+      // push: a tail restates the forming bar's entry on every step, so pushing
+      // would fill the window with six copies of one bar and the classification
+      // would read a flat level that is moving.
+      keepVaPath(vaPathsRef.current.g, r.gProfTail);
+      keepVaPath(vaPathsRef.current.n, r.nProfTail);
+      keepVaPath(vaPathsRef.current.w, r.wProfTail);
       if (vrClosed) {
         refreshVr();
+        // A bar closed, so a fractal `fractalN` bars back may have just been
+        // confirmed — the only moment a divergence can appear.
+        drawCvdOsc();
         // Same cadence: the indicator's every value is a fact about a closed bar.
         refreshMv();
+        refreshDsv();
+        // And the picker's studies, which are the same fact 415 more times.
+        // Measured at 1-5ms each over 4000 bars, against a cadence of once a bar.
+        refreshStudies();
+        // Last, because it reads what the three above have just redrawn: the
+        // Modern VWAP's rings and the swing line only have a tail once their
+        // redraw has run.
+        refreshLevelsRef.current();
       }
-      const anchors: [Anchor, BandPt[]][] = [
-        [gRef.current, r.gTail],
-        [nRef.current, r.nTail],
-        [aRef.current, r.aTail],
-        [wkRef.current, r.wkTail],
-      ];
-      for (const [a, tail] of anchors) {
-        for (const k of BAND_KEYS) for (const p of tail) a.lines[k].update({ time: p.time as Time, value: p[k] });
-        mergeTail(a, tail);
+      // The developing overlays. Their *bookkeeping* is unconditional (above and
+      // below this block); only the draw is gated, which is the same split the
+      // extra panes make — see OVERLAY_DRAW_MS for the cadence and the reason.
+      // Until a drawing frame comes round, each tail accrues into the buffer, so
+      // what finally reaches the series is every point, once.
+      const pend = pendingOverlayRef.current;
+      const bandTails = [r.gTail, r.nTail, r.aTail, r.wkTail];
+      const profTails = [r.gProfTail, r.nProfTail, r.wProfTail];
+      for (let i = 0; i < bandTails.length; i++)
+        for (const p of bandTails[i]) putTail(pend.band[i], p);
+      for (let i = 0; i < profTails.length; i++)
+        for (const p of profTails[i]) putTail(pend.prof[i], p);
+      const now = performance.now();
+      if (vrClosed || now - lastOverlayDrawRef.current >= OVERLAY_DRAW_MS) {
+        lastOverlayDrawRef.current = now;
+        const anchors: [Anchor, BandPt[]][] = [
+          [gRef.current, pend.band[0]],
+          [nRef.current, pend.band[1]],
+          [aRef.current, pend.band[2]],
+          [wkRef.current, pend.band[3]],
+        ];
+        for (const [a, tail] of anchors) {
+          for (const k of BAND_KEYS)
+            for (const p of tail) a.lines[k].update({ time: p.time as Time, value: p[k] });
+          mergeTail(a, tail);
+        }
+        const stepProf = (
+          lines: Record<ProfKey, ISeriesApi<"Line">> | null,
+          tail: ProfilePt[],
+        ) => {
+          if (!lines) return;
+          for (const k of PROF_KEYS)
+            for (const p of tail) lines[k].update({ time: p.time as Time, value: p[k] });
+        };
+        stepProf(gProfRef.current, pend.prof[0]);
+        stepProf(nProfRef.current, pend.prof[1]);
+        stepProf(wProfRef.current, pend.prof[2]);
+        pend.band = [[], [], [], []];
+        pend.prof = [[], [], []];
       }
-      const stepProf = (
-        lines: Record<ProfKey, ISeriesApi<"Line">> | null,
-        tail: ProfilePt[],
-      ) => {
-        if (!lines) return;
-        for (const k of PROF_KEYS)
-          for (const p of tail) lines[k].update({ time: p.time as Time, value: p[k] });
-      };
-      stepProf(gProfRef.current, r.gProfTail);
-      stepProf(nProfRef.current, r.nProfTail);
       // The first NY point the playback ever emits is the bell.
       if (!Number.isFinite(nyStartRef.current) && r.nProfTail.length)
         nyStartRef.current = r.nProfTail[0].time;
@@ -4012,6 +6108,12 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       // added and nothing more.
       hooksRef.current?.reprofile();
       paintDevRef.current?.();
+      paintExtRef.current?.();
+      paintHtfRef.current?.();
+      paintRzRef.current?.();
+      paintEconRef.current?.();
+      paintGexRef.current?.();
+      paintShelvesRef.current?.(false);
       // A fixed-range profile is bounded by two bar times the user dragged out,
       // so only a new bar can change one (the range that ends at the live edge
       // gains the bar that just closed).
@@ -4024,6 +6126,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
         wk: presentRef.current.wk || r.wkTail.length > 0,
         gp: presentRef.current.gp || r.gProfTail.length > 0,
         np: presentRef.current.np || r.nProfTail.length > 0,
+        wp: presentRef.current.wp || r.wProfTail.length > 0,
         ib: r.ib != null,
         cvd: cvdAnyRef.current,
       });
@@ -4057,6 +6160,9 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
     // The page-level rail's four. No deps array on this handle, so these close
     // over the current render's arm functions rather than the first one's.
     armTool,
+    // And the topbar catalogue's one, for the same reason it is on the handle at
+    // all: this pane owns which layers it draws.
+    setLayer,
     clearAvwap,
     deleteSelected: deleteSelectedAny,
     clearDrawings() {
@@ -4075,182 +6181,541 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
   // the dark palettes directly — otherwise a light chart would list its levels
   // in the hues of a chart it isn't.
   const legendInk = chartInk(appearance.surface);
-  const tkt: TicketDraft = ticket ?? { size: 1, stopTicks: 0, targetTicks: 0 };
+  const tkt: TicketDraft = ticket ?? {
+    size: 1,
+    stopTicks: 0,
+    targetTicks: 0,
+    stopUsd: null,
+    targetUsd: null,
+  };
   // The routed contract's money if the page named one, else the tape's, else
   // none — and none means the ticket shows ticks alone. See `pointValue`.
   const tickUsd = tickSize * (pointValueProp ?? tapeRef.current?.pointValue ?? 0);
 
-  const legendItems: LegendItem[] = [];
-  if (present.g)
-    legendItems.push({ key: "vwapGlobex", label: "VWAP · Globex ±1σ ±2σ", color: legendInk.vwap.globex.middle });
-  if (present.n)
-    legendItems.push({ key: "vwapNy", label: "VWAP · NY ±1σ ±2σ", color: legendInk.vwap.ny.middle });
-  if (present.wk)
-    legendItems.push({ key: "vwapWeekly", label: "VWAP · Weekly ±1σ ±2σ", color: legendInk.vwap.weekly.middle });
-  if (avwapAnchor != null)
-    legendItems.push({ key: "vwapAnchored", label: "VWAP · Anchored ±1σ ±2σ", color: legendInk.vwap.anchored.middle });
+  // Every layer this pane can draw, whether or not it can draw it *yet*.
+  //
+  // One array carrying an `available` flag, rather than the series of guarded
+  // pushes this used to be, because the same list now answers two questions. The
+  // legend shows the rows that can draw — a toggle for a layer with no data is a
+  // toggle for nothing. The topbar catalogue shows all of them, because switching
+  // something on ahead of the session reaching it is legitimate, and it has to be
+  // able to say *why* no row appeared. Guarding the push made the second list
+  // impossible without writing every condition out a second time.
+  //
+  // The names come from LAYER_NAME and the readouts are built here, which is the
+  // split that keeps the catalogue and the legend calling each layer the same
+  // thing. A label is not a name: it quotes the threshold a count was counted at,
+  // how many days went into a composite, what share of the session a gate called
+  // trending. That is a fact about this pane now, and it belongs where it is
+  // computed.
+  const rows: (LegendItem & { available: boolean })[] = [];
+  const row = (
+    key: ReplayLayerKey,
+    available: boolean,
+    label: string,
+    color: string,
+    dim?: boolean,
+    // Most rows get their knobs from the page (see `indicatorSettings` below,
+    // which overwrites this). A layer whose params this pane owns brings its
+    // own, so no host page has to learn about it to make it adjustable.
+    settings?: LegendItem["settings"],
+  ) => {
+    rows.push({ key, available, label, color, dim, settings });
+  };
+  const N = LAYER_NAME;
+
+  // Each fixed anchor carries its own envelope and fill weight — pane knobs, not
+  // page ones, because the preference is the chart's and no host page needs to
+  // learn about it for the band to be adjustable here. The label quotes the rings
+  // the knob is actually drawing: a row reading "±1σ ±2σ" over a chart drawing
+  // one of them is the legend lying about the layer it names.
+  const anchorSpec = (anchor: VwapFillAnchor, title: string) => ({
+    title,
+    fields: vwapAnchorKnobs(
+      { bands: vwapBands[anchor], fill: vwapFill[anchor], region: vwapRegion[anchor] },
+      {
+        bands: (c) => setBands(anchor, c),
+        fill: (w) => setFill(anchor, w),
+        region: (r) => setRegion(anchor, r),
+      },
+    ),
+  });
+  const anchorLabel = (anchor: VwapFillAnchor, name: string) =>
+    `${name} ${vwapBandLabel(vwapBands[anchor])}`.trimEnd();
+  // The coarser bar over this one. Always available — it is the chart's own bars
+  // regrouped, so there is no tape it can be waiting on — but dimmed when the
+  // period isn't above the drawn timeframe, which is the one way it can be on
+  // and draw nothing. Its knobs are the pane's, like the anchors' above.
+  row(
+    "externalChart",
+    true,
+    `${N.externalChart} · ${
+      EXTERNAL_PERIOD_OPTIONS.find((o) => o.value === extParams.period)?.label ?? extParams.period
+    }`,
+    extParams.palette === "custom" ? extParams.bull : legendInk.externalChart.bull,
+    !extGrouped,
+    {
+      title: N.externalChart,
+      fields: externalChartKnobs(extParams, patchExternal, extGrouped),
+    },
+  );
+  // The higher frames' trend. Always available — it is this chart's bars
+  // regrouped — dimmed while no frame is warm, and the label quotes the frames'
+  // agreement at the live edge, so the read is in the legend as well as the wash.
+  row(
+    "htfTrend",
+    true,
+    `${N.htfTrend} · ${framesLabel(htfParams)}${
+      htfNow.warm ? (htfNow.state > 0 ? " · up" : htfNow.state < 0 ? " · down" : " · mixed") : " · warming"
+    }`,
+    legendInk.htfTrend.line,
+    !htfNow.warm,
+    {
+      title: N.htfTrend,
+      fields: htfTrendKnobs(htfParams, patchHtf, htfNow.warm),
+    },
+  );
+  // The ranked levels. Available whenever the tape is long enough to confirm a
+  // pivot — it reads the chart's own bars, so there is nothing it waits on — and
+  // dimmed when the walk found none, which on a short or a one-way session is a
+  // real answer rather than a fault. The readout is how many are *drawn*, not
+  // how many exist: the cap is the layer's main knob and a row saying 8 while
+  // sixty are stored would hide that.
+  // Always available — a calendar has no warm-up — and dimmed on a span with no
+  // timed release at the floor, which on most overnight stretches is the answer.
+  row(
+    "econEvents",
+    true,
+    `${N.econEvents} · ${econCount}`,
+    legendInk.econEvents.high,
+    econCount === 0,
+    {
+      title: N.econEvents,
+      fields: [
+        {
+          kind: "select" as const,
+          key: "econFloor",
+          label: "Impact",
+          help: "Which ForexFactory impact tiers get a line. Every USD row is banked (data/cache/econ), so widening this needs no re-scrape. The actual is withheld until the tape reaches the release. Context only: docs/research/event-day-overlay.md found no event-day effect on any strategy.",
+          value: econParams.floor,
+          options: [
+            { value: "high", label: "high" },
+            { value: "medium", label: "high + medium" },
+            { value: "low", label: "all" },
+          ],
+          onChange: (v: string | number) => patchEcon(v as EconImpactFloor),
+        },
+      ],
+    },
+  );
+  // Needs the real contract, so unavailable wherever the page withholds it
+  // (blind replay). The readout is the latest session's regime per book — the
+  // two books disagreeing on long vs short gamma is itself the read.
+  const gexRegime = (() => {
+    if (!gexLast) return "";
+    const parts = Object.entries(gexLast.books)
+      .filter(([, b]) => b.available && b.at_ref_b != null)
+      .map(([k, b]) => `${k} ${b.at_ref_b! >= 0 ? "+γ" : "−γ"}`);
+    return parts.length ? ` · ${parts.join(" / ")}` : " · no book";
+  })();
+  row(
+    "gexLevels",
+    !!tapeContract,
+    `${N.gexLevels}${gexParams.expiry === "all" ? "" : ` · ${GEX_EXPIRY_LABEL[gexParams.expiry]}`}${gexRegime}`,
+    legendInk.gex.callBoth,
+    !gexLast || !Object.values(gexLast.books).some((b) => b.available),
+    {
+      title: N.gexLevels,
+      fields: [
+        {
+          kind: "select" as const,
+          key: "gexExpiry",
+          label: "Expiries",
+          help: "Which options the levels are built from, by days to expiry counted from the session on the chart. 'All' sums every expiry — the big monthly and quarterly open interest dominates, so walls sit hundreds of points from price. '≤7 days' and '0DTE' keep only the near-dated contracts, whose gamma is concentrated at the strikes right around price, so the walls come in close: 0DTE is 1–2% of the open interest but ~20% of the gamma within 1% of price. This is only the 0DTE open interest the prior session left behind — the same-day 0DTE flow lives in intraday volume, which a once-a-day book cannot see, so the flip does not come in to price the way a volume-based read's does.",
+          value: gexParams.expiry,
+          options: GEX_EXPIRY_OPTIONS.map((e) => ({ value: e, label: GEX_EXPIRY_LABEL[e] })),
+          onChange: (v: string | number) => patchGex({ expiry: v as GexExpiry }),
+        },
+        {
+          kind: "select" as const,
+          key: "gexWalls",
+          label: "Walls",
+          help: "How many call walls (C1.., cyan — resistance) and put walls (P1.., peach — support) to draw, per book. C1 is the strike with the most call dollar-gamma at the book's spot, P1 the most put dollar-gamma; strikes within 0.15% of each other count as one wall. Solid = both books (NDX and QQQ) carry it, dashed = one book only; thicker = more gamma resting there, a bigger hedge to work through — not a claim that it holds. Each session uses the latest book stamped before its Globex open, so a replay never sees open interest from after the fact (in practice that is the prior day's close snapshot — one day stale). Unvalidated: the gamma is a Black-Scholes recompute 5–9% off Cboe's own greeks, and level-bounce geometry has come out null four times here. Context to look at, not levels to trade.",
+          value: gexParams.walls,
+          options: GEX_WALL_OPTIONS.map((n) => ({ value: n, label: n === 0 ? "none" : `top ${n}` })),
+          onChange: (v: string | number) => patchGex({ walls: Number(v) }),
+        },
+        {
+          kind: "select" as const,
+          key: "gexFlip",
+          label: "Flip band",
+          help: "The zero-gamma flip: above it dealers are net long gamma and damp moves, below it they are short and chase them. Drawn as the band between the NDX book's flip and the QQQ book's, because the two routinely disagree by 0.5–1.5% and a single line would claim a precision the data does not have. The legend row names each book's regime at its own spot (+γ long, −γ short) for the latest session.",
+          value: gexParams.flip ? 1 : 0,
+          options: [
+            { value: 1, label: "on" },
+            { value: 0, label: "off" },
+          ],
+          onChange: (v: string | number) => patchGex({ flip: Number(v) === 1 }),
+        },
+      ],
+    },
+  );
+  row(
+    "rankedZones",
+    true,
+    `${N.rankedZones} · top ${rzCount}` +
+      (rzParams.rankBy === "flow" ? (rzFlow ? " by flow" : " · no tape, by score") : ""),
+    legendInk.rankedZones.support,
+    rzCount === 0,
+    {
+      title: N.rankedZones,
+      fields: rankedZonesKnobs(rzParams, patchRankedZones),
+    },
+  );
+  row(
+    "vwapGlobex",
+    present.g,
+    anchorLabel("globex", N.vwapGlobex),
+    legendInk.vwap.globex.middle,
+    undefined,
+    anchorSpec("globex", N.vwapGlobex),
+  );
+  row(
+    "vwapNy",
+    present.n,
+    anchorLabel("ny", N.vwapNy),
+    legendInk.vwap.ny.middle,
+    undefined,
+    anchorSpec("ny", N.vwapNy),
+  );
+  row(
+    "vwapWeekly",
+    present.wk,
+    anchorLabel("weekly", N.vwapWeekly),
+    legendInk.vwap.weekly.middle,
+    undefined,
+    anchorSpec("weekly", N.vwapWeekly),
+  );
+  row(
+    "vwapAnchored",
+    avwapAnchor != null,
+    `${N.vwapAnchored} ±1σ ±2σ`,
+    legendInk.vwap.anchored.middle,
+  );
   // Modern VWAP, offered only where the page holds its parameters. Two rows: the
   // line, and the triggers read off it. Each label quotes what its own row is
   // actually showing at the current settings — an anchor count is how hard the
   // swing rule is working, and a gate that is undefined half the session is a
   // fact about warm-up, not about the market.
-  if (mvParams) {
-    const swing = mvParams.anchor === "swing";
-    // Nothing is computed while both rows are off (see refreshMv), so neither
-    // label quotes a number it doesn't have — "0 through the gate" would read as
-    // a measurement when it only means nobody has asked yet.
-    const live = vis.modernVwap || vis.modernVwapSignals;
-    legendItems.push({
-      key: "modernVwap",
-      label:
-        `Modern VWAP · ${swing ? `swing ${mvParams.pivot}` : mvParams.anchor} ±${mvParams.bands}σ` +
+  //
+  // Nothing is computed while both rows are off (see refreshMv), so neither label
+  // quotes a number it doesn't have — "0 through the gate" would read as a
+  // measurement when it only means nobody has asked yet.
+  const mvLive = vis.modernVwap || vis.modernVwapSignals;
+  row(
+    "modernVwap",
+    !!mvParams,
+    !mvParams
+      ? N.modernVwap
+      : `${N.modernVwap} · ${
+          mvParams.anchor === "swing"
+            ? `swing ${mvParams.pivot}`
+            : mvParams.anchor === "poc"
+              ? `${mvParams.pocSource === "weekly" ? "wk " : ""}${
+                  mvParams.rearmMode === "pocMove" ? "naked " : ""
+                }POC${mvParams.rearmTicks ? ` ${mvParams.rearmTicks}t` : ""} · ${mvRead.anchors}⚓`
+              : mvParams.anchor
+        } ±${mvParams.bands}σ` +
         (mvParams.adaptive ? " · KER-adaptive" : "") +
-        (live
+        (mvLive
           ? ` · ${Math.round(mvRead.trendPct)}% trending${mvRead.undefPct >= 1 ? `, ${Math.round(mvRead.undefPct)}% undefined` : ""}`
           : ""),
-      color: legendInk.modernVwap.middle,
-    });
-    legendItems.push({
-      key: "modernVwapSignals",
-      label:
-        mvParams.signals === "none"
-          ? "Modern VWAP signals · off"
-          : "Modern VWAP signals · MR/TC" +
-            (live
-              ? ` · ${mvRead.signals}${mvParams.signals === "gated" ? " through the gate" : " raw"}`
-              : ""),
-      color: legendInk.modernVwap.middle,
-      // The row stays when its own knob switched it off — that knob is the only
-      // way back on, and it lives behind this row's "…".
-      dim: mvParams.signals === "none",
-    });
-  }
-  if (present.gp)
-    legendItems.push({
-      key: "developingProfileGlobex",
-      label: "Developing VA · Globex VAH/POC/VAL",
-      color: legendInk.profile.globex.edge,
-    });
-  if (present.np) {
-    legendItems.push({
-      key: "developingProfileNy",
-      label: "Developing VA · NY VAH/POC/VAL",
-      color: legendInk.profile.ny.edge,
-    });
-    // The same distribution as a histogram, in its own gutter. Its own row
-    // because the levels and the shape are separately useful — and because this
-    // one is where the event marginal lands.
-    legendItems.push({
-      key: "developingVpNy",
-      label: `Developing VP · NY session (${PROFILE_BIN}pt rows)`,
-      color: "#c4b5fd",
-    });
-    // The nodes it names, on the same switch as the composite's: the prominence
-    // floor behind this row's "…" is what decides they exist at all. The row is
-    // here even at zero, dimmed — that knob is the only way back on.
-    legendItems.push({
-      key: "developingVpNyNodes",
-      label:
-        nodeProm > 0
-          ? `NY nodes · HVN/LVN at ${Math.round(nodeProm * 100)}% prominence`
-          : "NY nodes · off",
-      color: "#818cf8",
-      dim: nodeProm === 0,
-    });
-  }
-  if (present.ib) {
-    legendItems.push({ key: "initialBalance", label: "Initial Balance · first 60m H/L", color: legendInk.ib.line });
-    legendItems.push({ key: "ibExtensions", label: "IB extensions · 1×/1.5×/2×", color: legendInk.ib.ext });
-  }
+    legendInk.modernVwap.middle,
+  );
+  row(
+    "modernVwapSignals",
+    !!mvParams,
+    !mvParams
+      ? N.modernVwapSignals
+      : mvParams.signals === "none"
+        ? `${N.modernVwapSignals} · off`
+        : `${N.modernVwapSignals} · MR/TC` +
+          (mvLive
+            ? ` · ${mvRead.signals}${mvParams.signals === "gated" ? " through the gate" : " raw"}`
+            : ""),
+    legendInk.modernVwap.middle,
+    // The row stays when its own knob switched it off — that knob is the only way
+    // back on, and it lives behind this row's "…".
+    mvParams?.signals === "none",
+  );
+  // The Zeiierman line. One row, and it quotes the two things that are facts
+  // about the construct rather than about the market: how many times the
+  // structure flipped at this swing period (an anchor count is how hard the rule
+  // is working) and what the volatility adjustment has done to the half-life —
+  // the knob says 20 bars, the tape may be running it at 9.
+  row(
+    "dynamicSwingVwap",
+    !!dsvParams,
+    !dsvParams
+      ? N.dynamicSwingVwap
+      : `${N.dynamicSwingVwap} · swing ${dsvParams.swingPeriod}${
+          // The bucketing the swings were actually hunted on, and only when they
+          // were: on a pane already at or below it, nothing was regrouped.
+          dsvRead.anchored && vis.dynamicSwingVwap ? `@${dsvParams.anchorTf}` : ""
+        } · ${
+          dsvParams.weighting === "cumulative"
+            ? // No half-life to quote, and the word is the point: the legs are
+              // ordinary anchored VWAPs off the same swings.
+              "cumulative"
+            : `APT ${
+                dsvParams.adaptApt && vis.dynamicSwingVwap && dsvRead.aptNow
+                  ? `${dsvRead.aptNow.toFixed(dsvRead.aptNow < 10 ? 1 : 0)}b`
+                  : `${dsvParams.apt}b`
+              }${dsvParams.adaptApt ? ` ATR ${dsvParams.volBias}×` : ""}`
+        }${
+          dsvParams.bands
+            ? ` ±${dsvParams.bands}σ${dsvParams.bandScope === "all" ? " all" : ""}`
+            : ""
+        }` +
+        (vis.dynamicSwingVwap
+          ? ` · ${dsvRead.pivots}⚑ · ${Math.round(dsvRead.bullPct)}% bull` +
+            // His `max_polylines_count`, said out loud: on a long tape the older
+            // segments are simply not on the chart, and a silent 100 would read
+            // as "that is all there was".
+            (dsvRead.dropped ? ` · oldest ${dsvRead.dropped} dropped` : "")
+          : ""),
+    `rgb(${legendInk.dynamicSwingVwap.bull})`,
+  );
+  row(
+    "developingProfileGlobex",
+    present.gp,
+    `${N.developingProfileGlobex} VAH/POC/VAL`,
+    legendInk.profile.globex.edge,
+  );
+  row(
+    "developingProfileNy",
+    present.np,
+    `${N.developingProfileNy} VAH/POC/VAL`,
+    legendInk.profile.ny.edge,
+  );
+  // Absent (not just off) when the weekly profile could not be honestly seeded
+  // — the same "no line without the whole week" rule the weekly VWAP row obeys.
+  row(
+    "developingProfileWeekly",
+    present.wp,
+    `${N.developingProfileWeekly} VAH/POC/VAL`,
+    legendInk.profile.weekly.edge,
+  );
+  // The same distribution as a histogram, in its own gutter. Its own row because
+  // the levels and the shape are separately useful — and because this one is
+  // where the event marginal lands.
+  row("developingVpNy", present.np, `${N.developingVpNy} (${PROFILE_BIN}pt rows)`, "#c4b5fd");
+  // The nodes it names, on the same switch as the composite's: the prominence
+  // floor behind this row's "…" is what decides they exist at all. The row is
+  // here even at zero, dimmed — that knob is the only way back on.
+  row(
+    "developingVpNyNodes",
+    present.np,
+    nodeProm > 0
+      ? `${N.developingVpNyNodes} · HVN/LVN at ${Math.round(nodeProm * 100)}% prominence`
+      : `${N.developingVpNyNodes} · off`,
+    "#818cf8",
+    nodeProm === 0,
+  );
+  row("initialBalance", present.ib, `${N.initialBalance} · first 60m H/L`, legendInk.ib.line);
+  row("ibExtensions", present.ib, `${N.ibExtensions} · 1×/1.5×/2×`, legendInk.ib.ext);
   // "(tick)" and not "(est.)": the replay profiles the real tape, never a
   // reconstruction spread across bar ranges — so the POC print is a price that
   // actually traded.
-  if (present.bars)
-    legendItems.push({
-      key: "volumeProfile",
-      label: `Volume profile · POC/VA (${PROFILE_BIN}pt rows)`,
-      color: palette.gold,
-    });
+  // The label says whether the delta lane is up, because the row's eye hides
+  // both lanes and "+ delta" is the only thing on screen that names the second
+  // one. `present.cvd` is the availability test the lane needs and not
+  // `present.bars`: both are the tape's aggressor tag, read by price here and by
+  // time there.
+  row(
+    "volumeProfile",
+    present.bars,
+    // The scale is named too: three different readings share this lane, and
+    // "+ delta" over one measuring imbalance names the wrong distribution.
+    `${N.volumeProfile} · POC/VA${profileDelta ? ` + delta:${deltaLaneLabel(deltaLane)}` : ""} (${PROFILE_BIN}pt rows)`,
+    palette.gold,
+    false,
+    {
+      title: N.volumeProfile,
+      // The tape that carries the aggressor tag is the same one a verdict reads
+      // its bars from, so one test answers for both knobs.
+      fields: volumeProfileKnobs(profileDelta, setProfileTint, present.cvd, {
+        value: deltaLane,
+        onChange: setLaneKnobs,
+        canClassify: present.cvd,
+      }),
+    },
+  );
+  // The shelves. Two rows, because the raster and the boxes are two readings and
+  // one of them is thresholded: the raster is the layer, the boxes are a claim
+  // drawn on top of it. Being able to drop the claim and keep the picture is the
+  // point — every level-geometry study in this repo has come back null, so the
+  // unthresholded view is the one that can be checked.
+  //
+  // Available on `present.bars` rather than on "a shelf exists": switching the
+  // layer on before the window has filled is legitimate, and a row that appeared
+  // only once something had been found would be missing at exactly the moment you
+  // went looking for it.
+  row(
+    "volumeShelf",
+    present.bars,
+    shelfFieldRef.current === "flow"
+      ? `${N.volumeShelf} · order flow over ${shelfParamsRef.current.windowMin}m`
+      : `${N.volumeShelf} · size per visit over ${shelfParamsRef.current.windowMin}m`,
+    palette.orange,
+  );
+  row(
+    "volumeShelfBoxes",
+    present.bars,
+    `${N.volumeShelfBoxes} · ≥${shelfParamsRef.current.zMin}σ held ${shelfParamsRef.current.minHoldMin}m`,
+    palette.orange,
+    !vis.volumeShelf,
+  );
   // Once the tape has printed, whether or not any sweep has cleared the floor
   // yet: the threshold is on this row now, and a row that waited for a big trade
-  // would be missing at exactly the moment you wanted to lower the bar. The
-  // label carries the threshold, since that is what "big" currently means.
-  if (present.bars)
-    legendItems.push({
-      key: "bigTrades",
-      label: `Big trades · >${bigLots} lots · ${bigCount}`,
-      color: palette.blue,
-    });
+  // would be missing at exactly the moment you wanted to lower the bar. The label
+  // carries the threshold, since that is what "big" currently means.
+  row("bigTrades", present.bars, `${N.bigTrades} · >${bigLots} lots · ${bigCount}`, palette.blue);
   // Only once the tape has actually tagged an aggressor — `present.cvd` is that
   // and not "there are bars". The label names the anchor, because a CVD that
   // reset somewhere you didn't expect is a different indicator, and this one
   // starts at the session open rather than at the first context day drawn.
-  if (present.cvd)
-    legendItems.push({
-      key: "cvd",
-      label: "CVD · cumulative delta from the session open",
-      color: palette.blue,
-    });
+  row("cvd", present.cvd, `${N.cvd} · cumulative delta from the session open`, palette.blue);
+  // The windowed one, available on the same condition and for the same reason —
+  // both read the tape's aggressor tag. The label names the window, because a
+  // 21-bar sum and a 55-bar EMA of the same delta are different indicators; the
+  // divergence count and the last one's strength only appear once the pane is up
+  // (with it collapsed the pairing still runs, but reporting a find nobody can
+  // look at is how a reading aid turns into a signal).
+  row(
+    "cvdOsc",
+    present.cvd,
+    `${N.cvdOsc} · ${cvdOscParams.mode === "ema" ? "EMA" : "periodic"} ${
+      cvdOscParams.period
+    } · fractal ${cvdOscParams.fractalN}` +
+      (vis.cvdOsc && cvdOscRead.divs > 0
+        ? ` · ${cvdOscRead.divs} divergence${cvdOscRead.divs === 1 ? "" : "s"} · last ${cvdOscStrengthLabel(
+            cvdOscRead.strength,
+          )}`
+        : ""),
+    palette.orange,
+    false,
+    { title: N.cvdOsc, fields: cvdOscKnobs(cvdOscParams, patchCvdOsc) },
+  );
   // The bar-range vol pane. The label names the read, because "ATR" alone is
   // exactly the graph-without-a-number this pane exists to replace.
-  if (present.bars)
-    legendItems.push({
-      key: "volRuler",
-      label: `Vol ruler · median bar range vs the ${VR_STOP_TICKS}t stop`,
-      color: palette.gold,
-    });
+  row(
+    "volRuler",
+    present.bars,
+    `${N.volRuler} · median bar range vs the ${VR_STOP_TICKS}t stop`,
+    palette.gold,
+  );
   // The composite gets a row once there are days to build it from — the rule
   // itself sits on the row. How many days went in is a reading under the balance
   // rule (this is how long the auction has been running), so the label says it.
-  if (ctxDays > 0) {
-    legendItems.push({
-      key: "compositeProfile",
-      label:
-        compDays > 0
-          ? `Composite VP · ${compDays} prior session${compDays === 1 ? "" : "s"} · VAH/POC/VAL`
-          : `Composite VP · off · ${ctxDays} prior day${ctxDays === 1 ? "" : "s"} loaded`,
-      color: legendInk.composite.poc,
-      dim: compDays === 0,
-    });
-    // The nodes read off it — only once there is a composite for them to be read
-    // off. Their own switch is the prominence floor, which the NY-nodes row
-    // above carries too, so nothing is stranded when this row isn't here.
-    if (compDays > 0)
-      legendItems.push({
-        key: "compositeNodes",
-        label:
-          nodeProm > 0
-            ? `Composite nodes · HVN/LVN at ${Math.round(nodeProm * 100)}% prominence`
-            : "Composite nodes · off",
-        color: legendInk.composite.hvn,
-        dim: nodeProm === 0,
-      });
-  }
+  row(
+    "compositeProfile",
+    ctxDays > 0,
+    compDays > 0
+      ? `${N.compositeProfile} · ${compDays} prior session${compDays === 1 ? "" : "s"} · VAH/POC/VAL`
+      : `${N.compositeProfile} · off · ${ctxDays} prior day${ctxDays === 1 ? "" : "s"} loaded`,
+    legendInk.composite.poc,
+    compDays === 0,
+  );
+  // The nodes read off it — only once there is a composite for them to be read
+  // off. Their own switch is the prominence floor, which the NY-nodes row above
+  // carries too, so nothing is stranded when this row isn't here.
+  row(
+    "compositeNodes",
+    ctxDays > 0 && compDays > 0,
+    nodeProm > 0
+      ? `${N.compositeNodes} · HVN/LVN at ${Math.round(nodeProm * 100)}% prominence`
+      : `${N.compositeNodes} · off`,
+    legendInk.composite.hvn,
+    nodeProm === 0,
+  );
   // Same again for the events: the ten knobs hang off these two rows, so they are
   // here from the first bar. Each count is quoted with the threshold it was
   // counted at — one without the other is a number that means nothing, since a
   // strength is only ever in units of what selected it.
-  if (present.bars && eventOverlay) {
-    const t = eventOverlay.tuning;
-    legendItems.push({
-      key: "sweepBursts",
-      label: `Sweep bursts · ≥${t.burstLots} lots · ${evCount.sweep}`,
-      color: palette.orange,
-    });
-    legendItems.push({
-      key: "absorption",
-      label: `Absorption · ≥${t.absorbMult}× ${t.absorbBaseline > 0 ? `the last ${t.absorbBaseline}` : "the session's own"} · ${evCount.absorb}`,
-      color: palette.blue,
-    });
-  }
+  const evT = eventOverlay?.tuning;
+  row(
+    "sweepBursts",
+    present.bars && !!evT,
+    evT ? `${N.sweepBursts} · ≥${evT.burstLots} lots · ${evCount.sweep}` : N.sweepBursts,
+    palette.orange,
+  );
+  row(
+    "absorption",
+    present.bars && !!evT,
+    evT
+      ? `${N.absorption} · ≥${evT.absorbMult}× ${evT.absorbBaseline > 0 ? `the last ${evT.absorbBaseline}` : "the session's own"} · ${evCount.absorb}`
+      : N.absorption,
+    palette.blue,
+  );
   // Only once something has been traded — a row for an empty session would be a
   // toggle for nothing.
-  if (tradeCount > 0)
-    legendItems.push({
-      key: "replayTrades",
-      label: `Trades · ${tradeCount} closed`,
-      color: palette.green,
-    });
+  row("replayTrades", tradeCount > 0, `${N.replayTrades} · ${tradeCount} closed`, palette.green);
+
+  const legendItems: LegendItem[] = rows.filter((r) => r.available);
+
+  // The community studies, as legend rows. Built here rather than handed down by
+  // the page because everything they need is already in this component — the
+  // specs, what the layer managed to draw, and the panel the settings open in.
+  // The page only hears about an edit (see `onStudiesChange`), the same way it
+  // hears about a bucketing change.
+  const studyRows: StudyRow[] = (studies ?? EMPTY_STUDIES).map((spec) => {
+    const entry = findStudy(spec.key);
+    const rep = studyReport.find((r) => r.id === spec.id);
+    const edit = (next: StudySpec) =>
+      onStudiesRef.current?.(
+        (studies ?? EMPTY_STUDIES).map((sp) => (sp.id === spec.id ? next : sp)),
+      );
+    // The panel's rows: the indicator's own inputs, then a colour per line it
+    // draws. A study with neither — a pattern that only ever emits marks — gets
+    // no "…" on its row rather than an empty panel.
+    const fields = entry ? studyFields(entry, spec, edit) : [];
+    return {
+      id: spec.id,
+      label: entry ? studyLabel(entry, spec.inputs) : spec.key,
+      // The colour of the study's first line, so the swatch is the line you are
+      // looking for — the user's override once they have set one, which is the
+      // whole point of being able to set it. A study with no plots at all (the
+      // pattern ones) falls back to the muted grey its marks are drawn in.
+      color: (entry && studyColor(entry, spec)) || palette.muted,
+      on: !spec.hidden,
+      error: rep?.error ?? null,
+      marks: rep?.plots === 0 ? rep.markers : 0,
+      settings: entry && fields.length ? { title: entry.title, fields } : undefined,
+      onToggle: () => edit({ ...spec, hidden: !spec.hidden }),
+      onRemove: () =>
+        onStudiesRef.current?.((studies ?? EMPTY_STUDIES).filter((sp) => sp.id !== spec.id)),
+    };
+  });
+
+  // The same list, as the topbar catalogue needs it: every layer, on or off,
+  // drawable or not yet. Published rather than lifted — visibility is this pane's
+  // (see `vis`), and a page holding a second copy of it is a page that can
+  // disagree with the chart. Same shape as `onToolsChange`: the chart owns the
+  // state and says what it is.
+  layerStatesRef.current = rows.map((r) => ({
+    key: r.key as ReplayLayerKey,
+    on: vis[r.key],
+    available: r.available,
+  }));
+  // Keyed on the contents, not the array: this is rebuilt on every render, and
+  // the page turns it into state.
+  const layerSig = layerStatesRef.current
+    .map((l) => `${l.key}${l.on ? 1 : 0}${l.available ? 1 : 0}`)
+    .join(",");
+  useEffect(() => {
+    onLayersRef.current?.(layerStatesRef.current);
+  }, [layerSig]);
 
   // Hang the page's knobs on whichever rows they belong to. Done in one pass at
   // the end rather than at each push: which row a setting goes on is the page's
@@ -4377,7 +6842,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           looking the tools up by what they say. The banners that used to clear
           this rail read `--chart-rail`, which the root sets to 0 when it goes. */}
       {!onToolsChange && (
-      <div className="chart-tools">
+      <ChartTools armed={orderArmed || armed || rulerArmed || avwapArmed || hlineArmed}>
         {/* Only where the modifier isn't available. On a mouse Space+click is
             strictly the better gesture — nothing to arm, nothing left armed —
             and a button that duplicates it would just be a slower way in. */}
@@ -4404,8 +6869,8 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           onClick={() => arm(!armed)}
           title={
             armed
-              ? "Drag across the chart to profile that range (Esc to cancel)"
-              : "Fixed-range volume profile — drag across a range to profile it. Drag its edges to resize, its body to move, Del to remove."
+              ? "Drag across the chart to profile that range — end on the last bar to keep it following the tape (Esc to cancel)"
+              : "Fixed-range volume profile — drag across a range to profile it, and it draws how its POC/VAH/VAL developed across that stretch. End the drag on the last bar and it keeps taking in new bars. Drag its edges to resize, its body to move, Del to remove."
           }
         />
         <ChartToolButton
@@ -4483,7 +6948,7 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
             title="Remove every fixed-range profile and price line"
           />
         )}
-      </div>
+      </ChartTools>
       )}
       {/* The pane's badges, top-right: what it is doing that isn't visible in
           the candles. Both of them answer a question you would otherwise have to
@@ -4530,6 +6995,42 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
       >
         ◎
       </button>
+      {/* What the scale stopped waiting for. A demoted layer draws at its true
+          price, so when it is far from the tape it simply leaves the pane — and
+          off screen looks exactly like not-there, which is the one real cost of
+          not letting it hold the scale open. These name the nearest one each way
+          and how far under or over the last trade it is, so a weekly band 800
+          points down is a number you can read instead of a line you have to go
+          hunting for. Nothing to press — they hover for the level's actual price
+          and do nothing else; the ◎ below them is still the only thing in this
+          corner that changes the view. */}
+      {edges.up && (
+        <div
+          className="chart-edge up"
+          title={`${edges.up.label} at ${edges.up.price.toFixed(2)} — ${Math.round(
+            edges.up.dist,
+          )} points above the last trade, drawn but off the top of the pane${
+            edges.nUp > 1 ? `. ${edges.nUp - 1} more above it.` : ""
+          }`}
+        >
+          ▲ {edges.up.label} {Math.round(edges.up.dist)}
+          {edges.nUp > 1 && <span className="chart-edge-n">+{edges.nUp - 1}</span>}
+        </div>
+      )}
+      {edges.down && edges.paneH > 0 && (
+        <div
+          className="chart-edge down"
+          style={{ top: edges.paneH - 30 }}
+          title={`${edges.down.label} at ${edges.down.price.toFixed(2)} — ${Math.round(
+            edges.down.dist,
+          )} points below the last trade, drawn but off the bottom of the pane${
+            edges.nDown > 1 ? `. ${edges.nDown - 1} more below it.` : ""
+          }`}
+        >
+          ▼ {edges.down.label} {Math.round(edges.down.dist)}
+          {edges.nDown > 1 && <span className="chart-edge-n">+{edges.nDown - 1}</span>}
+        </div>
+      )}
       <div ref={elRef} style={{ width: "100%", height: "100%", minHeight: 0 }} />
       {/* The long-press ＋, riding the price axis at the price it was summoned
           at, with the ticket hanging off its left. Deliberately a sibling of the
@@ -4577,8 +7078,28 @@ export const ReplayChart = forwardRef<ReplayChartHandle, Props>(function ReplayC
           )}
         </>
       )}
+      {levelPanel && (
+        <LevelApproach
+          rows={levelRows}
+          window={`${GAP_LOOKBACK_BARS} × ${tfLabel ?? "bars"}`}
+          open={levelOpen}
+          onToggle={() => {
+            const next = !levelOpen;
+            setLevelOpen(next);
+            saveLevelPanelOpen(next);
+          }}
+          containerRef={levelBoxRef}
+          arms={arms}
+          onArm={onArmToggle}
+          reach={levelReach}
+          onReach={onArmToggle ? () => setLevelReach((v) => !v) : undefined}
+          race={armRace}
+          onRace={onArmRace}
+        />
+      )}
       <IndicatorLegend
         items={legendItems}
+        studies={studyRows}
         visibility={vis}
         onToggle={toggle}
         appearance={appearanceSettings(appearance, changeAppearance)}

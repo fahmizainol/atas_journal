@@ -212,6 +212,7 @@ function RunTradeChartBody({
         atrPoints={data.atr_points}
         cvd={data.cvd}
         cvdDivergences={data.cvd_divergences}
+        delta={data.delta}
         markers={data.markers}
         priceLines={data.price_lines}
         levels={[]}
@@ -392,6 +393,7 @@ function RunDayChartBody({
           atrPoints={data.atr_points}
           cvd={data.cvd}
           cvdDivergences={data.cvd_divergences}
+          delta={data.delta}
           markers={data.markers}
           priceLines={[]}
           levels={[]}

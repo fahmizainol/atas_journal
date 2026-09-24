@@ -324,6 +324,13 @@ def simulator_session(
     # accumulates over would then start at the bell and the seed would be short
     # a whole overnight session.
     weekly_seed = weeklymod.weekly_seed(symbol, day) if on is not None and not on.empty else None
+    # And the weekly *profile* behind the same anchor — volume-at-price on the
+    # tick grid, so the client's weekly LevelHist starts where the week left it.
+    # Same gate as the VWAP seed, same honesty rule (None on a hole in the week).
+    weekly_hist = (
+        weeklymod.weekly_hist_seed(symbol, day, tick_size)
+        if on is not None and not on.empty else None
+    )
 
     # The prior-days context, plus the two research constants the client's
     # indicators are cut at. The constants ship with the payload rather than
@@ -352,6 +359,10 @@ def simulator_session(
         # than re-deriving it, so the tag can never disagree with the frame.
         "source": "cache" if tickmod.have_segment(symbol, day, "rth") else "live",
         "weekly_seed": list(weekly_seed) if weekly_seed is not None else None,
+        "weekly_hist_seed": (
+            {"min": weekly_hist[0], "counts": weekly_hist[1]}
+            if weekly_hist is not None else None
+        ),
         "has_overnight": on is not None and not on.empty,
         "has_post": post is not None and not post.empty,
         "context": {

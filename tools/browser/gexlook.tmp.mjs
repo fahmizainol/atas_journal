@@ -1,0 +1,35 @@
+import { launch, BASE } from "./lib.mjs";
+const { browser, page, errors } = await launch({});
+const pe = [];
+page.on("pageerror", (e) => pe.push(String(e)));
+const reqs = [];
+page.on("response", (r) => { if (r.url().includes("/api/") && !r.url().includes("stream")) reqs.push(`${r.status()} ${r.url().replace(BASE, "").slice(0, 140)}`); });
+await page.goto(BASE, { waitUntil: "domcontentloaded" });
+await page.evaluate(() => {
+  localStorage.setItem("sim.resume.replay", JSON.stringify({ symbol: "NQZ6", date: "2026-09-23", clockMs: Date.UTC(2026, 8, 23, 18, 0, 0), attemptId: null, contextTicks: 0 }));
+  const vis = JSON.parse(localStorage.getItem("chart.indicatorVisibility") || "{}");
+  vis.gexLevels = true;
+  localStorage.setItem("chart.gexLevels", JSON.stringify({ walls: 3, flip: true, expiry: "0dte" }));
+  localStorage.setItem("chart.indicatorVisibility", JSON.stringify(vis));
+});
+await page.goto(`${BASE}/charts/replay`, { waitUntil: "domcontentloaded" });
+await page.waitForTimeout(15000);
+await page.screenshot({ path: "shots/gex-steps.png" });
+// Compress the price axis: drag down on it, then zoom time out.
+const c = await page.locator("canvas").first().boundingBox();
+const axX = 1530, axY = 300;
+await page.mouse.move(axX, axY);
+await page.mouse.down();
+await page.mouse.move(axX, axY + 260, { steps: 20 });
+await page.mouse.up();
+await page.mouse.move(700, 300);
+for (let i = 0; i < 8; i++) await page.mouse.wheel(0, 600);
+await page.waitForTimeout(1200);
+await page.screenshot({ path: "shots/gex-steps-wide.png" });
+console.log("pageerrors", pe.slice(0, 5));
+console.log("errors", errors.slice(0, 5));
+console.log(reqs.filter((r) => /gex|replay|tape|session|sim/.test(r)).slice(0, 30).join("\n"));
+const legend = await page.locator(".chart-legend").first().textContent().catch(() => "none");
+console.log("legend:", legend?.slice(0, 600));
+await page.evaluate(() => localStorage.removeItem("chart.gexLevels"));
+await browser.close();

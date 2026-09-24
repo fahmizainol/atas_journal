@@ -1,0 +1,1364 @@
+<meta charset="utf-8"/>
+<title>Four lightweight-charts addons on our tape — demo</title>
+<script>__LWC_ADDONS_JS__</script>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0e13; color:#cbd5e1; font:14px/1.5 Inter,system-ui,sans-serif; }
+  #wrap { max-width:1760px; margin:0 auto; padding:18px 20px 48px; }
+  h1 { font-size:20px; font-weight:600; margin:0 0 4px; }
+  .lede { color:#64748b; font-size:12.5px; margin:0 0 14px; max-width:1000px; }
+  .lede b { color:#94a3b8; }
+  .warn { display:flex; gap:10px; padding:10px 13px; margin:0 0 16px; font-size:12.5px;
+          background:#1a1410; border:1px solid #3a2a18; border-radius:8px; color:#c8a06a; }
+  .warn b { color:#e0b878; }
+  .steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:10px; margin:0 0 16px; }
+  .step { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; font-size:12px; color:#94a3b8; }
+  .step h3 { margin:0 0 4px; font-size:12px; color:#e2e8f0; font-weight:600; }
+  .step .tag { float:right; font-size:10.5px; text-transform:uppercase; letter-spacing:.4px; color:#64748b; }
+  .step.new .tag { color:#8b5cf6; }
+  .step.vendored .tag { color:#e0b878; }
+  .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px 26px; padding:12px 14px;
+              background:#11151d; border:1px solid #1c2230; border-radius:8px; margin:0 0 14px; }
+  .ctl { display:flex; align-items:center; gap:9px; font-size:12.5px; color:#94a3b8; }
+  .ctl b { color:#e2e8f0; font-weight:600; }
+  select, .btn { background:#0b0e13; color:#cbd5e1; border:1px solid #1c2230; border-radius:6px;
+                 padding:5px 9px; font:inherit; font-size:12px; cursor:pointer; }
+  .seg { display:flex; border:1px solid #1c2230; border-radius:6px; overflow:hidden; }
+  .seg button { background:#0b0e13; color:#94a3b8; border:none; padding:5px 11px; font:inherit; font-size:12px; cursor:pointer; }
+  .seg button.on { background:#1c2230; color:#e2e8f0; }
+  .tabs { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 18px; border-bottom:1px solid #1c2230; }
+  .tab { padding:8px 15px; cursor:pointer; border:1px solid #1c2230; border-bottom:none;
+         border-radius:8px 8px 0 0; background:#11151d; color:#94a3b8; font:inherit; font-size:12.5px; }
+  .tab.active { background:#1c2230; color:#e2e8f0; }
+  .tabpane { display:none; } .tabpane.active { display:block; }
+  .chart { height:520px; background:#0b0e13; border:1px solid #1c2230; border-radius:8px; }
+  .chart.tall { height:600px; }
+  .chart.taller { height:700px; }
+  .cap { display:flex; align-items:baseline; gap:8px; font-size:12px; color:#64748b; margin:0 2px 6px; }
+  .cap b { color:#e2e8f0; font-size:12.5px; font-weight:600; }
+  .palette { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 12px; }
+  .palette button { background:#11151d; color:#94a3b8; border:1px solid #1c2230; border-radius:6px;
+                    padding:5px 10px; font:inherit; font-size:12px; cursor:pointer; }
+  .palette button.on { background:#1c2230; color:#e2e8f0; border-color:#33415c; }
+  .tbl-card { background:#11151d; border:1px solid #1c2230; border-radius:8px; padding:10px 12px; margin-top:14px; }
+  .tbl-card h3 { font-size:12.5px; margin:0 0 2px; color:#e2e8f0; font-weight:600; }
+  .tbl-card p { font-size:12px; color:#64748b; margin:0 0 8px; }
+  .scroll { max-height:340px; overflow:auto; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th, td { padding:4px 8px; text-align:right; border-bottom:1px solid #1c2230; white-space:nowrap; }
+  th { color:#94a3b8; font-weight:600; position:sticky; top:0; background:#11151d; }
+  td:first-child, th:first-child { text-align:left; }
+  .pos { color:#21c07a; } .neg { color:#f5455f; } .muted { color:#64748b; } .amber { color:#e0b878; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:99px; font-size:11px; border:1px solid; }
+  .pill.ok { color:#21c07a; border-color:#1c5340; background:#0f2019; }
+  .pill.bad { color:#f5455f; border-color:#5c2230; background:#1f1014; }
+  .pill.warnp { color:#e0b878; border-color:#4a3a18; background:#1d170b; }
+  .note { margin-top:22px; padding:12px 14px; background:#11151d; border:1px solid #1c2230;
+          border-radius:8px; font-size:12px; color:#64748b; }
+  .note b { color:#94a3b8; }
+  .note ul { margin:6px 0 0; padding-left:18px; } .note li { margin:5px 0; }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; color:#94a3b8; }
+  #selftest { margin:0 0 16px; padding:11px 14px; background:#11151d; border:1px solid #1c2230;
+              border-radius:8px; font-size:12.5px; }
+  #selftest h3 { margin:0 0 6px; font-size:12.5px; color:#e2e8f0; font-weight:600; }
+  #selftest ul { margin:0; padding-left:18px; } #selftest li { margin:3px 0; color:#94a3b8; }
+
+  /* ---- Terminal tab: the TradingView layout, assembled from the packages'
+     own metadata. Left rail, top bar, legend overlay, modal dialogs. None of
+     this ships with lightweight-charts; all of it is DOM around the canvas. */
+  .tm { border:1px solid #1c2230; border-radius:8px; overflow:hidden; background:#0b0e13; }
+  .tm-top { display:flex; align-items:center; gap:8px; padding:6px 8px; background:#11151d;
+            border-bottom:1px solid #1c2230; flex-wrap:wrap; }
+  .tm-top .sep { width:1px; align-self:stretch; background:#1c2230; margin:0 2px; }
+  .tm-top button, .tm-top select { background:transparent; color:#94a3b8; border:1px solid transparent;
+            border-radius:5px; padding:4px 9px; font:inherit; font-size:12px; cursor:pointer; }
+  .tm-top button:hover, .tm-top select:hover { background:#1c2230; color:#e2e8f0; }
+  .tm-top button.on { background:#1c2230; color:#e2e8f0; }
+  .tm-top .fx { color:#c79bff; }
+  .tm-body { display:flex; align-items:stretch; }
+  .tm-rail { width:38px; flex:0 0 38px; background:#11151d; border-right:1px solid #1c2230;
+             display:flex; flex-direction:column; gap:2px; padding:5px 3px; position:relative; }
+  .tm-rail button { background:transparent; border:1px solid transparent; border-radius:5px; color:#8fa0b8;
+                    height:30px; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+  .tm-rail button:hover { background:#1c2230; color:#e2e8f0; }
+  .tm-rail button.on { background:#1c2230; color:#c79bff; border-color:#3d2a5c; }
+  .tm-rail .spacer { flex:1; }
+  .tm-flyout { position:absolute; left:39px; z-index:30; min-width:210px; background:#141922;
+               border:1px solid #2a3346; border-radius:8px; padding:5px; box-shadow:0 10px 34px #0009; }
+  .tm-flyout div { padding:5px 9px; border-radius:5px; font-size:12.5px; color:#cbd5e1; cursor:pointer; }
+  .tm-flyout div:hover { background:#1f2736; }
+  .tm-flyout .head { color:#64748b; font-size:11px; text-transform:uppercase; letter-spacing:.5px;
+                     cursor:default; padding:4px 9px 3px; }
+  .tm-flyout .head:hover { background:none; }
+  .tm-main { position:relative; flex:1; min-width:0; }
+  .tm-chart { height:600px; }
+  .tm-legend { position:absolute; left:10px; top:8px; z-index:12; pointer-events:none;
+               font-size:12px; line-height:1.55; text-shadow:0 1px 3px #0b0e13; }
+  .tm-legend .sym { color:#e2e8f0; font-weight:600; font-size:12.5px; }
+  .tm-legend .ohlc span { margin-right:9px; }
+  .tm-legend .ind { pointer-events:auto; display:flex; align-items:center; gap:7px; }
+  .tm-legend .ind .nm { color:#cbd5e1; }
+  .tm-legend .ind .vals { color:#8fa0b8; font-variant-numeric:tabular-nums; }
+  .tm-legend .ind button { pointer-events:auto; background:none; border:none; color:#475569;
+                           cursor:pointer; font-size:11px; padding:0 2px; }
+  .tm-legend .ind button:hover { color:#e2e8f0; }
+  .tm-legend .ind .swatch { width:8px; height:8px; border-radius:2px; display:inline-block; }
+  .tm-modal { position:fixed; inset:0; z-index:60; background:#000a; display:flex;
+              align-items:flex-start; justify-content:center; padding:60px 16px; }
+  .tm-modal[hidden] { display:none; }
+  .tm-sheet { background:#11151d; border:1px solid #2a3346; border-radius:10px; width:min(620px,100%);
+              max-height:76vh; display:flex; flex-direction:column; box-shadow:0 18px 60px #000b; }
+  .tm-sheet header { display:flex; align-items:center; gap:10px; padding:11px 14px;
+                     border-bottom:1px solid #1c2230; }
+  .tm-sheet header h3 { margin:0; font-size:13px; color:#e2e8f0; font-weight:600; flex:1; }
+  .tm-sheet header button { background:none; border:none; color:#64748b; font-size:16px; cursor:pointer; }
+  .tm-sheet .body { overflow:auto; padding:8px 6px; }
+  .tm-search { width:100%; box-sizing:border-box; background:#0b0e13; color:#e2e8f0; font:inherit;
+               font-size:12.5px; border:1px solid #1c2230; border-radius:6px; padding:7px 10px; }
+  .tm-list div { padding:6px 10px; border-radius:6px; cursor:pointer; display:flex; gap:9px; align-items:baseline; }
+  .tm-list div:hover { background:#1f2736; }
+  .tm-list .sh { color:#c79bff; font-size:11.5px; min-width:74px; font-family:ui-monospace,monospace; }
+  .tm-list .ti { color:#cbd5e1; font-size:12.5px; flex:1; }
+  .tm-list .pn { color:#475569; font-size:11px; }
+  .tm-form { display:grid; grid-template-columns:1fr auto; gap:8px 14px; align-items:center; padding:6px 12px 12px; }
+  .tm-form label { font-size:12.5px; color:#94a3b8; }
+  .tm-form input[type=number], .tm-form input[type=text], .tm-form select {
+      background:#0b0e13; color:#e2e8f0; border:1px solid #1c2230; border-radius:5px;
+      padding:4px 7px; font:inherit; font-size:12px; min-width:130px; }
+  .tm-form input[type=color] { background:none; border:1px solid #1c2230; border-radius:5px;
+      width:44px; height:24px; padding:1px; cursor:pointer; }
+  .tm-foot { padding:9px 14px; border-top:1px solid #1c2230; display:flex; gap:8px; justify-content:flex-end; }
+  .tm-foot button { background:#1c2230; color:#e2e8f0; border:1px solid #2a3346; border-radius:6px;
+                    padding:5px 13px; font:inherit; font-size:12px; cursor:pointer; }
+  .tm-err { color:#f5455f; font-size:11.5px; }
+</style>
+
+<div id="wrap">
+  <h1>Four lightweight-charts addons — on our tape</h1>
+  <p class="lede">Every chart in the app is lightweight-charts with <b>sixteen primitives we wrote ourselves</b>.
+    These four community packages cover ground we either built by hand or left unbuilt, and none of them had been
+    pointed at real NQ data before this page. It renders <b class="js-sessions"></b> from the tick cache through each
+    one. The first four tabs each ask <b>does it draw our data correctly</b>; the fifth assembles all of it into
+    the TradingView layout to see how much of that chrome the packages carry on their own.</p>
+
+  <div class="warn"><b>Evaluation, not adoption.</b>
+    <span>Nothing here is wired into the app. Three of the four packages are pre-1.0 and one is a single-author
+    v0.2.0. The section that matters is <b>Indicators</b>: it diffs the library's ATR/RSI/EMA against ours bar for
+    bar. A transpiled Pine indicator that is quietly wrong is the cheapest possible route to a fake edge.</span></div>
+
+  <div id="selftest"><h3>Self-check</h3><ul id="selftest-list"><li class="muted">running…</li></ul></div>
+
+  <div class="steps">
+    <div class="step new"><span class="tag">v0.2.0 · 161 dl/mo</span><h3>lightweight-orderflow-charts</h3>
+      Footprint custom series, session volume profile primitive, delta-summary subchart. Overlaps
+      <code>VolumeProfilePrimitive</code> and goes well past it — imbalances, POC per bar, intrabar delta excursion.</div>
+    <div class="step vendored"><span class="tag">vendored · not on npm</span><h3>box-whisker-series</h3>
+      The official plugin-example custom series, copied into <code>demo/vendor/box-whisker/</code>. The only quartile
+      mark we can draw on the same engine as the candles; <code>DistributionChart.tsx</code> does it in Recharts.</div>
+    <div class="step"><span class="tag">v0.5.0 · 13.7k dl/mo</span><h3>lightweight-charts-indicators</h3>
+      446 indicators over <code>oakscriptjs</code>, a PineScript-v6 runtime. 317 of them are transpiled from published
+      Pine, which is exactly why this page diffs them against our own maths.</div>
+    <div class="step"><span class="tag">v0.1.1 · 9.5k dl/mo</span><h3>lightweight-charts-drawing</h3>
+      Tools behind one <code>DrawingManager</code> — the README says 68, the runtime registry enumerates
+      <span class="js-tools"></span>. Correct v5 peer range, unlike <code>lightweight-charts-line-tools</code>,
+      which is a v4 fork last touched in 2024.</div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="fp">Footprint</button>
+    <button class="tab" data-tab="wh">Vol clock</button>
+    <button class="tab" data-tab="ind">Indicators</button>
+    <button class="tab" data-tab="dr">Drawing</button>
+    <button class="tab" data-tab="tm">Terminal</button>
+  </div>
+
+  <!-- ---------------------------------------------------------------- -->
+  <div class="tabpane active" id="pane-fp">
+    <div class="controls">
+      <div class="ctl"><b>Session</b><select id="fp-session"></select></div>
+      <div class="ctl"><b>Mintick</b><div class="seg" id="fp-mintick"></div></div>
+      <div class="ctl"><b>Style</b><select id="fp-style"></select></div>
+      <div class="ctl"><b>Theme</b><select id="fp-theme"></select></div>
+      <div class="ctl"><label><input type="checkbox" id="fp-vp" checked> session volume profile</label></div>
+      <div class="ctl"><label><input type="checkbox" id="fp-ds" checked> delta-summary pane</label></div>
+    </div>
+    <div class="cap"><b>Footprint</b><span id="fp-caption" class="muted"></span></div>
+    <div class="chart taller" id="fp-chart"></div>
+    <div class="tbl-card">
+      <h3>Aggressor mapping</h3>
+      <p>The cache stores <code>B</code> for a buy aggressor and <code>A</code> for a sell. The footprint convention
+        is the mirror of the name — aggressive buys lift the offer and belong in <b>askVolume</b>, aggressive sells hit
+        the bid and belong in <b>bidVolume</b>. Inverted, every imbalance on this chart would flip while still looking
+        entirely plausible. These totals are computed in Python and re-derived from the levels in the browser; they
+        must agree.</p>
+      <div class="scroll"><table id="fp-table"></table></div>
+    </div>
+  </div>
+
+  <!-- ---------------------------------------------------------------- -->
+  <div class="tabpane" id="pane-wh">
+    <div class="controls">
+      <div class="ctl"><b>Range distribution by time of day</b>
+        <span class="muted">1-minute bar range in ticks · <span class="js-whisker-n"></span> sessions ·
+          <span class="js-bucket"></span>-minute buckets</span></div>
+      <div class="ctl"><label><input type="checkbox" id="wh-outliers" checked> outliers</label></div>
+    </div>
+    <div class="cap"><b>The vol clock, as a distribution</b>
+      <span class="muted">box = IQR, whiskers = 1.5×IQR fence, dots = beyond it</span></div>
+    <div class="chart" id="wh-chart"></div>
+    <div class="tbl-card">
+      <h3>Why a box plot and not a mean</h3>
+      <p>The vol-clock study settled that ATR sets the session clock. What a mean hides is the shape: whether the
+        open is loud because every minute is loud, or because a handful are. The whiskers and the outlier cloud are
+        the part worth reading — the tails are where the sub-30s trades and the stop-outs live.</p>
+      <div class="scroll"><table id="wh-table"></table></div>
+    </div>
+  </div>
+
+  <!-- ---------------------------------------------------------------- -->
+  <div class="tabpane" id="pane-ind">
+    <div class="controls">
+      <div class="ctl"><b>Session</b><select id="ind-session"></select></div>
+      <div class="ctl"><b>Overlay</b><div class="seg" id="ind-overlay"></div></div>
+      <div class="ctl"><b>Lower</b><div class="seg" id="ind-lower"></div></div>
+    </div>
+    <div class="cap"><b>lightweight-charts-indicators</b><span class="muted">computed in the browser from the
+      same 1-minute bars, plotted from the library's own <code>plotConfig</code></span></div>
+    <div class="chart" id="ind-chart"></div>
+    <div class="tbl-card">
+      <h3>Agreement with our own maths</h3>
+      <p>Each row runs the library over the loaded session's bars and diffs it against a series computed in Python:
+        <b>ATR(14)</b> against <code>journal.atr.atr_series</code> — the function the sim actually uses — and
+        <b>RSI(14)</b> / <b>EMA(20)</b> against Wilder and standard-span references built the same way.</p>
+      <p>Read the <b>tail</b> column, not the first one. Every recursive indicator has to be seeded and there is no
+        single right seed — pandas' <code>ewm(adjust=False)</code> starts from the first observation, Pine's
+        <code>ta.ema</code> from an SMA of the first <i>length</i> bars — so the raw max error only ever measures
+        that disagreement, and it is always large. What matters is whether it <b>decays</b>: a seed difference is
+        multiplied by (1−α) every bar and must reach zero, so anything still standing a thousand bars later is a
+        difference in the recursion itself. The floor is <span class="js-eps"></span>, which is this page's own
+        rounding of the Python reference, not a property of the library.</p>
+      <div class="scroll"><table id="ind-table"></table></div>
+    </div>
+  </div>
+
+  <!-- ---------------------------------------------------------------- -->
+  <div class="tabpane" id="pane-dr">
+    <div class="controls">
+      <div class="ctl"><b>Session</b><select id="dr-session"></select></div>
+      <div class="ctl"><button class="btn" id="dr-clear">Clear all</button></div>
+      <div class="ctl"><span class="muted">Pick a tool, then click the chart. Two-point tools need two clicks.</span></div>
+    </div>
+    <div class="palette" id="dr-palette"></div>
+    <div class="cap"><b>lightweight-charts-drawing</b><span class="muted" id="dr-count"></span></div>
+    <div class="chart" id="dr-chart"></div>
+    <div class="tbl-card">
+      <h3>What this replaces</h3>
+      <p>We have <code>RulerPrimitive</code> and <code>TradeRectanglePrimitive</code> and drawings persistence
+        already. What this package adds is <b>breadth</b> — 68 tools including Fibonacci, Gann, pitchforks and
+        position tools — behind one manager with a serialisable state, rather than one primitive per shape. The
+        tool registry below is enumerated from the package at runtime, not hardcoded.</p>
+      <div class="scroll"><table id="dr-table"></table></div>
+    </div>
+  </div>
+
+
+  <!-- ---------------------------------------------------------------- -->
+  <div class="tabpane" id="pane-tm">
+    <div class="tm">
+      <div class="tm-top">
+        <select id="tm-session"></select>
+        <div class="sep"></div>
+        <span id="tm-tf"></span>
+        <div class="sep"></div>
+        <button class="fx" id="tm-add">&fnof;x&nbsp; Indicators</button>
+        <div class="sep"></div>
+        <button id="tm-clear-ind">Clear studies</button>
+        <button id="tm-clear-draw">Clear drawings</button>
+        <span style="flex:1"></span>
+        <span class="muted" id="tm-count" style="font-size:11.5px"></span>
+      </div>
+      <div class="tm-body">
+        <div class="tm-rail" id="tm-rail"></div>
+        <div class="tm-main">
+          <div class="tm-legend" id="tm-legend"></div>
+          <div class="tm-chart" id="tm-chart"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tbl-card">
+      <h3>Everything above is generated, not written</h3>
+      <p>The left rail is <code>getToolRegistry()</code> — <span class="js-tools"></span> tools grouped by the
+        <code>category</code> each one declares, placed using its <code>requiredAnchors</code> and built by its own
+        <code>factory</code>. No tool is named anywhere in this page. The picker is the
+        <span class="js-ind-count"></span> modules that expose a <code>metadata</code>/<code>calculate</code> pair,
+        routed to an overlay or a lower pane by <code>metadata.overlay</code>. Each settings dialog is rendered from
+        that indicator's <code>inputConfig</code>, and the six input types below cover all of them — which is why one
+        form renderer serves every indicator in the catalogue. Legend rows come from <code>plotConfig</code>, values
+        from <code>subscribeCrosshairMove</code>.</p>
+      <div class="scroll"><table id="tm-table"></table></div>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Reading this page.</b>
+    <ul>
+      <li><b>Footprint.</b> The levels ship at the raw 0.25 increment and are re-bucketed in the browser by
+        <code>clusterOrderFlowBarsByMintick</code>. That is the right split: re-bucketing a footprint is a display
+        decision and should not cost a round trip. Our own profile primitives bucket server-side.</li>
+      <li><b>One bug found.</b> The volume profile is drawn with <code>createVolumeProfilePrimitive</code> under a
+        <code>visible-range</code> scope. The <b>session</b> scope draws nothing when the primitive is attached to
+        the footprint custom series — true for <code>createSessionVolumeProfilePrimitive</code> and for
+        <code>createVolumeProfilePrimitive</code> with <code>scope: {kind:'session'}</code>, with or without
+        <code>sessionId</code> on the bars. The same call renders correctly against a standard candlestick series,
+        so the scope resolver appears not to see a custom series' data. Worth an upstream issue; not a blocker,
+        since visible-range is the more useful scope here anyway.</li>
+      <li><b>Vol clock.</b> The box-whisker series is ~200 lines of plugin-example source. It has no options beyond
+        four colours and no hit-testing, so a tooltip would be ours to write — but it puts a quartile mark on the
+        same engine, same time axis, same crosshair as everything else.</li>
+      <li><b>Indicators.</b> Read the agreement table before anything else. The library is fast and the plot
+        metadata is genuinely useful, but 317 of its indicators are machine ports of community Pine and this table
+        checks three.</li>
+      <li><b>Drawing.</b> Interactive — nothing is persisted, and that is the point of the demo rather than a
+        limitation of the package, which serialises drawings fine.</li>
+      <li><b>Terminal.</b> The fifth tab is the TradingView layout — left rail, top bar, top-left legend,
+        modal picker, generated settings — built on the same canvas. It exists to answer one question: how much of
+        that chrome do these packages actually give you? The answer is the catalogue and its schema, which is the
+        expensive part. It is not Advanced Charts: no symbol search, no saved layouts, no alerts, no server side.
+        Timeframes are resampled from the shipped 1-minute bars, so 1h is a fold of 60 real bars, not a fetch.</li>
+      <li><b>Not benchmarked.</b> Nothing here measures frame cost. The multi-chart cost model says ~65% of a core
+        per repainting pane; a footprint series draws far more per bar than a candle and would need its own
+        measurement before it went near a live pane.</li>
+    </ul>
+  </div>
+</div>
+
+
+<div class="tm-modal" id="tm-picker" hidden>
+  <div class="tm-sheet">
+    <header><h3>Indicators</h3><button data-close="tm-picker">&times;</button></header>
+    <div style="padding:9px 12px 4px"><input class="tm-search" id="tm-search" placeholder="Search 415 indicators…" autocomplete="off"></div>
+    <div class="body tm-list" id="tm-results"></div>
+  </div>
+</div>
+
+<div class="tm-modal" id="tm-settings" hidden>
+  <div class="tm-sheet">
+    <header><h3 id="tm-set-title">Settings</h3><button data-close="tm-settings">&times;</button></header>
+    <div class="body"><div class="tm-form" id="tm-set-form"></div></div>
+    <div class="tm-foot"><button data-close="tm-settings">Close</button><button id="tm-set-apply">Apply</button></div>
+  </div>
+</div>
+
+<script>
+const DATA = __DATA__;
+const A = LWCAddons;
+const TESTS = [];
+function check(name, ok, detail) { TESTS.push({ name, ok, detail: detail || '' }); }
+
+const fmt = (v, d) => v == null || Number.isNaN(v) ? '—' : v.toLocaleString(undefined, {
+  minimumFractionDigits: d ?? 0, maximumFractionDigits: d ?? 0 });
+const el = (id) => document.getElementById(id);
+const pad = (n) => String(n).padStart(2, '0');
+// Times are ET wall clock stamped as a UTC epoch (see et_seconds in the demo
+// script), so the formatter must read them back as UTC or the axis drifts.
+function fmtET(t) {
+  const d = new Date(t * 1000);
+  return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
+}
+
+const SURFACE = {
+  layout: { background: { type: A.ColorType.Solid, color: '#0b0e13' }, textColor: '#8fa0b8',
+            attributionLogo: true, fontSize: 11 },
+  grid: { vertLines: { color: '#151a24' }, horzLines: { color: '#151a24' } },
+  rightPriceScale: { borderColor: '#1c2230' },
+  timeScale: { borderColor: '#1c2230', timeVisible: true, secondsVisible: false, tickMarkFormatter: (t) => fmtET(t) },
+  crosshair: { mode: A.CrosshairMode.Normal },
+  localization: { timeFormatter: fmtET },
+};
+const clone = (o) => JSON.parse(JSON.stringify(o));
+
+document.querySelectorAll('.js-sessions').forEach(n => {
+  n.textContent = DATA.sessions.length + ' NQ session' + (DATA.sessions.length === 1 ? '' : 's') +
+    ' (' + DATA.sessions.map(s => s.day).join(', ') + ')';
+});
+document.querySelectorAll('.js-whisker-n').forEach(n => n.textContent = DATA.meta.whiskerSessions);
+document.querySelectorAll('.js-bucket').forEach(n => n.textContent = DATA.meta.bucketMinutes);
+document.querySelectorAll('.js-eps').forEach(n =>
+  n.textContent = ((DATA.meta.referenceEpsilon || 5e-7) * 2).toExponential(0));
+
+// The payload ships each bar's ladder as flat [offsetTicks, bid, ask] triples
+// against a per-bar base price (see order_flow_bars in the demo script). Expand
+// once, here, so everything downstream sees the package's own PriceLevelVolume
+// shape and nothing else in the page has to know about the encoding.
+function hydrate() {
+  const tick = DATA.meta.tick;
+  for (const s of DATA.sessions) {
+    for (const b of s.orderFlow) {
+      const flat = b.levels, out = new Array(flat.length / 3);
+      for (let i = 0, j = 0; i < flat.length; i += 3, j++) {
+        out[j] = { price: +(b.levelBase + flat[i] * tick).toFixed(2),
+                   bidVolume: flat[i + 1], askVolume: flat[i + 2] };
+      }
+      b.levels = out;
+    }
+  }
+}
+hydrate();
+
+function fillSessions(sel) {
+  sel.innerHTML = DATA.sessions.map((s, i) =>
+    `<option value="${i}">${s.day} · ${s.symbol}</option>`).join('');
+}
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+  document.querySelectorAll('.tabpane').forEach(p =>
+    p.classList.toggle('active', p.id === 'pane-' + btn.dataset.tab));
+  window.dispatchEvent(new Event('resize'));
+}));
+
+/* ---------------------------------------------------------------- 1. Footprint */
+// Footprint legibility is a *vertical* problem, not a horizontal one. A 5-minute
+// NQ session spans a few hundred points, so at the raw 0.25 increment the ladder
+// is over a thousand rows deep and no cell is more than a pixel tall. Opening at
+// a 5-point mintick puts it near 70 rows in a 700px pane — about 8px a row,
+// which is the coarsest the text will tolerate. Drop to 0.25 to see the real
+// grain, and zoom the price scale to read it.
+const FP_VISIBLE = 16;   // footprint bars on screen at open — see buildFootprint
+const FP = { chart: null, series: null, ds: null, vp: null, mintick: 5, sessionIx: 0,
+             style: 'orderFlowReference', theme: 'midnightTerminal' };
+
+function fpBars() {
+  const raw = DATA.sessions[FP.sessionIx].orderFlow;
+  return FP.mintick <= DATA.meta.tick ? raw
+       : A.clusterOrderFlowBarsByMintick(raw, FP.mintick, DATA.meta.tick);
+}
+
+function buildFootprint() {
+  if (FP.chart) { FP.chart.remove(); FP.chart = null; }
+  const theme = A.ORDER_FLOW_THEME_PRESETS[FP.theme];
+  const style = A.ORDER_FLOW_STYLE_PRESETS[FP.style];
+  const surface = clone(SURFACE);
+  if (theme && theme.surface) {
+    surface.layout.background = { type: A.ColorType.Solid, color: theme.surface.backgroundColor };
+    surface.layout.textColor = theme.surface.textColor;
+    surface.grid = { vertLines: { color: theme.surface.gridColor }, horzLines: { color: theme.surface.gridColor } };
+    surface.rightPriceScale = { borderColor: theme.surface.borderColor };
+    surface.timeScale = Object.assign({}, SURFACE.timeScale, { borderColor: theme.surface.borderColor });
+  }
+  const chart = A.createChart(el('fp-chart'), surface);
+  FP.chart = chart;
+
+  const bars = fpBars();
+  // The theme's footprint block is the base; the style preset layers on top of
+  // it. Both are the package's own presets — nothing here is hand-tuned, which
+  // is the point: this is what a consumer gets out of the box.
+  const fpOpts = Object.assign({}, theme && theme.footprint, style && style.footprint);
+  const series = chart.addCustomSeries(A.createFootprintSeries(), fpOpts);
+  series.setData(bars);
+  FP.series = series;
+
+  if (el('fp-vp').checked) {
+    // createVolumeProfilePrimitive with a visible-range scope, not
+    // createSessionVolumeProfilePrimitive. The session-scoped profile draws
+    // nothing when it is attached to the footprint custom series — with or
+    // without sessionId on the bars, and the same for
+    // createVolumeProfilePrimitive under scope {kind:'session'}. It renders
+    // correctly on a standard candlestick series, so the scope resolver seems
+    // not to see a custom series' data. Visible-range works on both, and
+    // recomputing as you pan is the better demo anyway.
+    const vp = A.createVolumeProfilePrimitive({
+      bars, options: Object.assign({ scope: { kind: 'visible-range' }, widthRatio: 0.22,
+                                     align: 'right', showValueArea: true, showPointOfControl: true },
+                                   theme && theme.volumeProfile) });
+    series.attachPrimitive(vp);
+    FP.vp = vp;
+  }
+  if (el('fp-ds').checked) {
+    const ds = chart.addCustomSeries(A.createDeltaSummarySeries(),
+      Object.assign({ rows: ['delta', 'maxDelta', 'minDelta', 'cumulativeDelta'] },
+                    theme && theme.deltaSummary), 1);
+    ds.setData(bars);
+    chart.panes()[1].setHeight(150);
+    FP.ds = ds;
+  }
+  // Not fitContent(). A footprint is unreadable the moment the bars are
+  // narrower than the bid x ask text — at 78 bars across a page width the cells
+  // collapse into noise. Open on the last FP_VISIBLE bars and let the reader
+  // scroll; that is what the numbers are for.
+  chart.timeScale().setVisibleLogicalRange({ from: bars.length - FP_VISIBLE, to: bars.length + 1 });
+
+  const s = DATA.sessions[FP.sessionIx];
+  el('fp-caption').textContent =
+    `${s.day} · ${s.symbol} · ${bars.length} bars of ${DATA.meta.footprintMinutes}m · ` +
+    `mintick ${FP.mintick} pt · ${bars.reduce((a, b) => a + b.levels.length, 0)} levels · ` +
+    `showing the last ${FP_VISIBLE} — scroll left for the rest`;
+  return bars;
+}
+
+function fpTable(bars) {
+  const rows = bars.slice(0, 200).map(b => {
+    // Re-derive the totals from the levels. If the aggressor mapping were
+    // inverted in one place and not the other, these would disagree.
+    const ask = b.levels.reduce((a, l) => a + l.askVolume, 0);
+    const bid = b.levels.reduce((a, l) => a + l.bidVolume, 0);
+    const ok = ask === b.askVolume && bid === b.bidVolume;
+    return { b, ask, bid, ok };
+  });
+  const bad = rows.filter(r => !r.ok).length;
+  check('footprint: level sums match bar totals', bad === 0,
+        bad === 0 ? `${rows.length} bars re-derived` : `${bad} of ${rows.length} bars disagree`);
+  el('fp-table').innerHTML =
+    '<thead><tr><th>Time</th><th>Levels</th><th>Ask (buys)</th><th>Bid (sells)</th><th>Delta</th>' +
+    '<th>Δ min</th><th>Δ max</th><th>POC</th><th>Check</th></tr></thead><tbody>' +
+    rows.map(({ b, ask, bid, ok }) => `<tr>
+      <td>${fmtET(b.time)}</td><td>${b.levels.length}</td>
+      <td>${fmt(ask)}</td><td>${fmt(bid)}</td>
+      <td class="${b.delta >= 0 ? 'pos' : 'neg'}">${b.delta > 0 ? '+' : ''}${fmt(b.delta)}</td>
+      <td class="muted">${fmt(b.deltaMin)}</td><td class="muted">${fmt(b.deltaMax)}</td>
+      <td>${b.pocPrice.toFixed(2)}</td>
+      <td><span class="pill ${ok ? 'ok' : 'bad'}">${ok ? 'ok' : 'mismatch'}</span></td></tr>`).join('') +
+    '</tbody>';
+}
+
+function initFootprint() {
+  fillSessions(el('fp-session'));
+  el('fp-style').innerHTML = Object.entries(A.ORDER_FLOW_STYLE_PRESETS)
+    .map(([k, v]) => `<option value="${k}"${k === FP.style ? ' selected' : ''}>${v.label || k}</option>`).join('');
+  el('fp-theme').innerHTML = Object.entries(A.ORDER_FLOW_THEME_PRESETS)
+    .filter(([, v]) => v.mode !== 'light')
+    .map(([k, v]) => `<option value="${k}"${k === FP.theme ? ' selected' : ''}>${v.label || k}</option>`).join('');
+  el('fp-mintick').innerHTML = [0.25, 1, 2, 5, 10].map(m =>
+    `<button data-m="${m}" class="${m === FP.mintick ? 'on' : ''}">${m}</button>`).join('');
+
+  const redraw = () => fpTable(buildFootprint());
+  el('fp-mintick').addEventListener('click', (e) => {
+    if (!e.target.dataset.m) return;
+    FP.mintick = parseFloat(e.target.dataset.m);
+    el('fp-mintick').querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.target));
+    redraw();
+  });
+  el('fp-session').addEventListener('change', (e) => { FP.sessionIx = +e.target.value; redraw(); });
+  el('fp-style').addEventListener('change', (e) => { FP.style = e.target.value; redraw(); });
+  el('fp-theme').addEventListener('change', (e) => { FP.theme = e.target.value; redraw(); });
+  el('fp-vp').addEventListener('change', redraw);
+  el('fp-ds').addEventListener('change', redraw);
+  redraw();
+}
+
+/* ---------------------------------------------------------------- 2. Vol clock */
+function initWhisker() {
+  const chart = A.createChart(el('wh-chart'), Object.assign(clone(SURFACE), {
+    rightPriceScale: { borderColor: '#1c2230', scaleMargins: { top: 0.08, bottom: 0.08 } },
+  }));
+  const series = chart.addCustomSeries(new A.WhiskerBoxSeries(), {
+    whiskerColor: 'rgba(148,163,184,0.85)',
+    lowerQuartileFill: '#2b6cb0',
+    upperQuartileFill: '#8b5cf6',
+    outlierColor: 'rgba(224,184,120,0.55)',
+    priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
+  });
+
+  const draw = () => {
+    const withOutliers = el('wh-outliers').checked;
+    series.setData(DATA.whisker.map(w => ({
+      time: w.time, quartiles: w.quartiles, outliers: withOutliers ? w.outliers : [],
+    })));
+    chart.timeScale().fitContent();
+  };
+  el('wh-outliers').addEventListener('change', draw);
+  draw();
+
+  const monotone = DATA.whisker.every(w =>
+    w.quartiles[0] <= w.quartiles[1] && w.quartiles[1] <= w.quartiles[2] &&
+    w.quartiles[2] <= w.quartiles[3] && w.quartiles[3] <= w.quartiles[4]);
+  check('box-whisker: quartiles ordered q0≤q1≤q2≤q3≤q4', monotone,
+        `${DATA.whisker.length} buckets`);
+
+  const peak = DATA.whisker.reduce((a, b) => b.quartiles[2] > a.quartiles[2] ? b : a, DATA.whisker[0]);
+  el('wh-table').innerHTML =
+    '<thead><tr><th>Bucket (ET)</th><th>n</th><th>min</th><th>Q1</th><th>median</th><th>Q3</th>' +
+    '<th>max</th><th>IQR</th><th>outliers</th></tr></thead><tbody>' +
+    DATA.whisker.map(w => {
+      const [q0, q1, q2, q3, q4] = w.quartiles;
+      return `<tr${w === peak ? ' style="background:#1b2333"' : ''}>
+        <td>${w.label}</td><td class="muted">${fmt(w.n)}</td>
+        <td class="muted">${q0.toFixed(1)}</td><td>${q1.toFixed(1)}</td>
+        <td class="amber">${q2.toFixed(1)}</td><td>${q3.toFixed(1)}</td>
+        <td class="muted">${q4.toFixed(1)}</td><td>${(q3 - q1).toFixed(1)}</td>
+        <td class="muted">${w.outliers.length}</td></tr>`;
+    }).join('') + '</tbody>';
+}
+
+/* ---------------------------------------------------------------- 3. Indicators */
+const IND = { chart: null, sessionIx: 0, overlay: 'BollingerBands', lower: 'RSI' };
+const OVERLAYS = { EMA: 'EMA(20)', SMA: 'SMA(20)', BollingerBands: 'Bollinger(20,2)' };
+const LOWERS = { RSI: 'RSI(14)', ATR: 'ATR(14)', MACD: 'MACD(12,26,9)' };
+
+function runIndicator(name, bars, inputs) {
+  const mod = A.INDICATORS[name];
+  const res = mod.calculate(bars, inputs || {});
+  return { res, plots: mod.plotConfig || [], meta: mod.metadata };
+}
+
+function buildIndicators() {
+  if (IND.chart) { IND.chart.remove(); IND.chart = null; }
+  const s = DATA.sessions[IND.sessionIx];
+  const chart = A.createChart(el('ind-chart'), clone(SURFACE));
+  IND.chart = chart;
+
+  const candles = chart.addSeries(A.CandlestickSeries, {
+    upColor: '#21c07a', downColor: '#f5455f', borderVisible: false,
+    wickUpColor: '#21c07a', wickDownColor: '#f5455f',
+  });
+  candles.setData(s.bars);
+
+  // oakscriptjs's Bar is {time, open, high, low, close, volume} — the same shape
+  // the chart already holds, so nothing is reshaped on the way in.
+  const bars = s.bars;
+
+  const over = runIndicator(IND.overlay, bars);
+  for (const p of over.plots) {
+    const data = (over.res.plots[p.id] || []).filter(d => d.value != null);
+    if (!data.length) continue;
+    const line = chart.addSeries(A.LineSeries, {
+      color: p.color || '#94a3b8', lineWidth: p.lineWidth || 1,
+      priceLineVisible: false, lastValueVisible: false, title: p.title,
+    });
+    line.setData(data);
+  }
+
+  const low = runIndicator(IND.lower, bars);
+  for (const p of low.plots) {
+    const data = (low.res.plots[p.id] || []).filter(d => d.value != null);
+    if (!data.length) continue;
+    const def = p.style === 'histogram' || p.style === 'columns' ? A.HistogramSeries : A.LineSeries;
+    const ser = chart.addSeries(def, {
+      color: p.color || '#94a3b8', lineWidth: p.lineWidth || 1,
+      priceLineVisible: false, lastValueVisible: false, title: p.title,
+    }, 1);
+    ser.setData(data);
+  }
+  chart.panes()[1].setHeight(140);
+  chart.timeScale().fitContent();
+  return s;
+}
+
+function indTable(s) {
+  // Diff the library against the Python references shipped with the payload.
+  const bars = s.bars;
+  // Two columns, measuring different things. A recursive indicator has to be
+  // *seeded* and there is no single right answer: pandas' ewm(adjust=False)
+  // seeds with the first observation, Pine's ta.ema seeds with an SMA of the
+  // first `length` bars. So "max error over every bar" only ever measures the
+  // seed, and every one of these would fail on it.
+  //
+  // The discriminator is whether the error *decays*. For a linear recursion
+  // with identical inputs, a seed difference is multiplied by (1-a) every bar
+  // and has to go to zero; anything still standing hundreds of bars later is a
+  // difference in the recursion itself. Hence the tail column — the last
+  // quarter of the session, by which point (1-1/14)^1000 is far past floating
+  // point. Tail at noise = same maths, different seed. Tail at 1e-3 = not the
+  // same indicator, whatever the label says.
+  const cases = [
+    { label: 'ATR(14)', ref: s.reference.atr14, period: 14,
+      run: () => runIndicator('ATR', bars, { length: 14 }),
+      pick: (r) => r.res.plots[Object.keys(r.res.plots)[0]],
+      against: 'journal.atr.atr_series (Wilder RMA)' },
+    { label: 'RSI(14)', ref: s.reference.rsi14, period: 14,
+      run: () => runIndicator('RSI', bars, { length: 14 }),
+      pick: (r) => r.res.plots.rsi || r.res.plots[Object.keys(r.res.plots)[0]],
+      against: 'Wilder RMA of gains/losses' },
+    { label: 'EMA(20)', ref: s.reference.ema20, period: 20,
+      run: () => runIndicator('EMA', bars, { length: 20 }),
+      pick: (r) => r.res.plots[Object.keys(r.res.plots)[0]],
+      against: 'pandas ewm(span=20, adjust=False)' },
+  ];
+
+  const tailFrom = Math.floor(bars.length * 0.75);
+  const out = cases.map(c => {
+    let maxErr = 0, worst = null, n = 0;
+    let maxTail = 0, worstTail = null, nTail = 0, last = null;
+    try {
+      const series = c.pick(c.run()) || [];
+      const byTime = new Map(series.map(d => [d.time, d.value]));
+      bars.forEach((b, i) => {
+        const ours = c.ref[i], theirs = byTime.get(b.time);
+        if (ours == null || theirs == null || Number.isNaN(theirs)) return;
+        n++;
+        const err = Math.abs(ours - theirs);
+        if (err > maxErr) { maxErr = err; worst = { t: b.time, ours, theirs, i }; }
+        if (i >= tailFrom) {
+          nTail++;
+          last = { t: b.time, ours, theirs, i, err };
+          if (err > maxTail) { maxTail = err; worstTail = { t: b.time, ours, theirs, i }; }
+        }
+      });
+    } catch (e) {
+      return { c, error: String(e && e.message || e) };
+    }
+    return { c, maxErr, worst, n, maxTail, worstTail, nTail, last, tailFrom };
+  });
+
+  el('ind-table').innerHTML =
+    '<thead><tr><th>Indicator</th><th>Compared against</th><th>bars</th>' +
+    `<th>max err (all)</th><th>worst bar</th><th>max err (tail, from bar ${tailFrom})</th>` +
+    '<th>final bar</th><th>Verdict</th></tr></thead><tbody>' +
+    out.map(r => {
+      if (r.error) return `<tr><td>${r.c.label}</td><td class="muted">${r.c.against}</td>
+        <td colspan="5" class="neg">${r.error}</td><td><span class="pill bad">error</span></td></tr>`;
+      // The floor is the payload, not the library: the reference series are
+      // rounded to REFERENCE_DP decimals on the way out of Python, so nothing
+      // can ever measure below that. Anything at or under it means "agrees as
+      // far as this page can see", which is the only claim available.
+      const floor = (DATA.meta.referenceEpsilon || 5e-7) * 2;
+      const scale = Math.max(1, Math.abs(r.worstTail ? r.worstTail.ours : 1));
+      const rel = r.maxTail / scale;
+      const decayed = r.maxErr > 0 && r.maxTail / r.maxErr < 0.01;
+      const verdict = r.nTail === 0 ? ['warnp', 'no overlap']
+        : r.maxTail <= floor ? ['ok', decayed ? 'agrees, seed only' : 'agrees']
+        : rel < 1e-6 ? ['ok', 'fp noise']
+        : rel < 1e-3 ? ['warnp', 'differs slightly'] : ['bad', 'different maths'];
+      check(`indicator: ${r.c.label} converges to ours`, verdict[0] === 'ok',
+            r.nTail === 0 ? 'no overlapping bars'
+              : `tail max abs ${r.maxTail.toExponential(2)} over ${r.nTail} bars ` +
+                `(raw ${r.maxErr.toExponential(2)} at bar ${r.worst.i}; ` +
+                `${decayed ? 'decayed' : 'persists'})`);
+      return `<tr><td>${r.c.label}</td><td class="muted">${r.c.against}</td>
+        <td class="muted">${fmt(r.n)}</td>
+        <td class="amber">${r.maxErr === 0 ? '0' : r.maxErr.toExponential(2)}</td>
+        <td class="muted">bar ${r.worst ? r.worst.i : '—'} · ${r.worst ? fmtET(r.worst.t) : ''}</td>
+        <td>${r.maxTail === 0 ? '0' : r.maxTail.toExponential(2)}</td>
+        <td class="muted">${r.last ? r.last.err.toExponential(2) : '—'}</td>
+        <td><span class="pill ${verdict[0]}">${verdict[1]}</span></td></tr>`;
+    }).join('') + '</tbody>';
+}
+
+function initIndicators() {
+  fillSessions(el('ind-session'));
+  el('ind-overlay').innerHTML = Object.entries(OVERLAYS).map(([k, v]) =>
+    `<button data-k="${k}" class="${k === IND.overlay ? 'on' : ''}">${v}</button>`).join('');
+  el('ind-lower').innerHTML = Object.entries(LOWERS).map(([k, v]) =>
+    `<button data-k="${k}" class="${k === IND.lower ? 'on' : ''}">${v}</button>`).join('');
+
+  const redraw = () => indTable(buildIndicators());
+  const wire = (id, key) => el(id).addEventListener('click', (e) => {
+    if (!e.target.dataset.k) return;
+    IND[key] = e.target.dataset.k;
+    el(id).querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.target));
+    redraw();
+  });
+  wire('ind-overlay', 'overlay');
+  wire('ind-lower', 'lower');
+  el('ind-session').addEventListener('change', (e) => { IND.sessionIx = +e.target.value; redraw(); });
+  redraw();
+}
+
+/* ---------------------------------------------------------------- 4. Drawing */
+const DR = { chart: null, series: null, manager: null, tool: 'trend-line', pending: [], n: 0, sessionIx: 0 };
+// Read from the package, not written out here. Every registry entry carries
+// {type, name, category, requiredAnchors, factory}, so a hardcoded list would
+// only be a way to go stale. The Terminal tab uses the same source for its
+// full 67-tool rail; this tab shows a representative nine.
+const TOOL_SHORTLIST = ['trend-line', 'horizontal-line', 'rectangle', 'fib-retracement',
+                        'parallel-channel', 'andrews-pitchfork', 'long-position',
+                        'short-position', 'price-range'];
+const REGISTRY = (() => {
+  try { return Object.values(A.getToolRegistry().getAll()); } catch (e) { return []; }
+})();
+const byType = (t) => REGISTRY.find(x => x.type === t);
+const TOOLS = TOOL_SHORTLIST.map(byType).filter(Boolean)
+  .map(t => [t.type, t.name, t.requiredAnchors]);
+
+function buildDrawing() {
+  if (DR.chart) { DR.chart.remove(); DR.chart = null; }
+  const s = DATA.sessions[DR.sessionIx];
+  const chart = A.createChart(el('dr-chart'), clone(SURFACE));
+  const series = chart.addSeries(A.CandlestickSeries, {
+    upColor: '#21c07a', downColor: '#f5455f', borderVisible: false,
+    wickUpColor: '#21c07a', wickDownColor: '#f5455f',
+  });
+  series.setData(s.bars);
+  chart.timeScale().fitContent();
+
+  const manager = new A.DrawingManager();
+  manager.attach(chart, series, el('dr-chart'));
+  Object.assign(DR, { chart, series, manager, pending: [], n: 0 });
+
+  chart.subscribeClick((param) => {
+    if (!param.point || param.time == null) return;
+    const price = series.coordinateToPrice(param.point.y);
+    if (price == null) return;
+    DR.pending.push({ time: param.time, price });
+    const def = byType(DR.tool);
+    const need = def ? def.requiredAnchors : 2;
+    if (DR.pending.length < need) { updateCount(); return; }
+    try {
+      // factory(id, anchors, style, options) — no class import needed.
+      manager.addDrawing(def.factory(`${DR.tool}-${++DR.n}`, DR.pending.slice(0, need)));
+    } catch (e) {
+      console.error('drawing failed', DR.tool, e);
+    }
+    DR.pending = [];
+    updateCount();
+  });
+  updateCount();
+}
+
+function updateCount() {
+  const need = (TOOLS.find(t => t[0] === DR.tool) || [, , 2])[2];
+  el('dr-count').textContent =
+    `${DR.n} drawn · ${DR.tool} needs ${need} point${need === 1 ? '' : 's'}` +
+    (DR.pending.length ? ` · ${DR.pending.length} placed` : '');
+}
+
+function initDrawing() {
+  fillSessions(el('dr-session'));
+  el('dr-palette').innerHTML = TOOLS.map(([k, label]) =>
+    `<button data-k="${k}" class="${k === DR.tool ? 'on' : ''}">${label}</button>`).join('');
+  el('dr-palette').addEventListener('click', (e) => {
+    if (!e.target.dataset.k) return;
+    DR.tool = e.target.dataset.k; DR.pending = [];
+    el('dr-palette').querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.target));
+    updateCount();
+  });
+  el('dr-session').addEventListener('change', (e) => { DR.sessionIx = +e.target.value; buildDrawing(); });
+  el('dr-clear').addEventListener('click', () => { DR.pending = []; DR.n = 0; buildDrawing(); });
+  buildDrawing();
+
+  // The registry is the package's own tool list — enumerated, not hardcoded, so
+  // the count in the prose above cannot drift from what actually shipped.
+  const names = REGISTRY.map(t => t && (t.name || t.type)).filter(Boolean);
+  check('drawing: tool registry enumerable', names.length > 0, `${names.length} tools registered`);
+  document.querySelectorAll('.js-tools').forEach(n => n.textContent = names.length);
+  el('dr-table').innerHTML =
+    '<thead><tr><th>Registered tools (' + names.length + ')</th></tr></thead><tbody><tr><td>' +
+    (names.length ? names.sort().join(' · ') : '<span class="muted">registry not enumerable in this build</span>') +
+    '</td></tr></tbody>';
+}
+
+
+/* ---------------------------------------------------------------- 5. Terminal
+
+   The TradingView layout — left tool rail, top bar, top-left legend, modal
+   picker and settings — assembled around the same lightweight-charts canvas.
+   None of that chrome ships with lightweight-charts; TradingView sells it
+   separately as Advanced Charts. What these two packages ship instead is the
+   *metadata* for it, which turns out to be most of the value:
+
+     getToolRegistry()  -> {type, name, category, requiredAnchors, factory}
+     each indicator     -> {metadata, inputConfig, plotConfig}
+
+   So the rail, the picker, the pane routing, the settings dialogs and the
+   legend rows are all generated. No tool name and no indicator name is written
+   anywhere below; delete a package and the corresponding UI empties itself. */
+
+const TF_STEPS = [['1m', 1], ['2m', 2], ['5m', 5], ['15m', 15], ['30m', 30], ['1h', 60]];
+const SOURCES = ['open', 'high', 'low', 'close', 'hl2', 'hlc3', 'ohlc4'];
+// Inline SVG rather than Unicode glyphs. The obvious characters for these
+// (⫽ ⋔ ≋ ⊞ ▭) are outside any font this page can assume, and a rail full of
+// tofu boxes is worse than no rail — the page is a self-contained artifact
+// served into an iframe with no network, so it cannot load an icon font.
+const CAT_ICON = {
+  line:        'M3 13L13 3',
+  channel:     'M2 11L10 3M6 14L14 6',
+  pitchfork:   'M8 14V8M8 8L3 3M8 8l5-5',
+  fibonacci:   'M2 4h12M2 7.5h9M2 11h12M2 14h6',
+  gann:        'M2.5 2.5h11v11h-11zM2.5 8h11M8 2.5v11',
+  shape:       'M3 4.5h10v7H3z',
+  measurement: 'M2 8h12M4.5 5.5L2 8l2.5 2.5M11.5 5.5L14 8l-2.5 2.5',
+  forecasting: 'M2.5 13L13 2.5M8.5 2.5H13V7',
+  annotation:  'M3 13l.6-2.4 6.8-6.8 1.8 1.8-6.8 6.8zM10.4 3.8l1.8 1.8',
+};
+const catIcon = (c) => `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"` +
+  ` stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">` +
+  `<path d="${CAT_ICON[c] || 'M8 3v10M3 8h10'}"/></svg>`;
+const CAT_ORDER = ['line', 'channel', 'pitchfork', 'fibonacci', 'gann', 'shape',
+                   'measurement', 'forecasting', 'annotation'];
+
+// Every module that exposes the metadata/calculate pair. Sorted by title
+// because the picker is a human-readable list, not an export dump.
+const CATALOGUE = Object.entries(A.INDICATORS)
+  .filter(([, v]) => v && typeof v === 'object' && v.metadata && typeof v.calculate === 'function')
+  .map(([key, mod]) => ({ key, mod, title: mod.metadata.title || key,
+                          short: mod.metadata.shortTitle || key,
+                          overlay: !!mod.metadata.overlay }))
+  .sort((a, b) => a.title.localeCompare(b.title));
+
+const TM = { chart: null, price: null, manager: null, bars: [], sessionIx: 0, tf: 5,
+             active: [], seq: 0, tool: null, pending: [], drawings: [], editing: null };
+
+// 1-minute bars are the only thing shipped; every other interval is folded out
+// of them here. Session epochs are ET wall clock, and 18:00 is a clean multiple
+// of every step offered, so flooring is enough — no phase correction needed.
+function resample(bars, minutes) {
+  if (minutes <= 1) return bars.slice();
+  const step = minutes * 60, out = [];
+  let cur = null;
+  for (const b of bars) {
+    const t = Math.floor(b.time / step) * step;
+    if (!cur || cur.time !== t) {
+      if (cur) out.push(cur);
+      cur = { time: t, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume || 0 };
+    } else {
+      if (b.high > cur.high) cur.high = b.high;
+      if (b.low < cur.low) cur.low = b.low;
+      cur.close = b.close;
+      cur.volume += b.volume || 0;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/* ---- chart ---- */
+function buildTerminal() {
+  if (TM.chart) { TM.chart.remove(); TM.chart = null; }
+  const s = DATA.sessions[TM.sessionIx];
+  TM.bars = resample(s.bars, TM.tf);
+
+  const chart = A.createChart(el('tm-chart'), clone(SURFACE));
+  TM.chart = chart;
+  TM.price = chart.addSeries(A.CandlestickSeries, {
+    upColor: '#21c07a', downColor: '#f5455f', borderVisible: false,
+    wickUpColor: '#21c07a', wickDownColor: '#f5455f',
+  });
+  TM.price.setData(TM.bars);
+
+  TM.manager = new A.DrawingManager();
+  TM.manager.attach(chart, TM.price, el('tm-chart'));
+  // Drawings are anchored in (time, price), so they survive a resample and a
+  // session swap. Keeping the specs rather than the instances is what makes
+  // that cheap — the chart can be thrown away and rebuilt at will.
+  for (const d of TM.drawings) {
+    const def = byType(d.type);
+    if (def) try { TM.manager.addDrawing(def.factory(d.id, d.anchors)); } catch (e) { /* off-range */ }
+  }
+
+  chart.subscribeClick(onTerminalClick);
+  chart.subscribeCrosshairMove(renderLegend);
+  rebuildIndicators();
+  chart.timeScale().fitContent();
+  renderLegend();
+  renderRail();
+  updateTerminalCount();
+}
+
+/* ---- indicators ---- */
+function defaultsFor(entry) {
+  const out = {};
+  for (const cfg of entry.mod.inputConfig || []) out[cfg.id] = cfg.defval;
+  return out;
+}
+
+// Rebuild every study from scratch on any structural change. Removing one
+// pane shifts the indices of the panes above it, so incremental bookkeeping
+// would have to track that; at this scale a full rebuild is cheaper to write
+// and impossible to get wrong.
+function rebuildIndicators() {
+  const chart = TM.chart;
+  if (!chart) return;
+  for (const inst of TM.active) {
+    for (const sp of inst.series) { try { chart.removeSeries(sp.ser); } catch (e) { /* gone */ } }
+    if (inst.markers) { try { inst.markers.detach(); } catch (e) { /* gone */ } inst.markers = null; }
+    inst.series = [];
+  }
+  while (chart.panes().length > 1) chart.removePane(chart.panes().length - 1);
+
+  let lower = 0;
+  for (const inst of TM.active) materialise(inst, inst.entry.overlay ? 0 : ++lower);
+  for (let i = 1; i < chart.panes().length; i++) chart.panes()[i].setHeight(110);
+}
+
+function materialise(inst, paneIx) {
+  let res;
+  try { res = inst.entry.mod.calculate(TM.bars, inst.inputs); inst.error = null; }
+  catch (e) { inst.error = String((e && e.message) || e); return; }
+
+  inst.paneIx = paneIx;
+  for (const cfg of inst.entry.mod.plotConfig || []) {
+    const raw = (res.plots && res.plots[cfg.id]) || null;
+    if (!raw) continue;
+    const data = raw.filter(d => d && d.value != null && !Number.isNaN(d.value));
+    if (!data.length) continue;
+    const hist = cfg.style === 'histogram' || cfg.style === 'columns';
+    const ser = TM.chart.addSeries(hist ? A.HistogramSeries : A.LineSeries, {
+      color: cfg.color || '#94a3b8', lineWidth: cfg.lineWidth || 1,
+      priceLineVisible: false, lastValueVisible: false, title: '',
+    }, paneIx);
+    ser.setData(data);
+    inst.series.push({ ser, cfg, lastValue: data[data.length - 1].value });
+  }
+  // plotshape / plotchar / plotarrow and every candlestick pattern come back as
+  // `markers`, not `plots` — 14 modules in this catalogue emit nothing else, so
+  // ignoring them would quietly present a working indicator as a broken one.
+  // The shape the library returns is already lightweight-charts' SeriesMarker;
+  // it only needs sorting, which setData does not do for you.
+  if (Array.isArray(res.markers) && res.markers.length) {
+    const ms = res.markers.filter(m => m && m.time != null).slice().sort((a, b) => a.time - b.time);
+    if (ms.length) inst.markers = A.createSeriesMarkers(TM.price, ms);
+    inst.markerCount = ms.length;
+  }
+  if (!inst.series.length && !inst.markers && !inst.error) inst.error = 'no plottable output';
+}
+
+function addIndicator(key) {
+  const entry = CATALOGUE.find(c => c.key === key);
+  if (!entry) return;
+  TM.active.push({ id: 'i' + (++TM.seq), entry, inputs: defaultsFor(entry), series: [] });
+  rebuildIndicators();
+  renderLegend();
+  updateTerminalCount();
+}
+
+function removeIndicator(id) {
+  TM.active = TM.active.filter(i => i.id !== id);
+  rebuildIndicators();
+  renderLegend();
+  updateTerminalCount();
+}
+
+/* ---- legend ---- */
+function renderLegend(param) {
+  const s = DATA.sessions[TM.sessionIx];
+  const hovered = param && param.seriesData ? param.seriesData.get(TM.price) : null;
+  const bar = hovered || TM.bars[TM.bars.length - 1];
+  const tf = (TF_STEPS.find(t => t[1] === TM.tf) || ['?'])[0];
+
+  let html = `<div class="sym">${s.symbol} · ${tf} <span class="muted">· ${s.day}</span></div>`;
+  if (bar) {
+    const d = bar.close - bar.open;
+    const cls = d >= 0 ? 'pos' : 'neg';
+    html += `<div class="ohlc">` +
+      ['O', 'H', 'L', 'C'].map((k, i) =>
+        `<span><span class="muted">${k}</span> <span class="${cls}">` +
+        `${[bar.open, bar.high, bar.low, bar.close][i].toFixed(2)}</span></span>`).join('') +
+      `<span class="${cls}">${d >= 0 ? '+' : ''}${d.toFixed(2)}` +
+      ` (${d >= 0 ? '+' : ''}${(d / bar.open * 100).toFixed(2)}%)</span></div>`;
+  }
+
+  for (const inst of TM.active) {
+    // The numeric inputs are what TradingView shows in parentheses after the
+    // name; strings and booleans would make the row unreadable.
+    const nums = (inst.entry.mod.inputConfig || [])
+      .filter(c => c.type === 'int' || c.type === 'float')
+      .map(c => inst.inputs[c.id]);
+    const args = nums.slice(0, 3).join(', ') + (nums.length > 3 ? ', …' : '');
+    const vals = inst.series.map(sp => {
+      const d = param && param.seriesData ? param.seriesData.get(sp.ser) : null;
+      const v = d && d.value != null ? d.value : sp.lastValue;
+      return `<span class="swatch" style="background:${sp.cfg.color || '#94a3b8'}"></span>` +
+             `${v == null ? '—' : v.toFixed(2)}`;
+    }).join(' ');
+    html += `<div class="ind"><span class="nm">${inst.entry.short}` +
+      `${args ? ` <span class="muted">(${args})</span>` : ''}</span>` +
+      (inst.error ? `<span class="tm-err">${inst.error}</span>`
+        : `<span class="vals">${vals || (inst.markerCount ? inst.markerCount + ' marks' : '')}</span>`) +
+      `<button data-set="${inst.id}" title="Settings">&#9881;</button>` +
+      `<button data-del="${inst.id}" title="Remove">&times;</button></div>`;
+  }
+  el('tm-legend').innerHTML = html;
+}
+
+/* ---- settings, rendered from inputConfig ---- */
+function inputControl(cfg, val) {
+  const id = `data-id="${cfg.id}"`;
+  switch (cfg.type) {
+    case 'int':
+      return `<input type="number" ${id} value="${val}" step="1"` +
+             `${cfg.min != null ? ` min="${cfg.min}"` : ''}${cfg.max != null ? ` max="${cfg.max}"` : ''}>`;
+    case 'float':
+      return `<input type="number" ${id} value="${val}" step="${cfg.step || 'any'}"` +
+             `${cfg.min != null ? ` min="${cfg.min}"` : ''}${cfg.max != null ? ` max="${cfg.max}"` : ''}>`;
+    case 'bool':
+      return `<input type="checkbox" ${id}${val ? ' checked' : ''}>`;
+    case 'color':
+      return `<input type="color" ${id} value="${/^#[0-9a-f]{6}$/i.test(val) ? val : '#7e57c2'}">`;
+    case 'source':
+      return `<select ${id}>${SOURCES.map(o =>
+        `<option${o === val ? ' selected' : ''}>${o}</option>`).join('')}</select>`;
+    case 'string':
+      return cfg.options
+        ? `<select ${id}>${cfg.options.map(o =>
+            `<option${o === val ? ' selected' : ''}>${o}</option>`).join('')}</select>`
+        : `<input type="text" ${id} value="${val == null ? '' : val}">`;
+    default:
+      // Unreachable while the self-check below passes; left loud on purpose.
+      return `<span class="tm-err">unhandled input type: ${cfg.type}</span>`;
+  }
+}
+
+function openSettings(id) {
+  const inst = TM.active.find(i => i.id === id);
+  if (!inst) return;
+  TM.editing = id;
+  el('tm-set-title').textContent = inst.entry.title;
+  const cfgs = inst.entry.mod.inputConfig || [];
+  el('tm-set-form').innerHTML = cfgs.length
+    ? cfgs.map(c => `<label>${c.title || c.id}</label>${inputControl(c, inst.inputs[c.id])}`).join('')
+    : '<span class="muted">This indicator takes no inputs.</span><span></span>';
+  el('tm-settings').hidden = false;
+}
+
+function applySettings() {
+  const inst = TM.active.find(i => i.id === TM.editing);
+  if (!inst) return;
+  for (const cfg of inst.entry.mod.inputConfig || []) {
+    const node = el('tm-set-form').querySelector(`[data-id="${cfg.id}"]`);
+    if (!node) continue;
+    inst.inputs[cfg.id] =
+      cfg.type === 'bool' ? node.checked
+      : cfg.type === 'int' ? parseInt(node.value, 10)
+      : cfg.type === 'float' ? parseFloat(node.value)
+      : node.value;
+  }
+  rebuildIndicators();
+  renderLegend();
+  el('tm-settings').hidden = true;
+}
+
+/* ---- left rail ---- */
+function renderRail() {
+  const cats = CAT_ORDER.filter(c => REGISTRY.some(t => t.category === c));
+  const activeCat = TM.tool ? (byType(TM.tool) || {}).category : null;
+  el('tm-rail').innerHTML =
+    `<button data-cat="__cursor" class="${TM.tool ? '' : 'on'}" title="Cursor">` +
+    `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"` +
+    ` stroke-width="1.3" stroke-linejoin="round"><path d="M4 2.5l8.5 5.2-3.7.9-1.6 3.6z"/>` +
+    `</svg></button>` +
+    cats.map(c => `<button data-cat="${c}" class="${c === activeCat ? 'on' : ''}"` +
+                  ` title="${c} — ${REGISTRY.filter(t => t.category === c).length} tools">` +
+                  `${catIcon(c)}</button>`).join('') +
+    `<div class="spacer"></div>` +
+    `<button data-cat="__trash" title="Clear drawings">` +
+    `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"` +
+    ` stroke-width="1.3" stroke-linecap="round"><path d="M3 4.5h10M6.5 4.5V3h3v1.5` +
+    `M4.5 4.5l.7 8.5h5.6l.7-8.5"/></svg></button>`;
+}
+
+function openFlyout(cat, anchorEl) {
+  closeFlyout();
+  const tools = REGISTRY.filter(t => t.category === cat);
+  const fly = document.createElement('div');
+  fly.className = 'tm-flyout';
+  fly.style.top = anchorEl.offsetTop + 'px';
+  fly.innerHTML = `<div class="head">${cat} · ${tools.length}</div>` +
+    tools.map(t => `<div data-tool="${t.type}">${t.name}` +
+      `<span class="muted" style="float:right">${t.requiredAnchors}pt</span></div>`).join('');
+  fly.addEventListener('click', (e) => {
+    const type = e.target.closest('[data-tool]');
+    if (!type) return;
+    TM.tool = type.dataset.tool;
+    TM.pending = [];
+    closeFlyout();
+    renderRail();
+    updateTerminalCount();
+  });
+  el('tm-rail').appendChild(fly);
+}
+function closeFlyout() {
+  const f = el('tm-rail').querySelector('.tm-flyout');
+  if (f) f.remove();
+}
+
+function onTerminalClick(param) {
+  if (!TM.tool || !param.point || param.time == null) return;
+  const price = TM.price.coordinateToPrice(param.point.y);
+  if (price == null) return;
+  TM.pending.push({ time: param.time, price });
+  const def = byType(TM.tool);
+  const need = def ? def.requiredAnchors : 2;
+  if (TM.pending.length < need) { updateTerminalCount(); return; }
+  const spec = { id: `${TM.tool}-${++TM.seq}`, type: TM.tool, anchors: TM.pending.slice(0, need) };
+  try { TM.manager.addDrawing(def.factory(spec.id, spec.anchors)); TM.drawings.push(spec); }
+  catch (e) { console.error('drawing failed', TM.tool, e); }
+  TM.pending = [];
+  updateTerminalCount();
+}
+
+function updateTerminalCount() {
+  const def = TM.tool ? byType(TM.tool) : null;
+  el('tm-count').textContent =
+    `${TM.active.length} stud${TM.active.length === 1 ? 'y' : 'ies'} · ` +
+    `${TM.drawings.length} drawing${TM.drawings.length === 1 ? '' : 's'}` +
+    (def ? ` · ${def.name}: ${TM.pending.length}/${def.requiredAnchors} anchors` : ' · cursor');
+}
+
+/* ---- picker ---- */
+function renderPicker(q) {
+  const needle = (q || '').trim().toLowerCase();
+  const hits = CATALOGUE.filter(c => !needle ||
+    c.title.toLowerCase().includes(needle) || c.short.toLowerCase().includes(needle));
+  el('tm-results').innerHTML = hits.slice(0, 300).map(c =>
+    `<div data-key="${c.key}"><span class="sh">${c.short}</span>` +
+    `<span class="ti">${c.title}</span>` +
+    `<span class="pn">${c.overlay ? 'overlay' : 'pane'}</span></div>`).join('') ||
+    '<div class="muted" style="padding:10px">Nothing matches.</div>';
+}
+
+/* ---- what the catalogue actually does on our bars ---- */
+function catalogueSmokeTest() {
+  // Six input types cover the whole catalogue — that claim is the reason one
+  // form renderer can serve 415 indicators, so it gets asserted rather than
+  // asserted-in-prose. A seventh type appearing upstream would silently render
+  // nothing in the settings dialog.
+  const handled = new Set(['int', 'float', 'bool', 'string', 'color', 'source']);
+  const stray = new Set();
+  for (const c of CATALOGUE) for (const cfg of c.mod.inputConfig || []) {
+    if (!handled.has(cfg.type)) stray.add(cfg.type);
+  }
+  check('terminal: every input type has a control', stray.size === 0,
+        stray.size ? `unhandled: ${[...stray].join(', ')}` : `${handled.size} types cover all ${CATALOGUE.length}`);
+
+  // And do they run? A tail slice keeps this to a second or so while still
+  // being long enough for the slower windows to warm up.
+  const bars = DATA.sessions[0].bars.slice(-400);
+  let ok = 0, marks = 0, threw = 0, empty = 0;
+  const failures = [];
+  for (const c of CATALOGUE) {
+    try {
+      const res = c.mod.calculate(bars, defaultsFor(c));
+      const anyPlot = res && res.plots && Object.values(res.plots)
+        .some(p => Array.isArray(p) && p.some(d => d && d.value != null && !Number.isNaN(d.value)));
+      const anyMark = res && Array.isArray(res.markers) && res.markers.length > 0;
+      if (anyPlot) ok++;
+      else if (anyMark) marks++;
+      // Silence is not automatically a fault. Most of this bucket is
+      // event-driven — a three-bar reversal pattern that did not occur in 400
+      // bars correctly returns nothing — and some is instrument-specific
+      // (session-window studies written for crypto). Reported, not failed.
+      else { empty++; failures.push(c.short); }
+    } catch (e) {
+      threw++;
+      failures.push(`${c.short}: ${String((e && e.message) || e).slice(0, 60)}`);
+    }
+  }
+  check('terminal: catalogue runs on our bars', threw === 0,
+        `${ok} plot, ${marks} markers only, ${empty} silent, ${threw} threw (of ${CATALOGUE.length})`);
+  return { ok, marks, threw, empty, failures };
+}
+
+function initTerminal() {
+  fillSessions(el('tm-session'));
+  el('tm-tf').innerHTML = TF_STEPS.map(([label, m]) =>
+    `<button data-tf="${m}" class="${m === TM.tf ? 'on' : ''}">${label}</button>`).join('');
+
+  el('tm-tf').addEventListener('click', (e) => {
+    if (!e.target.dataset.tf) return;
+    TM.tf = +e.target.dataset.tf;
+    el('tm-tf').querySelectorAll('button').forEach(b => b.classList.toggle('on', b === e.target));
+    buildTerminal();
+  });
+  el('tm-session').addEventListener('change', (e) => { TM.sessionIx = +e.target.value; buildTerminal(); });
+
+  el('tm-rail').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-cat]');
+    if (!btn) return;
+    const cat = btn.dataset.cat;
+    if (cat === '__cursor') { TM.tool = null; TM.pending = []; closeFlyout(); renderRail(); updateTerminalCount(); return; }
+    if (cat === '__trash') { clearDrawings(); closeFlyout(); return; }
+    if (el('tm-rail').querySelector('.tm-flyout')) { closeFlyout(); return; }
+    openFlyout(cat, btn);
+  });
+
+  el('tm-legend').addEventListener('click', (e) => {
+    const del = e.target.closest('[data-del]'), set = e.target.closest('[data-set]');
+    if (del) removeIndicator(del.dataset.del);
+    else if (set) openSettings(set.dataset.set);
+  });
+
+  el('tm-add').addEventListener('click', () => {
+    el('tm-picker').hidden = false;
+    el('tm-search').value = '';
+    renderPicker('');
+    el('tm-search').focus();
+  });
+  el('tm-search').addEventListener('input', (e) => renderPicker(e.target.value));
+  el('tm-results').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-key]');
+    if (!row) return;
+    addIndicator(row.dataset.key);
+    el('tm-picker').hidden = true;
+  });
+  el('tm-clear-ind').addEventListener('click', () => {
+    TM.active = []; rebuildIndicators(); renderLegend(); updateTerminalCount();
+  });
+  el('tm-clear-draw').addEventListener('click', clearDrawings);
+  el('tm-set-apply').addEventListener('click', applySettings);
+  document.querySelectorAll('[data-close]').forEach(b =>
+    b.addEventListener('click', () => { el(b.dataset.close).hidden = true; }));
+  document.querySelectorAll('.tm-modal').forEach(m =>
+    m.addEventListener('click', (e) => { if (e.target === m) m.hidden = true; }));
+
+  el('tm-search').placeholder = `Search ${CATALOGUE.length} indicators…`;
+  document.querySelectorAll('.js-ind-count').forEach(n => n.textContent = CATALOGUE.length);
+
+  buildTerminal();
+  // Open on something, so the tab shows what it is without a click.
+  addIndicator((CATALOGUE.find(c => c.short === 'EMA') || CATALOGUE[0]).key);
+  addIndicator((CATALOGUE.find(c => c.short === 'RSI') || CATALOGUE[1]).key);
+
+  const smoke = catalogueSmokeTest();
+  const byType_ = {};
+  for (const c of CATALOGUE) for (const cfg of c.mod.inputConfig || []) {
+    byType_[cfg.type] = byType_[cfg.type] || { n: 0, eg: `${c.short} · ${cfg.title || cfg.id}` };
+    byType_[cfg.type].n++;
+  }
+  const CONTROL = { int: 'number, step 1', float: 'number, step from cfg', bool: 'checkbox',
+                    string: 'select when options[], else text', color: 'colour swatch',
+                    source: 'select of 7 price sources' };
+  el('tm-table').innerHTML =
+    '<thead><tr><th>inputConfig type</th><th>inputs across the catalogue</th>' +
+    '<th>control rendered</th><th>example</th></tr></thead><tbody>' +
+    Object.entries(byType_).sort((a, b) => b[1].n - a[1].n).map(([t, v]) =>
+      `<tr><td><code>${t}</code></td><td>${fmt(v.n)}</td>` +
+      `<td class="muted">${CONTROL[t] || '—'}</td><td class="muted">${v.eg}</td></tr>`).join('') +
+    `<tr><td colspan="4" class="muted" style="padding-top:9px">` +
+    `Every indicator run over the last 400 bars on default inputs: ` +
+    `<b class="pos">${smoke.ok}</b> plot lines, <b class="pos">${smoke.marks}</b> emit markers only ` +
+    `(candlestick patterns and <code>plotshape</code>), <b class="amber">${smoke.empty}</b> return ` +
+    `nothing, <b class="${smoke.threw ? 'neg' : 'muted'}">${smoke.threw}</b> throw. The silent bucket is ` +
+    `mostly event-driven studies whose event did not occur in 400 bars, plus a few written for other ` +
+    `instruments' session windows` +
+    (smoke.failures.length ? ` — ${smoke.failures.slice(0, 5).join(', ')}, …` : '') +
+    `.</td></tr></tbody>`;
+}
+
+function clearDrawings() {
+  TM.drawings = [];
+  TM.pending = [];
+  buildTerminal();
+}
+
+/* ---------------------------------------------------------------- boot */
+function renderSelfTest() {
+  const list = el('selftest-list');
+  const pass = TESTS.filter(t => t.ok).length;
+  list.innerHTML = TESTS.map(t =>
+    `<li><span class="pill ${t.ok ? 'ok' : 'bad'}">${t.ok ? 'pass' : 'FAIL'}</span> ${t.name}` +
+    (t.detail ? ` <span class="muted">— ${t.detail}</span>` : '') + '</li>').join('');
+  el('selftest').dataset.result = `${pass}/${TESTS.length}`;
+  el('selftest').querySelector('h3').textContent =
+    `Self-check — ${pass}/${TESTS.length} passing`;
+}
+
+try {
+  initFootprint();
+  initWhisker();
+  initIndicators();
+  initDrawing();
+  initTerminal();
+  check('all four packages loaded', true,
+        'orderflow · box-whisker · indicators+oakscript · drawing');
+} catch (e) {
+  check('page built without throwing', false, String(e && e.stack || e));
+  console.error(e);
+}
+renderSelfTest();
+
+// The footprint is deliberately left alone here: it opens on a hand-set visible
+// range and refitting it on every resize would undo that.
+new ResizeObserver(() => {
+  for (const c of [IND.chart, DR.chart, TM.chart]) if (c) c.timeScale().fitContent();
+}).observe(document.getElementById('wrap'));
+</script>

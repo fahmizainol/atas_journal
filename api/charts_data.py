@@ -191,6 +191,15 @@ def _near_levels(rows: list[dict], bars: list[dict], margin: float = 0.10) -> li
     return [r for r in rows if lo <= r["price"] <= hi]
 
 
+#: Prior sessions shipped with a journal chart, for the composite drawn over
+#: them. Five because that is the balance rule's own cap (lib/compositeProfile
+#: BALANCE_CAP): a run of days in one auction is median two and never more than
+#: five, so a sixth day could only ever be dropped by the rule that reads them.
+#: The histograms are cached per session, so the cost is a handful of small JSON
+#: reads rather than a walk back through five days of ticks.
+CONTEXT_DAYS = 5
+
+
 def _session_for(trade_or_instrument, day, tf: str, tz):
     """The session a journal chart draws, off the tick cache and never buying.
 
@@ -205,6 +214,7 @@ def _session_for(trade_or_instrument, day, tf: str, tz):
         tz=tz,
         resolution=_RESOLUTION.get(tf, "1min"),
         allow_fetch=False,
+        context_days=CONTEXT_DAYS,
     )
 
 
@@ -232,7 +242,12 @@ def _session_payload(frame, instrument: str) -> dict:
     return {
         "bars": frame.bars,
         **vwap_slots(frame.vwap_globex, frame.vwap_ny, frame.vwap_weekly, "ny"),
-        **_profile_slots(frame.profile_globex, frame.profile_ny),
+        **_profile_slots(frame.profile_globex, frame.profile_ny, frame.profile_weekly),
+        # The prior sessions' volume-at-price. The composite itself is built on
+        # the client, by the same code the replay chart builds its own with —
+        # the balance walk is a rule you turn on the chart, and shipping a
+        # server-side answer to it would mean two implementations of one rule.
+        "context_profiles": frame.context_profiles,
         "ema9": frame.ema9,
         "ema20": frame.ema20,
         "ema50": frame.ema50,
@@ -243,6 +258,7 @@ def _session_payload(frame, instrument: str) -> dict:
         "footprint": frame.footprint,
         "cvd": frame.cvd,
         "cvd_divergences": frame.cvd_divergences,
+        "delta": frame.delta,
         # The contract the roll resolved, not the export's stale label — so the
         # chart header names the contract whose ticks are actually drawn.
         "instrument": frame.symbol or instrument,

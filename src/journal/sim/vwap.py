@@ -1,9 +1,18 @@
 """Session-anchored VWAP and deviation bands, computed tick by tick.
 
-Deliberately *not* shared with ``api/charts_data._vwap_rows``, which derives sigma
-from 1-minute bar typical prices. These produce different numbers. The sim owns
-this one so that the bands the engine trades against are the same bands the chart
-draws — a strategy tested on one sigma and shown on another is untestable.
+This is *the* VWAP definition in this codebase, and the reason it is worth saying
+so: accumulating trade prices and accumulating 1-minute bar typical prices are
+two different statistics, not two spellings of one. Their mids differ by a tick
+or three (hlc3 is only a proxy for a bar's true VWAP) and their sigmas differ by
+far more near an anchor — by the law of total variance the tick sigma carries the
+within-bar spread as well as the between-bar one, so it is ~40x wider one bar in,
+and converges to the bar figure only some tens of bars later. Drawing both under
+one name is what made a hand-placed anchor read differently on two charts.
+
+So the bands the engine trades against, the session lines the charts draw, and
+every cumulative anchored VWAP on the frontend all come from here or from
+``bar_moments`` below — a strategy tested on one sigma and shown on another is
+untestable, and a tool that means two things is worse than either.
 
 Volume-weighted, which is the standard (and what ATAS draws):
 
@@ -62,6 +71,66 @@ def vwap_bands(ticks: pd.DataFrame,
         "lower1": mid - std,
         "lower2": mid - 2 * std,
     }, index=ticks.index)
+
+
+def bar_moments(ticks: pd.DataFrame,
+                start_idx: np.ndarray,
+                end_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Each bar's own tick VWAP and tick variance, one pair per bar.
+
+    This is what lets a chart draw a *tick-accurate* VWAP anchored anywhere
+    without being shipped the tape. Sums are associative, so accumulating these
+    forward from any bar reproduces ``vwap_bands`` over the same tick range
+    exactly — the frontend rebuilds (Σv, Σpv, Σp²v) from ``(volume, vwap, var)``
+    as ``pv = vwap·v`` and ``p²v = (var + vwap²)·v``. Two floats per bar buys
+    every anchor the user can place, at bar cost rather than tick cost. Same
+    trick ``frame_sums`` plays for the weekly seed, one bar wide.
+
+    ``start_idx``/``end_idx`` are positional into *ticks*, inclusive at both
+    ends, exactly as ``bars.BAR_COLS`` carries them.
+
+    The variance is accumulated *about each bar's own mean* rather than as
+    E[x²]−E[x]², because the difference-of-cumulative-sums form loses most of its
+    significant digits here: p² is ~6e8 on NQ and a bar's true variance is single
+    digits, so the naive route subtracts two nearly equal large numbers to get a
+    small one. Centring costs one extra pass and is exact.
+
+    NaN for a bar that caught no volume — a time bar over a hole. Callers drop
+    those rather than drawing a made-up price; a zeroed moment would silently
+    drag an anchored VWAP toward zero.
+    """
+    n = len(start_idx)
+    if ticks.empty or n == 0:
+        return np.full(n, np.nan), np.full(n, np.nan)
+
+    p = ticks["price"].to_numpy(dtype="float64")
+    v = ticks["size"].to_numpy(dtype="float64")
+    s = np.asarray(start_idx, dtype="int64")
+    e = np.asarray(end_idx, dtype="int64")
+
+    # Which bar each tick belongs to. `end_idx` is inclusive and ascending, so
+    # side="left" lands a tick on the first bar whose end it does not pass —
+    # the same mapping session_chart builds for its footprint and CVD lookups.
+    bar_of = np.searchsorted(e, np.arange(len(p)), side="left")
+    # Ticks before the first bar opens, or past the last one's close, belong to
+    # no drawn bar. Both happen: an NY-anchored slice starts mid-frame, and a
+    # session can carry recovered ticks past the final bar.
+    live = (np.arange(len(p)) >= s[0]) & (bar_of < n)
+    bo, pv_p, pv_v = bar_of[live], p[live], v[live]
+
+    vol = np.bincount(bo, weights=pv_v, minlength=n)
+    pv = np.bincount(bo, weights=pv_p * pv_v, minlength=n)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mid = pv / vol
+    d = pv_p - mid[bo]
+    var = np.bincount(bo, weights=d * d * pv_v, minlength=n)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        var = var / vol
+
+    empty = vol <= 0
+    mid = np.where(empty, np.nan, mid)
+    var = np.where(empty, np.nan, np.clip(var, 0.0, None))
+    return mid, var
 
 
 def frame_sums(ticks: pd.DataFrame) -> tuple[float, float, float]:

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { type ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "../components/DataTable";
@@ -49,6 +49,14 @@ import type {
   VwapPoint,
 } from "../lib/chartTypes";
 import { fmt, fmtInt, fmtPct } from "../lib/format";
+import {
+  loadDynamicSwingVwapParams,
+  loadModernVwapParams,
+  saveDynamicSwingVwapParams,
+  saveModernVwapParams,
+} from "../lib/chartPrefs";
+import type { ModernVwapParams } from "../lib/modernVwap";
+import type { DsvParams } from "../lib/dynamicSwingVwap";
 
 // The interactions day-chart sends bar/level/event timestamps as raw UTC epoch
 // seconds, but lightweight-charts renders a numeric time *as UTC* — so the axis
@@ -161,6 +169,36 @@ function SessionChart({
   vaSnaps: VaSnap[];
 }) {
   const windowDays = useMemo(() => sessionWindow(dayList, selectedDay), [dayList, selectedDay]);
+  // Modern VWAP's knobs, hung off the chart's own legend rows. Persisted as a
+  // viewing preference (lib/chartPrefs) rather than saved with a run: nothing in
+  // the study reads them, they are the same kind of thing as the indicator
+  // toggles and the chart's colours, and a run re-loaded a month later should
+  // not silently re-anchor the line. Patched rather than replaced, because half
+  // the knobs are only meaningful beside another (a pivot length without a swing
+  // anchor, an occupancy floor without its window).
+  const [mvParams, setMvParams] = useState(loadModernVwapParams);
+  const patchMv = useCallback((patch: Partial<ModernVwapParams>) => {
+    setMvParams((p) => {
+      const next = { ...p, ...patch };
+      saveModernVwapParams(next);
+      return next;
+    });
+  }, []);
+  const mv = useMemo(() => ({ params: mvParams, onChange: patchMv }), [mvParams, patchMv]);
+  // The Zeiierman line, stored the same sticky-global way and for the same
+  // reason: this page has no prefs blob of its own to keep it in.
+  const [dsvParams, setDsvParams] = useState(loadDynamicSwingVwapParams);
+  const patchDsv = useCallback((patch: Partial<DsvParams>) => {
+    setDsvParams((p) => {
+      const next = { ...p, ...patch };
+      saveDynamicSwingVwapParams(next);
+      return next;
+    });
+  }, []);
+  const dsv = useMemo(
+    () => ({ params: dsvParams, onChange: patchDsv }),
+    [dsvParams, patchDsv],
+  );
   const results = useInteractionRunChart(
     symbol,
     windowDays,
@@ -193,6 +231,7 @@ function SessionChart({
     const vwapGlobex: VwapPoint[] = [];
     const vwapWeekly: VwapPoint[] = [];
     const profileGlobex: ProfilePoint[] = [];
+    const profileWeekly: ProfilePoint[] = [];
     const ema9: EmaPoint[] = [];
     const ema20: EmaPoint[] = [];
     const ema50: EmaPoint[] = [];
@@ -226,6 +265,7 @@ function SessionChart({
       pushShifted(vwapGlobex, cd.vwap_globex, off);
       pushShifted(vwapWeekly, cd.vwap_weekly, off);
       pushShifted(profileGlobex, cd.profile_globex, off);
+      pushShifted(profileWeekly, cd.profile_weekly, off);
       pushShifted(ema9, cd.ema9, off);
       pushShifted(ema20, cd.ema20, off);
       pushShifted(ema50, cd.ema50, off);
@@ -291,6 +331,7 @@ function SessionChart({
       vwapNy,
       vwapWeekly,
       profileGlobex,
+      profileWeekly,
       profileNy,
       ema9,
       ema20,
@@ -357,6 +398,7 @@ function SessionChart({
         vwapNy={tape.vwapNy}
         vwapWeekly={tape.vwapWeekly}
         profileGlobex={tape.profileGlobex}
+        profileWeekly={tape.profileWeekly}
         profileNy={tape.profileNy}
         ema9={tape.ema9}
         ema20={tape.ema20}
@@ -368,6 +410,8 @@ function SessionChart({
         touches={tape.touches}
         vaSnaps={tape.vaSnaps}
         initialTimeRange={focusRange}
+        modernVwap={mv}
+        dynamicSwingVwap={dsv}
         tickSize={tape.tickSize}
         pointValue={tape.pointValue}
         height={560}
@@ -385,6 +429,7 @@ function SessionChart({
 const ALL_SOURCES = [
   { key: "ny", label: "NY profile" },
   { key: "globex", label: "Globex profile" },
+  { key: "weekly", label: "Weekly profile" },
   { key: "vwap_bands", label: "VWAP bands" },
   { key: "session_refs", label: "Session refs" },
 ];
@@ -787,7 +832,8 @@ const snapColumns: ColumnDef<VaSnap, any>[] = [
   {
     id: "level",
     header: "Level",
-    accessorFn: (r) => `${r.source === "ny" ? "NY" : "Globex"} ${r.level_type}`,
+    accessorFn: (r) =>
+      `${r.source === "ny" ? "NY" : r.source === "weekly" ? "Weekly" : "Globex"} ${r.level_type}`,
     cell: (c) => String(c.getValue()),
   },
   { accessorKey: "snap_dir", header: "Direction", cell: (c) => String(c.getValue()) },

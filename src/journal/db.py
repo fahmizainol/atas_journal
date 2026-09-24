@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS atas_journal (
     close_volume  REAL,
     price_pnl     REAL,
     profit_ticks  REAL,
-    pnl           REAL,
+    pnl           REAL,   -- gross, always
+    fees          REAL,   -- commission both sides; NULL = never reported
     comment       TEXT,
     source_file   TEXT
 );
@@ -60,12 +61,58 @@ CREATE TABLE IF NOT EXISTS atas_statistics (
     PRIMARY KEY (source_file, metric, scope)
 );
 
+-- The trader's own account of a trade. HUMAN-OWNED, and the counterpart to
+-- ``trade_levels`` / ``trade_context`` below, which answer what they can without
+-- a self-report.
+--
+-- ``grade`` and ``watched_levels_json`` are the review
+-- (docs/trade-grading-plan.md).
+-- Both are written by the review alone and are deliberately NOT part of
+-- ``save_note``'s whole-row overwrite — see ``set_trade_review``, which updates
+-- them in place so the journal form and the drill save never have to echo two
+-- fields they know nothing about.
+--
+-- ``grade`` is A|B|C|D on the whole trade. Until 2026-08-31 it was assigned in
+-- the review panel with the outcome on screen, and the 132 rows written that way
+-- restated the P&L sign (every A/B won, every D lost). It is now written from
+-- the recall front — the fill-freeze, before the outcome fetch — which is the
+-- one surface that can ask the question blind. Rows graded under the old rule
+-- keep their letters; cuts that care can split on ``updated_at``.
+--
+-- ``setup`` and ``discipline`` are the two enumerated axes the free tags held by
+-- accident (``journal.review.SETUPS`` / ``DISCIPLINES``): what the trade *was*,
+-- faded-vs-joined first, and whether the plan was followed. NULL = never
+-- answered. Written by ``set_trade_review`` like the fields above.
+--
+-- ``watched_levels_json`` is the levels the trade was taken off, chosen from the
+-- candidates ``trade_levels`` measured, or the single literal ``'none'``. NULL
+-- and ``'[]'`` mean never answered; ``["none"]`` means answered *I was not
+-- trading a level*, and the two must stay distinguishable or a trade with no
+-- cached tape becomes indistinguishable from an unreviewed one.
+--
+-- It holds levels (``gxVP_poc``), not families. It briefly held a family, which
+-- could not distinguish the globex VAH from the session one — the whole point of
+-- asking. It then held exactly one level, which could not say *the globex POC
+-- and the weekly VWAP were the same price*: confluence is the ordinary reason a
+-- level gets traded, and forcing the pick to one made the answer arbitrary at
+-- the moments that mattered most. ``'none'`` stays exclusive — "no level" and "a
+-- level" cannot both be true — and that is enforced at the door in
+-- ``api.routers.notes``.
+--
+-- ``watched_level`` and ``watched_family`` are the older columns, migrated
+-- across and then left alone rather than dropped.
 CREATE TABLE IF NOT EXISTS trade_notes (
     trade_key        TEXT PRIMARY KEY,
     note             TEXT,
     tags_json        TEXT,
     setups_json      TEXT DEFAULT '[]',   -- setup badges (per-trade)
     confluences_json TEXT DEFAULT '[]',   -- evidence/context badges (per-trade)
+    grade            TEXT,                -- 'A'|'B'|'C'|'D'; NULL = ungraded
+    setup            TEXT,                -- review.SETUPS; NULL = unanswered
+    discipline       TEXT,                -- review.DISCIPLINES; NULL = unanswered
+    watched_levels_json TEXT DEFAULT '[]',-- level_tag MEMBERS keys, or ['none']
+    watched_level    TEXT,                -- superseded by watched_levels_json; unread
+    watched_family   TEXT,                -- superseded by watched_level; unread
     updated_at       TEXT
 );
 
@@ -123,27 +170,14 @@ CREATE TABLE IF NOT EXISTS ai_settings (
     value         TEXT
 );
 
-CREATE TABLE IF NOT EXISTS attempt_videos (
-    source_file   TEXT PRIMARY KEY,   -- the replay take this video belongs to
-    path          TEXT NOT NULL,      -- as entered (Windows or POSIX); resolved on serve
-    duration_s    REAL,               -- known once the browser reads metadata; nullable
-    updated_at    TEXT
-);
+-- ``attempt_videos`` / ``video_bookmarks`` used to live here: a day was reviewed
+-- by replaying a screen recording. The tape replayer in the day view replaced
+-- that, and this DB held no rows for either table when they were removed. They
+-- are deliberately *not* dropped on init — the pre-mode-folders and pre-tz-repair
+-- backups still carry 86 links and 723 bookmarks between them, and restoring one
+-- of those should not silently destroy the history it was kept for.
 
-CREATE TABLE IF NOT EXISTS video_bookmarks (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_file   TEXT NOT NULL,      -- the replay take this bookmark belongs to
-    offset_s      REAL NOT NULL,      -- seconds into that take's video
-    label         TEXT,
-    trade_key     TEXT,               -- bound trade (NULL = free-form bookmark)
-    created_at    TEXT,
-    origin        TEXT NOT NULL DEFAULT 'manual'  -- 'manual' (hand-placed/anchor) | 'synced' (auto from trade ts)
-);
-
-CREATE INDEX IF NOT EXISTS idx_video_bookmarks_sf ON video_bookmarks(source_file);
-
--- A session is one ATAS export (one source_file) — the same key attempt_videos
--- and video_bookmarks already use, so linking sessions costs no migration.
+-- A session is one ATAS export (one source_file).
 --   live     — prop firm / real money
 --   replay   — a simulated re-run of a past session
 --   backtest — one model exercised exclusively for the whole session
@@ -203,7 +237,247 @@ CREATE TABLE IF NOT EXISTS trade_rule_checks (
     PRIMARY KEY (trade_key, rule_id)
 );
 
+-- Measured level proximity, one row per (trade, fill, family). MACHINE-OWNED:
+-- nothing here is a self-report, and the review gate deliberately does not read
+-- it. Keeping it out of the human's own tables is what preserves the only
+-- comparison that makes it worth measuring — what the trader said, versus what
+-- the tape did. Auto-filling the human's side would answer the question with its
+-- own guess and satisfy the review gate for free.
+--
+-- What the human side *is* changed twice. It was the review's confluence tags —
+-- a list of the levels the trader remembered seeing, which this table could only
+-- agree or disagree with, and which was never wrong in any way worth recording.
+-- Then a thesis, deleted 2026-08-20 with its vocabulary. It is now
+-- ``trade_notes.watched_levels_json``: the levels the trade was taken off,
+-- picked from the levels measured here.
+--
+-- That pick is offered a shortlist, which is as close to the forbidden thing as
+-- this gets, and the boundary holds on two rules kept in
+-- ``api/routers/replays._level_candidates``: candidates are ordered by DISTANCE,
+-- never by ``rank`` (distance is a fact about the chart; rank is this table's
+-- opinion about it), and nothing is pre-selected. A single referent that can
+-- disagree with the nearest measured level is falsifiable in the way the
+-- confluence list never was.
+--
+-- ``rank`` is the measurement (fraction of drift-matched companions that sat
+-- closer); "at the level" is a threshold applied at READ time, never stored, so
+-- retuning it costs nothing. ``method`` stamps the null that produced the row —
+-- see journal.level_tag.METHOD — so a mixed table is detectable and recomputable.
+--
+-- ONE ROW PER LEVEL since 2026-08-21, not per family. The families still own the
+-- ranking (that is what stops one collinear signal being split three ways), so
+-- ``rank`` is carried only by the member its family was scored through and is
+-- NULL on the rest. The rest exist because the review asks which level the trade
+-- was taken off, and a family collapsed to its nearest member cannot answer that:
+-- on a day the session POC was closer, there was simply no way to say "the
+-- globex POC". Distance is a fact, needs no null, and every measured level has one.
+CREATE TABLE IF NOT EXISTS trade_levels (
+    trade_key   TEXT NOT NULL,
+    anchor      TEXT NOT NULL,   -- 'entry' | 'exit'
+    family      TEXT NOT NULL,   -- journal.level_tag.FAMILIES
+    member      TEXT NOT NULL,   -- journal.level_tag.MEMBERS — the level itself
+    rank        REAL,            -- 0..1 on the family's scored member; NULL elsewhere
+    dist_ticks  REAL,            -- signed: fill price minus the level
+    method      TEXT NOT NULL,
+    computed_at TEXT,
+    PRIMARY KEY (trade_key, anchor, member)
+);
+
+-- What price did BEFORE the entry and AFTER the exit, in index points, signed to
+-- the trade's own direction. One row per trade. MACHINE-OWNED, like trade_levels
+-- and for the same reason: nothing here is a self-report, which is the whole
+-- point of having it beside the trader's own account of the trade.
+--
+-- Everything is re-derivable from the tape — an attempt pins its symbol and day
+-- — so this table is a cache of a measurement, never a second copy of the ticks.
+-- ``method`` stamps the definitions (journal.trade_context.METHOD) so a mixed
+-- table is detectable and a redefinition is a backfill.
+--
+-- READ ``pre_avail_s``/``post_avail_s`` FIRST. They are how much tape each window
+-- actually got: a trade exited at 15:58 has four minutes of session left, and
+-- its 30-minute follow-through of zero is the clock, not the market.
+--
+-- The hold itself is deliberately absent — MAE/MFE between entry and exit is
+-- journal.excursion, on minute bars, and two numbers with one name is how a
+-- journal starts lying.
+CREATE TABLE IF NOT EXISTS trade_context (
+    trade_key    TEXT PRIMARY KEY,
+    symbol       TEXT,            -- contract the roll resolved; the audit trail
+    tick_size    REAL,            -- points per tick: converts the two units below
+    method       TEXT NOT NULL,
+    computed_at  TEXT,
+    pre_avail_s  REAL,
+    post_avail_s REAL,
+    fwd_avail_s  REAL,            -- tape left AFTER THE ENTRY (see fwd_pts_*)
+    -- The approach. POSITIVE run = price had already gone your way: you chased.
+    pre_run_pts_1m   REAL,
+    pre_run_pts_5m   REAL,
+    pre_run_pts_15m  REAL,
+    pre_run_pts_30m  REAL,
+    pre_range_pts_15m REAL,
+    pre_range_pts_30m REAL,
+    pre_loc_15m  REAL,            -- 0 = fill at the window low, 1 = at its high
+    pre_loc_30m  REAL,            -- RAW, not direction-signed (see trade_context)
+    -- Was the direction right. Net move from the ENTRY at a fixed clock, signed
+    -- to the trade. The one measurement here that is BLIND TO THE EXIT: it
+    -- scores the claim the entry made, so a scratch and a runner off the same
+    -- signal read the same. NULL past the session end, never the closing price.
+    fwd_pts_30s  REAL,
+    fwd_pts_1m   REAL,
+    fwd_pts_5m   REAL,
+    -- What was left behind. MFE without MAE is half a claim: holding for the
+    -- follow-through means sitting through the drawdown that came with it.
+    post_mfe_pts_1m  REAL,
+    post_mfe_pts_5m  REAL,
+    post_mfe_pts_15m REAL,
+    post_mfe_pts_30m REAL,
+    post_mae_pts_1m  REAL,
+    post_mae_pts_5m  REAL,
+    post_mae_pts_15m REAL,
+    post_mae_pts_30m REAL,
+    post_mfe_close_pts REAL,      -- to the session end, not to a horizon
+    post_close_pts     REAL,
+    exit_rank          REAL,      -- 1.0 = nothing in the next 30m traded better
+    post_ret_entry_s   REAL,      -- NULL = the entry was never offered again
+    -- How big the bars were around the fill, at the three resolutions actually
+    -- traded on. In TICKS (the points above divide by tick_size), so these read
+    -- the same as the chart's vol-ruler pane. ATR(14) is what was on screen;
+    -- the median over the 30m approach is the number one bar cannot yank.
+    vol_atr_ticks_500t REAL,
+    vol_atr_ticks_30s  REAL,
+    vol_atr_ticks_1m   REAL,
+    vol_med_ticks_500t REAL,
+    vol_med_ticks_30s  REAL,
+    vol_med_ticks_1m   REAL,
+    -- The bar the fill landed in. Body is SIGNED TO THE TRADE (positive = the
+    -- bar was going your way), because "green" means opposite things to a long
+    -- and a short. `elapsed` is the honest form of "was the candle closed":
+    -- off the tape every bar is closed, and what differed live is how much of
+    -- it had printed when you fired.
+    eb_body_ticks_500t REAL,
+    eb_body_ticks_30s  REAL,
+    eb_body_ticks_1m   REAL,
+    eb_loc_500t        REAL,      -- 0 = filled at the bar's low, 1 = at its high
+    eb_loc_30s         REAL,      -- RAW, not direction-signed, and NOT clipped:
+                                  -- a scaled entry's average can sit outside the
+                                  -- bar its first fill landed in, and that is the
+                                  -- fact, not an error to round away
+    eb_loc_1m          REAL,
+    eb_elapsed_500t    REAL,      -- 0.1 on a 500-tick bar = you saw 50 prints
+    eb_elapsed_30s     REAL,
+    eb_elapsed_1m      REAL
+);
+
+-- Spaced repetition over your own reviewed trades (Lab -> Recall,
+-- docs/trade-grading-plan.md). One card per trade; the rep log is separate so a
+-- card's schedule can be rebuilt from its history and so a rep is never lost to
+-- an upsert.
+--
+-- **This table holds a schedule and nothing else.** Where the front's tape stops
+-- is not stored: it is the trade's own fill, read off the journal row each time
+-- (``api.routers.recall``). It used to be a jittered ``cut_ms`` column, pinned so
+-- the question could not move between reps — dropped 2026-08-22 along with the
+-- jitter itself, because a stop that is derived from the trade cannot drift the
+-- way a rolled one could, and a card whose row is deleted still comes back as
+-- the same question.
+-- ``ease``, ``reps`` and ``lapses`` are SM-2's. They are still written, because
+-- SM-2 is what schedules this deck when the Arena binary hasn't been built, and
+-- a column that goes stale the moment you clone the repo is worse than one kept
+-- current for a fallback that costs nothing.
+CREATE TABLE IF NOT EXISTS recall_cards (
+    trade_key   TEXT PRIMARY KEY,
+    due         TEXT NOT NULL,     -- ISO date; <= today means show it
+    interval_d  REAL NOT NULL,     -- days until the next showing
+    ease        REAL NOT NULL,     -- SM-2 ease factor, starts at 2.5
+    reps        INTEGER NOT NULL,
+    lapses      INTEGER NOT NULL,
+    -- The Arena's per-card state (~900 bytes of JSON): the five models' item
+    -- state, its stability and difficulty. NULL until the card's first rating
+    -- under SM-20. Deliberately not read by ``all_recall_cards`` — the deck
+    -- needs a due date, not a scheduler's working set.
+    sm20_state  TEXT,
+    -- Unix epoch days at the last rating, the clock the Arena is given. Ours,
+    -- not read out of ``sm20_state``: M1 keeps its own copy inside that blob and
+    -- reaching into a vendored struct's internals from Python is how a re-vendor
+    -- breaks silently. NULL means "never rated under SM-20".
+    last_review_day INTEGER,
+    updated_at  TEXT
+);
+
+-- One row per showing, append-only. ``guess`` is free text and is NEVER scored:
+-- there is no objective answer to "what does price do next", so the card is
+-- self-rated the way an Anki card is, and the guess exists to make you commit to
+-- a read before flipping rather than to be marked.
+CREATE TABLE IF NOT EXISTS recall_reps (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_key  TEXT NOT NULL,
+    shown_at   TEXT NOT NULL,     -- UTC ISO, stamped server-side at the rating
+    rating     INTEGER NOT NULL,  -- 1 again | 2 hard | 3 good | 4 easy
+    guess      TEXT
+);
+
+-- The Algorithm Arena's deck-wide state: live blend weights, M2's optimizer,
+-- and M3's 21x21x21 matrices (src/journal/sm20.py, vendor/sm20/PROVENANCE.md).
+--
+-- One row, always id 1. SM-2 needed nothing like this — a card's schedule was a
+-- function of that card alone — but the Arena learns across the whole deck, so
+-- this blob is where every rating's tuning accumulates. It is ~270 KB and it is
+-- rewritten on each rating; that is a fixed cost, not one that grows with the
+-- deck, because every matrix inside it has fixed dimensions.
+--
+-- Losing this row is not fatal and not loud: the next rating starts from
+-- default weights, and the schedule simply gets quietly worse. It is derived
+-- state and cannot be rebuilt from ``recall_reps`` (the models are path
+-- dependent), which is the argument for keeping it in the same file as the
+-- cards rather than in a cache directory.
+CREATE TABLE IF NOT EXISTS recall_collection (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    state_json TEXT NOT NULL,
+    updated_at TEXT
+);
+
+-- What the **last** rating overwrote, so that one misclick can be taken back.
+--
+-- One row, always id 1, replaced by every rating: the slot therefore always
+-- describes the most recent one, which is the only rating that can be reverted
+-- exactly. Restoring an older snapshot would roll ``recall_collection`` back to
+-- a state every rating since has learned past, so an undo stack is not a deeper
+-- version of this feature — it is a different and worse one.
+--
+-- Why a snapshot rather than a recomputation: two of the three things a rating
+-- writes cannot be reconstructed after the fact. The Arena's collection is path
+-- dependent (see above), and ``save_recall_card`` deliberately COALESCEs
+-- ``sm20_state`` so a fallback rating cannot blank it — which also means the
+-- previous value is gone the moment it is written over. The bytes have to be
+-- kept, so they are kept here, once.
+--
+-- NULL ``card_json`` means the card had no row at all before the rating (its
+-- first ever showing), and NULL ``collection_json`` means the deck had no Arena
+-- state. Both restore by deleting, not by writing a default: the point is to
+-- leave the tables exactly as the rating found them.
+CREATE TABLE IF NOT EXISTS recall_undo (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    trade_key       TEXT NOT NULL,
+    rep_id          INTEGER NOT NULL,  -- the recall_reps row to delete
+    card_json       TEXT,              -- recall_cards row before; NULL = none
+    collection_json TEXT,              -- recall_collection blob before; NULL = none
+    -- The grade this rating wrote, if it wrote one (the recall front is where a
+    -- trade gets graded). ``wrote_grade`` says whether to restore at all;
+    -- ``grade_before`` is what to restore to — NULL for a first grading, which
+    -- is the ordinary case since the front only asks an ungraded trade.
+    wrote_grade     INTEGER DEFAULT 0,
+    grade_before    TEXT,
+    staged_at       TEXT
+);
+
+-- ``trade_intent`` and ``recall_reviews`` are gone (the thesis vocabulary they
+-- served was deleted 2026-08-20, docs/trade-grading-plan.md). Installs that have
+-- them keep them: dropping a table to reclaim nothing is how a record of what
+-- was once asked gets lost, and nothing reads them now.
+
 CREATE INDEX IF NOT EXISTS idx_model_rules_model ON model_rules(model_id);
+CREATE INDEX IF NOT EXISTS idx_trade_levels_key ON trade_levels(trade_key);
+CREATE INDEX IF NOT EXISTS idx_recall_reps_key ON recall_reps(trade_key);
 """
 
 # One-time curated seed for the setup/confluence master lists (option (b):
@@ -314,36 +588,23 @@ def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    _migrate_video_schema(conn)  # must run before SCHEMA recreates the tables
     conn.executescript(SCHEMA)
     conn.commit()
     _migrate_ai_schema(conn)
     _migrate_imported_files(conn)
-    _migrate_bookmark_origin(conn)
     _migrate_trade_note_tagging(conn)
+    _migrate_trade_review_cols(conn)
+    _migrate_watched_level(conn)          # reads the OLD trade_levels rows
+    _migrate_watched_levels_multi(conn)   # ...and folds its column into a list
+    _migrate_trade_levels_per_member(conn)  # ...so it must run after
     _migrate_setup_confluence_master(conn)  # needs trade-note columns above
     _migrate_journal_model(conn)
     _migrate_backtest_journaling(conn)
-
-
-def _migrate_video_schema(conn: sqlite3.Connection) -> None:
-    """Drop pre-rekey video tables so SCHEMA can recreate them keyed by
-    ``source_file`` instead of ``day``.
-
-    An early build keyed videos/bookmarks by ``day``; we switched to the stable
-    ``source_file`` (the attempt id). ``CREATE TABLE IF NOT EXISTS`` would skip
-    the old tables, then the new ``source_file`` index would fail against the
-    old ``day`` columns. These tables only ever held throwaway pre-release data,
-    so dropping is safe — relink the recording to recreate.
-    """
-    conn.execute("DROP TABLE IF EXISTS day_videos")  # renamed to attempt_videos
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='video_bookmarks'"
-    ).fetchone()
-    if row is not None and "source_file" not in (row[0] or ""):
-        conn.execute("DROP INDEX IF EXISTS idx_video_bookmarks_day")
-        conn.execute("DROP TABLE IF EXISTS video_bookmarks")
-    conn.commit()
+    _migrate_trade_context_cols(conn)
+    _migrate_recall_sm20(conn)
+    _migrate_recall_drop_cut(conn)
+    _migrate_review_axes(conn)
+    _migrate_journal_fees(conn)
 
 
 def _migrate_imported_files(conn: sqlite3.Connection) -> None:
@@ -355,20 +616,6 @@ def _migrate_imported_files(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(imported_files)")}
     if "file_mtime" not in cols:
         conn.execute("ALTER TABLE imported_files ADD COLUMN file_mtime TEXT")
-        conn.commit()
-
-
-def _migrate_bookmark_origin(conn: sqlite3.Connection) -> None:
-    """Add ``origin`` to installs whose video_bookmarks predate auto-sync.
-
-    Existing rows were all hand-placed, so they default to 'manual' — exactly
-    right, since "Clear synced" and orphan-pruning must never touch them.
-    """
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(video_bookmarks)")}
-    if "origin" not in cols:
-        conn.execute(
-            "ALTER TABLE video_bookmarks ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
-        )
         conn.commit()
 
 
@@ -390,6 +637,136 @@ def _migrate_trade_note_tagging(conn: sqlite3.Connection) -> None:
         else:
             conn.execute("ALTER TABLE trade_notes ADD COLUMN setups_json TEXT DEFAULT '[]'")
     conn.commit()
+
+
+def _migrate_trade_review_cols(conn: sqlite3.Connection) -> None:
+    """Add ``grade`` / ``watched_family`` to installs whose ``trade_notes``
+    predate the graded review (docs/trade-grading-plan.md).
+
+    Both stay NULL on existing rows, which is exactly right: NULL means *never
+    answered*, and every trade reviewed under the old thesis-and-note rule is
+    unanswered under the new one. They will be asked again the next time each
+    sitting is opened.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_notes)")}
+    if "grade" not in cols:
+        conn.execute("ALTER TABLE trade_notes ADD COLUMN grade TEXT")
+    if "watched_family" not in cols:
+        conn.execute("ALTER TABLE trade_notes ADD COLUMN watched_family TEXT")
+    conn.commit()
+
+
+def _migrate_watched_level(conn: sqlite3.Connection) -> None:
+    """Move the review's level answer from a family to the level itself.
+
+    The old column stored a family, which could not say *which* VAH — the thing
+    the question exists to capture. Each stored answer is resolved to the member
+    that family was scored through on that trade, which is the level the picker
+    was naming when it was answered, so nothing is guessed.
+
+    Reads ``trade_levels`` in its OLD one-row-per-family shape, so it has to run
+    before that table is rebuilt. An answer whose measurement is gone keeps the
+    family id: ``label_for`` falls back to the family name, and a stale id reads
+    better than a silently dropped answer.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_notes)")}
+    if "watched_level" not in cols:
+        conn.execute("ALTER TABLE trade_notes ADD COLUMN watched_level TEXT")
+    if "watched_family" not in cols:
+        conn.commit()
+        return
+    rows = conn.execute(
+        "SELECT trade_key, watched_family FROM trade_notes "
+        "WHERE watched_family IS NOT NULL AND watched_level IS NULL"
+    ).fetchall()
+    for r in rows:
+        fam = r["watched_family"]
+        member = None
+        if fam != "none":
+            hit = conn.execute(
+                "SELECT member FROM trade_levels "
+                "WHERE trade_key = ? AND anchor = 'entry' AND family = ?",
+                (r["trade_key"], fam),
+            ).fetchone()
+            member = hit["member"] if hit else None
+        conn.execute(
+            "UPDATE trade_notes SET watched_level = ? WHERE trade_key = ?",
+            (member or fam, r["trade_key"]),
+        )
+    if rows:
+        print(f"[db] carried {len(rows)} review answer(s) from family to level")
+    conn.commit()
+
+
+def _migrate_watched_levels_multi(conn: sqlite3.Connection) -> None:
+    """Let the review's level answer name more than one level.
+
+    A trade taken where the globex POC and the weekly VWAP sat on the same price
+    was being asked which one it was, and any answer to that was arbitrary.
+
+    Every stored answer becomes a one-element list, which loses nothing: a single
+    pick is still a valid multiple pick. The old column keeps its value and stops
+    being read, the way ``watched_family`` did before it.
+
+    Idempotent by NULL: the ALTER adds the column with no default, so exactly the
+    rows that predate it are NULL, and the backfill leaves none behind. A review
+    later cleared back to ``'[]'`` is therefore not resurrected on the next boot.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_notes)")}
+    if "watched_levels_json" not in cols:
+        conn.execute("ALTER TABLE trade_notes ADD COLUMN watched_levels_json TEXT")
+    rows = conn.execute(
+        "SELECT trade_key, watched_level FROM trade_notes "
+        "WHERE watched_levels_json IS NULL"
+    ).fetchall()
+    carried = 0
+    for r in rows:
+        one = (r["watched_level"] or "").strip()
+        conn.execute(
+            "UPDATE trade_notes SET watched_levels_json = ? WHERE trade_key = ?",
+            (json.dumps([one] if one else []), r["trade_key"]),
+        )
+        carried += bool(one)
+    if carried:
+        print(f"[db] carried {carried} review answer(s) from one level to a list")
+    conn.commit()
+
+
+def _migrate_trade_levels_per_member(conn: sqlite3.Connection) -> None:
+    """Rebuild ``trade_levels`` keyed by the level rather than by the family.
+
+    The primary key changes, which SQLite cannot alter in place, so the table is
+    dropped and recreated. **That discards the stored measurements**, and is only
+    acceptable because they are exactly the kind of thing that can be recomputed:
+    the row shape moved, which bumps ``level_tag.METHOD``, which already means
+    every row is stale and awaiting ``demo/level_tag_backfill.py``.
+
+    Answers written by a human are NOT in this table and are untouched — see
+    ``_migrate_watched_level``, which runs first and depends on these rows.
+    """
+    cols = list(conn.execute("PRAGMA table_info(trade_levels)"))
+    if not cols:
+        return
+    # ``table_info`` states primary-key membership directly, in its ``pk``
+    # ordinal (0 = not in the key). Read it from there rather than walking
+    # ``index_list`` -> ``index_info``: that walk read the index *name* out of
+    # ``index_list``'s ``unique`` slot — the row is (seq, name, unique, origin,
+    # partial) — so ``index_info`` was handed a 1, matched nothing, and left
+    # ``pk_cols`` empty. The guard below could then never fire, and a migration
+    # meant to run once dropped every measurement on *every* connect. The cost
+    # was invisible until a review: with no candidates, a card offers only "no
+    # level", and a trade that cannot name its level cannot be answered at all.
+    pk_cols = {r[1] for r in cols if r[5]}
+    # The old shape keys on the family; the new one keys on the member.
+    if "member" in pk_cols and "family" not in pk_cols:
+        return
+    n = conn.execute("SELECT COUNT(*) FROM trade_levels").fetchone()[0]
+    conn.execute("DROP TABLE trade_levels")
+    conn.executescript(SCHEMA)
+    conn.commit()
+    if n:
+        print(f"[db] trade_levels rebuilt per-level; {n} row(s) dropped — "
+              f"re-run demo/level_tag_backfill.py to recompute them")
 
 
 def _migrate_setup_confluence_master(conn: sqlite3.Connection) -> None:
@@ -512,6 +889,128 @@ def _migrate_backtest_journaling(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+#: The only non-numeric columns of ``trade_context``. Everything else the
+#: measurement defines is a REAL, which is what lets the migration below be
+#: written once instead of once per redefinition.
+_CONTEXT_TEXT_COLS = frozenset({"trade_key", "symbol", "method", "computed_at"})
+
+
+def _migrate_trade_context_cols(conn: sqlite3.Connection) -> None:
+    """Give an older context table whatever columns the measurement now defines.
+
+    Driven off ``trade_context.COLUMNS`` rather than a hand-written list, because
+    that list is already the single definition of the table's shape — the writer
+    inserts by it and the reader reads by it — and a migration that restates it
+    is a third copy waiting to fall out of step. Adding a horizon is then one
+    edit in that module plus a ``METHOD`` bump, with nothing to remember here.
+
+    Existing rows keep their old ``method`` stamp and get NULLs in the new
+    columns, which is the honest shape: those numbers were never measured, and
+    every reader renders a missing one as absent rather than as a zero. Running
+    ``demo/trade_context_backfill.py`` re-measures the table at the current
+    METHOD, which is what actually fills them in.
+    """
+    from .trade_context import COLUMNS as CONTEXT_COLUMNS
+
+    have = {r[1] for r in conn.execute("PRAGMA table_info(trade_context)")}
+    for col in CONTEXT_COLUMNS:
+        if col not in have and col not in _CONTEXT_TEXT_COLS:
+            conn.execute(f"ALTER TABLE trade_context ADD COLUMN {col} REAL")
+    conn.commit()
+
+
+def _migrate_recall_sm20(conn: sqlite3.Connection) -> None:
+    """Give an SM-2-era recall deck the two columns the Arena needs.
+
+    Existing cards get NULL in both, which reads as "never rated under SM-20":
+    the next rating seeds fresh item state from the grade it is given, exactly as
+    a new card would. Their SM-2 history is not translated and cannot be — the
+    two schedulers do not share a state space — so a deck carried across this
+    migration keeps its due dates and starts learning again from the next rep.
+
+    ``recall_collection`` needs nothing here: it is a ``CREATE TABLE IF NOT
+    EXISTS`` in the schema, which every open already runs.
+    """
+    have = {r[1] for r in conn.execute("PRAGMA table_info(recall_cards)")}
+    if "sm20_state" not in have:
+        conn.execute("ALTER TABLE recall_cards ADD COLUMN sm20_state TEXT")
+    if "last_review_day" not in have:
+        conn.execute("ALTER TABLE recall_cards ADD COLUMN last_review_day INTEGER")
+    conn.commit()
+
+
+def _migrate_recall_drop_cut(conn: sqlite3.Connection) -> None:
+    """Drop the jittered ``cut_ms`` from a deck that predates the fixed stop.
+
+    Nothing reads it any more — the front stops at the trade's own fill — and it
+    is ``NOT NULL``, so leaving it would make every future insert carry a number
+    with no meaning. The schedule in the other columns is untouched: these are
+    the same cards, asked at the fill instead of near it.
+    """
+    have = {r[1] for r in conn.execute("PRAGMA table_info(recall_cards)")}
+    if "cut_ms" in have:
+        conn.execute("ALTER TABLE recall_cards DROP COLUMN cut_ms")
+        conn.commit()
+
+
+def _migrate_review_axes(conn: sqlite3.Connection) -> None:
+    """Add the review's two enumerated axes, and the undo slot's grade snapshot.
+
+    ``setup`` / ``discipline`` stay NULL on existing rows — never answered —
+    which makes every pre-axes review unanswered under the new gate. That is
+    deliberate and mirrors what ``_migrate_trade_review_cols`` did when the
+    grade arrived: old attempts are already filed and are not re-gated, and any
+    row edited from now on owes the current questions. The one-time tag→axis
+    carry lives in ``demo/review_axes_backfill.py``, not here: it is a judgment
+    call over a closed set of rows, not a schema fact every install must apply.
+
+    The ``recall_undo`` columns let an undone rating take back the grade it
+    wrote, now that the recall front is where grading happens.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(trade_notes)")}
+    if "setup" not in cols:
+        conn.execute("ALTER TABLE trade_notes ADD COLUMN setup TEXT")
+    if "discipline" not in cols:
+        conn.execute("ALTER TABLE trade_notes ADD COLUMN discipline TEXT")
+    # When the grade was written — the blind-era marker. Stamped only by
+    # ``set_trade_review`` when a grade rides the write, and since 2026-08-31
+    # the only caller that sends one is the recall front, so NOT NULL means
+    # *answered blind*. Every grade already on disk stays NULL: those were
+    # assigned with the P&L on screen and restate the outcome, and any cut by
+    # grade must be able to tell the two eras apart. ``updated_at`` cannot do
+    # this job — the axis backfill touched it on rows whose grade it never
+    # wrote.
+    if "graded_at" not in cols:
+        conn.execute("ALTER TABLE trade_notes ADD COLUMN graded_at TEXT")
+    undo_cols = {r[1] for r in conn.execute("PRAGMA table_info(recall_undo)")}
+    if "wrote_grade" not in undo_cols:
+        conn.execute("ALTER TABLE recall_undo ADD COLUMN wrote_grade INTEGER DEFAULT 0")
+    if "grade_before" not in undo_cols:
+        conn.execute("ALTER TABLE recall_undo ADD COLUMN grade_before TEXT")
+    conn.commit()
+
+
+def _migrate_journal_fees(conn: sqlite3.Connection) -> None:
+    """Give ``atas_journal`` the commission column the broker already computes.
+
+    Until this column existed the journal stored gross P&L and nothing else:
+    ``trades.py`` hardcoded ``commission = 0.0``, so ``net_pnl`` *was*
+    ``gross_pnl`` everywhere and a live day could never agree with the broker's
+    own statement, which is net. The number was not missing, only homeless —
+    ``Broker._emit_trade`` has always put ``fees`` on every round trip and
+    written it to ``orders.jsonl``.
+
+    Existing rows get NULL, and NULL rather than 0.0 is the honest value: an
+    imported ATAS export never reported a commission, so "not known" is what is
+    true of it. Every reader treats NULL as no commission known and renders the
+    row exactly as it renders it today.
+    """
+    have = {r[1] for r in conn.execute("PRAGMA table_info(atas_journal)")}
+    if "fees" not in have:
+        conn.execute("ALTER TABLE atas_journal ADD COLUMN fees REAL")
+    conn.commit()
+
+
 def _migrate_ai_schema(conn: sqlite3.Connection) -> None:
     """Rebuild AI tables that predate the per-model composite primary keys.
 
@@ -568,7 +1067,8 @@ def insert_executions(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
 JOURNAL_COLS = [
     "dedupe_key", "account", "instrument", "open_ts_local", "close_ts_local",
     "open_ts_utc", "close_ts_utc", "open_price", "open_volume", "close_price",
-    "close_volume", "price_pnl", "profit_ticks", "pnl", "comment", "source_file",
+    "close_volume", "price_pnl", "profit_ticks", "pnl", "fees", "comment",
+    "source_file",
 ]
 
 
@@ -788,20 +1288,90 @@ def load_statistics(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query("SELECT * FROM atas_statistics", conn)
 
 
+EMPTY_NOTE = {
+    "note": "",
+    "tags_json": "[]",
+    "setups_json": "[]",
+    "confluences_json": "[]",
+    "grade": None,
+    "setup": None,
+    "discipline": None,
+    # Decoded, unlike the badge arrays beside it: every caller of this wants the
+    # list, and four of them re-implementing the same ``json.loads`` around a
+    # column that can be NULL is four places for "never answered" to read wrong.
+    "watched_levels": [],
+}
+
+
+def _decode_levels(raw: str | None) -> list[str]:
+    """``watched_levels_json`` as a list, tolerating anything a hand-edited row
+    could hold. An empty list is "never answered" — the same thing NULL is."""
+    try:
+        arr = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [str(x) for x in arr if str(x).strip()] if isinstance(arr, list) else []
+
+
 def get_note(conn: sqlite3.Connection, trade_key: str) -> dict:
     row = conn.execute(
-        "SELECT note, tags_json, setups_json, confluences_json "
+        "SELECT note, tags_json, setups_json, confluences_json, grade, "
+        "setup, discipline, watched_levels_json "
         "FROM trade_notes WHERE trade_key = ?",
         (trade_key,),
     ).fetchone()
     if row is None:
-        return {"note": "", "tags_json": "[]", "setups_json": "[]", "confluences_json": "[]"}
+        return dict(EMPTY_NOTE)
     return {
         "note": row["note"] or "",
         "tags_json": row["tags_json"] or "[]",
         "setups_json": row["setups_json"] or "[]",
         "confluences_json": row["confluences_json"] or "[]",
+        # No coalescing: NULL is "never answered" and must not read as an answer.
+        "grade": row["grade"],
+        "setup": row["setup"],
+        "discipline": row["discipline"],
+        "watched_levels": _decode_levels(row["watched_levels_json"]),
     }
+
+
+def all_trade_reviews(conn: sqlite3.Connection) -> dict[str, dict]:
+    """{trade_key: the three review answers}, for deciding *which* trades have
+    been reviewed in one query instead of one per trade.
+
+    Deliberately unfiltered: whether a row counts as a review is
+    ``journal.review.trade_answered``'s call and must not be re-stated as a
+    WHERE clause here, where it would drift. The table only holds trades that
+    have been written about at all, so reading it whole is cheap."""
+    return {
+        r["trade_key"]: {
+            "grade": r["grade"],
+            "setup": r["setup"],
+            "discipline": r["discipline"],
+            "watched_levels": _decode_levels(r["watched_levels_json"]),
+            "tags": json.loads(r["tags_json"] or "[]"),
+        }
+        for r in conn.execute(
+            "SELECT trade_key, grade, setup, discipline, watched_levels_json, "
+            "tags_json FROM trade_notes"
+        )
+    }
+
+
+def all_trade_tags(conn: sqlite3.Connection) -> list[str]:
+    """The union of every free-form tag on any trade, sorted by how often it is
+    used and then alphabetically — the order an autocomplete wants to offer
+    them in. Tags only: setups/confluences have their own curated masters."""
+    counts: dict[str, int] = {}
+    for row in conn.execute("SELECT tags_json FROM trade_notes"):
+        try:
+            arr = json.loads(row["tags_json"] or "[]")
+        except (TypeError, ValueError):
+            continue
+        for t in arr:
+            if isinstance(t, str) and t.strip():
+                counts[t] = counts.get(t, 0) + 1
+    return sorted(counts, key=lambda t: (-counts[t], t.lower()))
 
 
 def save_note(
@@ -822,6 +1392,62 @@ def save_note(
         "confluences_json=excluded.confluences_json, "
         "updated_at=excluded.updated_at",
         (trade_key, note, tags_json, setups_json, confluences_json),
+    )
+    conn.commit()
+
+
+def set_trade_review(conn: sqlite3.Connection, trade_key: str,
+                     grade: str | None, watched_levels: list[str] | None,
+                     setup: str | None = None,
+                     discipline: str | None = None, *,
+                     blind: bool = False) -> None:
+    """Write the review's verdict columns **in place**, leaving the note and
+    every badge array alone.
+
+    Deliberately not part of ``save_note``. That one overwrites the whole row,
+    which is a documented blanking hazard the journal form and the drill save
+    already have to work around by echoing fields they don't own; folding more
+    in would widen that obligation to every caller. Here ``None`` means
+    *leave it as it was*, so a caller that has never heard of a grade cannot
+    erase one.
+
+    A ``watched_levels`` **list** replaces the stored set wholesale — deselecting
+    one of two has to persist, so this one field cannot be additive. An empty
+    list is therefore a deliberate un-answering, reachable only from a caller
+    that sent the field at all; ``None`` remains the way to say nothing.
+    """
+    if grade is None and watched_levels is None \
+            and setup is None and discipline is None:
+        return
+    sets, vals = [], []
+    if grade is not None:
+        sets.append("grade = ?")
+        vals.append(grade)
+        # The blind-era stamp (see _migrate_review_axes). The recall front
+        # passes ``blind=True``; a hand repair through PUT /notes does not, and
+        # *clears* any stamp it overwrites — the invariant is that a non-NULL
+        # ``graded_at`` always describes the grade currently stored.
+        sets.append("graded_at = datetime('now')" if blind else "graded_at = NULL")
+    if setup is not None:
+        sets.append("setup = ?")
+        vals.append(setup)
+    if discipline is not None:
+        sets.append("discipline = ?")
+        vals.append(discipline)
+    if watched_levels is not None:
+        sets.append("watched_levels_json = ?")
+        vals.append(json.dumps(list(watched_levels)))
+    # INSERT first so a trade whose only answer is a grade still gets a row;
+    # DO NOTHING keeps an existing note untouched.
+    conn.execute(
+        "INSERT INTO trade_notes (trade_key, note, tags_json) VALUES (?, '', '[]') "
+        "ON CONFLICT(trade_key) DO NOTHING",
+        (trade_key,),
+    )
+    conn.execute(
+        f"UPDATE trade_notes SET {', '.join(sets)}, updated_at = datetime('now') "
+        "WHERE trade_key = ?",
+        (*vals, trade_key),
     )
     conn.commit()
 
@@ -1045,7 +1671,7 @@ def list_sessions(conn: sqlite3.Connection) -> list[dict]:
 # Every table that identifies its rows by the imports-relative source path.
 SOURCE_FILE_TABLES = (
     "executions", "atas_journal", "atas_statistics",
-    "sessions", "imported_files", "attempt_videos", "video_bookmarks",
+    "sessions", "imported_files",
 )
 
 
@@ -1117,6 +1743,21 @@ def update_session(
     params.append(source_file)
     conn.execute(f"UPDATE sessions SET {', '.join(sets)} WHERE source_file = ?", params)
     conn.commit()
+
+
+def session_note(conn: sqlite3.Connection, source_file: str) -> str:
+    """What was written about the sitting as a whole, or ``""``.
+
+    One column off one row, because the two readers next to it answer a
+    different question: ``session_map`` is the scope filter's hot path and has no
+    business carrying prose, and ``list_sessions`` reads the whole table to fill
+    a page. A session with no row (an export ingested before the sessions table,
+    say) has no note, which is the same answer as an empty one.
+    """
+    row = conn.execute(
+        "SELECT note FROM sessions WHERE source_file = ?", (source_file,)
+    ).fetchone()
+    return (row["note"] if row else "") or ""
 
 
 def delete_session(conn: sqlite3.Connection, source_file: str) -> None:
@@ -1374,6 +2015,417 @@ def set_trade_model(conn: sqlite3.Connection, trade_key: str, model_id: int | No
     conn.commit()
 
 
+# --- Measured level proximity (machine-owned; see the trade_levels schema) ---
+def set_trade_levels(conn: sqlite3.Connection, rows: Iterable, method: str) -> int:
+    """Replace a trade's measured proximities with a freshly computed set.
+
+    Whole-trade replace rather than per-row upsert: a recompute under a new
+    ``method`` must not leave last method's rows sitting alongside the new ones,
+    where they would read as extra evidence that nothing produced.
+
+    ``rows`` are ``level_tag.LevelRank``. Returns how many were written.
+    """
+    rows = list(rows)
+    for key in {r.key for r in rows}:
+        conn.execute("DELETE FROM trade_levels WHERE trade_key = ?", (key,))
+    conn.executemany(
+        "INSERT OR REPLACE INTO trade_levels "
+        "(trade_key, anchor, family, member, rank, dist_ticks, method, computed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+        [(r.key, r.anchor, r.family, r.member, r.rank, r.dist_ticks, method)
+         for r in rows],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def get_trade_levels(conn: sqlite3.Connection, trade_key: str) -> list[dict]:
+    """One trade's measured proximities, tightest first.
+
+    Returned whole — every level, not just the ones that qualify — because the
+    "nothing was near" answer is a real result and the caller owns the threshold.
+
+    Ranked rows sort first (they are the families' scored members), then the rest
+    by absolute distance. An unranked row is not a badly-ranked one: it is a level
+    that was measured but was not the one its family was scored through.
+    """
+    return [dict(r) for r in conn.execute(
+        "SELECT anchor, family, member, rank, dist_ticks, method, computed_at "
+        "FROM trade_levels WHERE trade_key = ? "
+        "ORDER BY anchor, rank IS NULL, rank, ABS(COALESCE(dist_ticks, 1e9))",
+        (trade_key,),
+    )]
+
+
+def trade_levels_map(conn: sqlite3.Connection, max_rank: float) -> dict[str, list[dict]]:
+    """{trade_key: [qualifying rows]} for the whole journal — the list view's feed.
+
+    Thresholded here rather than in SQL-per-trade so the ranking stays one query
+    no matter how many trades the page shows.
+    """
+    out: dict[str, list[dict]] = {}
+    for r in conn.execute(
+        "SELECT trade_key, anchor, family, member, rank, dist_ticks FROM trade_levels "
+        "WHERE rank < ? ORDER BY trade_key, anchor, rank", (max_rank,),
+    ):
+        out.setdefault(r["trade_key"], []).append(dict(r))
+    return out
+
+
+def prune_trade_levels(conn: sqlite3.Connection, method: str) -> int:
+    """Drop every row not stamped ``method``. Returns how many went.
+
+    A recompute replaces the rows of the trades it scores, which leaves behind
+    the rows of trades it *didn't* — ones whose key no longer exists because a
+    re-import re-cut them, or whose fills have since become mechanical. Those
+    rows are a measurement of a trade the journal can't show, under a family map
+    that may no longer contain their families, and they are what makes
+    ``trade_levels_methods`` report a mixed table.
+
+    Only safe after a run that covered the whole journal: a since-date backfill
+    would delete perfectly good rows for the trades it never looked at.
+    """
+    n = conn.execute("DELETE FROM trade_levels WHERE method != ?", (method,)).rowcount
+    conn.commit()
+    return n
+
+
+def trade_levels_methods(conn: sqlite3.Connection) -> dict[str, int]:
+    """{method stamp: row count}. A table carrying more than one stamp is mid
+    -recompute, and any cross-trade comparison drawn from it is comparing nulls."""
+    return {r["method"]: r["n"] for r in conn.execute(
+        "SELECT method, COUNT(*) AS n FROM trade_levels GROUP BY method"
+    )}
+
+
+# --- Measured pre-entry / post-exit context (see the trade_context schema) ---
+def set_trade_context(conn: sqlite3.Connection, rows: Iterable[dict]) -> int:
+    """Store one row per trade, replacing whatever was there.
+
+    ``rows`` are already flattened onto ``trade_context.COLUMNS`` — the column
+    list lives with the measurement rather than here, so adding a horizon is one
+    edit in one module plus a migration, not a rewrite of this function.
+    """
+    rows = list(rows)
+    if not rows:
+        return 0
+    cols = list(rows[0])
+    conn.executemany(
+        f"INSERT OR REPLACE INTO trade_context ({', '.join(cols)}) "
+        f"VALUES ({', '.join('?' * len(cols))})",
+        [tuple(r[c] for c in cols) for r in rows],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def clear_trade_context(conn: sqlite3.Connection, keys: Iterable[str]) -> int:
+    """Drop the rows for trades the tape has since refused.
+
+    The measurement is a cache, so a row must never outlive the reading that
+    produced it: once a guard rejects a trade, leaving its old numbers in place
+    is worse than having none, because every reader treats a present row as a
+    measured one. INSERT OR REPLACE cannot express that — a refused trade
+    produces nothing to insert — so the removal is its own call.
+    """
+    keys = list(keys)
+    if not keys:
+        return 0
+    cur = conn.executemany("DELETE FROM trade_context WHERE trade_key = ?",
+                           [(k,) for k in keys])
+    conn.commit()
+    return cur.rowcount
+
+
+def get_trade_context(conn: sqlite3.Connection, trade_key: str) -> dict | None:
+    """One trade's windows, or None when the tape could never speak to it."""
+    r = conn.execute(
+        "SELECT * FROM trade_context WHERE trade_key = ?", (trade_key,)
+    ).fetchone()
+    return dict(r) if r else None
+
+
+def trade_context_methods(conn: sqlite3.Connection) -> dict[str, int]:
+    """{method stamp: row count}. More than one stamp means the table is mid
+    -recompute, and any cross-trade comparison drawn from it mixes definitions."""
+    return {r["method"]: r["n"] for r in conn.execute(
+        "SELECT method, COUNT(*) AS n FROM trade_context GROUP BY method"
+    )}
+
+
+def trade_context_keys(conn: sqlite3.Connection, method: str) -> set[str]:
+    """Which trades already carry context under this method — what lets a backfill
+    resume, and what makes a method bump re-measure everything."""
+    return {r["trade_key"] for r in conn.execute(
+        "SELECT trade_key FROM trade_context WHERE method = ?", (method,)
+    )}
+
+
+# --- The recall deck (see the recall_cards / recall_reps schema) -------------
+def all_recall_cards(conn: sqlite3.Connection) -> dict[str, dict]:
+    """{trade_key: card}, for building the deck in one query.
+
+    Deliberately without ``sm20_state``: the deck asks each card only whether it
+    is due, and pulling ~900 bytes of scheduler state per card to answer a date
+    comparison would put the whole deck's working set in memory to show one card.
+    :func:`get_recall_card` is where the scheduler's state comes from.
+    """
+    return {
+        r["trade_key"]: {
+            "due": r["due"],
+            "interval_d": float(r["interval_d"]),
+            "ease": float(r["ease"]),
+            "reps": int(r["reps"]),
+            "lapses": int(r["lapses"]),
+        }
+        for r in conn.execute(
+            "SELECT trade_key, due, interval_d, ease, reps, lapses FROM recall_cards"
+        )
+    }
+
+
+def get_recall_card(conn: sqlite3.Connection, trade_key: str) -> dict | None:
+    """One card's schedule and scheduler state, or None if it has never been rated.
+
+    ``sm20_state`` comes back parsed, or None on a card that predates SM-20 or
+    was last scheduled by the SM-2 fallback. ``last_review_day`` is Unix epoch
+    days and is what the elapsed interval must be measured against.
+    """
+    r = conn.execute(
+        "SELECT due, interval_d, ease, reps, lapses, sm20_state, last_review_day "
+        "FROM recall_cards WHERE trade_key = ?",
+        (trade_key,),
+    ).fetchone()
+    if r is None:
+        return None
+    return {
+        "due": r["due"],
+        "interval_d": float(r["interval_d"]), "ease": float(r["ease"]),
+        "reps": int(r["reps"]), "lapses": int(r["lapses"]),
+        "sm20_state": json.loads(r["sm20_state"]) if r["sm20_state"] else None,
+        "last_review_day": (
+            None if r["last_review_day"] is None else int(r["last_review_day"])
+        ),
+    }
+
+
+def save_recall_card(conn: sqlite3.Connection, trade_key: str, card: dict) -> None:
+    """Upsert one card's schedule.
+
+    ``sm20_state`` and ``last_review_day`` are optional and are only overwritten
+    when present: a rating that fell back to SM-2 leaves the Arena's last state
+    intact rather than blanking it, so building the binary later resumes the card
+    where it was instead of restarting it.
+    """
+    state = card.get("sm20_state")
+    conn.execute(
+        "INSERT INTO recall_cards "
+        "(trade_key, due, interval_d, ease, reps, lapses, "
+        " sm20_state, last_review_day, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+        "ON CONFLICT(trade_key) DO UPDATE SET "
+        "due=excluded.due, interval_d=excluded.interval_d, ease=excluded.ease, "
+        "reps=excluded.reps, lapses=excluded.lapses, "
+        "sm20_state=COALESCE(excluded.sm20_state, recall_cards.sm20_state), "
+        "last_review_day=COALESCE(excluded.last_review_day, recall_cards.last_review_day), "
+        "updated_at=excluded.updated_at",
+        (trade_key, card["due"], float(card["interval_d"]),
+         float(card["ease"]), int(card["reps"]), int(card["lapses"]),
+         json.dumps(state) if state is not None else None,
+         card.get("last_review_day")),
+    )
+    conn.commit()
+
+
+def get_recall_collection(conn: sqlite3.Connection) -> dict | None:
+    """The Arena's deck-wide state, or None before the deck's first SM-20 rating."""
+    r = conn.execute("SELECT state_json FROM recall_collection WHERE id = 1").fetchone()
+    return json.loads(r["state_json"]) if r else None
+
+
+def save_recall_collection(conn: sqlite3.Connection, state: dict) -> None:
+    """Replace the deck-wide state. Whole-blob rewrite on every rating, ~270 KB:
+    the models inside it are cross-referential, so there is no smaller unit to
+    write, and it does not grow with the deck."""
+    conn.execute(
+        "INSERT INTO recall_collection (id, state_json, updated_at) "
+        "VALUES (1, ?, datetime('now')) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "state_json=excluded.state_json, updated_at=excluded.updated_at",
+        (json.dumps(state),),
+    )
+    conn.commit()
+
+
+def add_recall_rep(conn: sqlite3.Connection, trade_key: str, rating: int,
+                   guess: str | None) -> int:
+    """Record one showing, returning its row id. Append, never upsert — the
+    schedule is derived state and can be rebuilt from these, so losing a rep to
+    an update loses the only thing that cannot be recomputed.
+
+    The id is what :func:`stage_recall_undo` holds onto: an undo has to delete
+    *this* showing, not "the newest one for this card", which is a different row
+    the moment two ratings interleave.
+    """
+    cur = conn.execute(
+        "INSERT INTO recall_reps (trade_key, shown_at, rating, guess) "
+        "VALUES (?, datetime('now'), ?, ?)",
+        (trade_key, int(rating), (guess or "").strip() or None),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def stage_recall_undo(conn: sqlite3.Connection, trade_key: str, rep_id: int,
+                      *, wrote_grade: bool = False) -> None:
+    """Snapshot what a rating is about to overwrite (see the ``recall_undo`` schema).
+
+    Reads the rows as they currently stand, so it must be called **after**
+    :func:`add_recall_rep` and **before** the card, collection and grade are
+    saved — the whole sequence under one held lock, which is where the rating
+    already runs. Replaces any previous snapshot: only the last rating is
+    revertible.
+
+    ``wrote_grade`` says this rating is about to write the trade's grade (the
+    recall front is where grading happens), so the undo knows to take that back
+    too — to whatever ``trade_notes.grade`` holds right now, NULL included.
+    """
+    row = conn.execute(
+        "SELECT due, interval_d, ease, reps, lapses, sm20_state, last_review_day "
+        "FROM recall_cards WHERE trade_key = ?",
+        (trade_key,),
+    ).fetchone()
+    coll = conn.execute(
+        "SELECT state_json FROM recall_collection WHERE id = 1").fetchone()
+    prior = conn.execute(
+        "SELECT grade FROM trade_notes WHERE trade_key = ?", (trade_key,)
+    ).fetchone()
+    conn.execute(
+        "INSERT INTO recall_undo "
+        "(id, trade_key, rep_id, card_json, collection_json, "
+        " wrote_grade, grade_before, staged_at) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?, datetime('now')) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "trade_key=excluded.trade_key, rep_id=excluded.rep_id, "
+        "card_json=excluded.card_json, collection_json=excluded.collection_json, "
+        "wrote_grade=excluded.wrote_grade, grade_before=excluded.grade_before, "
+        "staged_at=excluded.staged_at",
+        (trade_key, int(rep_id),
+         json.dumps(dict(row)) if row is not None else None,
+         coll["state_json"] if coll is not None else None,
+         int(wrote_grade),
+         prior["grade"] if prior is not None else None),
+    )
+    conn.commit()
+
+
+def pending_recall_undo(conn: sqlite3.Connection) -> dict | None:
+    """The rating that can still be taken back, or None. Identity and rating
+    only — enough to label a button, and no free text: this is read by the deck,
+    which is the payload that must never carry anything about a card's answer."""
+    r = conn.execute(
+        "SELECT u.trade_key, u.staged_at, p.rating FROM recall_undo u "
+        "LEFT JOIN recall_reps p ON p.id = u.rep_id WHERE u.id = 1"
+    ).fetchone()
+    if r is None:
+        return None
+    return {
+        "trade_key": r["trade_key"],
+        "rating": None if r["rating"] is None else int(r["rating"]),
+        "staged_at": r["staged_at"],
+    }
+
+
+def undo_last_recall_rating(conn: sqlite3.Connection) -> dict | None:
+    """Put the deck back exactly as the last rating found it, or None if there
+    is nothing staged.
+
+    Returns the showing that was removed — its card, rating and guess — so the
+    caller can hand the typed read back to whoever undid the misclick.
+
+    All three restores plus the slot's own clearing share one transaction: a
+    half-applied undo would leave a schedule that no rep log explains. The card
+    is written column-by-column rather than through :func:`save_recall_card`,
+    because that one COALESCEs ``sm20_state`` and an undo must be able to put a
+    NULL back — a card rated for the first time had none.
+    """
+    slot = conn.execute(
+        "SELECT trade_key, rep_id, card_json, collection_json, "
+        "wrote_grade, grade_before "
+        "FROM recall_undo WHERE id = 1").fetchone()
+    if slot is None:
+        return None
+    key = slot["trade_key"]
+    rep = conn.execute(
+        "SELECT rating, guess FROM recall_reps WHERE id = ?", (slot["rep_id"],)
+    ).fetchone()
+    card = json.loads(slot["card_json"]) if slot["card_json"] else None
+
+    conn.execute("DELETE FROM recall_reps WHERE id = ?", (slot["rep_id"],))
+    if card is None:
+        conn.execute("DELETE FROM recall_cards WHERE trade_key = ?", (key,))
+    else:
+        conn.execute(
+            "INSERT INTO recall_cards "
+            "(trade_key, due, interval_d, ease, reps, lapses, "
+            " sm20_state, last_review_day, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(trade_key) DO UPDATE SET "
+            "due=excluded.due, interval_d=excluded.interval_d, ease=excluded.ease, "
+            "reps=excluded.reps, lapses=excluded.lapses, "
+            "sm20_state=excluded.sm20_state, "
+            "last_review_day=excluded.last_review_day, "
+            "updated_at=excluded.updated_at",
+            (key, card["due"], float(card["interval_d"]), float(card["ease"]),
+             int(card["reps"]), int(card["lapses"]),
+             card["sm20_state"], card["last_review_day"]),
+        )
+    if slot["collection_json"] is None:
+        conn.execute("DELETE FROM recall_collection WHERE id = 1")
+    else:
+        conn.execute(
+            "INSERT INTO recall_collection (id, state_json, updated_at) "
+            "VALUES (1, ?, datetime('now')) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "state_json=excluded.state_json, updated_at=excluded.updated_at",
+            (slot["collection_json"],),
+        )
+    # The grade this rating wrote goes back too — usually to NULL, since the
+    # front only asks an ungraded trade. Guarded by the flag rather than by
+    # comparing values, so an undo cannot clobber a grade some other surface
+    # wrote in between.
+    if slot["wrote_grade"]:
+        # ``graded_at`` (the blind-answer stamp) goes with it. NULL is right in
+        # every reachable state: the front only asks an ungraded trade, so
+        # ``grade_before`` is NULL — and were it ever not, a pre-blind or
+        # hand-repaired grade carries no stamp either.
+        conn.execute(
+            "UPDATE trade_notes SET grade = ?, graded_at = NULL, "
+            "updated_at = datetime('now') WHERE trade_key = ?",
+            (slot["grade_before"], key),
+        )
+    conn.execute("DELETE FROM recall_undo WHERE id = 1")
+    conn.commit()
+    return {
+        "trade_key": key,
+        "rating": None if rep is None else int(rep["rating"]),
+        "guess": None if rep is None else rep["guess"],
+    }
+
+
+def recall_reps_for(conn: sqlite3.Connection, trade_key: str) -> list[dict]:
+    """Every showing of one card, oldest first — the card's own history, shown on
+    the back so a guess can be read against the ones before it."""
+    return [
+        {"shown_at": r["shown_at"], "rating": int(r["rating"]), "guess": r["guess"]}
+        for r in conn.execute(
+            "SELECT shown_at, rating, guess FROM recall_reps "
+            "WHERE trade_key = ? ORDER BY id",
+            (trade_key,),
+        )
+    ]
+
+
 def get_rule_checks(conn: sqlite3.Connection, trade_key: str) -> dict[int, bool]:
     return {
         r["rule_id"]: bool(r["met"])
@@ -1449,159 +2501,6 @@ def save_day_note(conn: sqlite3.Connection, day: str, note: str, tags_json: str)
 
 def all_day_notes(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query("SELECT * FROM day_notes", conn)
-
-
-# --- Per-attempt video link + bookmarks ----------------------------------
-# Each replay take (source_file) links to one recorded session video
-# (referenced by on-disk path, never copied). The attempt "number" shown in the
-# UI is positional and shifts when takes are deleted, so the stable key is the
-# source_file. Bookmarks are pure metadata — an offset in seconds plus a label —
-# independent of the file's location or format; trade_key binds one to a trade.
-def get_attempt_video(conn: sqlite3.Connection, source_file: str) -> dict | None:
-    row = conn.execute(
-        "SELECT source_file, path, duration_s, updated_at "
-        "FROM attempt_videos WHERE source_file = ?",
-        (source_file,),
-    ).fetchone()
-    if row is None:
-        return None
-    return dict(row)
-
-
-def linked_video_source_files(conn: sqlite3.Connection) -> set[str]:
-    """Every ``source_file`` that has a recording linked.
-
-    Used by the calendar to badge days whose attempts carry a video, without a
-    per-day round-trip. "Linked" only — disk existence isn't checked here (that
-    would mean resolving every path on each calendar render)."""
-    return {
-        r[0] for r in conn.execute("SELECT source_file FROM attempt_videos")
-    }
-
-
-def save_attempt_video(
-    conn: sqlite3.Connection, source_file: str, path: str, duration_s: float | None = None
-) -> None:
-    conn.execute(
-        "INSERT INTO attempt_videos (source_file, path, duration_s, updated_at) "
-        "VALUES (?, ?, ?, datetime('now')) "
-        "ON CONFLICT(source_file) DO UPDATE SET "
-        "path=excluded.path, duration_s=excluded.duration_s, updated_at=excluded.updated_at",
-        (source_file, path, duration_s),
-    )
-    conn.commit()
-
-
-def delete_attempt_video(conn: sqlite3.Connection, source_file: str) -> None:
-    """Unlink the attempt's video and drop its bookmarks (offsets are
-    meaningless without the video they point into)."""
-    conn.execute("DELETE FROM video_bookmarks WHERE source_file = ?", (source_file,))
-    conn.execute("DELETE FROM attempt_videos WHERE source_file = ?", (source_file,))
-    conn.commit()
-
-
-def list_bookmarks(conn: sqlite3.Connection, source_file: str) -> list[dict]:
-    rows = conn.execute(
-        "SELECT id, source_file, offset_s, label, trade_key, created_at, origin "
-        "FROM video_bookmarks WHERE source_file = ? ORDER BY offset_s",
-        (source_file,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def add_bookmark(
-    conn: sqlite3.Connection,
-    source_file: str,
-    offset_s: float,
-    label: str = "",
-    trade_key: str | None = None,
-    origin: str = "manual",
-) -> dict:
-    cur = conn.execute(
-        "INSERT INTO video_bookmarks "
-        "(source_file, offset_s, label, trade_key, created_at, origin) "
-        "VALUES (?, ?, ?, ?, datetime('now'), ?)",
-        (source_file, offset_s, label, trade_key, origin),
-    )
-    conn.commit()
-    row = conn.execute(
-        "SELECT id, source_file, offset_s, label, trade_key, created_at, origin "
-        "FROM video_bookmarks WHERE id = ?",
-        (cur.lastrowid,),
-    ).fetchone()
-    return dict(row)
-
-
-def update_bookmark(
-    conn: sqlite3.Connection,
-    bookmark_id: int,
-    offset_s: float | None = None,
-    label: str | None = None,
-) -> dict | None:
-    """Patch a bookmark's offset and/or label; unspecified fields are left as-is.
-
-    Any hand edit promotes the row to ``origin='manual'``: once you've nudged a
-    synced marker, it's yours, so "Clear synced" won't wipe your change.
-    """
-    sets: list[str] = []
-    params: list[object] = []
-    if offset_s is not None:
-        sets.append("offset_s = ?")
-        params.append(offset_s)
-    if label is not None:
-        sets.append("label = ?")
-        params.append(label)
-    if sets:
-        sets.append("origin = 'manual'")
-        params.append(bookmark_id)
-        conn.execute(
-            f"UPDATE video_bookmarks SET {', '.join(sets)} WHERE id = ?", params
-        )
-        conn.commit()
-    row = conn.execute(
-        "SELECT id, source_file, offset_s, label, trade_key, created_at, origin "
-        "FROM video_bookmarks WHERE id = ?",
-        (bookmark_id,),
-    ).fetchone()
-    return dict(row) if row else None
-
-
-def delete_bookmark(conn: sqlite3.Connection, bookmark_id: int) -> None:
-    conn.execute("DELETE FROM video_bookmarks WHERE id = ?", (bookmark_id,))
-    conn.commit()
-
-
-def clear_synced_bookmarks(conn: sqlite3.Connection, source_file: str) -> int:
-    """Delete every auto-synced bookmark for an attempt; manual rows survive.
-    Returns the number removed."""
-    cur = conn.execute(
-        "DELETE FROM video_bookmarks WHERE source_file = ? AND origin = 'synced'",
-        (source_file,),
-    )
-    conn.commit()
-    return cur.rowcount
-
-
-def prune_orphan_synced_bookmarks(
-    conn: sqlite3.Connection, source_file: str, valid_trade_keys: list[str]
-) -> int:
-    """Drop synced bookmarks whose trade no longer exists (e.g. after a
-    re-import shifted trade_keys). Manual rows are never pruned. Returns count.
-
-    Synced markers are fully regenerable (just re-sync), so removing stale ones
-    keeps the scrub bar honest with no user action.
-    """
-    keys = list(valid_trade_keys)
-    placeholders = ",".join("?" for _ in keys)
-    # NOT IN () is invalid SQL; with no valid keys, every synced row is orphaned.
-    where_keys = f"AND trade_key NOT IN ({placeholders})" if keys else ""
-    cur = conn.execute(
-        f"DELETE FROM video_bookmarks "
-        f"WHERE source_file = ? AND origin = 'synced' {where_keys}",
-        (source_file, *keys),
-    )
-    conn.commit()
-    return cur.rowcount
 
 
 # --- AI analyzer persistence (keyed per model) ---------------------------

@@ -19,7 +19,13 @@ const SECONDS = 12;
 //   node renderbench.mjs "/charts/replay?spike=gated"
 // argv.slice(2), because argv[0] is the node binary — an absolute path, and so
 // a match for any "starts with /" test.
-const ROUTE = process.argv.slice(2).find((a) => a.startsWith("/")) ?? "/charts/replay";
+//
+// The *paper* replay by default, not the funded one. Identical page, identical
+// engine — but the funded replay is locked to 1× with no ladder (see
+// `clockLocked` in Simulator.tsx), and the "playing fast" sample below is the
+// half of this benchmark that matters. Run there and the `]`s do nothing and
+// both samples silently measure 1×.
+const ROUTE = process.argv.slice(2).find((a) => a.startsWith("/")) ?? "/charts/replay/paper";
 
 const { browser, page, errors } = await launch({ headed });
 

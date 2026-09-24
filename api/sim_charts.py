@@ -183,6 +183,7 @@ def sim_trade_chart(slug: str, run_id: str, trade_no: int, tz, resolution: str =
         "footprint": frame.footprint,
         "cvd": frame.cvd,
         "cvd_divergences": frame.cvd_divergences,
+        "delta": frame.delta,
         "tick_size": tick_size(cfg.contract),
         "point_value": point_value(cfg.contract),
     }
@@ -274,6 +275,7 @@ def sim_day_chart(slug: str, run_id: str, day, tz, resolution: str = "tick",
         "footprint": frame.footprint,
         "cvd": frame.cvd,
         "cvd_divergences": frame.cvd_divergences,
+        "delta": frame.delta,
         "tick_size": tick_size(cfg.contract),
         "point_value": point_value(cfg.contract),
     }

@@ -123,6 +123,17 @@ def _build_base(gen: int, data: tuple, view: str, tz_label: str) -> pd.DataFrame
     return base
 
 
+def text_cell(v) -> str | None:
+    """A TEXT column read off one of this module's pandas frames.
+
+    read_sql turns an all-NULL TEXT column into float64, so an empty cell is
+    NaN — which is truthy AND not valid JSON, so neither ``or "[]"`` nor
+    ``json.loads`` survives it. Every consumer of ``scope.notes`` (and this
+    module's own tag filter) must read TEXT through this, not truthiness.
+    """
+    return v if isinstance(v, str) else None
+
+
 def _csv(value: str | None) -> list[str]:
     if not value:
         return []
@@ -197,6 +208,12 @@ def _attach_session_columns(
     sess = [sessions.get(s, DEFAULT_SESSION) for s in out["source_file"]]
     out["session_mode"] = [s["mode"] for s in sess]
     out["session_archived"] = [s["archived"] for s in sess]
+    # Whether the mode above was read or defaulted. ``DEFAULT_SESSION`` says
+    # "replay" for an imported broker export, which is right for counting and
+    # wrong for asking questions: a UI that prompts for what a sitting should
+    # have recorded must not put that prompt on a row that never went through
+    # one. The mode alone cannot tell the two apart, so the fallback is flagged.
+    out["session_known"] = [s in sessions for s in out["source_file"]]
     # Built as an object column, not via ``Series.where``: a NULL model would
     # otherwise coerce the whole column to float and turn model ids into 1.0.
     out["model_id"] = [
@@ -231,11 +248,11 @@ def _apply_filters(
     if tags:
         sel = set(tags)
         trade_tag_map = {
-            r["trade_key"]: set(json.loads(r["tags_json"] or "[]"))
+            r["trade_key"]: set(json.loads(text_cell(r["tags_json"]) or "[]"))
             for _, r in notes_df.iterrows()
         } if not notes_df.empty else {}
         day_tag_map = {
-            r["day"]: set(json.loads(r["tags_json"] or "[]"))
+            r["day"]: set(json.loads(text_cell(r["tags_json"]) or "[]"))
             for _, r in day_notes_df.iterrows()
         } if not day_notes_df.empty else {}
         day_iso = out["entry_ts_local"].dt.date.map(lambda d: d.isoformat())
@@ -246,6 +263,24 @@ def _apply_filters(
         ) | day_iso.apply(lambda d: bool(day_tag_map.get(d, set()) & sel))
         out = out[mask]
     return out.reset_index(drop=True)
+
+
+def default_scope(*, include_archived: bool = True) -> Scope:
+    """The unfiltered scope, callable from plain Python.
+
+    ``resolve_scope``'s defaults are FastAPI ``Query`` sentinels, so calling it
+    with no arguments outside a request hands you Query objects where values
+    should be. This is the same resolution with every filter off — for code
+    (and tests) that needs the frame without being an endpoint, e.g. the replay
+    review gates. Archived stays in by default for the reason the journal
+    endpoint forces it: a gate is about the trades a sitting made, not about
+    whether their session is currently shown.
+    """
+    return resolve_scope(
+        view="logical", instruments=None, accounts=None, start=None, end=None,
+        tags=None, tz=None, modes=None, models=None,
+        include_archived=include_archived,
+    )
 
 
 def resolve_scope(

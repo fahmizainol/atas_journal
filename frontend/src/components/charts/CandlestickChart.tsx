@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CandlestickSeries,
   ColorType,
@@ -6,6 +6,7 @@ import {
   HistogramSeries,
   LineSeries,
   createChart,
+  type AutoscaleInfo,
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
@@ -20,32 +21,143 @@ import {
   volumeColors,
 } from "./chartAppearance";
 import { TradeRectanglePrimitive } from "./TradeRectanglePrimitive";
+import { CompositeProfilePrimitive } from "./CompositeProfilePrimitive";
+import { DevelopingProfilePrimitive } from "./DevelopingProfilePrimitive";
+import { ExternalChartPrimitive } from "./ExternalChartPrimitive";
+import {
+  EXTERNAL_PERIOD_OPTIONS,
+  groupExternalBars,
+  type ExternalChartParams,
+} from "../../lib/externalChart";
 import { RulerPrimitive } from "./RulerPrimitive";
 import { MarkerPrimitive } from "./MarkerPrimitive";
 import { CvdDivergencePrimitive } from "./CvdDivergencePrimitive";
 import { VwapBandPrimitive } from "./VwapBandPrimitive";
 import { VolumeProfilePrimitive } from "./VolumeProfilePrimitive";
 import { RangeProfilePrimitive } from "./RangeProfilePrimitive";
+import {
+  VolumeShelfPrimitive,
+  type ShelfColumn,
+  type ShelfField,
+} from "./VolumeShelfPrimitive";
+import {
+  detectShelves,
+  evalBars,
+  windowStart,
+  ShelfTracker,
+  shelfFlow,
+  type ShelfBox,
+  type ShelfParams,
+} from "../../lib/volumeShelf";
+import {
+  loadShelfParams,
+  saveShelfParams,
+  loadShelfField,
+  saveShelfField,
+} from "../../lib/chartPrefs";
 import { InteractionPrimitive } from "./InteractionPrimitive";
-import { IndicatorLegend, type IndicatorKey, type LegendItem } from "./IndicatorLegend";
-import { ChartToolButton, ChartToolSep } from "./ChartToolButton";
+import {
+  IndicatorLegend,
+  type IndicatorKey,
+  type IndicatorSettingsMap,
+  type LegendItem,
+  type StudyRow,
+} from "./IndicatorLegend";
+import { StudyLayer } from "./StudyLayer";
+import { StudyPicker } from "./StudyPicker";
+import type { LayerState, ReplayLayerKey } from "./chartLayers";
+import {
+  findStudy,
+  studyColor,
+  studyFields,
+  studyLabel,
+  type StudyReport,
+  type StudySpec,
+} from "../../lib/studies";
+import { createModernVwapLayer, type ModernVwapLayer } from "./modernVwapLayer";
+import {
+  buildChartKnobs,
+  cvdOscKnobs,
+  dynamicSwingVwapKnobs,
+  externalChartKnobs,
+  modernVwapKnobs,
+  volumeProfileKnobs,
+  vwapAnchorKnobs,
+} from "./indicatorKnobs";
+import {
+  computeCvdOsc,
+  cvdOscStrengthLabel,
+  type CvdOscDivergence,
+  type CvdOscParams,
+} from "../../lib/cvdOsc";
+import type { ModernVwapData, ModernVwapParams } from "../../lib/modernVwap";
+import type { DsvParams, DynamicSwingVwapData } from "../../lib/dynamicSwingVwap";
+import {
+  createDynamicSwingVwapLayer,
+  type DynamicSwingVwapLayer,
+} from "./dynamicSwingVwapLayer";
+import { ChartToolButton, ChartToolSep, ChartTools } from "./ChartToolButton";
 import {
   loadChartAppearance,
+  loadCvdOsc,
+  deltaLaneLabel,
+  loadDeltaLane,
+  loadExternalChartParams,
   loadIndicatorVisibility,
+  loadProfileDelta,
+  loadProfileKnobs,
+  loadStudies,
+  loadVwapBands,
+  loadVwapFill,
+  loadVwapFillRegion,
   saveChartAppearance,
+  saveCvdOsc,
+  saveDeltaLane,
+  saveExternalChartParams,
   saveIndicatorVisibility,
+  saveProfileDelta,
+  saveProfileKnobs,
+  saveStudies,
+  saveVwapBands,
+  saveVwapFill,
+  saveVwapFillRegion,
   type ChartAppearance,
+  type DeltaLaneKnobs,
   type IndicatorVisibility,
+  type ProfileKnobs,
+  vwapBandLabel,
+  vwapBandsShown,
+  type VwapBandChoice,
+  type VwapBandChoices,
+  type VwapFillAnchor,
+  type VwapFillRegion,
+  type VwapFillRegions,
+  type VwapFillWeights,
 } from "../../lib/chartPrefs";
 import {
   computeTickProfile,
-  computeVolumeProfile,
+  profileNodes,
+  type TapeRange,
   type VolumeProfile,
+  computeVolumeProfile,
 } from "../../lib/volumeProfile";
+import {
+  LANE_WINDOW_MINUTES,
+  classifyFlagged,
+  readLane,
+  readVisitLane,
+  splitVisits,
+  windowedOnto,
+  type LaneReading,
+  type LaneSource,
+} from "../../lib/deltaFlow";
+import { BALANCE_CAP, buildComposite, type Composite } from "../../lib/compositeProfile";
+import { VR_STOP_TICKS, computeVolRuler } from "../../lib/volRuler";
 import type {
   ATRPoint,
   Bar,
   ChartMarker,
+  ContextProfile,
   CvdPoint,
   CvdDivergence,
   EmaPoint,
@@ -57,6 +169,7 @@ import type {
   TradeRect,
   VwapPoint,
 } from "../../lib/chartTypes";
+import { Vwap, hasTickMoments } from "../../lib/vwap";
 import type { Touch, VaSnap } from "../../lib/interactionTypes";
 
 interface Props {
@@ -74,6 +187,20 @@ interface Props {
    */
   profileGlobex?: ProfilePoint[];
   profileNy?: ProfilePoint[];
+  /** The developing *weekly* value area — the globex profile carrying the week
+   *  behind it. Present only when the week could be honestly built. */
+  profileWeekly?: ProfilePoint[];
+  /**
+   * The prior sessions' volume-at-price, oldest first — what the multi-session
+   * composite is built from, by the same balance walk the replay chart runs
+   * (lib/compositeProfile). Absent on a chart whose payload doesn't carry them,
+   * and the composite's two rows then aren't drawn at all.
+   *
+   * They arrive as collapsed histograms rather than as tape because a journal
+   * chart holds one session: five days of ticks to draw five frozen levels is a
+   * cost with no second use. See lib/chartTypes.ContextProfile.
+   */
+  contextProfiles?: ContextProfile[];
   /**
    * 9/20/50/200 EMA on the 1-minute grid — the day-trading convention, drawn as
    * context lines over the candles (9/20 the fast pullback pair, 50/200 the
@@ -105,6 +232,13 @@ interface Props {
    * divergence is a statement about the delta line. See CvdDivergencePrimitive.
    */
   cvdDivergences?: CvdDivergence[];
+  /**
+   * Signed aggressor volume *per bar* — the same tape pass as `cvd`, unaccumulated.
+   * Feeds the CVD oscillator (lib/cvdOsc): its own pane under the cumulative one,
+   * plus divergence marks over the candles. Ships from the same charts `cvd` does;
+   * absent, the layer is not offered at all.
+   */
+  delta?: CvdPoint[];
   markers?: ChartMarker[];
   /**
    * Level-interaction overlay from the Interactions Lab: touch dots (coloured by
@@ -150,6 +284,31 @@ interface Props {
    * bars) it falls back to spreading each bar's volume across its range.
    */
   footprint?: Footprint;
+  /**
+   * Modern VWAP [GBB] — the swing- (or POC-, or clock-) anchored VWAP, its σ
+   * envelope, and the MR/TC triggers read off it. Absent on a page that doesn't
+   * offer the layer, and its two legend rows then aren't drawn at all.
+   *
+   * The parameters live on the page (which is what persists them) and arrive as
+   * one object because the indicator takes them as one; `onChange` patches, so
+   * the knobs behind the two rows' "…" can each set their own field. An
+   * unfalsified indicator — see lib/modernVwap and docs/research/modern-vwap.html
+   * before reading anything off it.
+   */
+  modernVwap?: {
+    params: ModernVwapParams;
+    onChange: (patch: Partial<ModernVwapParams>) => void;
+  };
+  /**
+   * Dynamic Swing Anchored VWAP [Zeiierman] — the other swing-anchored VWAP, on
+   * exactly the same terms as the one above and for the same reasons. A separate
+   * indicator rather than a mode of that one: see lib/dynamicSwingVwap for the
+   * three places the two constructs disagree. Also unfalsified.
+   */
+  dynamicSwingVwap?: {
+    params: DsvParams;
+    onChange: (patch: Partial<DsvParams>) => void;
+  };
   /**
    * Per-minute session regime (which side of the two anchored VWAPs price is on),
    * drawn as a colour strip in its own pane under the candles. Supplied by the
@@ -224,6 +383,29 @@ function tradeTooltipHtml(r: TradeRect): string {
 // re-gridding 1m → 15m never drops an anchor sitting on the first/last bar.
 const GRID_SLACK_S = 15 * 60;
 
+// The two halves of the picker this chart doesn't use, as module constants
+// rather than fresh `[]`s per render — a new array identity on every render is a
+// dependency change to everything downstream of it.
+const EMPTY_LAYERS: LayerState[] = [];
+const EMPTY_APP_LAYERS: ReplayLayerKey[] = [];
+
+/**
+ * Which slot these charts keep their picked studies in (chartPrefs.paneKey).
+ *
+ * Their own, not the replay chart's. Hide/show is deliberately one map across
+ * every chart — it is a preference about a fixed set of layers, and a band you
+ * hid because you never read it stays hidden wherever you meet it. A study is
+ * not that: it is an instance you added for a purpose, and it brings a pane with
+ * it. Four studies picked to read a replay session, silently mounting four panes
+ * on a 560px trade chart you opened to look at one fill, is a surprise in the
+ * one direction that costs you the thing you came for.
+ *
+ * One slot for every chart built on this component — the journal's day and trade
+ * charts, and the Lab's — because they are all the same chart of a finished
+ * session with different marks on it. The replay panes keep theirs.
+ */
+const STUDY_PANE = "session";
+
 // Client-side candlestick (+ anchored VWAPs + volume) used by both the
 // single-trade reconstruction and the full-day session views. Weekend/overnight
 // gaps collapse natively (missing bars aren't drawn).
@@ -234,6 +416,8 @@ export function CandlestickChart({
   vwapWeekly,
   profileGlobex,
   profileNy,
+  profileWeekly,
+  contextProfiles,
   ema9,
   ema20,
   ema50,
@@ -242,6 +426,7 @@ export function CandlestickChart({
   atrPoints,
   cvd,
   cvdDivergences,
+  delta,
   markers,
   touches,
   vaSnaps,
@@ -253,6 +438,8 @@ export function CandlestickChart({
   debugZoom,
   initialTimeRange,
   footprint,
+  modernVwap,
+  dynamicSwingVwap,
   regimeStates,
   tickSize,
   pointValue,
@@ -288,6 +475,104 @@ export function CandlestickChart({
   const [vis, setVis] = useState<Visibility>(loadIndicatorVisibility);
   const visRef = useRef(vis);
   const applyRef = useRef<((v: Visibility) => void) | null>(null);
+  // How heavily each fixed anchor's ±1σ→±2σ region is washed in, on the same
+  // sticky-global terms as the visibility above and applied the same way — the
+  // fill is a repaint of a primitive already on the pane, and rebuilding the
+  // chart to change one alpha would cost the reader their zoom.
+  const [vwapFill, setVwapFill] = useState<VwapFillWeights>(loadVwapFill);
+  const fillRef = useRef(vwapFill);
+  const applyFillRef = useRef<((w: VwapFillWeights) => void) | null>(null);
+  const setFill = (anchor: VwapFillAnchor, weight: number) => {
+    const next = { ...fillRef.current, [anchor]: weight };
+    fillRef.current = next;
+    applyFillRef.current?.(next);
+    saveVwapFill(next);
+    setVwapFill(next);
+  };
+  // Which σ rings each fixed anchor draws, on the same sticky-global terms. Unlike
+  // the fill this is a *visibility* question, so it rides the visibility apply
+  // rather than getting a second one: the σ lines it hides are the same series
+  // the row's own eye hides, and two functions racing to set `visible` on one
+  // series is two answers to one question.
+  const [vwapBands, setVwapBands] = useState<VwapBandChoices>(loadVwapBands);
+  const bandsRef = useRef(vwapBands);
+  const setBands = (anchor: VwapFillAnchor, choice: VwapBandChoice) => {
+    const next = { ...bandsRef.current, [anchor]: choice };
+    bandsRef.current = next;
+    saveVwapBands(next);
+    setVwapBands(next);
+    applyRef.current?.(visRef.current);
+  };
+  // Which region each fixed anchor's wash covers — outer ±1σ→±2σ, or the inner
+  // −1σ→+1σ value area. Rides the visibility apply like the rings: which region
+  // is drawn decides whether the wash has both of its edges at all.
+  const [vwapRegion, setVwapRegion] = useState<VwapFillRegions>(loadVwapFillRegion);
+  const regionRef = useRef(vwapRegion);
+  const setRegion = (anchor: VwapFillAnchor, region: VwapFillRegion) => {
+    const next = { ...regionRef.current, [anchor]: region };
+    regionRef.current = next;
+    saveVwapFillRegion(next);
+    setVwapRegion(next);
+    applyRef.current?.(visRef.current);
+  };
+  // What the volume profile's rows are painted with — the value area, or the
+  // aggressor delta at each price. Sticky-global like the two above and applied
+  // the same way, for the same reason: it is a fill on primitives already on the
+  // pane, and rebuilding the chart to recolour them would cost the reader their
+  // zoom. Both histograms take it, the viewport one and the fixed-range tool.
+  // The External Chart overlay (lib/externalChart) — the same sticky-global
+  // preference the replay's copy of this layer reads, so a period picked over
+  // there is the period a trade's chart comes up at. Applied straight to the
+  // primitive like the two below: none of these knobs touches a series, and
+  // rebuilding the chart to change an outline colour would cost the reader
+  // their zoom.
+  const [extParams, setExtParams] = useState(loadExternalChartParams);
+  const extParamsRef = useRef(extParams);
+  const extPrimRef = useRef<ExternalChartPrimitive | null>(null);
+  const patchExternal = (patch: Partial<ExternalChartParams>) => {
+    const next = { ...extParamsRef.current, ...patch };
+    extParamsRef.current = next;
+    saveExternalChartParams(next);
+    setExtParams(next);
+    extPrimRef.current?.setParams(next);
+  };
+  // Grouped here rather than in the build effect because this chart's bars are a
+  // payload, not a tape: they change when the day changes and not otherwise, so
+  // one memo covers both the period moving and the chart being handed a new day.
+  // The ref is what the build effect seeds a freshly-built primitive from — a
+  // rebuild doesn't change the grouping, so the effect below would not re-fire.
+  const extBars = useMemo(() => groupExternalBars(bars, extParams.period), [bars, extParams.period]);
+  const extBarsRef = useRef(extBars);
+  extBarsRef.current = extBars;
+  useEffect(() => {
+    extPrimRef.current?.setBars(extBars);
+  }, [extBars]);
+
+  const [profileDelta, setProfileDelta] = useState(loadProfileDelta);
+  const profileDeltaRef = useRef(profileDelta);
+  const applyTintRef = useRef<((on: boolean) => void) | null>(null);
+  const setProfileTint = (on: boolean) => {
+    profileDeltaRef.current = on;
+    applyTintRef.current?.(on);
+    saveProfileDelta(on);
+    setProfileDelta(on);
+  };
+  // What that lane is being *asked* — its scale, which rows it marks, and whether
+  // marked rows get a verdict (lib/deltaFlow). Sticky-global and applied without
+  // a rebuild, exactly like the switch above: these change a reading drawn on
+  // primitives already on the pane, and none of them touches the distribution
+  // underneath, so re-deriving the profile would be work done to reach the same
+  // rows.
+  const [deltaLane, setDeltaLane] = useState<DeltaLaneKnobs>(loadDeltaLane);
+  const deltaLaneRef = useRef(deltaLane);
+  const applyLaneRef = useRef<(() => void) | null>(null);
+  const setLaneKnobs = (patch: Partial<DeltaLaneKnobs>) => {
+    const next = { ...deltaLaneRef.current, ...patch };
+    deltaLaneRef.current = next;
+    applyLaneRef.current?.();
+    saveDeltaLane(next);
+    setDeltaLane(next);
+  };
   // Push a new indicator ink onto the series the build effect made. A series
   // carries its colour in its options, so unlike the canvas primitives (which
   // read the active ink each frame) it has to be told when the chart crosses
@@ -315,6 +600,277 @@ export function CandlestickChart({
   };
   const revealRef = useRef(reveal);
   revealRef.current = reveal;
+
+  // --- Community studies -----------------------------------------------------
+  // The ƒ picker's indicators (see lib/studies and StudyLayer), the same
+  // catalogue the Charts workspace offers. Their specs live here rather than on
+  // the page: unlike the replay chart — where the topbar picker aims at whichever
+  // pane has focus, so the page has to hold them — these charts are one chart on
+  // a page, and the picker sits in this one's own tool rail.
+  const studyLayerRef = useRef<StudyLayer | null>(null);
+  const [studies, setStudies] = useState<StudySpec[]>(() => loadStudies(STUDY_PANE));
+  const studiesRef = useRef(studies);
+  studiesRef.current = studies;
+  const [studyReport, setStudyReport] = useState<StudyReport[]>([]);
+  const changeStudies = useCallback((specs: StudySpec[]) => {
+    studiesRef.current = specs;
+    saveStudies(specs, STUDY_PANE);
+    setStudies(specs);
+  }, []);
+  // A spec added, removed or re-tuned is structural — series made and destroyed,
+  // panes appearing. Never a rebuild of the chart: that would cost the zoom.
+  useEffect(() => {
+    studyLayerRef.current?.setSpecs(studies);
+  }, [studies]);
+
+  // --- The histogram layers' knobs -------------------------------------------
+  // How the prior sessions are composited, how much of each goes in, and how
+  // prominent a hump must be to be named. Sticky-global like the toggles above,
+  // and read through refs for the same reason: turning one of these re-derives a
+  // profile, which is a repaint — never a rebuild.
+  const [knobs, setKnobs] = useState<ProfileKnobs>(loadProfileKnobs);
+  const knobsRef = useRef(knobs);
+  knobsRef.current = knobs;
+  /** Prior sessions the rule actually accepted, 0 when there is no composite.
+   *  The composite's row is drawn off the days *handed in* rather than off this,
+   *  because the rule that rejected them lives on that row: gating the row on a
+   *  composite existing would hide the only way to switch one back on. */
+  const [compDays, setCompDays] = useState(0);
+  /** Rebuild the composite and repaint both node readers. Set by the build
+   *  effect, which is where the primitives are. */
+  const profilesRef = useRef<(() => void) | null>(null);
+  /** Repaint the volume shelves in place. Set by the build effect, like the
+   *  profiles above and for the same reason — the primitive lives there. The
+   *  argument is whether the session has to be re-walked: a parameter change
+   *  asks a different question of the tape, a field change only draws a
+   *  different one of the two answers each column already carries. */
+  const shelvesRef = useRef<((rebuild: boolean) => void) | null>(null);
+  /** The shelf reading's parameters, sticky-global like the profile knobs.
+   *  Through a ref because changing one re-walks the whole session. */
+  const [shelfParams, setShelfParams] = useState<ShelfParams>(loadShelfParams);
+  const shelfParamsRef = useRef(shelfParams);
+  shelfParamsRef.current = shelfParams;
+  const patchShelf = useCallback((patch: Partial<ShelfParams>) => {
+    setShelfParams((prev) => {
+      const next = { ...prev, ...patch };
+      shelfParamsRef.current = next;
+      saveShelfParams(next);
+      return next;
+    });
+  }, []);
+  /** Which field the raster draws. Separate from the params because switching it
+   *  is a repaint, not a re-reading: the walk is unchanged and every column
+   *  already carries both quantities. */
+  const [shelfField, setShelfField] = useState<ShelfField>(loadShelfField);
+  const shelfFieldRef = useRef(shelfField);
+  shelfFieldRef.current = shelfField;
+  const patchShelfField = useCallback((f: ShelfField) => {
+    setShelfField(f);
+    shelfFieldRef.current = f;
+    saveShelfField(f);
+  }, []);
+  useEffect(() => {
+    shelvesRef.current?.(true);
+  }, [shelfParams]);
+  useEffect(() => {
+    shelvesRef.current?.(false);
+  }, [shelfField]);
+  const patchKnobs = useCallback((patch: Partial<ProfileKnobs>) => {
+    setKnobs((prev) => {
+      const next = { ...prev, ...patch };
+      knobsRef.current = next;
+      saveProfileKnobs(next);
+      return next;
+    });
+  }, []);
+  // A knob turned re-derives the profiles in place. Declared as an effect rather
+  // than done inside `patchKnobs` so it also runs on the first paint after a
+  // rebuild, when the primitives are new and the knobs are whatever was stored.
+  useEffect(() => {
+    profilesRef.current?.();
+  }, [knobs]);
+
+  // --- The CVD oscillator ----------------------------------------------------
+  // Its window and its fractal width, sticky-global like the profile knobs above
+  // and read through a ref for the same reason: changing either re-runs the
+  // window and the pivots off it, which is a redraw, not a rebuild.
+  //
+  // The parameters live here rather than on the page (as Modern VWAP's do)
+  // because nothing off-chart reads them — no strategy, no sim, no export. They
+  // are how this chart is being looked at, and every chart should be looked at
+  // the same way until the user says otherwise.
+  const [cvdOscParams, setCvdOscParams] = useState<CvdOscParams>(loadCvdOsc);
+  const cvdOscRef = useRef(cvdOscParams);
+  cvdOscRef.current = cvdOscParams;
+  const cvdOscDrawRef = useRef<(() => void) | null>(null);
+  const [cvdOscRead, setCvdOscRead] = useState({ divs: 0, strength: 0 });
+  const patchCvdOsc = useCallback((patch: Partial<CvdOscParams>) => {
+    setCvdOscParams((prev) => {
+      const next = { ...prev, ...patch };
+      cvdOscRef.current = next;
+      saveCvdOsc(next);
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    cvdOscDrawRef.current?.();
+  }, [cvdOscParams]);
+
+  /** Per-bar delta on the *drawn* bar grid, or null when this chart's payload
+   *  carried none. Matched by time rather than by index: the delta rows and the
+   *  bars come off the same backend pass, but a chart that ever drew a subset of
+   *  what it was sent would silently window-shift the whole indicator, and a
+   *  missing bar honestly reads as zero flow. */
+  const deltaByBar = useMemo(() => {
+    if (!delta || delta.length === 0 || bars.length === 0) return null;
+    const m = new Map<number, number>();
+    for (const p of delta) m.set(p.time, p.value);
+    return bars.map((b) => m.get(b.time) ?? 0);
+  }, [delta, bars]);
+
+  /**
+   * The context days as one glued "tape", in the shape `buildComposite` reads.
+   *
+   * The prior sessions arrive as dense per-window histograms, and a profile only
+   * ever asks its input two things — what level, how much. So each window
+   * expands to its non-empty (level, size) pairs, the windows of one day are laid
+   * down adjacently, and a day becomes an index span: the whole day for a Globex
+   * composite, its second window alone for an RTH one. Aggregated input is
+   * lossless here — `computeTapeProfileRanges` sums by level and never looks at
+   * order — so the balance walk this feeds returns exactly what it would have
+   * returned over five days of raw prints.
+   */
+  /**
+   * Where the drawn tape's last RTH session starts and ends, as bar indices
+   * (`start` is -1 when there is no RTH on the chart at all).
+   *
+   * Three layers need it — the vol ruler (everything before the bell is context
+   * it warms *through* rather than measures), the session's own volume profile,
+   * and the nodes read off that — and the legend needs to know whether those
+   * rows exist, so it lives out here rather than inside the build effect.
+   *
+   * Read off the bar clock, since bar times carry the ET wall clock on a UTC
+   * epoch, rather than off `profileNy`: the layer is then there on a chart whose
+   * payload has no developing value area. The *last* bell, because a
+   * multi-session tape (the Lab's) is developing the session it ended in.
+   */
+  const nySpan = useMemo(() => {
+    const NY_OPEN_S = 9.5 * 3600;
+    const NY_CLOSE_S = 16 * 3600;
+    const tod = (t: number) => ((t % 86400) + 86400) % 86400;
+    let start = -1;
+    for (let i = 0; i < bars.length; i++) {
+      const s = tod(bars[i].time);
+      if (s >= NY_OPEN_S && s < NY_CLOSE_S && (i === 0 || tod(bars[i - 1].time) < NY_OPEN_S))
+        start = i;
+    }
+    let end = -1;
+    if (start >= 0) {
+      end = start;
+      while (end + 1 < bars.length && tod(bars[end + 1].time) < NY_CLOSE_S) end++;
+    }
+    return { start, end };
+  }, [bars]);
+
+  const ctxTape = useMemo(() => {
+    const days = contextProfiles ?? [];
+    if (days.length === 0) return null;
+    const level: number[] = [];
+    const size: number[] = [];
+    const globex: TapeRange[] = [];
+    const rth: TapeRange[] = [];
+    const push = (h?: { min: number; counts: number[] }) => {
+      if (!h) return;
+      for (let i = 0; i < h.counts.length; i++) {
+        const v = h.counts[i];
+        if (v > 0) {
+          level.push(h.min + i);
+          size.push(v);
+        }
+      }
+    };
+    for (const d of days) {
+      const i0 = level.length;
+      push(d.on);
+      const rthStart = level.length;
+      push(d.rth);
+      const i1 = level.length - 1;
+      if (i1 < i0) continue; // a day with neither window on disk
+      globex.push({ i0, i1 });
+      if (i1 >= rthStart) rth.push({ i0: rthStart, i1 });
+    }
+    if (globex.length === 0) return null;
+    return { level: Int32Array.from(level), size: Int32Array.from(size), globex, rth };
+  }, [contextProfiles]);
+
+  // --- Modern VWAP ----------------------------------------------------------
+  // The layer itself is ./modernVwapLayer, shared with the replay chart. What
+  // lives here is the wiring: the parameters read through a ref (a knob turn
+  // must redraw, never rebuild — a rebuild costs the user their zoom), and what
+  // the two legend rows quote.
+  const mvLayerRef = useRef<ModernVwapLayer | null>(null);
+  const mvParams = modernVwap?.params ?? null;
+  const mvRef = useRef<ModernVwapParams | null>(mvParams);
+  mvRef.current = mvParams;
+
+  // --- Dynamic Swing VWAP ---------------------------------------------------
+  // The Zeiierman line, wired exactly as Modern VWAP is above and sharing its
+  // draw effect below — one indicator, one layer, two charts.
+  const dsvLayerRef = useRef<DynamicSwingVwapLayer | null>(null);
+  const dsvParams = dynamicSwingVwap?.params ?? null;
+  const dsvRef = useRef<DsvParams | null>(dsvParams);
+  dsvRef.current = dsvParams;
+  const dsvDrawRef = useRef<(() => void) | null>(null);
+  const [dsvRead, setDsvRead] = useState({
+    pivots: 0,
+    bullPct: 0,
+    aptNow: 0,
+    dropped: 0,
+    // Whether the anchor timeframe regrouped these bars at all — see the row
+    // below, which says '@' only when it did.
+    anchored: false,
+  });
+  const onDsvData = useCallback((d: DynamicSwingVwapData | null) => {
+    if (!d) return;
+    setDsvRead((prev) =>
+      prev.pivots === d.pivots.length &&
+      prev.bullPct === d.bullPct &&
+      prev.aptNow === d.aptNow &&
+      prev.dropped === d.dropped &&
+      prev.anchored === d.anchored
+        ? prev
+        : {
+            pivots: d.pivots.length,
+            bullPct: d.bullPct,
+            aptNow: d.aptNow,
+            dropped: d.dropped,
+            anchored: d.anchored,
+          },
+    );
+  }, []);
+  /** Redraw with the current parameters, set by the build effect (which is where
+   *  the bars and the POC maps are). Null before the chart exists. */
+  const mvDrawRef = useRef<(() => void) | null>(null);
+  const [mvRead, setMvRead] = useState({ trendPct: 0, undefPct: 0, signals: 0, anchors: 0 });
+  const onMvData = useCallback((d: ModernVwapData | null) => {
+    // A dark layer keeps its last numbers rather than printing zeros — the rows
+    // stop quoting them anyway, and "0 through the gate" would read as a
+    // measurement when it only means nobody has asked yet.
+    if (!d) return;
+    setMvRead((prev) =>
+      prev.trendPct === d.trendPct &&
+      prev.undefPct === d.undefPct &&
+      prev.signals === d.signals.length &&
+      prev.anchors === d.anchors.length
+        ? prev
+        : {
+            trendPct: d.trendPct,
+            undefPct: d.undefPct,
+            signals: d.signals.length,
+            anchors: d.anchors.length,
+          },
+    );
+  }, []);
 
   // The chart's own colours — same sticky-global shape as the toggles above, and
   // the same rule about the build effect: recolouring goes through applyOptions
@@ -519,6 +1075,8 @@ export function CandlestickChart({
     // overlay time onto the actual (resampled) bar grid.
     const barTimes = bars.map((b) => b.time);
     const last = barTimes.length - 1;
+
+    const { start: nyStart, end: nyEnd } = nySpan;
     const nearestIdx = (t: number): number => {
       if (t <= barTimes[0]) return 0;
       if (t >= barTimes[last]) return last;
@@ -671,7 +1229,14 @@ export function CandlestickChart({
       // Divergence A→B lines live on this pane, attached to the CVD series so
       // they resolve in delta units and vanish with CVD when it's toggled off.
       if (cvdDivergences && cvdDivergences.length > 0) {
-        cvdSeries.attachPrimitive(new CvdDivergencePrimitive(cvdDivergences) as any);
+        cvdSeries.attachPrimitive(
+          new CvdDivergencePrimitive(
+            // This pane names the read outright; the oscillator's marks below use
+            // its source script's ±RD, which only means anything next to its own
+            // histogram.
+            cvdDivergences.map((d) => ({ ...d, label: d.kind })),
+          ) as any,
+        );
       }
       const panes = chart.panes();
       if (panes.length > cvdPane) {
@@ -686,8 +1251,91 @@ export function CandlestickChart({
     // is a straight copy, but kept identical to the EMA's so it's robust to any
     // stamp that lands off-grid. The pane is pinned to 0-100 with 30/50/70 guides —
     // the oscillator's whole read is where it sits between those bands.
+    // The CVD oscillator: the windowed delta as a histogram, under the cumulative
+    // line it is the alternative to, and the divergences it finds drawn twice —
+    // on this pane in delta units, and over the candles at the pivot prices. The
+    // second attachment is the point of the indicator (a divergence you have to
+    // eyeball across two panes isn't one), and it is why this owns a primitive on
+    // the price series that has to be detached by hand when the row goes dark.
+    let cvdOscSeries: ISeriesApi<"Histogram"> | null = null;
+    let cvdOscMarks: CvdDivergencePrimitive | null = null;
+    let cvdOscPriceMarks: CvdDivergencePrimitive | null = null;
+    const cvdOscPane = cvdPane + (cvd && cvd.length > 0 ? 1 : 0);
+    /** Re-run the window and the pivots at the current knobs and repaint. Cheap
+     *  enough to call on every knob turn: one pass over the drawn bars. */
+    const drawCvdOsc = () => {
+      if (!cvdOscSeries || !deltaByBar) return;
+      const { hist, divergences } = computeCvdOsc(bars, deltaByBar, cvdOscRef.current);
+      cvdOscSeries.setData(
+        bars.map((b, i) => {
+          const v = hist[i];
+          // Whitespace through the seeding window rather than a zero: the window
+          // isn't full yet, and a zero there would read as "flow balanced".
+          if (!Number.isFinite(v)) return { time: b.time as Time };
+          return {
+            time: b.time as Time,
+            value: v,
+            color: v >= 0 ? palette.green : palette.red,
+          };
+        }),
+      );
+      // `+RD`/`-RD` is the source script's notation: the sign is the *trade*
+      // implied (bullish divergence is +), not the sign of the reading.
+      const seg = (d: CvdOscDivergence, v1: number, v2: number) => ({
+        kind: d.kind,
+        t1: d.t1,
+        v1,
+        t2: d.t2,
+        v2,
+        label: d.kind === "bear" ? "-RD" : "+RD",
+      });
+      cvdOscMarks?.setData(divergences.map((d) => seg(d, d.h1, d.h2)));
+      cvdOscPriceMarks?.setData(divergences.map((d) => seg(d, d.p1, d.p2)));
+      const last = divergences[divergences.length - 1];
+      const strength = last ? last.strength : 0;
+      setCvdOscRead((prev) =>
+        prev.divs === divergences.length && prev.strength === strength
+          ? prev
+          : { divs: divergences.length, strength },
+      );
+    };
+    const addCvdOsc = () => {
+      cvdOscSeries = chart.addSeries(
+        HistogramSeries,
+        { priceLineVisible: false, lastValueVisible: true, priceFormat: { type: "volume" } },
+        cvdOscPane,
+      );
+      // Zero is the whole read here — unlike the cumulative pane, where it means
+      // "back to the anchor", on a window it means the last `period` bars
+      // balanced.
+      cvdOscSeries.createPriceLine({
+        price: 0,
+        color: palette.grid,
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: false,
+      });
+      cvdOscMarks = new CvdDivergencePrimitive();
+      cvdOscSeries.attachPrimitive(cvdOscMarks as any);
+      cvdOscPriceMarks = new CvdDivergencePrimitive();
+      candle.attachPrimitive(cvdOscPriceMarks as any);
+      drawCvdOsc();
+      const panes = chart.panes();
+      if (panes.length > cvdOscPane) {
+        panes[0].setStretchFactor(1000);
+        panes[cvdOscPane].setStretchFactor(200);
+      }
+    };
+    const removeCvdOsc = () => {
+      if (cvdOscPriceMarks) candle.detachPrimitive(cvdOscPriceMarks as any);
+      cvdOscPriceMarks = null;
+      cvdOscMarks = null;
+      if (cvdOscSeries) chart.removeSeries(cvdOscSeries);
+      cvdOscSeries = null;
+    };
+
     let rsiSeries: ISeriesApi<"Line"> | null = null;
-    const rsiPane = cvdPane + (cvd && cvd.length > 0 ? 1 : 0);
+    const rsiPane = cvdOscPane + (deltaByBar ? 1 : 0);
     const addRsi = () => {
       rsiSeries = chart.addSeries(
         LineSeries,
@@ -726,6 +1374,84 @@ export function CandlestickChart({
       if (panes.length > rsiPane) {
         panes[0].setStretchFactor(1000);
         panes[rsiPane].setStretchFactor(200);
+      }
+    };
+
+    // The vol ruler: the bar-range volatility pane, read three ways at once —
+    // an ATR(14) line, the session's developing median bar range, and (when the
+    // tape carries a prior session) yesterday's settled median, all in ticks
+    // against the 50-tick stop. See lib/volRuler for why the median exists next
+    // to the ATR. Same create/remove-on-toggle treatment and its own pane, last
+    // in the stack.
+    //
+    // Everything before the bell is context it warms *through* rather than
+    // measures — an overnight bar's range says nothing about the day's character
+    // — which is exactly what `nyStart` means to computeVolRuler.
+    let vrAtr: ISeriesApi<"Line"> | null = null;
+    let vrDev: ISeriesApi<"Line"> | null = null;
+    const vrPane = rsiPane + (rsi && rsi.length > 0 ? 1 : 0);
+    const addVr = () => {
+      const fmt = {
+        type: "custom" as const,
+        formatter: (v: number) => `${Math.round(v)}t`,
+        minMove: 1,
+      };
+      vrAtr = chart.addSeries(
+        LineSeries,
+        {
+          color: palette.violet,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          priceFormat: fmt,
+          // Keep the 50t rule in view however hot the tape got: the distance
+          // between the lines and that rule is the whole read, and autoscale
+          // would otherwise leave it below the frame on a wild session.
+          autoscaleInfoProvider: (orig: () => AutoscaleInfo | null) => {
+            const r = orig();
+            if (r?.priceRange)
+              r.priceRange.minValue = Math.min(r.priceRange.minValue, VR_STOP_TICKS - 10);
+            return r;
+          },
+        },
+        vrPane,
+      );
+      vrDev = chart.addSeries(
+        LineSeries,
+        {
+          color: palette.gold,
+          lineWidth: 2,
+          priceLineVisible: false,
+          lastValueVisible: true,
+          priceFormat: fmt,
+        },
+        vrPane,
+      );
+      const d = computeVolRuler(bars, Math.max(0, nyStart), tickSize ?? 0.25);
+      vrAtr.setData(d.atr.map((p) => ({ time: p.time as Time, value: p.value })));
+      vrDev.setData(d.dev.map((p) => ({ time: p.time as Time, value: p.value })));
+      vrDev.createPriceLine({
+        price: VR_STOP_TICKS,
+        color: palette.muted,
+        lineWidth: 1,
+        lineStyle: 2,
+        title: `${VR_STOP_TICKS}t stop`,
+      });
+      // Only when the tape actually carries a settled prior session — on a
+      // one-session chart it doesn't, and a made-up reference is worse than none.
+      if (d.yday != null) {
+        vrDev.createPriceLine({
+          price: d.yday,
+          color: palette.green,
+          lineWidth: 1,
+          lineStyle: 2,
+          title: `yday ${Math.round(d.yday)}t`,
+        });
+      }
+      const panes = chart.panes();
+      if (panes.length > vrPane) {
+        panes[0].setStretchFactor(1000);
+        panes[vrPane].setStretchFactor(200);
       }
     };
 
@@ -770,8 +1496,15 @@ export function CandlestickChart({
     const addVwap = (
       points: VwapPoint[],
       colors: { middle: string; band1: string; band2: string; fill: string },
-    ): { series: ISeriesApi<"Line">[]; band: VwapBandPrimitive } => {
+    ): {
+      series: ISeriesApi<"Line">[];
+      sigma1: ISeriesApi<"Line">[];
+      sigma2: ISeriesApi<"Line">[];
+      band: VwapBandPrimitive;
+    } => {
       const series: ISeriesApi<"Line">[] = [];
+      const sigma1: ISeriesApi<"Line">[] = [];
+      const sigma2: ISeriesApi<"Line">[] = [];
       const mid = chart.addSeries(LineSeries, {
         color: colors.middle,
         lineWidth: 2,
@@ -780,8 +1513,8 @@ export function CandlestickChart({
       mid.setData(gappedLineData(points, "middle"));
       series.push(mid);
       const bands = [
-        { keys: ["upper1", "lower1"], color: colors.band1 },
-        { keys: ["upper2", "lower2"], color: colors.band2 },
+        { keys: ["upper1", "lower1"], color: colors.band1, ring: sigma1 },
+        { keys: ["upper2", "lower2"], color: colors.band2, ring: sigma2 },
       ] as const;
       for (const band of bands) {
         for (const key of band.keys) {
@@ -794,11 +1527,16 @@ export function CandlestickChart({
           });
           line.setData(gappedLineData(points, key));
           series.push(line);
+          // The same series in two lists: `series` is the anchor whole — what the
+          // relight recolours and what the ⚓ band toggles as a unit — and the two
+          // rings are what the per-anchor band knob hides. One array, two ways of
+          // asking about it, so neither can drift from what was actually built.
+          band.ring.push(line);
         }
       }
       const band = new VwapBandPrimitive(points, colors.fill);
       candle.attachPrimitive(band as any);
-      return { series, band };
+      return { series, sigma1, sigma2, band };
     };
 
     const globex =
@@ -806,6 +1544,69 @@ export function CandlestickChart({
     const ny = vwapNy && vwapNy.length > 0 ? addVwap(vwapNy, hues.vwap.ny) : null;
     const weekly =
       vwapWeekly && vwapWeekly.length > 0 ? addVwap(vwapWeekly, hues.vwap.weekly) : null;
+
+    // Modern VWAP — the same layer the replay chart mounts (see
+    // ./modernVwapLayer), fed here from the drawn bars and the developing
+    // profiles this chart was already handed. Built whatever the page passes, so
+    // it is one thing to switch on rather than a rebuild; with no parameters it
+    // computes nothing and its rows aren't in the legend.
+    //
+    // The marks go on the pane here rather than later in the stack: unlike the
+    // replay there is no open position or working order for a study layer to be
+    // careful about, and the Lab's own touch/VA-snap marks are the reading this
+    // chart exists for, so they stay on top.
+    // The developing POC by bar time, for the indicator's `poc` anchor: whichever
+    // profile the knob asks for, read off the series this chart was given. An
+    // absent profile leaves an empty map and that anchor degrades to a plain
+    // session anchor — the legend's ⚓ count is the tell.
+    const mvPocMap = (pts: ProfilePoint[] | undefined): Map<number, number> =>
+      new Map((pts ?? []).map((p) => [p.time, p.poc]));
+    const mvGlobexPoc = mvPocMap(profileGlobex);
+    const mvWeeklyPoc = mvPocMap(profileWeekly);
+    // Where the context ends and the session begins. On a multi-session tape the
+    // frame the chart opens on *is* the session being read (the Lab hands over
+    // the focused day's span), so the prior days behind it warm the medians, the
+    // KER and the anchors without being counted in what the gate says about the
+    // day. Without a frame there is nothing to call context and the whole tape
+    // is the session.
+    const mvFrom = initialRangeRef.current?.from;
+    const mvFirst = mvFrom == null ? -1 : bars.findIndex((b) => b.time >= mvFrom);
+    const mvHist = mvFirst < 0 ? 0 : mvFirst;
+    const mvLayer = createModernVwapLayer(
+      chart,
+      candle,
+      () => {
+        // The parameters through the ref, not the prop: this closure lives as
+        // long as the chart does, and a knob turn must reach it without a
+        // rebuild (which would cost the user their zoom).
+        const p = mvRef.current;
+        return {
+          bars,
+          histCount: mvHist,
+          params: p,
+          ctx: { poc: p?.pocSource === "weekly" ? mvWeeklyPoc : mvGlobexPoc, tickSize },
+        };
+      },
+      onMvData,
+    );
+    mvLayer.attachSignals();
+    mvLayerRef.current = mvLayer;
+    mvDrawRef.current = () => mvLayer.redraw();
+
+    // The Zeiierman line beside it, off the same bars and the same context
+    // boundary. It reads no profile, so there is nothing else to hand it.
+    const dsvLayer = createDynamicSwingVwapLayer(
+      chart,
+      candle,
+      () => ({ bars, histCount: mvHist, params: dsvRef.current }),
+      onDsvData,
+    );
+    dsvLayer.attachOverlays();
+    dsvLayerRef.current = dsvLayer;
+    dsvDrawRef.current = () => dsvLayer.redraw();
+    // A no-op while the oscillator's row is off — its series doesn't exist, and
+    // turning it on is what runs the first pass.
+    cvdOscDrawRef.current = drawCvdOsc;
 
     // User-anchored VWAP (the ⚓ tool). Computed here from the bars in the browser
     // — running Σv, Σpv, Σp²v over each bar's typical price (H+L+C)/3 from the
@@ -815,20 +1616,21 @@ export function CandlestickChart({
     // re-snaps onto the current grid after a timeframe switch, exactly like the
     // fixed-range profiles.
     let avwap: { series: ISeriesApi<"Line">[]; band: VwapBandPrimitive } | null = null;
+    // Tick-accumulated, via each bar's shipped moments — the same arithmetic the
+    // engine runs on the replay chart and the same the session bands beside it
+    // are drawn with. It used to accumulate hlc3 × volume, which made this one
+    // tool mean two different things depending on which chart you dropped it on:
+    // a mid a tick or three away and, near the anchor, a sigma tens of times
+    // narrower, because a bar-domain sigma is zero at its own anchor bar while a
+    // tick one already carries that bar's internal spread. See lib/vwap.
     const computeAvwap = (i0: number): VwapPoint[] => {
       const out: VwapPoint[] = [];
-      let sumV = 0;
-      let sumPV = 0;
-      let sumP2V = 0;
+      const acc = new Vwap();
       for (let i = i0; i <= last; i++) {
         const b = bars[i];
-        const typ = (b.high + b.low + b.close) / 3;
-        sumV += b.volume;
-        sumPV += typ * b.volume;
-        sumP2V += typ * typ * b.volume;
-        if (sumV <= 0) continue; // no volume yet -> no defined VWAP
-        const mid = sumPV / sumV;
-        const sd = Math.sqrt(Math.max(0, sumP2V / sumV - mid * mid));
+        acc.addBar(b);
+        if (!acc.active) continue; // no volume yet -> no defined VWAP
+        const { mid, sd } = acc.read();
         out.push({
           time: b.time,
           middle: mid,
@@ -898,6 +1700,7 @@ export function CandlestickChart({
     };
     const profileGlobexSeries = addProfile(profileGlobex, hues.profile.globex);
     const profileNySeries = addProfile(profileNy, hues.profile.ny);
+    const profileWeeklySeries = addProfile(profileWeekly, hues.profile.weekly);
 
     // 9/20 EMA (1-minute). The values arrive stamped on the minute they were
     // computed on, but the candles may be tick bars — and an off-grid time has no
@@ -1038,11 +1841,110 @@ export function CandlestickChart({
       return computeVolumeProfile(bars.slice(i0, i1 + 1));
     };
 
+    // And how that profile's delta lane is read — resolved here for the same
+    // reason the profile is: every lane on this chart is a slice of these bars,
+    // and one function is what stops the viewport histogram and the dragged one
+    // from answering the same question differently.
+    //
+    // Classification is the only expensive part and it is gated three ways: the
+    // knob has to be on, some row has to have been flagged, and the chart needs a
+    // footprint to look at. When all three hold it costs one pass over the
+    // window's trades — for *every* flagged row at once, not one pass each,
+    // which is what keeps a pan from paying per mark. `reprofile` below only
+    // calls this when the visible bar range actually moved, so it is once per pan
+    // step rather than once per frame.
+    const laneFor = (
+      p: VolumeProfile | null,
+      i0: number,
+      i1: number,
+      /** False for the dragged slices, whose right edge is the reader's rather
+       *  than the market's — see RangeProfileItem.lane. Also spares a drag the
+       *  pass over its trades on every mousemove. */
+      allowVerdict = true,
+      /** True only for the viewport lane. A fixed range's span *is* the window
+       *  the reader drew, so the window knob never re-cuts it. */
+      follow = false,
+    ): LaneReading | null => {
+      if (!p || !p.hasDelta) return null;
+      const k = deltaLaneRef.current;
+      // The timed and visit windows both need the trades cut by bar, which on
+      // this chart is the footprint — without one the lane holds the session
+      // reading whatever the knob says, the same degradation classify has.
+      const win = follow && exact ? k.window : "session";
+
+      if (win === "visit" && i0 >= 0 && i1 >= i0) {
+        const split = splitVisits(p, bars.slice(i0, i1 + 1), (emit) => {
+          for (let b = i0; b <= i1; b++)
+            for (const e of footprint![b]) emit(b - i0, e[0], e[2] ?? 0);
+        });
+        return readVisitLane(p, split);
+      }
+
+      // The timed windows re-source the lane; everything after this block reads
+      // `src` and the `vi0..vi1` bars behind it, so flags, scales and verdicts
+      // are all statements about the same stretch of tape.
+      let src: LaneSource = p;
+      let vi0 = i0;
+      let vi1 = i1;
+      const mins = LANE_WINDOW_MINUTES[win];
+      if (mins != null && i0 >= 0 && i1 >= i0) {
+        const cut = bars[i1].time - mins * 60;
+        let wi0 = i0;
+        while (wi0 < i1 && bars[wi0].time <= cut) wi0++;
+        // A span already inside the window is its own window — the session lane.
+        if (wi0 > i0) {
+          const entries: number[][] = [];
+          for (let i = wi0; i <= i1; i++) entries.push(...footprint![i]);
+          const ws = windowedOnto(p, computeTickProfile(entries, tickSize!));
+          if (ws) {
+            src = ws;
+            vi0 = wi0;
+          }
+        }
+      }
+
+      const lane = readLane(src, k.scale, k.flagSigma);
+      if (!allowVerdict || !k.classify || lane.flagged.length === 0 || !exact || vi1 < vi0)
+        return lane;
+
+      const n = vi1 - vi0 + 1;
+      const table = new Map<number, Float64Array>();
+      for (const r of lane.flagged) table.set(r, new Float64Array(n));
+      for (let b = vi0; b <= vi1; b++) {
+        for (const e of footprint![b]) {
+          // Row membership off the row's own bounds rather than by repeating
+          // computeTickProfile's binning arithmetic: a second copy of that
+          // rounding is a second thing to keep in step, and a row that means
+          // something slightly different here would misattribute the delta it is
+          // being judged on.
+          for (const r of lane.flagged) {
+            const row = src.rows[r];
+            if (e[0] >= row.low && e[0] < row.high) {
+              table.get(r)![b - vi0] += e[2] ?? 0;
+              break;
+            }
+          }
+        }
+      }
+      lane.verdict = classifyFlagged(
+        src,
+        lane.flagged,
+        (r) => table.get(r)!,
+        bars.slice(vi0, vi1 + 1),
+      );
+      return lane;
+    };
+
     // Volume profile over whatever bars are on screen: the histogram itself is a
     // primitive (nothing native runs along the price axis), while POC/VAH/VAL are
     // price lines so they get axis labels and span the full pane for free.
     const vp = new VolumeProfilePrimitive(profileFor(0, last));
     candle.attachPrimitive(vp as any);
+    // The bar window `vp.profile` currently covers. Kept beside the primitive
+    // rather than derived from it because a lane's verdicts are measured against
+    // those bars, and a profile knows its prices but not which slice made it.
+    const vpWin = { i0: 0, i1: last };
+    vp.setLane(laneFor(vp.profile, vpWin.i0, vpWin.i1, true, true));
 
     const VP_LINES = [
       { key: "poc", color: palette.gold, style: 0, title: "POC" },
@@ -1091,10 +1993,168 @@ export function CandlestickChart({
       lastFrom = from;
       lastTo = to;
       const p = profileFor(from, to);
+      vpWin.i0 = from;
+      vpWin.i1 = to;
       vp.setProfile(p);
+      vp.setLane(laneFor(p, from, to, true, true));
       syncProfileLines(p);
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange(reprofile);
+
+    // --- The session's own distribution, and the days behind it ---------------
+    //
+    // Two histograms in two gutters, answering two questions the value-area
+    // *lines* above cannot: what shape the session has built getting where it is,
+    // and what shape the auction in front of it left behind. Both are read at the
+    // knobs held above, and both name their HVN/LVN nodes at one shared
+    // prominence — see lib/volumeProfile.profileNodes.
+    //
+    // The composite is frozen by construction: it is built from the prior
+    // sessions' volume alone, never this one's. Letting today feed it is circular
+    // — the POC drifts toward price, the level can never be violated, and every
+    // touch looks like a hold.
+    const compPrim = new CompositeProfilePrimitive();
+    candle.attachPrimitive(compPrim as any);
+    const devPrim = new DevelopingProfilePrimitive();
+    candle.attachPrimitive(devPrim as any);
+
+    // The coarser bar over this one. Owns both z-orders internally, so where it
+    // sits relative to the candles is a setting rather than an attach order.
+    const extPrim = new ExternalChartPrimitive();
+    extPrim.setParams(extParamsRef.current);
+    extPrim.setBars(extBarsRef.current);
+    candle.attachPrimitive(extPrim as any);
+    extPrimRef.current = extPrim;
+
+    // The session's histogram, computed once: it is frozen too. A journal chart
+    // draws a session that has already happened, so "developing" here means the
+    // whole of it — there is no clock left to grow it.
+    const nyProfile = nyStart >= 0 ? profileFor(nyStart, nyEnd) : null;
+    // The value area as the *server* has it, at tick resolution — the numbers the
+    // developing NY lines are drawn from. Binning to readable rows moves VAH by
+    // points, and shading rows by a number the lines beside them disagree with
+    // would be a bug you could see. Shape from the histogram, levels from the
+    // engine. (See DevelopingProfilePrimitive.DevelopingVa.)
+    const nyVa = profileNy && profileNy.length > 0 ? profileNy[profileNy.length - 1] : null;
+
+    /** The composite as the current rule reads the context days, and the nodes
+     *  both layers name at the current prominence. Recomputed on a knob turn and
+     *  on a rebuild; the profiles themselves never change under it. */
+    let comp: Composite | null = null;
+    let compRule: string | null = null;
+    const paintProfiles = () => {
+      const k = knobsRef.current;
+      if (ctxTape && tickSize) {
+        // Only re-walk the days when the question changed — the balance rule is
+        // a profile per candidate day, and a prominence turn is not a new
+        // composite, only a new reading of one.
+        const sig = `${k.composite}/${k.compositeSpan}`;
+        if (sig !== compRule) {
+          compRule = sig;
+          comp = buildComposite(
+            ctxTape.level,
+            ctxTape.size,
+            k.compositeSpan === "rth" ? ctxTape.rth : ctxTape.globex,
+            tickSize,
+            k.composite,
+          );
+        }
+      } else {
+        comp = null;
+      }
+      setCompDays(comp?.days ?? 0);
+      compPrim.setData(
+        comp
+          ? {
+              profile: comp.profile,
+              nodes: k.nodeProm > 0 ? profileNodes(comp.profile, k.nodeProm) : null,
+              // No stretch of tape to pin it to: the days it was measured over
+              // are not drawn on a journal chart, so the shape goes in a gutter
+              // and the levels run the full width. See CompositeData.from.
+              from: null,
+              to: null,
+              days: comp.days,
+            }
+          : null,
+      );
+      devPrim.setData(
+        nyProfile
+          ? {
+              profile: nyProfile,
+              va: nyVa ? { poc: nyVa.poc, vah: nyVa.vah, val: nyVa.val } : null,
+              nodes: k.nodeProm > 0 ? profileNodes(nyProfile, k.nodeProm) : null,
+              from: bars[nyStart].time,
+            }
+          : null,
+      );
+      compPrim.setVisible(visRef.current.compositeProfile, visRef.current.compositeNodes);
+      devPrim.setVisible(visRef.current.developingVpNy, visRef.current.developingVpNyNodes);
+      extPrim.setVisible(visRef.current.externalChart);
+    };
+    profilesRef.current = paintProfiles;
+    paintProfiles();
+
+    // --- Volume shelves: where size is *building*, not where it has been ---
+    //
+    // Computed off the same `profileFor` every other profile on this chart uses,
+    // so a shelf is read from the identical distribution the histogram draws.
+    // `exact` is handed straight through: on a chart with no footprint the
+    // profile is the bar-spreading estimate, under which size-per-visit is
+    // near-constant by construction, and every band would be an artefact of the
+    // estimator rather than a reading (see lib/volumeShelf.detectShelves).
+    const shelfPrim = new VolumeShelfPrimitive();
+    candle.attachPrimitive(shelfPrim as any);
+
+    // The walked session, kept so switching a layer on and off does not re-walk
+    // it. Everything the walk reads — the bars, the tick size, the parameters —
+    // is fixed for the life of this effect except the parameters, and those
+    // arrive through `rebuild`. Visibility is not an input to the reading at all,
+    // only to what is drawn of it, so a legend click must not cost a session.
+    let built: { columns: ShelfColumn[]; boxes: ShelfBox[] } | null = null;
+
+    const paintShelves = (rebuild = false) => {
+      if (rebuild) built = null;
+      const v = visRef.current;
+      if (!v.volumeShelf || tickSize == null) {
+        shelfPrim.setData({
+          columns: [], boxes: [], showBoxes: false, zMin: 0,
+          field: "size", flowAvailable: false,
+        });
+        return;
+      }
+      const params = shelfParamsRef.current;
+      if (!built) {
+        const shelfBars = bars.map((b) => ({
+          time: b.time,
+          high: b.high,
+          low: b.low,
+        }));
+        const tracker = new ShelfTracker(2, params.minHoldMin * 60);
+        const columns: ShelfColumn[] = [];
+        for (const i of evalBars(shelfBars, params.stepSec)) {
+          const j = windowStart(shelfBars, i, params.windowMin);
+          const prof = profileFor(j, i);
+          const win = shelfBars.slice(j, i + 1);
+          const { shelves, reading } = detectShelves(prof, win, exact, tickSize, params);
+          tracker.push(shelfBars[i].time, shelves, win);
+          if (prof && reading) {
+            const flow = shelfFlow(prof) ?? undefined;
+            columns.push({ time: shelfBars[i].time, rows: prof.rows, z: reading.z, flow });
+          }
+        }
+        built = { columns, boxes: tracker.boxes() };
+      }
+      shelfPrim.setData({
+        columns: built.columns,
+        boxes: built.boxes,
+        showBoxes: v.volumeShelfBoxes,
+        zMin: params.zMin,
+        field: shelfFieldRef.current,
+        flowAvailable: built.columns.some((c) => c.flow != null),
+      });
+    };
+    shelvesRef.current = paintShelves;
+    paintShelves();
 
     // --- Fixed-range profile: drag across the chart to profile just that slice ---
     const rangePrim = new RangeProfilePrimitive();
@@ -1113,11 +2173,15 @@ export function CandlestickChart({
         rangesRef.current.map((r) => {
           const i0 = nearestIdx(r.from);
           const i1 = nearestIdx(r.to);
+          const p = profileFor(i0, i1);
           return {
             id: r.id,
             from: barTimes[i0],
             to: barTimes[i1],
-            profile: profileFor(i0, i1),
+            profile: p,
+            // Scale and flags only — RangeProfileItem.lane says why a dragged
+            // slice gets no verdicts.
+            lane: laneFor(p, i0, i1, false),
           };
         }),
         selectedRef.current,
@@ -1380,25 +2444,58 @@ export function CandlestickChart({
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
 
+    /** Which of the optional panes are up, as one string — the thing the study
+     *  panes' indices depend on. */
+    const panesSig = () =>
+      `${atrSeries ? 1 : 0}${cvdSeries ? 1 : 0}${cvdOscSeries ? 1 : 0}${rsiSeries ? 1 : 0}${
+        vrDev ? 1 : 0
+      }`;
+    let lastPanes = panesSig();
+
     applyRef.current = (v: Visibility) => {
       vp.setVisible(v.volumeProfile);
       for (const l of vpLines)
         l.applyOptions({ lineVisible: v.volumeProfile, axisLabelVisible: v.volumeProfile });
-      for (const s of globex?.series ?? []) s.applyOptions({ visible: v.vwapGlobex });
-      globex?.band.setVisible(v.vwapGlobex);
-      for (const s of ny?.series ?? []) s.applyOptions({ visible: v.vwapNy });
-      ny?.band.setVisible(v.vwapNy);
-      for (const s of weekly?.series ?? []) s.applyOptions({ visible: v.vwapWeekly });
-      weekly?.band.setVisible(v.vwapWeekly);
+      // A fixed anchor's row toggles the whole thing; inside it, the band knob
+      // says which rings survive. The mid is not on that knob, so it is on
+      // whenever the anchor is — see chartPrefs.vwapBandsShown, which also owns
+      // the rule that the wash needs both of its edges to be honest.
+      const setAnchor = (
+        a: { series: ISeriesApi<"Line">[]; sigma1: ISeriesApi<"Line">[]; sigma2: ISeriesApi<"Line">[]; band: VwapBandPrimitive } | null,
+        on: boolean,
+        key: VwapFillAnchor,
+      ) => {
+        if (!a) return;
+        const region = regionRef.current[key];
+        const s = vwapBandsShown(bandsRef.current[key], region);
+        a.band.setRegion(region);
+        for (const line of a.series) line.applyOptions({ visible: on });
+        for (const line of a.sigma1) line.applyOptions({ visible: on && s.s1 });
+        for (const line of a.sigma2) line.applyOptions({ visible: on && s.s2 });
+        a.band.setVisible(on && s.fill);
+      };
+      setAnchor(globex, v.vwapGlobex, "globex");
+      setAnchor(ny, v.vwapNy, "ny");
+      setAnchor(weekly, v.vwapWeekly, "weekly");
+      // The ⚓ band is not one of the three: it is drawn one at a time, by hand,
+      // at the place you asked about, and it keeps its whole envelope.
       for (const s of avwap?.series ?? []) s.applyOptions({ visible: v.vwapAnchored });
       avwap?.band.setVisible(v.vwapAnchored);
       for (const s of profileGlobexSeries) s.applyOptions({ visible: v.developingProfileGlobex });
       for (const s of profileNySeries) s.applyOptions({ visible: v.developingProfileNy });
+      for (const s of profileWeeklySeries) s.applyOptions({ visible: v.developingProfileWeekly });
       for (const { key, series } of emaSeries) series.applyOptions({ visible: v[key] });
       for (const l of levelLines) l.applyOptions({ lineVisible: v.levels, axisLabelVisible: v.levels });
       for (const s of ibSeries) s.applyOptions({ visible: v.initialBalance });
       for (const s of ibExtSeries) s.applyOptions({ visible: v.ibExtensions });
       interactionPrim.setVisibility(v.touches, v.va_snaps);
+      // The line's seven series hide as a unit and the marks have their own eye.
+      // The layer redraws itself when this takes it out of, or into, dark — with
+      // both rows off it isn't drawn *or computed*, which is why it can be built
+      // on every chart without costing the ones that never show it.
+      mvLayer.setVisible(v.modernVwap, v.modernVwapSignals);
+      // One row: the flags are how the line is read, not a separate claim.
+      dsvLayer.setVisible(v.dynamicSwingVwap);
       if (atrPoints && atrPoints.length > 0) {
         if (v.atr && !atrSeries) addAtr();
         else if (!v.atr && atrSeries) {
@@ -1413,6 +2510,10 @@ export function CandlestickChart({
           cvdSeries = null;
         }
       }
+      if (deltaByBar) {
+        if (v.cvdOsc && !cvdOscSeries) addCvdOsc();
+        else if (!v.cvdOsc && cvdOscSeries) removeCvdOsc();
+      }
       if (rsi && rsi.length > 0) {
         if (v.rsi && !rsiSeries) addRsi();
         else if (!v.rsi && rsiSeries) {
@@ -1420,8 +2521,70 @@ export function CandlestickChart({
           rsiSeries = null;
         }
       }
+      // The vol ruler's two lines are one pane, so they come and go together —
+      // removing the last series of a pane is what drops the pane.
+      if (v.volRuler && !vrDev) addVr();
+      else if (!v.volRuler && vrDev) {
+        chart.removeSeries(vrDev);
+        if (vrAtr) chart.removeSeries(vrAtr);
+        vrDev = null;
+        vrAtr = null;
+      }
+      // Any of the five panes above coming or going renumbers everything after
+      // it, and the studies' panes have to stay last. Only when the set actually
+      // changed: rebuilding them to discover nothing moved is the one way to make
+      // a picked indicator flicker.
+      if (panesSig() !== lastPanes) {
+        lastPanes = panesSig();
+        studyLayerRef.current?.remount();
+      }
+      // Both histograms hide as a unit with their nodes' own eye beside them —
+      // the shape in its gutter and the levels it names over the price action are
+      // separately useful, and the second is the one that draws on the tape.
+      compPrim.setVisible(v.compositeProfile, v.compositeNodes);
+      devPrim.setVisible(v.developingVpNy, v.developingVpNyNodes);
+      extPrim.setVisible(v.externalChart);
+      // The shelves have no `setVisible`: both of their switches change what the
+      // primitive is *given*, not whether it draws, so they go back through the
+      // paint. It is the cached walk unless the reading itself changed.
+      paintShelves();
     };
+    applyFillRef.current = (w) => {
+      globex?.band.setAlphaScale(w.globex);
+      ny?.band.setAlphaScale(w.ny);
+      weekly?.band.setAlphaScale(w.weekly);
+    };
+    // One switch over both histograms: a chart reading its viewport profile for
+    // flow is reading the slice you dragged for it too.
+    applyTintRef.current = (on) => {
+      vp.setShowDelta(on);
+      rangePrim.setShowDelta(on);
+    };
+    applyTintRef.current(profileDeltaRef.current);
+    // Re-reading the lane needs no new profile — same rows, same volumes, a
+    // different question asked of the delta already on them. `paint` re-derives
+    // the dragged slices, which is where their own readings are attached.
+    applyLaneRef.current = () => {
+      vp.setLane(laneFor(vp.profile, vpWin.i0, vpWin.i1, true, true));
+      paintRef.current?.();
+    };
+    // Seeded here for the same reason the visibility is below: the bands were
+    // built at the authored weight, and a chart rebuilt for any other reason has
+    // to come back carrying the reader's.
+    applyFillRef.current(fillRef.current);
+    // Which also gives the Modern VWAP its first draw, if either of its rows is
+    // on: the layer starts dark, so switching it on there is the crossing that
+    // makes it pull from its source.
     applyRef.current(visRef.current);
+
+    // The picker's studies, built after every pane above has claimed its index:
+    // pane indices are positional, and a study pane has to be the last one. The
+    // specs come off the ref rather than the render's copy so a chart rebuilt for
+    // some other reason comes back with what was on it.
+    const studyLayer = new StudyLayer(chart, candle, setStudyReport);
+    studyLayerRef.current = studyLayer;
+    studyLayer.setSpecs(studiesRef.current);
+    studyLayer.setBars(bars);
 
     if (tradeRects && tradeRects.length > 0) {
       // Snap entry down / exit up to bar boundaries so the rectangle spans the
@@ -1626,6 +2789,10 @@ export function CandlestickChart({
       for (const e of emaSeries) e.series.applyOptions({ color: emaHue[e.key] });
       for (const l of ibSeries) l.applyOptions({ color: hues.ib.line });
       for (const l of ibExtSeries) l.applyOptions({ color: hues.ib.ext });
+      // The layer re-cuts its own lines and wash, and redraws — its regime tint
+      // rides on per-point colours, which only come back with the data.
+      mvLayer.relight();
+      dsvLayer.relight();
       paintRef.current?.();
     };
 
@@ -1640,13 +2807,28 @@ export function CandlestickChart({
       candleRef.current = null;
       volumeRef.current = null;
       applyRef.current = null;
+      extPrimRef.current = null;
+      applyFillRef.current = null;
+      applyTintRef.current = null;
+      applyLaneRef.current = null;
       relightRef.current = null;
+      mvLayerRef.current = null;
+      mvDrawRef.current = null;
+      dsvLayerRef.current = null;
+      dsvDrawRef.current = null;
+      cvdOscDrawRef.current = null;
       armApplyRef.current = null;
       rulerApplyRef.current = null;
       rulerClearRef.current = () => {};
       avwapApplyRef.current = null;
       avwapDrawRef.current = null;
       paintRef.current = null;
+      profilesRef.current = null;
+      shelvesRef.current = null;
+      // Before `chart.remove()` below: taking series off a chart that no longer
+      // exists throws from inside the library.
+      studyLayer.destroy();
+      studyLayerRef.current = null;
       host.removeEventListener("mousedown", onDown);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
@@ -1662,6 +2844,8 @@ export function CandlestickChart({
     vwapWeekly,
     profileGlobex,
     profileNy,
+    profileWeekly,
+    ctxTape,
     ema9,
     ema20,
     ema50,
@@ -1670,6 +2854,7 @@ export function CandlestickChart({
     atrPoints,
     cvd,
     cvdDivergences,
+    deltaByBar,
     markers,
     touches,
     vaSnaps,
@@ -1696,6 +2881,18 @@ export function CandlestickChart({
     relightRef.current?.();
   }, [appearance]);
 
+  // A Modern VWAP knob turned re-derives everything — the anchors, the regime and
+  // the triggers all move together, and there is no partial version of that. A
+  // redraw, never a rebuild: the parameters are deliberately not a dependency of
+  // the build effect, which would cost the user their zoom on every knob turn.
+  useEffect(() => {
+    mvDrawRef.current?.();
+  }, [mvParams]);
+
+  useEffect(() => {
+    dsvDrawRef.current?.();
+  }, [dsvParams]);
+
   // Re-frame on a new selected day without rebuilding: when the tape spans many
   // sessions and only the focus span changes (same bars), scroll to it in place
   // so the user's zoom into a neighbour isn't thrown away. Skipped under
@@ -1717,31 +2914,202 @@ export function CandlestickChart({
   // in the hues of a chart it isn't.
   const legendInk = chartInk(appearance.surface);
 
+  /** Prior sessions handed to the composite, whatever the rule then made of
+   *  them — see `compDays` for what it kept. */
+  const ctxDays = ctxTape?.globex.length ?? 0;
+  /** Is there an RTH session on this tape to profile? */
+  const sessionVpOn = nySpan.start >= 0;
+  // The panels behind the two histogram layers' "…" — the same builder the
+  // replay pages hand their whole knob map to, asked for the subset this chart
+  // draws. The Modern VWAP rows keep building their own below, since those
+  // parameters belong to the page rather than to this chart.
+  const profileKnobPanels: IndicatorSettingsMap = buildChartKnobs({
+    // A layer this chart doesn't draw: the builder wants the fields, and a knob
+    // for a layer with no row is never reached.
+    bigLots: 0,
+    onBigLots: () => {},
+    nodeProm: knobs.nodeProm,
+    onNodeProm: (nodeProm) => patchKnobs({ nodeProm }),
+    volumeShelf: {
+      params: shelfParams,
+      onChange: patchShelf,
+      field: shelfField,
+      onField: patchShelfField,
+    },
+    composite: {
+      rule: knobs.composite,
+      onRule: (composite) => patchKnobs({ composite }),
+      span: knobs.compositeSpan,
+      onSpan: (compositeSpan) => patchKnobs({ compositeSpan }),
+      // The replay pages point at their context-day knob here. A journal chart
+      // has none: the days arrive with the session, fixed at the rule's own cap,
+      // so what the line has to say is why there aren't more of them.
+      note:
+        `Up to ${BALANCE_CAP} prior sessions arrive with the chart — the balance rule's own cap. ` +
+        "The run ends early at a contract roll, or at the first session whose ticks were never bought.",
+    },
+  });
+
+  // Whether this chart's profile can be read for flow at all: a footprint whose
+  // levels ship a signed delta beside their size. Absent on a day the feed never
+  // tagged an aggressor on (the server drops the third element rather than
+  // shipping zeros), and on the estimated profile, which has no tape to tag.
+  // The first bar that traded settles it — the footprint is one shape for the
+  // whole payload.
+  const profileHasDelta = !!footprint?.some((rows) => rows.length > 0 && rows[0].length > 2);
+
   const legendItems: LegendItem[] = [];
+  // The row says which rings it is drawing, because the knob inside can now take
+  // them away — a label reading "±1σ ±2σ" over a chart drawing one of them is the
+  // legend lying about the layer it names.
+  const anchorRow = (anchor: VwapFillAnchor, name: string, title: string) => ({
+    label: `${name} ${vwapBandLabel(vwapBands[anchor])}`.trimEnd(),
+    settings: {
+      title,
+      fields: vwapAnchorKnobs(
+        { bands: vwapBands[anchor], fill: vwapFill[anchor], region: vwapRegion[anchor] },
+        {
+          bands: (c) => setBands(anchor, c),
+          fill: (w) => setFill(anchor, w),
+          region: (r) => setRegion(anchor, r),
+        },
+      ),
+    },
+  });
+  // The coarser bar over this one — the chart's own bars regrouped, so the row
+  // exists whenever there are bars at all. Dimmed when the period isn't above
+  // the drawn timeframe, which is the one way it can be on and draw nothing.
+  if (bars.length > 0)
+    legendItems.push({
+      key: "externalChart",
+      label: `External chart · ${
+        EXTERNAL_PERIOD_OPTIONS.find((o) => o.value === extParams.period)?.label ?? extParams.period
+      }`,
+      color: extParams.palette === "custom" ? extParams.bull : legendInk.externalChart.bull,
+      dim: extBars.length === 0,
+      settings: {
+        title: "External chart",
+        fields: externalChartKnobs(extParams, patchExternal, extBars.length > 0),
+      },
+    });
   if (vwapGlobex && vwapGlobex.length > 0)
     legendItems.push({
       key: "vwapGlobex",
-      label: "VWAP · Globex ±1σ ±2σ",
       color: legendInk.vwap.globex.middle,
+      ...anchorRow("globex", "VWAP · Globex", "Globex VWAP"),
     });
   if (vwapNy && vwapNy.length > 0)
     legendItems.push({
       key: "vwapNy",
-      label: "VWAP · NY ±1σ ±2σ",
       color: legendInk.vwap.ny.middle,
+      ...anchorRow("ny", "VWAP · NY", "NY VWAP"),
     });
   if (vwapWeekly && vwapWeekly.length > 0)
     legendItems.push({
       key: "vwapWeekly",
-      label: "VWAP · Weekly ±1σ ±2σ",
       color: legendInk.vwap.weekly.middle,
+      ...anchorRow("weekly", "VWAP · Weekly", "Weekly VWAP"),
     });
   if (avwapAnchor != null)
     legendItems.push({
       key: "vwapAnchored",
-      label: "VWAP · Anchored ±1σ ±2σ",
+      // Says which arithmetic drew it. Normally this line accumulates the tape's
+      // own prints, exactly as the session bands beside it do — but a payload
+      // with no tape behind it (the timeframe-radio refetch, resampled from the
+      // bar store) leaves the bars without moments and the line falls back to
+      // hlc3. That is a *different statistic*, widest apart in the first bars
+      // after the anchor, and one anchored VWAP silently meaning two things is
+      // the bug this whole seam exists to prevent. So it is said out loud.
+      label: `VWAP · Anchored ±1σ ±2σ${
+        bars.length && !hasTickMoments(bars[bars.length - 1]) ? " · hlc3 (no tape)" : ""
+      }`,
       color: legendInk.vwap.anchored.middle,
     });
+  // Modern VWAP, offered only where the page holds its parameters. Two rows: the
+  // line, and the triggers read off it. Each label quotes what its own row is
+  // actually showing at the current settings — an anchor count is how hard the
+  // swing rule is working, and a gate that is undefined half the session is a
+  // fact about warm-up, not about the market. Nothing is computed while both
+  // rows are off, so neither label quotes a number it doesn't have.
+  if (mvParams && modernVwap) {
+    const mvKnobs = modernVwapKnobs(mvParams, modernVwap.onChange);
+    const mvLive = vis.modernVwap || vis.modernVwapSignals;
+    legendItems.push({
+      key: "modernVwap",
+      label:
+        `Modern VWAP · ${
+          mvParams.anchor === "swing"
+            ? `swing ${mvParams.pivot}`
+            : mvParams.anchor === "poc"
+              ? `${mvParams.pocSource === "weekly" ? "wk " : ""}${
+                  mvParams.rearmMode === "pocMove" ? "naked " : ""
+                }POC${mvParams.rearmTicks ? ` ${mvParams.rearmTicks}t` : ""} · ${mvRead.anchors}⚓`
+              : mvParams.anchor
+        } ±${mvParams.bands}σ` +
+        (mvParams.adaptive ? " · KER-adaptive" : "") +
+        (mvLive
+          ? ` · ${Math.round(mvRead.trendPct)}% trending${
+              mvRead.undefPct >= 1 ? `, ${Math.round(mvRead.undefPct)}% undefined` : ""
+            }`
+          : ""),
+      color: legendInk.modernVwap.middle,
+      settings: { title: "Modern VWAP", fields: mvKnobs.line },
+    });
+    legendItems.push({
+      key: "modernVwapSignals",
+      label:
+        mvParams.signals === "none"
+          ? "Modern VWAP signals · off"
+          : "Modern VWAP signals · MR/TC" +
+            (mvLive
+              ? ` · ${mvRead.signals}${mvParams.signals === "gated" ? " through the gate" : " raw"}`
+              : ""),
+      color: legendInk.modernVwap.middle,
+      settings: { title: "Modern VWAP signals", fields: mvKnobs.signals },
+      // The row stays when its own knob switched it off — that knob is the only
+      // way back on, and it lives behind this row's "…".
+      dim: mvParams.signals === "none",
+    });
+  }
+  // The Zeiierman line, on the same terms: offered only where the page holds its
+  // parameters, and quoting the two numbers that are facts about the construct —
+  // how often the structure flipped at this swing period, and what the volatility
+  // adjustment has actually done to the half-life the knob asks for.
+  if (dsvParams && dynamicSwingVwap) {
+    const live = vis.dynamicSwingVwap;
+    legendItems.push({
+      key: "dynamicSwingVwap",
+      label:
+        `Dynamic Swing VWAP · swing ${dsvParams.swingPeriod}${
+          // Named only when the swings really were hunted somewhere else: a grid
+          // at or below this chart's own bar regroups nothing.
+          dsvRead.anchored && live ? `@${dsvParams.anchorTf}` : ""
+        } · ${
+          dsvParams.weighting === "cumulative"
+            ? // No half-life to quote, and the word is the point: the legs are
+              // ordinary anchored VWAPs off the same swings.
+              "cumulative"
+            : `APT ${
+                dsvParams.adaptApt && live && dsvRead.aptNow
+                  ? `${dsvRead.aptNow.toFixed(dsvRead.aptNow < 10 ? 1 : 0)}b`
+                  : `${dsvParams.apt}b`
+              }${dsvParams.adaptApt ? ` ATR ${dsvParams.volBias}×` : ""}`
+        }${
+          dsvParams.bands
+            ? ` ±${dsvParams.bands}σ${dsvParams.bandScope === "all" ? " all" : ""}`
+            : ""
+        }` +
+        (live
+          ? ` · ${dsvRead.pivots}⚑ · ${Math.round(dsvRead.bullPct)}% bull` +
+            (dsvRead.dropped ? ` · oldest ${dsvRead.dropped} dropped` : "")
+          : ""),
+      color: `rgb(${legendInk.dynamicSwingVwap.bull})`,
+      settings: {
+        title: "Dynamic Swing VWAP",
+        fields: dynamicSwingVwapKnobs(dsvParams, dynamicSwingVwap.onChange),
+      },
+    });
+  }
   if (profileGlobex && profileGlobex.length > 0)
     legendItems.push({
       key: "developingProfileGlobex",
@@ -1753,6 +3121,12 @@ export function CandlestickChart({
       key: "developingProfileNy",
       label: "Developing VA · NY VAH/POC/VAL",
       color: legendInk.profile.ny.edge,
+    });
+  if (profileWeekly && profileWeekly.length > 0)
+    legendItems.push({
+      key: "developingProfileWeekly",
+      label: "Developing VA · Weekly VAH/POC/VAL",
+      color: legendInk.profile.weekly.edge,
     });
   // One legend row per EMA so each hides/shows on its own (see emaSeries above).
   const emaLegend: { key: IndicatorKey; pts?: EmaPoint[]; label: string; color: string }[] = [
@@ -1768,6 +3142,25 @@ export function CandlestickChart({
     legendItems.push({ key: "atr", label: "ATR 14", color: palette.gold });
   if (cvd && cvd.length > 0)
     legendItems.push({ key: "cvd", label: "CVD · cumulative delta", color: palette.blue });
+  // The windowed delta beside the cumulative one. The label quotes the window it
+  // is actually running — a divergence count means nothing without the fractal
+  // width that produced it — and the swatch is a row marker only: the histogram
+  // itself is green above zero and red below.
+  if (deltaByBar)
+    legendItems.push({
+      key: "cvdOsc",
+      label:
+        `CVD oscillator · ${cvdOscParams.mode === "ema" ? "EMA" : "periodic"} ${
+          cvdOscParams.period
+        } · fractal ${cvdOscParams.fractalN}` +
+        (vis.cvdOsc && cvdOscRead.divs > 0
+          ? ` · ${cvdOscRead.divs} divergence${cvdOscRead.divs === 1 ? "" : "s"} · last ${
+              cvdOscStrengthLabel(cvdOscRead.strength)
+            }`
+          : ""),
+      color: palette.orange,
+      settings: { title: "CVD oscillator", fields: cvdOscKnobs(cvdOscParams, patchCvdOsc) },
+    });
   if (rsi && rsi.length > 0)
     legendItems.push({ key: "rsi", label: "RSI 14", color: palette.violet });
   if (levels && levels.length > 0)
@@ -1788,19 +3181,147 @@ export function CandlestickChart({
     legendItems.push({ key: "touches", label: "Interactions · touches", color: palette.green });
   if (vaSnaps && vaSnaps.length > 0)
     legendItems.push({ key: "va_snaps", label: "Interactions · VA-snaps", color: palette.red });
+  // The shelves. Only where the profile is exact: without a footprint the rows
+  // come from spreading each bar's volume across its range, and size-per-visit is
+  // then near-constant by construction — every band would be an artefact of the
+  // estimator. `detectShelves` refuses to draw it; offering a row the layer
+  // cannot honour would make that refusal look like a bug.
+  if (bars.length > 0 && footprint != null && footprint.length === bars.length) {
+    legendItems.push({
+      key: "volumeShelf",
+      label:
+        shelfField === "flow"
+          ? `Volume shelves · order flow over ${shelfParams.windowMin}m`
+          : `Volume shelves · size per visit over ${shelfParams.windowMin}m`,
+      color: palette.orange,
+    });
+    legendItems.push({
+      key: "volumeShelfBoxes",
+      label: `Shelf boxes · ≥${shelfParams.zMin}σ held ${shelfParams.minHoldMin}m`,
+      color: palette.orange,
+      dim: !vis.volumeShelf,
+    });
+  }
   if (bars.length > 0)
     legendItems.push({
       key: "volumeProfile",
       // Say which kind it is: on the sim's charts it's the real tape, on the
       // journal's it's reconstructed from bars, and that changes how much you
-      // should trust the exact POC print.
-      label: footprint ? "Volume profile · POC/VA (tick)" : "Volume profile · POC/VA (est.)",
+      // should trust the exact POC print. And say whether the delta lane is up,
+      // since the row's own eye hides both lanes together.
+      // Name the scale the lane is drawn at, not just that it is up: "delta" over
+      // a lane measuring imbalance is the legend naming the wrong distribution,
+      // and the three modes are different enough readings that which one you are
+      // looking at cannot be left to memory.
+      label: `Volume profile · POC/VA${profileDelta ? ` + delta:${deltaLaneLabel(deltaLane)}` : ""} (${footprint ? "tick" : "est."})`,
+      color: palette.gold,
+      settings: {
+        title: "Volume profile",
+        // A reconstructed profile has no aggressor tag anywhere in it — a bar's
+        // one volume number cannot say who lifted — so the knob says so rather
+        // than offering a lane that would draw empty. The same footprint is what
+        // a verdict needs a time axis from, so it gates that knob too.
+        fields: volumeProfileKnobs(profileDelta, setProfileTint, profileHasDelta, {
+          value: deltaLane,
+          onChange: setLaneKnobs,
+          canClassify: profileHasDelta,
+        }),
+      },
+    });
+  // The session's own distribution, and the days behind it. Each label quotes
+  // what its row is actually showing at the current settings — how many days a
+  // rule kept, what prominence named the nodes — because that is a fact about
+  // this chart now, and a number quoted without the threshold that produced it
+  // means nothing.
+  if (bars.length > 0 && sessionVpOn) {
+    legendItems.push({
+      key: "developingVpNy",
+      label: footprint
+        ? "Session VP · NY volume at price (tick)"
+        : "Session VP · NY volume at price (est.)",
+      color: "#c4b5fd",
+    });
+    legendItems.push({
+      key: "developingVpNyNodes",
+      label:
+        knobs.nodeProm > 0
+          ? `Session VP nodes · HVN/LVN at ${Math.round(knobs.nodeProm * 100)}% prominence`
+          : "Session VP nodes · off",
+      color: "#818cf8",
+      // The row stays when its own knob switched it off — that knob is the only
+      // way back on, and it lives behind this row's "…".
+      dim: knobs.nodeProm === 0,
+    });
+  }
+  if (ctxDays > 0) {
+    legendItems.push({
+      key: "compositeProfile",
+      label:
+        compDays > 0
+          ? `Composite VP · ${compDays} prior session${compDays === 1 ? "" : "s"} · VAH/POC/VAL`
+          : `Composite VP · off · ${ctxDays} prior day${ctxDays === 1 ? "" : "s"} loaded`,
+      color: legendInk.composite.poc,
+      dim: compDays === 0,
+    });
+    if (compDays > 0)
+      legendItems.push({
+        key: "compositeNodes",
+        label:
+          knobs.nodeProm > 0
+            ? `Composite nodes · HVN/LVN at ${Math.round(knobs.nodeProm * 100)}% prominence`
+            : "Composite nodes · off",
+        color: legendInk.composite.hvn,
+        dim: knobs.nodeProm === 0,
+      });
+  }
+  if (bars.length > 0)
+    legendItems.push({
+      key: "volRuler",
+      label: `Vol ruler · median bar range vs the ${VR_STOP_TICKS}t stop`,
       color: palette.gold,
     });
 
+  // Hang the histogram layers' knobs on the rows they tune, in one pass at the
+  // end — the same panels the replay chart's rows carry, from the same builder,
+  // so a composite rule means the same thing on either chart.
+  for (const it of legendItems) {
+    const spec = profileKnobPanels[it.key];
+    if (spec) it.settings = spec;
+  }
+
+  // The community studies, as legend rows — same three gestures as a layer
+  // above plus an ×, because unlike a layer a study is an instance you added and
+  // can take away. Built here rather than handed down: everything they need is
+  // already in this component.
+  const studyRows: StudyRow[] = studies.map((spec) => {
+    const entry = findStudy(spec.key);
+    const rep = studyReport.find((r) => r.id === spec.id);
+    const edit = (next: StudySpec) =>
+      changeStudies(studiesRef.current.map((sp) => (sp.id === spec.id ? next : sp)));
+    // The panel's rows: the indicator's own inputs, then a colour per line it
+    // draws. A study with neither — a pattern that only ever emits marks — gets
+    // no "…" on its row rather than an empty panel.
+    const fields = entry ? studyFields(entry, spec, edit) : [];
+    return {
+      id: spec.id,
+      label: entry ? studyLabel(entry, spec.inputs) : spec.key,
+      // The colour of the study's first line, so the swatch is the line you are
+      // looking for — the user's override once they have set one, which is the
+      // whole point of being able to set it. A study with no plots at all (the
+      // pattern ones) falls back to the muted grey its marks are drawn in.
+      color: (entry && studyColor(entry, spec)) || palette.muted,
+      on: !spec.hidden,
+      error: rep?.error ?? null,
+      marks: rep?.plots === 0 ? rep.markers : 0,
+      settings: entry && fields.length ? { title: entry.title, fields } : undefined,
+      onToggle: () => edit({ ...spec, hidden: !spec.hidden }),
+      onRemove: () => changeStudies(studiesRef.current.filter((sp) => sp.id !== spec.id)),
+    };
+  });
+
   return (
     <div style={{ position: "relative", width: "100%" }}>
-      <div className="chart-tools">
+      <ChartTools armed={armed || rulerArmed || avwapArmed}>
         <ChartToolButton
           icon="📊"
           label={armed ? "Drag a range…" : "Fixed range VP"}
@@ -1834,6 +3355,20 @@ export function CandlestickChart({
               : "Anchored VWAP — click any bar to draw a VWAP + ±1σ/±2σ bands from that point forward. σ is bar-derived (not tick-exact). Click again to re-anchor."
           }
         />
+        {/* The community catalogue. On the Charts workspace this lives on the
+            topbar, because there it aims at whichever pane has focus; here there
+            is one chart and one rail, so it sits in it. Its app-layers half is
+            switched off: this chart draws a session that has already happened, so
+            every layer that has anything to draw already has a legend row, and a
+            second list of the same switches is a second place for them to
+            disagree. */}
+        <StudyPicker
+          layers={EMPTY_LAYERS}
+          onLayer={() => {}}
+          appLayers={EMPTY_APP_LAYERS}
+          specs={studies}
+          onSpecs={changeStudies}
+        />
         {/* Below the hairline: the tools that take things away. They come and go
             with what is on the chart, so they live at the foot of the rail where
             appearing doesn't move anything above them. */}
@@ -1862,7 +3397,7 @@ export function CandlestickChart({
             title="Remove every fixed-range profile"
           />
         )}
-      </div>
+      </ChartTools>
       <div ref={ref} style={{ width: "100%" }} />
       {debugZoom && (
         <div
@@ -1903,6 +3438,7 @@ export function CandlestickChart({
       />
       <IndicatorLegend
         items={legendItems}
+        studies={studyRows}
         visibility={vis}
         onToggle={toggle}
         appearance={appearanceSettings(appearance, changeAppearance)}

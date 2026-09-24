@@ -67,7 +67,11 @@ export function usePaneKeys({ paneCount, focused, setFocus, setPaneTimeframe, di
         return;
       }
       if (e.shiftKey) return;
-      if (!/^[1-8]$/.test(e.key)) return;
+      // Any digit, and the list decides which of them land: a bar added to
+      // TIMEFRAMES gets its key without this needing to know how long the list
+      // has become, and the `!tf` guard below is what says "8" does nothing on a
+      // seven-bar list.
+      if (!/^[1-9]$/.test(e.key)) return;
       const tf = TIMEFRAMES[Number(e.key) - 1];
       if (!tf) return;
       e.preventDefault();

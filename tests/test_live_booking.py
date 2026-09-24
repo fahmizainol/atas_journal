@@ -23,6 +23,7 @@ Run directly:  ``.venv/bin/python tests/test_live_booking.py``
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 from datetime import date
@@ -39,6 +40,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from api import deps  # noqa: E402
 from helpers import make_scope  # noqa: E402
 from journal import db  # noqa: E402
+from journal.ingest import _journal_key  # noqa: E402
 from journal.live import booking as bk  # noqa: E402
 
 DAY = date(2026, 8, 7)
@@ -115,14 +117,92 @@ def test_a_short_row_does_not_disagree_with_itself(conn):
 
 def test_every_column_the_inserter_wants_is_present():
     """`db._insert_ignore` does `r[c] for c in cols` — a missing key is a
-    KeyError at insert time, not a NULL. This is the guard for that."""
-    cols = ["dedupe_key", "account", "instrument", "open_ts_local",
-            "close_ts_local", "open_ts_utc", "close_ts_utc", "open_price",
-            "open_volume", "close_price", "close_volume", "price_pnl",
-            "profit_ticks", "pnl", "comment", "source_file"]
+    KeyError at insert time, not a NULL. This is the guard for that.
+
+    Read off ``db.JOURNAL_COLS`` rather than restated: a hand-copied list here
+    passes while the inserter asks for a column the builder stopped supplying,
+    which is precisely the failure it is meant to catch."""
     r = bk.journal_row(account="A", instrument="B", source_file="c",
                        trade=_trade())
-    assert set(cols) <= set(r), set(cols) - set(r)
+    assert set(db.JOURNAL_COLS) <= set(r), set(db.JOURNAL_COLS) - set(r)
+
+
+# --- the scale-out, and the lots it used to eat -------------------------------
+
+
+def test_identical_lots_of_one_scale_out_all_survive(conn):
+    """**The bug this pair of tests exists for.** Closing a position in several
+    equal portions at one price emits several lots that agree in every field the
+    importer's hash reads — same frozen open stamp, same exit price, same per-lot
+    P&L — so they hashed alike and INSERT OR IGNORE kept exactly one. On
+    2026-09-14 that quietly removed 8 of 65 contracts and $247.40 from a live
+    day, and nothing anywhere said so."""
+    lots = [_trade(size=1, pnl=35.9, reason="reduce", id=n) for n in (1, 2, 3, 4)]
+    booked = [bk.book_trade(conn, account="DEMO1", instrument="NQU6@CME",
+                            mode="live", session_date=DAY, trade=t)
+              for t in lots]
+
+    assert booked == [True, True, True, True], "every lot is a new row"
+    # One position, so they group into one logical trade — carrying all four.
+    (t,) = _rows()
+    assert t["leg_count"] == 4
+    assert t["max_contracts"] == 4
+    assert t["gross_pnl"] == pytest.approx(143.6)
+
+
+def test_rebooking_the_same_lot_is_still_free(conn):
+    """Idempotence is why the key is content-derived, and separating the lots
+    must not cost it: the broker re-offers a trade after a reconnect, and the
+    paper path re-posts by design."""
+    t = _trade(size=1, pnl=35.9, id=7)
+    assert bk.book_trade(conn, account="DEMO1", instrument="NQU6@CME",
+                         mode="live", session_date=DAY, trade=t)
+    assert not bk.book_trade(conn, account="DEMO1", instrument="NQU6@CME",
+                             mode="live", session_date=DAY, trade=t)
+    assert len(_rows()) == 1
+
+
+def test_an_imported_rows_key_is_untouched_by_the_lot_discriminator():
+    """**A regression pin, not a behaviour test.** Every imported row in the
+    database is keyed under the seven-part hash, and `trades._trade_key` derives
+    from it the id notes, reviews, recall cards and rule checks are filed under.
+    Changing the recipe for rows that pass no lot would silently orphan all of
+    them, so the old hash is written out here literally."""
+    row = {"account": "A", "instrument": "NQU6@CME",
+           "open_ts_local": "2026-08-07T09:31:00-04:00",
+           "close_ts_local": "2026-08-07T09:41:00-04:00",
+           "open_price": 20000.0, "close_price": 20010.0, "pnl": 400.0}
+    expected = hashlib.sha1(
+        "A|NQU6@CME|2026-08-07T09:31:00-04:00|2026-08-07T09:41:00-04:00"
+        "|20000.0|20010.0|400.0".encode()).hexdigest()
+    assert _journal_key(row) == expected
+    assert _journal_key(row, "3") != expected
+
+
+# --- commission --------------------------------------------------------------
+
+
+def test_net_pnl_subtracts_the_commission_the_broker_charged(conn):
+    """Gross stays gross and net is real, which is the whole of why a live day
+    could not agree with the broker's own statement: the journal stored 289.50
+    where Lucid reported 254.50, and the $35 between them was 35 contracts of
+    commission that had nowhere to land."""
+    bk.book_trade(conn, account="DEMO1", instrument="NQU6@CME", mode="live",
+                  session_date=DAY, trade=_trade(pnl=400.0, fees=4.0))
+    (t,) = _rows()
+    assert t["gross_pnl"] == 400.0
+    assert t["commission"] == 4.0
+    assert t["net_pnl"] == 396.0
+
+
+def test_a_source_that_reports_no_commission_reads_exactly_as_before(conn):
+    """NULL means never reported — an ATAS export, a paper trade, a replayed
+    attempt — and those rows must show the net they have always shown."""
+    bk.book_trade(conn, account="DEMO1", instrument="NQU6@CME", mode="live",
+                  session_date=DAY, trade=_trade(pnl=400.0))
+    (t,) = _rows()
+    assert t["commission"] == 0.0
+    assert t["net_pnl"] == t["gross_pnl"] == 400.0
 
 
 def test_the_timestamps_land_where_the_clock_says(conn):
@@ -256,6 +336,48 @@ def test_a_scaled_out_position_reads_as_one_trade_not_two(conn):
     assert t["net_pnl"] == 900.0            # and one trade over them
 
 
+def test_the_day_counts_positions_and_the_journal_agrees(conn):
+    """The panel's trade count and the ledger's must be the same number.
+
+    They were not. The broker booked a lot per closing portion and counted each
+    as a trade, while ``build_logical_trades`` nets them back to flat->flat — so
+    a live day the journal recorded 8 trades of read "12 closed" on the page it
+    was traded from, and there was nothing on screen to say which was right.
+
+    ``position_key`` is the rule that closes that, and this pins it to the
+    ledger's own answer rather than to a number typed in here: the two are
+    asserted equal, so a change to either grouping fails.
+    """
+    scaled = [_trade(size=1, pnl=100.0, reason="reduce"),
+              _trade(size=2, exit_ms=EXIT_MS + 60_000, exit_price=20020.0,
+                     pnl=800.0, reason="target")]
+    # Opened after the first position was fully out, which is not a nicety of
+    # the fixture: the account is netted, so a fresh position cannot start
+    # while the last one still has size on. That is exactly the condition under
+    # which the net-walk and the open-stamp grouping are the same rule — lots
+    # that overlap in time are one position, and both say so.
+    later = _trade(size=1, entry_ms=EXIT_MS + 120_000,
+                   exit_ms=EXIT_MS + 180_000, pnl=-50.0, reason="stop")
+    bk.book_trades(conn, account="A", instrument="NQU6@CME", mode="live",
+                   session_date=DAY, trades=[*scaled, later])
+
+    rows = bk.day_trades(conn, account="A", session_date=DAY)
+    assert len(rows) == 3, "three lots on the blotter, one row each"
+    assert len({bk.position_key(r) for r in rows}) == len(_rows()) == 2
+
+    # And the same rule applied to what the broker emits, before any of it has
+    # been near the database — the live path counts off these, not off rows.
+    assert len({bk.position_key(t) for t in [*scaled, later]}) == 2
+
+
+def test_an_unstamped_lot_is_its_own_trade_rather_than_everyone_elses(conn):
+    """A row whose open stamp did not parse must not pull every other unstamped
+    row into one phantom trade. Two of them are two, not one."""
+    a = {"id": 1, "entry_ms": None}
+    b = {"id": 2, "entry_ms": None}
+    assert bk.position_key(a) != bk.position_key(b)
+
+
 def test_a_sitting_is_one_account_one_day(conn):
     assert bk.source_file_for("DEMO1", DAY) == "live/DEMO1/2026-08-07"
     assert bk.source_file_for(bk.PAPER_ACCOUNT, DAY) == "live/paper/2026-08-07"
@@ -303,7 +425,7 @@ def test_paper_journaling_does_not_need_routing_switched_on(conn, monkeypatch):
     from journal.live import routing as rt
 
     monkeypatch.setattr(rt, "policy",
-                        lambda: rt.Policy(enabled=False, max_qty=5))
+                        lambda: rt.Policy(enabled=False))
     assert _post()["written"] == 1
 
 

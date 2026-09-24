@@ -76,6 +76,14 @@ CONTRACT_SPECS: dict[str, dict[str, float]] = {
 }
 DEFAULT_SPEC = {"point_value": 20.0, "tick_size": 0.25}
 
+# Which micro belongs to which mini, by root. Only the pairs whose specs are
+# above: naming a contract this table cannot then price would move the problem
+# rather than solve it. Mirrors MICROS in frontend/src/lib/contracts.ts, which
+# carries the same map for the same reason — the replay can send its orders to
+# the micro of the contract whose ticks it is reading, and what came back has to
+# be labelled with the contract it was actually traded in.
+MICRO_ROOTS: dict[str, str] = {"NQ": "MNQ", "ES": "MES"}
+
 # Databento dataset for CME Globex futures.
 DATABENTO_DATASET = "GLBX.MDP3"
 
@@ -175,6 +183,38 @@ def root_symbol(instrument: str) -> str:
     if m:
         return m.group(1)
     return sym
+
+
+def micro_symbol(instrument: str) -> str | None:
+    """`NQU6` -> `MNQU6`, keeping the month and year. None for a root with no
+    micro in ``MICRO_ROOTS``.
+
+    None is a real answer and callers must handle it rather than fall back to a
+    guessed name: the obvious rule ("M" + root) is wrong for at least one listed
+    micro (RTY's is M2K), and a symbol nothing can price is worse than the mini
+    it was traded against.
+    """
+    sym = raw_symbol(instrument)
+    root = root_symbol(sym)
+    micro = MICRO_ROOTS.get(root)
+    return None if micro is None else micro + sym[len(root):]
+
+
+_MINI_OF_MICRO = {micro: mini for mini, micro in MICRO_ROOTS.items()}
+
+
+def tape_root(instrument: str) -> str:
+    """`MNQU5@CME` -> `NQ`: the root whose cached tick tape prices this
+    instrument. Everything that isn't a micro is its own tape.
+
+    The tick cache only ever carries minis — the replay trades the micro *of*
+    the contract whose ticks it is reading (see ``MICRO_ROOTS``), so a journal
+    row labelled `MNQU5` printed on the `NQU5` tape. Reducing to ``root_symbol``
+    alone strands those rows: nothing was ever cached under an `MNQ` name, and
+    every tape lookup quietly comes back empty.
+    """
+    root = root_symbol(instrument)
+    return _MINI_OF_MICRO.get(root, root)
 
 
 def continuous_symbol(instrument: str) -> str:

@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { loadToolsOpen, saveToolsOpen } from "../../lib/chartPrefs";
 
 // One button in the on-chart tool rail, shared by the strategy chart and the
 // replay chart because both rails are the same rail.
@@ -50,4 +51,53 @@ export function ChartToolButton({
 // them. Only worth drawing when something removable exists — see both charts.
 export function ChartToolSep() {
   return <div className="chart-tool-sep" aria-hidden="true" />;
+}
+
+// The in-canvas rail itself: the panel the buttons sit in, and the one control
+// that belongs to the rail rather than to any tool — the fold.
+//
+// WHY IT FOLDS. This rail floats *over* the tape on the chart's left edge, which
+// is affordable on a desktop pane and not on a phone: nine 44px buttons is a
+// third of the width of the thing you are trying to read. Folded it is a single
+// button in the same corner, so the tools are one tap away and the chart gets
+// its edge back. The state is sticky and shared across every page that draws one
+// of these (lib/chartPrefs) — it is a statement about how much chrome you want
+// over a chart, not about which chart.
+//
+// The fold button is at the *top* because it is the only stable seat: the
+// removal tools at the foot come and go with what is drawn, and a control that
+// moves under your thumb as you draw is a control you mis-tap.
+export function ChartTools({
+  children,
+  armed,
+}: {
+  children: ReactNode;
+  /** Whether any tool inside is armed. Lights the fold button, so a rail folded
+   *  with the ruler live still says a click is going somewhere unusual — folded,
+   *  the lit tool that would otherwise say it is out of sight. */
+  armed?: boolean;
+}) {
+  const [open, setOpen] = useState(loadToolsOpen);
+  return (
+    <div className={`chart-tools${open ? "" : " folded"}`}>
+      <ChartToolButton
+        icon={open ? "▴" : "🛠"}
+        label={open ? "Fold the tools away" : "Show the tools"}
+        on={!open && armed}
+        onClick={() => {
+          const v = !open;
+          setOpen(v);
+          saveToolsOpen(v);
+        }}
+        title={
+          open
+            ? "Fold the tool rail away — it comes back from this same button."
+            : armed
+              ? "Show the tools — one of them is armed"
+              : "Show the tools"
+        }
+      />
+      {open && children}
+    </div>
+  );
 }
